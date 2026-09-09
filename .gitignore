@@ -1,1 +1,8 @@
 node_modules
+
+# Build-Output von Eleventy
+deploy
+
+# Privater Obsidian-Vault: gehoert NICHT in dieses oeffentliche Repo.
+# Der Vault lebt in einem separaten privaten Repo (siehe leven-vault).
+vault
