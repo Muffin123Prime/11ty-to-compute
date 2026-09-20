@@ -47,16 +47,21 @@ const DEFAULT_OPTS = {
   phraseWeight: 1.5,
 };
 
-/** Which fields feed the index, and how much a hit in them is worth. */
+/**
+ * Which fields feed the index, and how much a hit in them is worth.
+ * Declaration order is READING order, not weight order: the same list builds
+ * the snippet text, and a snippet that starts with a tag list instead of the
+ * title reads like machine output.
+ */
 const FIELD_WEIGHTS = {
-  note: { title: 3, tags: 2, body: 1 },
+  note: { title: 3, body: 1, tags: 2 },
   chat: { title: 3, systemPrompt: 1 },
   message: { content: 1 },
-  project: { name: 3, tags: 2, description: 1 },
+  project: { name: 3, description: 1, tags: 2 },
   task: { title: 3, body: 1 },
   agent: { name: 3, description: 1, systemPrompt: 1 },
-  file: { name: 3, tags: 2, text: 1 },
-  entity: { name: 3, aliases: 2, description: 1 },
+  file: { name: 3, text: 1, tags: 2 },
+  entity: { name: 3, description: 1, aliases: 2 },
   memory: { text: 1, scope: 1 },
   run: { goal: 2, result: 1 },
 };

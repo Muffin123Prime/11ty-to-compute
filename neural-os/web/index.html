@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Neural OS</title>
+  <meta name="description" content="Persönliches, offline-first KI-System: Chat, Wissensgraph und Agenten auf dem eigenen Gerät.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f7f8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0c0d10" media="(prefers-color-scheme: dark)">
+  <meta name="referrer" content="no-referrer">
+
+  <!--
+    Every byte this page loads comes from this server. No font service, no CDN,
+    no analytics, no favicon request to a third party - the icon below is an
+    inline data URI, which the server's CSP (img-src 'self' data: blob:) allows.
+
+    There is deliberately NO inline <script> anywhere in this file: the server
+    sends `script-src 'self'`, and the whole point of that header is that it
+    needs no exception. The cost is that the stored theme is applied a few
+    milliseconds after first paint; `color-scheme` plus the prefers-color-scheme
+    rules in app.css make that first paint match the system theme, so the
+    transition is invisible unless the stored choice contradicts the system.
+  -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23111' stroke-width='1.6' stroke-linecap='round'%3E%3Ccircle cx='10' cy='4.6' r='2.1'/%3E%3Ccircle cx='4.6' cy='14.4' r='2.1'/%3E%3Ccircle cx='15.4' cy='14.4' r='2.1'/%3E%3Cpath d='M8.5 6.3 5.8 12.4M11.5 6.3l2.7 6.1M6.7 14.4h6.6'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+  <a class="skip-link" href="#view">Zum Inhalt springen</a>
+
+  <div class="shell">
+    <!-- Filled by app.js. The static skeleton keeps the first paint stable. -->
+    <nav class="rail" id="rail" aria-label="Hauptbereiche"></nav>
+
+    <header class="topbar" id="topbar">
+      <div class="topbar__left">
+        <h1 class="topbar__title">Neural OS</h1>
+      </div>
+    </header>
+
+    <main class="main" id="view" tabindex="-1" role="main">
+      <div class="view-state">
+        <div class="spinner" aria-hidden="true"></div>
+        <p class="view-state__text">Oberfläche wird geladen …</p>
+      </div>
+    </main>
+  </div>
+
+  <div class="toasts" id="toasts" role="region" aria-label="Meldungen" aria-live="polite"></div>
+  <div id="overlays"></div>
+
+  <noscript>
+    <div class="noscript">
+      <h2>JavaScript ist deaktiviert</h2>
+      <p>
+        Neural OS läuft vollständig auf diesem Gerät, die Oberfläche wird aber im Browser
+        zusammengebaut. Ohne JavaScript bleibt sie leer. Deine Daten sind davon nicht betroffen:
+        sie liegen als Dateien in deinem Neural-OS-Verzeichnis und lassen sich auch ohne diese
+        Anwendung lesen und sichern.
+      </p>
+    </div>
+  </noscript>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

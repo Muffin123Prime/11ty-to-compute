@@ -48,6 +48,23 @@ function logger(scope) {
 }
 
 /**
+ * The factory doubles as a usable logger.
+ *
+ * Dependency injection across many modules produced two reasonable readings of
+ * a `logger` parameter -- "the factory, call it with your scope" and "an
+ * instance, call .info() on it". Rather than police that at every call site
+ * (where getting it wrong is a crash at exactly the moment something is
+ * already going wrong -- a corrupt log tail, a failing export), the factory
+ * carries the level methods itself. Both readings are now correct.
+ */
+Object.assign(logger, {
+  error: (m, e) => emit('error', 'app', m, e),
+  warn: (m, e) => emit('warn', 'app', m, e),
+  info: (m, e) => emit('info', 'app', m, e),
+  debug: (m, e) => emit('debug', 'app', m, e),
+});
+
+/**
  * Append-only JSONL audit writer.
  *
  * Writes are SYNCHRONOUS on purpose. An audit trail that loses its last lines
