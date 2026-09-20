@@ -151,8 +151,20 @@ function createVaultCrypto({ paths, config } = {}) {
   /** Cached because `enabled` is read on every single encrypted line; a stat
    *  syscall per log line would dominate the store's write path. */
   let secretsPresent = fileExists(secretsPath);
-  /** Collapses concurrent unlock attempts onto one 0.9 s derivation. */
+  /**
+   * Concurrency control for unlock. Two guarantees:
+   *  - a repeat of the SAME passphrase (double-clicked button) reuses the
+   *    running derivation instead of paying 0.9 s twice;
+   *  - a DIFFERENT passphrase never rides on someone else's result, and waits
+   *    its turn, so N attempts cannot pin N * 128 MB of scrypt memory at once.
+   * @type {{fp:string, promise:Promise<true>}|null}
+   */
   let unlockInFlight = null;
+  let unlockQueue = Promise.resolve();
+
+  function fingerprint(value) {
+    return crypto.createHash('sha256').update(String(value), 'utf8').digest('hex');
+  }
 
   function fileExists(p) {
     try {
@@ -391,9 +403,23 @@ function createVaultCrypto({ paths, config } = {}) {
         throw new ValidationError('Der Vault ist nicht verschluesselt; es gibt nichts zu entsperren.');
       }
       if (dataKey) return true;
-      if (unlockInFlight) return unlockInFlight;
       assertPassphrase(passphrase);
-      unlockInFlight = (async () => {
+      const fp = fingerprint(passphrase);
+      if (unlockInFlight && unlockInFlight.fp === fp) return unlockInFlight.promise;
+
+      const promise = unlockQueue.then(doUnlock, doUnlock);
+      unlockInFlight = { fp, promise };
+      // Keep the queue alive after a rejection: a wrong passphrase must not
+      // wedge every later attempt.
+      unlockQueue = promise.catch(() => {});
+      try {
+        return await promise;
+      } finally {
+        if (unlockInFlight && unlockInFlight.promise === promise) unlockInFlight = null;
+      }
+
+      async function doUnlock() {
+        if (dataKey) return true;
         const secrets = readSecrets();
         const kek = await deriveAndVerify(passphrase, secrets);
         try {
@@ -407,11 +433,6 @@ function createVaultCrypto({ paths, config } = {}) {
         // tightening it is more useful than a warning nobody reads.
         try { fs.chmodSync(secretsPath, 0o600); } catch { /* best effort */ }
         return true;
-      })();
-      try {
-        return await unlockInFlight;
-      } finally {
-        unlockInFlight = null;
       }
     },
 
