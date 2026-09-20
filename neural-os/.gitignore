@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+# Never commit a vault or any user data.
+vault/
+exports/
+secrets.json
+audit.jsonl
