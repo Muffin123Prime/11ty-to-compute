@@ -34,6 +34,12 @@ const { ValidationError, asNeuralError } = require('../kernel/errors');
  *   Wissen des Besitzers ins fremde Netz. Das ist keine Einstellung, das ist
  *   eine Zusage; sie wird an jeder Stelle gesetzt, an der eine Adresse
  *   vorkommt, auch wenn der Beschreibungseintrag etwas anderes wuenscht.
+ *   Das gilt AUCH, wenn Neural OS selbst fuer andere Geraete geoeffnet ist
+ *   (security.sharing, z. B. um vom iPad im Browser darauf zuzugreifen):
+ *   geoeffnet wird dann die Oberflaeche mit ihrer Anmeldung, nicht der
+ *   Modellserver. llama-server und Ollama kennen kein Token und keine
+ *   Rechte -- wer sie erreicht, redet mit dem Modell. Diese beiden Zusagen
+ *   duerfen nie zusammenfallen.
  * - **Bereitschaft wird gemessen.** "Prozess gestartet" heisst nicht
  *   "Modell antwortet": llama-server laedt erst mehrere Gigabyte in den
  *   Arbeitsspeicher. Solange die Schnittstelle nicht antwortet, ist der
@@ -102,7 +108,9 @@ const FELD_PROGRAMM = ['programm', 'binary', 'bin', 'exe', 'executable', 'comman
 const FELD_MODELL = ['modell', 'model', 'modellDatei', 'modelFile', 'gguf', 'gewichte', 'weights', 'modelPath', 'modellPfad'];
 const FELD_ARGS = ['args', 'argumente', 'arguments', 'argv', 'optionen', 'options', 'flags'];
 const FELD_ART = ['kern', 'art', 'kind', 'engine', 'laufzeit', 'runtime', 'typ', 'type', 'backend', 'schnittstelle'];
-const FELD_NAME = ['id', 'name', 'bezeichnung', 'titel', 'label'];
+// `name` vor `id`: src/portable/model.js vergibt ids wie "kern:llama.cpp",
+// das steht in einem deutschen Satz schlechter da als "llama-server".
+const FELD_NAME = ['name', 'bezeichnung', 'titel', 'label', 'id'];
 const FELD_PLATTFORM = ['plattform', 'platform', 'os', 'betriebssystem', 'plattformen', 'platforms'];
 const FELD_LISTE = ['modelle', 'models', 'eintraege', 'einträge', 'entries', 'items', 'kerne', 'runtimes', 'liste'];
 
@@ -132,12 +140,14 @@ function artErkennen(rohwert, programmpfad) {
   const quellen = [rohwert, programmpfad ? path.basename(programmpfad) : null];
   for (const quelle of quellen) {
     if (typeof quelle !== 'string' || !quelle) continue;
-    const s = quelle.toLowerCase();
+    // Trenner weg, bevor verglichen wird: "LM Studio", "lm-studio" und
+    // "lmstudio" sind dasselbe Programm, und welche Schreibweise in der
+    // Beschreibungsdatei landet, entscheidet nicht dieses Modul.
+    const s = quelle.toLowerCase().replace(/[\s._-]/g, '');
     if (s.includes('ollama')) return 'ollama';
     // llama-server, llama.cpp, llamafile, llamacpp, lmstudio, vllm und
     // "openai" sprechen alle den /v1/chat/completions-Dialekt.
-    if (s.includes('llama') || s.includes('openai') || s.includes('lmstudio')
-      || s.includes('lm-studio') || s.includes('vllm') || s.includes('llamafile')) return 'openai';
+    if (s.includes('llama') || s.includes('openai') || s.includes('lmstudio') || s.includes('vllm')) return 'openai';
   }
   return null;
 }
@@ -166,7 +176,7 @@ function alsListe(roh) {
     if (Array.isArray(roh[name])) return roh[name];
   }
   // Ein einzelner Eintrag ohne Huelle ist ebenfalls eine gueltige Liste.
-  if (feld(roh, FELD_PROGRAMM) !== undefined) return [roh];
+  if (feld(roh, FELD_PROGRAMM) !== undefined || Array.isArray(roh.dateien)) return [roh];
   return null;
 }
 
@@ -355,13 +365,23 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
     if (!liste) {
       return {
         fehler: `${BESCHREIBUNG} ist gültiges JSON, aber ich erkenne darin keine Liste von Laufzeitkernen. `
-          + `Erwartet wird ein Feld ${FELD_LISTE.slice(0, 3).map((n) => `"${n}"`).join(' oder ')} mit Einträgen, `
-          + `die mindestens ein Feld ${FELD_PROGRAMM.slice(0, 4).map((n) => `"${n}"`).join('/')} enthalten.`,
+          + 'Erwartet wird ein Feld "eintraege" (so schreibt es der Stick selbst) oder "modelle"/"models" mit '
+          + 'Einträgen, die entweder "dateien": [{"ziel": …}] oder kurz "programm"/"bin"/"exe" nennen.',
       };
     }
     if (!liste.length) {
       return { fehlt: true, grund: `${BESCHREIBUNG} ist da, enthält aber keinen Eintrag.` };
     }
+
+    // Der Ordner, gegen den alle relativen Pfade der Datei gelten: models/.
+    // Genau so schreibt src/portable/model.js seine `dateien[].ziel`.
+    const basis = path.dirname(path.join(wurzel, BESCHREIBUNG));
+
+    // Erst die Gewichte einsammeln, dann die Kerne: ein llama-server ohne
+    // Modelldatei startet zwar, kann aber nichts. Beides steht in derselben
+    // Liste, nur mit verschiedener `rolle` -- die Zuordnung muss also
+    // stattfinden, bevor ueber einen Kern entschieden wird.
+    const gewichte = liste.filter((e) => e && typeof e === 'object' && rolleVon(e) === 'gewichte');
 
     const verworfen = [];
     for (const [i, eintrag] of liste.entries()) {
@@ -370,50 +390,39 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
         continue;
       }
       const name = String(feld(eintrag, FELD_NAME) || `Eintrag ${i + 1}`);
+      if (rolleVon(eintrag) === 'gewichte') continue; // kein Programm, nichts zu starten
       if (eintrag.enabled === false || eintrag.aktiv === false) {
         verworfen.push(`"${name}" ist in der Datei ausgeschaltet.`);
         continue;
       }
       if (!plattformPasst(feld(eintrag, FELD_PLATTFORM), dieseP, dieseA)) {
-        verworfen.push(`"${name}" ist nicht für ${dieseP}-${dieseA} gedacht.`);
+        const gewuenscht = Array.isArray(feld(eintrag, FELD_PLATTFORM))
+          ? feld(eintrag, FELD_PLATTFORM).join(', ') : String(feld(eintrag, FELD_PLATTFORM));
+        verworfen.push(`"${name}" ist für ${gewuenscht} gebaut, nicht für ${dieseP}-${dieseA} gedacht. `
+          + 'Ein Programm für ein anderes Betriebssystem startet hier nicht — daran ändert keine Dateikopie etwas.');
         continue;
       }
-      const rohProgramm = feld(eintrag, FELD_PROGRAMM);
-      if (rohProgramm === undefined) {
-        verworfen.push(`Bei "${name}" steht nicht, welches Programm gestartet werden soll `
-          + `(erwartet: ${FELD_PROGRAMM.slice(0, 4).map((n) => `"${n}"`).join(' oder ')}).`);
-        continue;
-      }
-      const basis = path.dirname(path.join(wurzel, BESCHREIBUNG));
-      const p = pfadImStick(rohProgramm, basis, wurzel, `"${name}"`);
+
+      const p = programmPfad(eintrag, name, basis);
       if (p.fehler) {
         verworfen.push(p.fehler);
-        continue;
-      }
-      if (!fs.existsSync(p.pfad)) {
-        verworfen.push(`"${name}" verweist auf ${p.pfad} — diese Datei liegt nicht auf dem Datenträger.`);
         continue;
       }
       const art = artErkennen(feld(eintrag, FELD_ART), p.pfad);
       if (!art) {
         verworfen.push(`Bei "${name}" ist nicht erkennbar, welche Schnittstelle der Kern spricht. `
-          + `Schreib "kern": "llama-server" (OpenAI-Dialekt) oder "kern": "ollama" dazu.`);
+          + 'Erwartet wird "art"/"kern": "llama.cpp" (OpenAI-Dialekt) oder "ollama".');
         continue;
       }
 
-      let modell = null;
-      const rohModell = feld(eintrag, FELD_MODELL);
-      if (rohModell !== undefined) {
-        const m = pfadImStick(rohModell, basis, wurzel, `die Modelldatei von "${name}"`);
-        if (m.fehler) {
-          verworfen.push(m.fehler);
-          continue;
-        }
-        if (!fs.existsSync(m.pfad)) {
-          verworfen.push(`Die Modelldatei von "${name}" (${m.pfad}) liegt nicht auf dem Datenträger.`);
-          continue;
-        }
-        modell = m.pfad;
+      // Wo die Gewichte liegen, hängt an der Art: llama-server bekommt eine
+      // Datei mit -m, Ollama einen Ordner über OLLAMA_MODELS.
+      const gefunden = art === 'ollama'
+        ? ollamaSpeicher(basis)
+        : modellDatei(eintrag, name, basis, gewichte);
+      if (gefunden.fehler) {
+        verworfen.push(gefunden.fehler);
+        continue;
       }
 
       return {
@@ -421,19 +430,148 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
           name,
           art,
           programm: p.pfad,
-          modell,
+          modell: gefunden.modell || null,
+          modellOrdner: gefunden.ordner || null,
           args: alsArgumente(feld(eintrag, FELD_ARGS)),
           umgebung: eintrag.env && typeof eintrag.env === 'object' ? eintrag.env : null,
-          modellName: typeof eintrag.modellName === 'string' ? eintrag.modellName
-            : (typeof rohModell === 'string' ? path.basename(rohModell) : name),
+          modellName: gefunden.modellName || name,
         },
       };
     }
 
+    if (!verworfen.length) {
+      return { fehlt: true, grund: `In ${BESCHREIBUNG} stehen nur Modelldateien, aber kein Laufzeitkern, der sie öffnen könnte.` };
+    }
     return {
       fehler: `In ${BESCHREIBUNG} steht kein Laufzeitkern, der hier benutzbar wäre:\n`
         + verworfen.map((z) => `  - ${z}`).join('\n'),
     };
+  }
+
+  /**
+   * Welche Rolle hat dieser Eintrag: Programm oder Gewichte?
+   *
+   * src/portable/model.js schreibt `rolle: 'kern'` bzw. `rolle: 'modell'`.
+   * Fehlt das Feld (handgeschriebene Datei), entscheidet, ob ein Programm
+   * benannt ist — ein Eintrag ohne Programm ist nichts, was man starten kann.
+   */
+  function rolleVon(eintrag) {
+    const roh = feld(eintrag, ['rolle', 'role']);
+    if (typeof roh === 'string') {
+      const r = roh.trim().toLowerCase();
+      if (r === 'kern' || r === 'runtime' || r === 'programm' || r === 'server') return 'kern';
+      if (r === 'modell' || r === 'model' || r === 'gewichte' || r === 'weights') return 'gewichte';
+    }
+    return feld(eintrag, FELD_PROGRAMM) !== undefined ? 'kern' : 'gewichte';
+  }
+
+  /** Alle Dateien eines Eintrags als Pfade unter models/, in Dateireihenfolge. */
+  function dateienVon(eintrag, nurArt) {
+    const roh = feld(eintrag, ['dateien', 'files']);
+    if (!Array.isArray(roh)) return [];
+    return roh
+      .filter((d) => d && typeof d === 'object' && typeof (d.ziel || d.pfad || d.path) === 'string')
+      .filter((d) => !nurArt || !d.art || d.art === nurArt)
+      .map((d) => String(d.ziel || d.pfad || d.path));
+  }
+
+  /**
+   * Der Pfad des Programms.
+   *
+   * Zwei Schreibweisen, beide echt: die von `src/portable/model.js`
+   * geschriebene (`dateien: [{ziel: "kern/linux-x64/llama-server"}]`) und die
+   * kurze, die ein Mensch von Hand hinschreibt (`"programm": "llama-server"`).
+   */
+  function programmPfad(eintrag, name, basis) {
+    const kandidaten = [];
+    const kurz = feld(eintrag, FELD_PROGRAMM);
+    if (typeof kurz === 'string') kandidaten.push(kurz);
+    kandidaten.push(...dateienVon(eintrag, 'programm'));
+    if (!kandidaten.length) kandidaten.push(...dateienVon(eintrag));
+    if (!kandidaten.length) {
+      return {
+        fehler: `Bei "${name}" steht nicht, welches Programm gestartet werden soll `
+          + '(erwartet: "programm"/"bin"/"exe" oder eine Liste "dateien" mit "ziel").',
+      };
+    }
+    // Mehrere Dateien: die ausfuehrbare ist die ohne Endung bzw. die erste.
+    // Geraten wird dabei nichts -- existiert keine davon, sagt der Satz das.
+    const fehlend = [];
+    for (const kandidat of kandidaten) {
+      const p = pfadImStick(kandidat, basis, wurzel, `"${name}"`);
+      if (p.fehler) return p;
+      if (fs.existsSync(p.pfad)) return p;
+      fehlend.push(p.pfad);
+    }
+    return {
+      fehler: `"${name}" verweist auf ${fehlend.join(' bzw. ')} — diese Datei liegt nicht auf dem Datenträger.`,
+    };
+  }
+
+  /**
+   * Die Modelldatei fuer einen llama-server.
+   *
+   * Sie steht in aller Regel NICHT beim Kern, sondern als eigener Eintrag mit
+   * `rolle: "modell"` in derselben Liste -- so legt src/portable/model.js sie
+   * an. Ohne Gewichte wird hier nichts gestartet: ein Kern, der laeuft und
+   * kein Modell hat, sieht von aussen aus wie ein kaputtes Neural OS.
+   */
+  function modellDatei(eintrag, name, basis, gewichte) {
+    const kurz = feld(eintrag, FELD_MODELL);
+    if (typeof kurz === 'string') {
+      const m = pfadImStick(kurz, basis, wurzel, `die Modelldatei von "${name}"`);
+      if (m.fehler) return m;
+      if (!fs.existsSync(m.pfad)) {
+        return { fehler: `Die Modelldatei von "${name}" (${m.pfad}) liegt nicht auf dem Datenträger.` };
+      }
+      return { modell: m.pfad, modellName: path.basename(m.pfad) };
+    }
+
+    const fehlend = [];
+    for (const kandidat of gewichte) {
+      // Ollama-Gewichte sind inhaltsadressierte Blobs; llama-server kann mit
+      // ihnen nichts anfangen, sie gehoeren zu einem Ollama-Kern.
+      const dateien = dateienVon(kandidat).filter((z) => !z.startsWith('ollama/'));
+      // Ein mehrteiliges Modell wird ueber seinen ERSTEN Teil geoeffnet;
+      // llama.cpp findet die uebrigen selbst.
+      const sortiert = dateien.filter((z) => /\.gguf$/i.test(z)).sort();
+      if (!sortiert.length) continue;
+      const m = pfadImStick(sortiert[0], basis, wurzel, `die Modelldatei von "${name}"`);
+      if (m.fehler) return m;
+      if (!fs.existsSync(m.pfad)) {
+        fehlend.push(m.pfad);
+        continue;
+      }
+      const gName = String(feld(kandidat, FELD_NAME) || path.basename(m.pfad));
+      if (gewichte.length > 1) {
+        log.info(`Mehrere Modelle auf dem Datenträger — "${gName}" ist das erste und wird geöffnet.`);
+      }
+      return { modell: m.pfad, modellName: gName };
+    }
+
+    return {
+      fehler: `"${name}" ist da, aber es liegt keine Modelldatei (.gguf) dabei, die er öffnen könnte`
+        + (fehlend.length ? `; beschrieben ist ${fehlend.join(', ')}, dort liegt aber nichts` : '')
+        + '. Ein Laufzeitkern ohne Gewichte kann nicht antworten.',
+    };
+  }
+
+  /**
+   * Der Ollama-Speicher auf dem Datentraeger.
+   *
+   * Ohne ihn duerfte der mitgebrachte Ollama NICHT starten: er faende sonst
+   * den Speicher des FREMDEN Rechners, und aus "die KI auf meinem Stick"
+   * wuerde unbemerkt "die Modelle von jemand anderem".
+   */
+  function ollamaSpeicher(basis) {
+    const ordner = path.join(basis, 'ollama');
+    if (!fs.existsSync(ordner)) {
+      return {
+        fehler: 'Für Ollama liegt auf dem Datenträger kein Modellspeicher (models/ollama). '
+          + 'Ohne ihn würde Ollama die Modelle des fremden Rechners benutzen — das wäre nicht mehr die KI vom Stick.',
+      };
+    }
+    return { ordner, modellName: 'Ollama-Speicher vom Stick' };
   }
 
   /* ---------------------------------------------------------- Aufrufzeile */
@@ -471,6 +609,9 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
       // OLLAMA_HOST -- und zwar auch dann, wenn schon ein anderes Ollama auf
       // 11434 laeuft. Unser Wert steht nach dem aus der Datei, gewinnt also.
       env.OLLAMA_HOST = `${HOST}:${gewaehlterPort}`;
+      // Und er liest NUR vom Datentraeger. Ohne diese Zeile griffe ein
+      // mitgebrachtes Ollama auf den Modellspeicher des fremden Rechners zu.
+      if (eintrag.modellOrdner) env.OLLAMA_MODELS = eintrag.modellOrdner;
       if (!args.length) args.push('serve');
       return { args, env };
     }
@@ -579,6 +720,7 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
     // Nur SIGKILL, und nur synchron: in einem 'exit'-Horcher laeuft nichts
     // Asynchrones mehr. Ein Kern, der 4 GB haelt, ist der groessere Schaden
     // als ein Kern, der nicht geordnet beenden durfte.
+    if (!pid) return; // spawn ist gescheitert; es gibt nichts abzuraeumen
     notbremse = () => {
       try { process.kill(pid, 'SIGKILL'); } catch { /* schon weg */ }
     };
@@ -668,9 +810,14 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
       let frueherTod = null;
       const gestorben = new Promise((resolve) => {
         prozess.once('error', (err) => {
-          // Ein spawn-Fehler kommt auf POSIX asynchron, nicht als Wurf.
+          // Ein spawn-Fehler kommt auf POSIX asynchron, nicht als Wurf -- und
+          // danach kommt KEIN 'exit' mehr. Das Aufraeumen muss deshalb hier
+          // stehen: sonst bliebe die Notbremse mit einer toten PID haengen,
+          // und nach zehn Fehlstarts warnt Node ueber zu viele Horcher.
           if (kind !== prozess) return resolve(null);
           ausgabeAbschliessen();
+          notbremseLoesen();
+          kind = null;
           frueherTod = { art: 'spawn', satz: startFehlerSatz(err, gewaehlt.programm) };
           scheitern(frueherTod.satz);
           resolve(frueherTod);

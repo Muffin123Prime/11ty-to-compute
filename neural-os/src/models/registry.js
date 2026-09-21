@@ -25,6 +25,17 @@ const openaiProvider = require('./providers/openai');
  * - API keys never enter the snapshot. `config.models.remote` stores an
  *   `apiKeyEnv` name; the key is read from the environment at call time and
  *   handed to the provider, so `/api/models` cannot leak it.
+ * - `anbieterAnmelden()` gibt es, weil ein Laufzeitkern VOM STICK kein
+ *   Konfigurationseintrag sein darf: seine Adresse entsteht erst beim Start
+ *   (freier Port, siehe models/local-runner.js) und gilt nur für diesen einen
+ *   Lauf. Stünde er in `config.json`, zeigte er beim nächsten Start auf einen
+ *   Port, hinter dem nichts mehr ist — und der Mensch säße vor einem Eintrag,
+ *   den er nie angelegt hat. Angemeldete Anbieter kommen deshalb VOR den
+ *   konfigurierten und werden nie gespeichert.
+ * - Jeder Eintrag im Schnappschuss sagt, WO er herkommt (`quelle`,
+ *   `vomStick`). "127.0.0.1" allein beantwortet die Frage nicht, die der
+ *   Besitzer eines Sticks wirklich hat: läuft die KI aus meiner Tasche oder
+ *   aus diesem fremden Rechner? Beides ist lokal, und nur eines gehört ihm.
  */
 
 const PROVIDER_MODULES = {
@@ -105,6 +116,13 @@ function createRegistry({ config, gate, bus, logger } = {}) {
   const log = typeof logger === 'function' ? logger('models') : nullLogger();
 
   /**
+   * Zur Laufzeit angemeldete Anbieter, nach Reihenfolge der Anmeldung.
+   * Nicht in der Konfiguration, nie gespeichert — siehe Kopfkommentar.
+   * @type {Map<string, object>}
+   */
+  const angemeldet = new Map();
+
+  /**
    * Read the provider list from config on every access rather than caching it:
    * `app.saveConfig` mutates the same object in place, and a registry that
    * kept a stale copy would keep probing a backend the user just removed.
@@ -122,6 +140,14 @@ function createRegistry({ config, gate, bus, logger } = {}) {
       out.push(def);
     };
 
+    // ZUERST die angemeldeten: `resolve()` ohne Wunsch nimmt den ersten
+    // erreichbaren Anbieter, und ein Kern, den der Nutzer in der Tasche
+    // mitgebracht hat, ist die bessere Antwort als irgendein Ollama, das auf
+    // diesem fremden Rechner zufaellig auch noch laeuft. Ein ausdruecklicher
+    // Wunsch (config.models.default) geht trotzdem vor -- der steht weiter
+    // unten in resolveWant() und wird hier nicht angetastet.
+    for (const def of angemeldet.values()) add(def);
+
     const local = Array.isArray(config.models && config.models.providers) ? config.models.providers : [];
     for (const p of local) {
       if (!p || typeof p !== 'object' || p.enabled === false) continue;
@@ -135,6 +161,7 @@ function createRegistry({ config, gate, bus, logger } = {}) {
         baseUrl: p.baseUrl,
         remote: false,
         apiKeyEnv: null,
+        quelle: 'geraet',
       });
     }
 
@@ -151,6 +178,7 @@ function createRegistry({ config, gate, bus, logger } = {}) {
         baseUrl: r.baseUrl,
         remote: true,
         apiKeyEnv: typeof r.apiKeyEnv === 'string' && r.apiKeyEnv ? r.apiKeyEnv : null,
+        quelle: 'fern',
       });
     }
     return out;
@@ -168,6 +196,23 @@ function createRegistry({ config, gate, bus, logger } = {}) {
     return entry && typeof entry.apiKey === 'string' && entry.apiKey ? entry.apiKey : null;
   }
 
+  /**
+   * Die Herkunftsfelder, die JEDER Schnappschuss-Eintrag trägt.
+   *
+   * An einer Stelle, weil `unprobed()` und `probeOne()` sonst
+   * auseinanderlaufen: einmal stünde "vom Stick" da und nach der ersten
+   * Prüfung nicht mehr — die Anzeige würde beim Suchen umspringen.
+   */
+  function herkunft(def) {
+    const quelle = def.quelle || (def.remote ? 'fern' : 'geraet');
+    return {
+      quelle,
+      vomStick: quelle === 'stick',
+      label: def.label || def.id,
+      hinweis: def.hinweis || null,
+    };
+  }
+
   function unprobed(def) {
     return {
       id: def.id,
@@ -175,6 +220,7 @@ function createRegistry({ config, gate, bus, logger } = {}) {
       baseUrl: def.baseUrl,
       remote: !!def.remote,
       hasApiKey: !!apiKeyFor(def),
+      ...herkunft(def),
       available: false,
       models: [],
       error: 'Noch nicht geprüft.',
@@ -188,15 +234,26 @@ function createRegistry({ config, gate, bus, logger } = {}) {
   /** Concurrent refreshes share one round of probes instead of stacking up. */
   let inFlight = null;
 
+  /**
+   * Woher der Anbieter kommt, gehört in dieselbe Zeile: "127.0.0.1:41233"
+   * sagt einem Menschen nicht, ob das sein eigener Stick ist oder irgendein
+   * Dienst auf dem fremden Rechner, in dem der Stick gerade steckt.
+   */
+  function anbieterZeile(p) {
+    return `  • ${padRight(p.id, 12)} ${p.baseUrl}${p.vomStick ? ' [vom Stick]' : ''}`;
+  }
+
   function describeProbe(p) {
-    const head = `  • ${padRight(p.id, 12)} ${p.baseUrl}`;
+    const woher = p.vomStick ? ' [vom Stick]' : '';
+    const head = anbieterZeile(p);
+    const nachsatz = !p.available && p.hinweis ? `\n      ${p.hinweis}` : '';
     if (p.available && (!p.models || p.models.length === 0)) return `${head} – erreichbar, aber kein Modell installiert`;
     if (p.available) return `${head} – erreichbar (${p.models.length} Modell${p.models.length === 1 ? '' : 'e'})`;
     const detail = p.error || 'nicht erreichbar';
     // The provider error already names the exact endpoint it tried; printing
     // the base address in front of it would say the same thing twice.
-    if (detail.includes(p.baseUrl)) return `  • ${padRight(p.id, 12)} ${detail}`;
-    return `${head} – ${detail}`;
+    if (detail.includes(p.baseUrl)) return `  • ${padRight(p.id, 12)} ${detail}${woher}${nachsatz}`;
+    return `${head} – ${detail}${nachsatz}`;
   }
 
   /**
@@ -212,7 +269,7 @@ function createRegistry({ config, gate, bus, logger } = {}) {
       parts.push('Es ist überhaupt kein Modellanbieter konfiguriert (models.providers ist leer).');
     } else if (snap.at === null) {
       parts.push('Die Modellanbieter wurden in dieser Sitzung noch nicht geprüft. Konfiguriert sind:');
-      for (const p of providers) parts.push(`  • ${padRight(p.id, 12)} ${p.baseUrl}`);
+      for (const p of providers) parts.push(anbieterZeile(p));
     } else {
       parts.push(`Geprüft am ${snap.at}:`);
       for (const p of providers) parts.push(describeProbe(p));
@@ -252,6 +309,7 @@ function createRegistry({ config, gate, bus, logger } = {}) {
       baseUrl: def.baseUrl,
       remote: !!def.remote,
       hasApiKey: !!apiKeyFor(def),
+      ...herkunft(def),
       probedAt: new Date().toISOString(),
     };
     if (!mod) {
@@ -328,6 +386,10 @@ function createRegistry({ config, gate, bus, logger } = {}) {
       kind: entry.kind,
       baseUrl: entry.baseUrl,
       model,
+      // Wandert bis in den Chat-Satz durch: die Antwort muss sagen können,
+      // aus wessen Gerät sie kam.
+      quelle: entry.quelle || (entry.remote ? 'fern' : 'geraet'),
+      vomStick: !!entry.vomStick,
     };
     const key = def ? apiKeyFor(def) : null;
     if (key) target.apiKey = key;
@@ -413,6 +475,65 @@ function createRegistry({ config, gate, bus, logger } = {}) {
     },
 
     /**
+     * Einen Anbieter für DIESEN Lauf anmelden — nicht speichern.
+     *
+     * Gedacht für den Laufzeitkern vom Stick (src/models/local-runner.js):
+     * seine Adresse entsteht beim Start und gilt nur solange der Prozess
+     * lebt. Angemeldete Anbieter stehen vor den konfigurierten, tauchen
+     * sofort im Schnappschuss auf (als "noch nicht geprüft", nicht als
+     * "erreichbar" — behauptet wird hier nichts) und verschwinden mit
+     * `anbieterAbmelden()` wieder.
+     *
+     * @param {{id:string, kind:string, baseUrl:string, label?:string,
+     *          quelle?:string, hinweis?:string}} def
+     */
+    anbieterAnmelden(def) {
+      if (!def || typeof def !== 'object') throw new ValidationError('Ein Anbieter braucht eine Beschreibung.');
+      const id = String(def.id || '').trim();
+      if (!id) throw new ValidationError('Ein angemeldeter Anbieter braucht eine Kennung (id).');
+      const kind = String(def.kind || '').trim();
+      if (!PROVIDER_MODULES[kind]) {
+        throw new ValidationError(`Für den Anbietertyp "${kind}" gibt es keine Anbindung. Möglich: ${Object.keys(PROVIDER_MODULES).join(', ')}.`);
+      }
+      if (typeof def.baseUrl !== 'string' || !def.baseUrl.trim()) {
+        throw new ValidationError(`Der Anbieter "${id}" hat keine Adresse (baseUrl).`);
+      }
+      const eintrag = {
+        id,
+        kind,
+        baseUrl: def.baseUrl.trim(),
+        remote: false,
+        apiKeyEnv: null,
+        quelle: def.quelle ? String(def.quelle) : 'stick',
+        label: def.label ? String(def.label) : id,
+        hinweis: def.hinweis ? String(def.hinweis) : null,
+      };
+      angemeldet.set(id, eintrag);
+      // Sofort sichtbar machen, ohne zu prüfen: ein Schnappschuss, in dem der
+      // Anbieter erst nach dem nächsten refresh() auftaucht, lässt die Anzeige
+      // behaupten, es gäbe ihn nicht.
+      const rest = (snapshot.providers || []).filter((p) => p.id !== id);
+      snapshot = { providers: [unprobed(eintrag), ...rest], at: snapshot.at };
+      if (bus && typeof bus.publish === 'function') {
+        bus.publish('models.changed', { providers: snapshot.providers, at: snapshot.at });
+      }
+      log.info(`Anbieter "${id}" für diesen Lauf angemeldet: ${eintrag.baseUrl} (${eintrag.quelle}).`);
+      return eintrag;
+    },
+
+    /** Einen angemeldeten Anbieter wieder entfernen. */
+    anbieterAbmelden(id) {
+      const key = String(id || '');
+      if (!angemeldet.delete(key)) return false;
+      snapshot = { providers: (snapshot.providers || []).filter((p) => p.id !== key), at: snapshot.at };
+      if (bus && typeof bus.publish === 'function') {
+        bus.publish('models.changed', { providers: snapshot.providers, at: snapshot.at });
+      }
+      log.info(`Anbieter "${key}" abgemeldet.`);
+      return true;
+    },
+
+    /**
      * @param {null|string|{provider?:string, model?:string}} ref
      * @returns {{providerId:string, kind:string, baseUrl:string, model:string, apiKey?:string}}
      */
@@ -462,7 +583,14 @@ function createRegistry({ config, gate, bus, logger } = {}) {
         idleTimeoutMs: opts.idleTimeoutMs,
       });
       // Provenance the chat service records verbatim: which backend really answered.
-      return { ...result, provider: target.providerId, kind: target.kind, model: target.model };
+      return {
+        ...result,
+        provider: target.providerId,
+        kind: target.kind,
+        model: target.model,
+        quelle: target.quelle,
+        vomStick: target.vomStick,
+      };
     },
 
     /** Embeddings on the resolved backend. Not every backend offers them. */

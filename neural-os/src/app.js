@@ -465,10 +465,29 @@ async function createApp(opts = {}) {
   // Browser nicht einmal erfahren, DASS er von einem Stick laeuft.
   const portable = pathsMod.portableInfo(paths.home);
 
+  // --- Laufzeitkern vom Datentraeger -----------------------------------------
+  //
+  // NUR im portablen Betrieb. Auf einer gewoehnlichen Installation entsteht
+  // dieses Objekt gar nicht erst: dort gibt es keinen Stick, auf dem ein Kern
+  // liegen koennte, und ein Aufseher ueber nichts waere eine Zeile im
+  // Selbstbericht, die jeden Leser in die Irre fuehrt.
+  //
+  // Hier wird NICHTS gestartet -- der Bau eines app-Objekts darf keinen
+  // fremden Prozess erzeugen, sonst startet `doctor` ein 4-GB-Modell, nur weil
+  // jemand nach dem Zustand gefragt hat. Das Starten steht in `listen()`,
+  // genau wie bei watcher/scheduler/triggers.
+  const runnerMod = tryRequire('./models/local-runner');
+  const localRunner = runnerMod && portable
+    ? optional(failures, 'stick-modell', () => runnerMod.createLocalRunner({
+      stickRoot: portable.root, gate, logger, audit,
+    }))
+    : null;
+
   const app = {
     version: VERSION,
     paths,
     portable,
+    localRunner,
     config,
     bus,
     audit,
@@ -607,6 +626,13 @@ async function createApp(opts = {}) {
         backup: !!backup,
         auth: !!auth,
         stick: !!stick,
+        // Bewusst NICHT in dieser Liste: sie zaehlt Teilsysteme auf, die auf
+        // jeder Installation geladen sein sollten, und ein `false` darin ist
+        // ein Fehlstart. Der Aufseher ueber den Laufzeitkern fehlt auf einer
+        // gewoehnlichen Installation aber voellig zu Recht -- dort gibt es
+        // keinen Datentraeger, auf dem ein Kern liegen koennte. Seine
+        // Auskunft steht darum weiter unten unter `stickModell`, mit allen
+        // vier Zustaenden statt einem irrefuehrenden Ja/Nein.
         extraction: !!extract,
         sync: !!sync,
         modules: !!modules,
@@ -633,6 +659,11 @@ async function createApp(opts = {}) {
             available: providers.some((p) => p.available),
             providers: providers.map((p) => ({
               id: p.id, baseUrl: p.baseUrl, available: p.available,
+              // Ohne diese beiden Felder steht hier dreimal "127.0.0.1" und
+              // die einzige Frage, die ein Stick-Besitzer wirklich hat --
+              // laeuft die KI aus meiner Tasche oder aus diesem fremden
+              // Rechner? -- bleibt unbeantwortet.
+              quelle: p.quelle || 'geraet', vomStick: !!p.vomStick,
               models: (p.models || []).map((m) => m.id), error: p.error || null,
             })),
           };
@@ -645,6 +676,11 @@ async function createApp(opts = {}) {
         node: process.version,
         home: paths.home,
         portable: pathsMod.describePortable(portable),
+        // null heisst: dieser Lauf bringt keinen eigenen Laufzeitkern mit
+        // (gewoehnliche Installation). Sonst steht hier einer der vier
+        // Zustaende aus models/local-runner.js -- mit Grund, wenn er
+        // gescheitert ist, samt der letzten Zeilen seiner Fehlerausgabe.
+        stickModell: localRunner && typeof localRunner.zustand === 'function' ? localRunner.zustand() : null,
         network: { mode: config.network.mode, hardened: !!hardening, strictAllowlist: config.network.strictAllowlist },
         vault: { ...(store.stats ? store.stats() : {}), encryption: vaultCrypto ? vaultCrypto.state : 'unavailable' },
         subsystems,
@@ -725,7 +761,84 @@ async function createApp(opts = {}) {
           log.error(`Ordnerbeobachtung konnte nicht gestartet werden: ${err && err.message}`);
         }
       }
+      // Zuletzt: der mitgelieferte Laufzeitkern. Er darf nichts aufhalten,
+      // also wird hier weder auf seine Bereitschaft gewartet noch geworfen.
+      await app.startLocalRunner(opts.modellTimeoutMs ? { timeoutMs: opts.modellTimeoutMs } : {});
       return created;
+    },
+
+    /**
+     * Startet den Laufzeitkern vom Stick und meldet ihn als ganz gewoehnlichen
+     * lokalen Anbieter an.
+     *
+     * Getrennt von `listen()`, damit ein Test den Vorgang einzeln messen kann,
+     * ohne einen HTTP-Server zu brauchen.
+     *
+     * Was hier NICHT passiert: warten. Ein Modell von einem USB-2-Stick laedt
+     * auch mal eine Minute; solange darf der Browser nicht vor einer leeren
+     * Seite sitzen. Der Anbieter ist trotzdem sofort angemeldet -- als
+     * "noch nicht geprueft", nicht als "erreichbar" -- und der Chat sagt bis
+     * dahin ehrlich, dass der Kern noch startet.
+     *
+     * @param {{timeoutMs?:number, warten?:boolean}} [opts]
+     */
+    async startLocalRunner(opts = {}) {
+      if (!localRunner || typeof localRunner.starten !== 'function') return null;
+      let zustand;
+      try {
+        zustand = await localRunner.starten(opts);
+      } catch (err) {
+        // starten() ist darauf ausgelegt, nicht zu werfen. Falls es doch
+        // einmal tut, faehrt die Anwendung trotzdem hoch -- und sagt es.
+        const e = asNeuralError(err);
+        failures.push({ subsystem: 'stick-modell', reason: e.message, code: e.code });
+        log.error(`Laufzeitkern vom Stick: ${e.message}`);
+        return null;
+      }
+
+      if (zustand.zustand === 'nicht-vorhanden') {
+        // Ein Stick ohne Modell ist der Normalfall, kein Fehler.
+        log.debug(zustand.grund || 'Kein Laufzeitkern auf dem Datenträger.');
+        return zustand;
+      }
+
+      if (zustand.zustand === 'gescheitert') {
+        failures.push({ subsystem: 'stick-modell', reason: zustand.grund });
+        audit.write('stick.modell.fehler', { grund: String(zustand.grund || '').slice(0, 500) });
+        return zustand;
+      }
+
+      if (registry && typeof registry.anbieterAnmelden === 'function' && zustand.baseUrl) {
+        try {
+          registry.anbieterAnmelden({
+            id: 'stick',
+            kind: zustand.art,
+            baseUrl: zustand.baseUrl,
+            quelle: 'stick',
+            label: `${zustand.modellName || zustand.name} (vom Stick)`,
+            hinweis: 'Dieses Modell liegt auf dem Datenträger, von dem Neural OS gerade läuft, '
+              + 'und wurde beim Start von dort hochgefahren. Beim ersten Mal dauert das, bis das Modell im Arbeitsspeicher ist.',
+          });
+        } catch (err) {
+          failures.push({ subsystem: 'stick-modell', reason: asNeuralError(err).message });
+          log.error(`Der Kern vom Stick läuft, ließ sich aber nicht als Anbieter anmelden: ${err && err.message}`);
+          return zustand;
+        }
+        // Sobald gemessen ist, dass er antwortet, einmal richtig suchen --
+        // dann steht im Schnappschuss, welches Modell er wirklich anbietet,
+        // statt einer Vermutung aus dem Dateinamen.
+        Promise.resolve(localRunner.bereit()).then((fertig) => {
+          if (fertig && fertig.zustand === 'laeuft' && registry && typeof registry.refresh === 'function') {
+            return registry.refresh({ timeoutMs: 4000 });
+          }
+          if (fertig && fertig.zustand === 'gescheitert') {
+            failures.push({ subsystem: 'stick-modell', reason: fertig.grund });
+            log.error(`Laufzeitkern vom Stick: ${String(fertig.grund || '').split('\n')[0]}`);
+          }
+          return null;
+        }).catch((err) => log.warn(`Nachlauf des Stick-Modells: ${err && err.message}`));
+      }
+      return zustand;
     },
 
     async close() {
@@ -741,6 +854,18 @@ async function createApp(opts = {}) {
         ['server', () => app.server && app.server.close()],
         ['modules', () => modules && modules.disposeAll && modules.disposeAll()],
         ['runtime', () => runtime && runtime.abortAll && runtime.abortAll()],
+        // Nach `runtime`, damit ein laufender Modellaufruf erst abgebrochen
+        // wird und der Kern nicht mitten im Satz wegstirbt -- und vor
+        // `store`, weil das Abraeumen selbst noch ins Pruefprotokoll gehoert.
+        // Ein verwaister llama-server haelt mehrere Gigabyte fest, bis der
+        // fremde Rechner neu startet; das ist der Schaden, den diese Zeile
+        // verhindert. Die zweite Sicherung dagegen haengt im Aufseher selbst
+        // an process.on('exit') -- fuer den Fall, dass close() nie laeuft.
+        ['stick-modell', async () => {
+          if (!localRunner || typeof localRunner.stoppen !== 'function') return;
+          if (registry && typeof registry.anbieterAbmelden === 'function') registry.anbieterAbmelden('stick');
+          await localRunner.stoppen();
+        }],
         ['vectors', () => vectors && vectors.close && vectors.close()],
         ['store', () => store.close()],
       ]) {

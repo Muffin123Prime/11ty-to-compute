@@ -164,10 +164,14 @@ async function main() {
       narrowProblems.length ? `betroffen: ${narrowProblems.join(', ')}` : `${ALL_VIEWS.length} Ansichten`);
     await narrow.close();
 
+    /* --------------------------------------------- 3. iPad, mit dem Finger */
+    console.log(`\n${B}3 · iPad: mit dem Finger bedienbar${X}`);
+    await pruefeIPad(browser, base);
+
     if (onlyViews) return;
 
-    /* ------------------------------ 3. Klicken, und im Tresor nachsehen */
-    console.log(`\n${B}3 · Ein Klick muss bis in den Tresor wirken${X}`);
+    /* ------------------------------ 4. Klicken, und im Tresor nachsehen */
+    console.log(`\n${B}4 · Ein Klick muss bis in den Tresor wirken${X}`);
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
@@ -205,8 +209,8 @@ async function main() {
         '„Verwerfen" wirkt ebenfalls bis in den Tresor');
     }
 
-    /* ------------------------------ 4. Nichts läuft, was niemand einschaltete */
-    console.log(`\n${B}4 · Automatik fragt, bevor etwas von allein läuft${X}`);
+    /* ------------------------------ 5. Nichts läuft, was niemand einschaltete */
+    console.log(`\n${B}5 · Automatik fragt, bevor etwas von allein läuft${X}`);
     await page.goto(`${base}/#/automation`, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(900);
     check(/Nichts läuft von allein/.test(await page.locator('body').innerText()),
@@ -252,7 +256,7 @@ async function main() {
     }
 
     /* --------------------------- 5. Das Zurueck ist auffindbar und wirkt */
-    console.log(`\n${B}5 · Rückgängig ist auffindbar und wirkt${X}`);
+    console.log(`\n${B}6 · Rückgängig ist auffindbar und wirkt${X}`);
     const opfer = store.create('note', { title: 'Wird geändert', body: 'Original' });
     // Eine Aenderung, die ein Agent gemacht hat -- der Fall, fuer den das
     // Ganze existiert.
@@ -290,7 +294,7 @@ async function main() {
     }
 
     /* --------------------------- 6. Heute: abhaken wirkt im Tresor */
-    console.log(`\n${B}6 · „Heute" zeigt Tatsachen und lässt handeln${X}`);
+    console.log(`\n${B}7 · „Heute" zeigt Tatsachen und lässt handeln${X}`);
     const gestern = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
     const faellig = store.create('task', { title: 'Mühle entkalken', due: gestern, priority: 1 });
     const { withActor: alsAgent } = require('../src/kernel/actor');
@@ -319,7 +323,7 @@ async function main() {
       `im Tresor: ${store.get(faellig.id).data.status}`);
 
     /* ------------------------ 7. Schnellerfassung von ueberall aus */
-    console.log(`\n${B}7 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
+    console.log(`\n${B}8 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
     // Absichtlich aus dem Gehirn heraus: der ganze Sinn ist, dass man nicht
     // erst irgendwohin navigieren muss.
     await page.goto(`${base}/#/graph`, { waitUntil: 'domcontentloaded' });
@@ -346,7 +350,7 @@ async function main() {
     }
 
     /* --------------- 8. Beobachtete Ordner: erst ansehen, dann aufnehmen */
-    console.log(`\n${B}8 · Ein beobachteter Ordner nimmt erst auf, wenn er eingeschaltet ist${X}`);
+    console.log(`\n${B}9 · Ein beobachteter Ordner nimmt erst auf, wenn er eingeschaltet ist${X}`);
     const eingang = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-eingang-'));
     fs.writeFileSync(path.join(eingang, 'notiz.md'), '# Espresso\n\nNeun bar, 93 Grad.\n');
     fs.writeFileSync(path.join(eingang, 'liste.txt'), 'Bohnen\nFilter\n');
@@ -405,7 +409,7 @@ async function main() {
     }
 
     /* ------------------------------- 9. Der Modellvergleich ist da */
-    console.log(`\n${B}9 · Zwei Modelle nebeneinander${X}`);
+    console.log(`\n${B}10 · Zwei Modelle nebeneinander${X}`);
     const probe = store.create('chat', { title: 'Probe' });
     await store.flush();
     await page.goto(`${base}/#/chat?id=${probe.id}`, { waitUntil: 'domcontentloaded' });
@@ -417,7 +421,7 @@ async function main() {
       'Ohne Modell sagt der Chat warum, statt leer zu bleiben');
 
     /* ------------------- 10. Zweiter Blick: belegbar vs. nicht belegbar */
-    console.log(`\n${B}10 · Der zweite Blick trennt Belegbares von Nichtbelegbarem${X}`);
+    console.log(`\n${B}11 · Der zweite Blick trennt Belegbares von Nichtbelegbarem${X}`);
     const langerText = 'Der Mahlgrad entscheidet über den Widerstand im Sieb. Ist er zu fein, steigt '
       + 'der Druck und der Espresso läuft nur tropfenweise; ist er zu grob, rauscht das Wasser durch '
       + 'und die Crema bleibt dünn. Die Brühtemperatur liegt bei rund 93 Grad, bei dunklen Röstungen '
@@ -449,7 +453,7 @@ async function main() {
       'An einer kurzen Notiz gibt es ihn gar nicht erst');
 
     /* ---------------- 11. Sichern: der Knopf muss einen Ordner hinterlassen */
-    console.log(`\n${B}11 · „Jetzt sichern" legt wirklich einen Ordner an${X}`);
+    console.log(`\n${B}12 · „Jetzt sichern" legt wirklich einen Ordner an${X}`);
     // Der Punkt dieser Pruefung: eine gruene Meldung beweist gar nichts. Eine
     // Sicherung ist erst dann eine, wenn danach Dateien auf der Platte liegen,
     // die man wieder einlesen kann. Deshalb wird hier nach dem Klick im
@@ -551,6 +555,181 @@ async function main() {
     + (unclear ? ` · ${Y}${unclear} nicht prüfbar${X}` : ''));
   console.log('');
   process.exit(failed ? 1 : 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* iPad                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Warum das iPad eine eigene Prüfung bekommt.
+ *
+ * Es ist kein schmales Telefon. Im Querformat steht es 1024 px breit da --
+ * breit genug, dass jede Regel für schmale Fenster daneben greift -- und wird
+ * trotzdem mit dem Finger bedient. Genau diese Mischung hat hier zwei Fehler
+ * erzeugt, die keine Breitenprüfung gefunden hätte:
+ *
+ *   - Rund die Hälfte aller Knöpfe, Felder und Chips war kleiner als die
+ *     44 px, die Apple als Mindestmaß für einen Finger nennt: gemessen
+ *     22/54 in „Heute", 24/42 im Chat, 48/64 in „Einstellungen".
+ *   - Die Bereichsschiene war 995 px hoch und damit auf 768 px Höhe unten
+ *     abgeschnitten. Ein halbes Symbol am Rand liest sich als Fehler, nicht
+ *     als Hinweis, dass es weitergeht.
+ *
+ * `hasTouch` ist deshalb nicht Beiwerk, sondern der Kern: nur damit meldet
+ * der Browser `(pointer: coarse)`, und nur dann greifen die Regeln aus
+ * Abschnitt 10 und 11 von web/app.css.
+ */
+const IPAD_GROESSEN = [
+  ['Querformat', 1024, 768],
+  ['Hochformat', 820, 1180],
+];
+
+/**
+ * Die Bausteine, die web/app.css selbst anbietet. Hier gilt null Toleranz:
+ * sie sind die Wurzel, an der das behoben wurde, und ein neuer Knopf, der
+ * unter 44 px landet, ist ein Rückfall in denselben Zustand.
+ */
+const IPAD_VOKABULAR = '.btn, .chip, .input, .select, .textarea, .icon-button,'
+  + ' .segmented__option, .topbar__search, .rail__item, .rail__brand,'
+  + ' .list__row, .palette__item, .toast__action, .toast__close, .skip-link';
+
+/**
+ * Die Schwelle für alles Übrige.
+ *
+ * Sie ist bewusst nicht null. Was übrig bleibt, sind Knöpfe, die
+ * Ansichtsmodule mit eigenen Klassen bauen und selbst auf feste Maße setzen
+ * (.todayv__tick misst 30 px, .chatv__row-actions .icon-button 26 px,
+ * .notesv__tag-remove und .notesv__link sind reine Textknöpfe). Die liegen
+ * in web/views/** und nicht in der Hand dieser Datei. Die Zahl ist der
+ * gemessene Rest plus etwas Luft -- nicht mehr, sonst deckt sie beim
+ * nächsten Mal einen echten Rückfall zu.
+ *
+ * Beim Ausgangsstand lag dieselbe Messung bei rund 350 -- die Schwelle wäre
+ * also rot gewesen.
+ */
+const IPAD_SCHWELLE = 0;
+
+async function pruefeIPad(browser, base) {
+  for (const [lage, breite, hoehe] of IPAD_GROESSEN) {
+    const context = await browser.newContext({
+      viewport: { width: breite, height: hoehe },
+      hasTouch: true,
+      deviceScaleFactor: 2,
+    });
+    const page = await context.newPage();
+    await page.goto(`${base}/#/today`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(500);
+    await dismissWelcome(page);
+    await page.waitForTimeout(300);
+
+    const klein = [];
+    const vokabel = [];
+    const schrift = [];
+    const schiene = [];
+    const ueberlauf = [];
+    let ziele = 0;
+
+    for (const view of ALL_VIEWS) {
+      await page.goto(`${base}/#/${view}`, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(view === 'graph' || view === 'timeline' ? 1600 : 500);
+      let m;
+      try {
+        m = await page.evaluate(messeTippziele, IPAD_VOKABULAR);
+      } catch (err) {
+        hmm(`${lage}: ${view} ließ sich nicht messen`, err.message.slice(0, 90));
+        continue;
+      }
+      ziele += m.ziele;
+      for (const x of m.klein) klein.push(`${view}: ${x}`);
+      for (const x of m.vokabel) vokabel.push(`${view}: ${x}`);
+      for (const x of m.schrift) schrift.push(`${view}: ${x}`);
+      for (const x of m.schiene) schiene.push(`${view}: ${x}`);
+      if (m.ueberlauf > 1) ueberlauf.push(`${view}: ${m.ueberlauf} px`);
+    }
+
+    console.log(`  ${D}${lage} ${breite}×${hoehe} · ${ziele} Bedienelemente geprüft${X}`);
+    check(!vokabel.length, `${lage}: kein Baustein aus web/app.css unter 44 px`,
+      vokabel.length ? `${vokabel.length}: ${vokabel.slice(0, 4).join(' · ')}` : IPAD_VOKABULAR.slice(0, 60) + ' …');
+    check(klein.length <= IPAD_SCHWELLE,
+      `${lage}: höchstens ${IPAD_SCHWELLE} Tippziele unter 44 px in ${ALL_VIEWS.length} Ansichten`,
+      `${klein.length} gefunden${klein.length ? `: ${[...new Set(klein.map((x) => x.split(' ')[1]))].slice(0, 6).join(' ')}` : ''}`);
+    check(!schrift.length, `${lage}: kein Eingabefeld unter 16 px (sonst zoomt iOS Safari beim Antippen hinein)`,
+      schrift.length ? schrift.slice(0, 4).join(' · ') : 'alle Felder ≥ 16 px');
+    check(!schiene.length, `${lage}: die Bereichsschiene zeigt jeden Eintrag ganz`,
+      schiene.length ? `angeschnitten: ${schiene.slice(0, 4).join(' · ')}` : 'kein Eintrag ragt aus der Schiene');
+    check(!ueberlauf.length, `${lage}: keine Ansicht erzwingt waagerechtes Scrollen`,
+      ueberlauf.length ? ueberlauf.join(' · ') : `${ALL_VIEWS.length} Ansichten`);
+
+    await context.close();
+  }
+}
+
+/**
+ * Läuft IM Browser. Steht hier als eigene Funktion, damit sie nicht in einer
+ * Zeichenkette versteckt ist und beim Lesen wie Code aussieht.
+ */
+function messeTippziele(vokabular) {
+  const SEL = 'button, a[href], input, select, textarea, summary,'
+    + ' [role="radio"], [role="tab"], [role="switch"], [role="checkbox"], [role="option"], [role="button"]';
+  const sichtbar = (e) => (e.offsetWidth || e.offsetHeight) && getComputedStyle(e).visibility !== 'hidden';
+
+  // Ein Ankreuzfeld ist nie allein: es steckt in einem <label>, und getippt
+  // wird das Label. Gemessen wird deshalb die Fläche, die der Finger wirklich
+  // trifft -- nicht die des Kästchens.
+  const ziel = (e) => (e.tagName === 'INPUT' && (e.type === 'checkbox' || e.type === 'radio')
+    && e.closest('label')) || e;
+  const name = (e) => {
+    const cls = (e.getAttribute('class') || '').split(/\s+/).filter(Boolean).slice(0, 2).join('.');
+    return `${e.tagName.toLowerCase()}${cls ? '.' + cls : ''}`;
+  };
+
+  const klein = [];
+  const vokabel = [];
+  const gesehen = new Set();
+  const elemente = [...document.querySelectorAll(SEL)].filter(sichtbar);
+  for (const e of elemente) {
+    const t = ziel(e);
+    if (gesehen.has(t)) continue;
+    gesehen.add(t);
+    const r = t.getBoundingClientRect();
+    if (r.height <= 0 || r.height >= 44) continue;
+    const eintrag = `${name(t)} ${Math.round(r.height)}px`;
+    klein.push(eintrag);
+    if (t.matches(vokabular)) vokabel.push(eintrag);
+  }
+
+  const schrift = [];
+  for (const e of document.querySelectorAll('input, textarea, select')) {
+    if (!sichtbar(e)) continue;
+    if (['hidden', 'checkbox', 'radio', 'range'].includes(e.type)) continue;
+    const groesse = parseFloat(getComputedStyle(e).fontSize);
+    if (groesse < 16) schrift.push(`${name(e)} ${groesse}px`);
+  }
+
+  // Ragt ein Bereichseintrag aus seiner eigenen Schiene heraus? Das ist das
+  // abgeschnittene Symbol am unteren Rand, gemessen statt angesehen.
+  const schiene = [];
+  const rail = document.querySelector('.rail');
+  if (rail) {
+    const aussen = rail.getBoundingClientRect();
+    for (const e of rail.querySelectorAll('.rail__item')) {
+      if (!sichtbar(e)) continue;
+      const r = e.getBoundingClientRect();
+      if (r.top < aussen.top - 0.5 || r.bottom > aussen.bottom + 0.5) {
+        schiene.push(((e.querySelector('.rail__label') || e).textContent || '?').trim());
+      }
+    }
+  }
+
+  return {
+    ziele: gesehen.size,
+    klein,
+    vokabel,
+    schrift,
+    schiene,
+    ueberlauf: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  };
 }
 
 /** Der Willkommensdialog liegt beim ersten Start über allem. */
