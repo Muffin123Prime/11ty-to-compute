@@ -1044,11 +1044,11 @@ function createNotesView(container, ctx) {
       // Es gibt einen Weg hierher, auf dem das Modell erst beim Aufruf
       // verschwunden ist -- dann kann davor sehr wohl etwas hinausgegangen
       // sein. Die Marke gehört deshalb auch in diesen Zweig.
-      const weg = renderSecondNet(result);
-      if (weg) {
-        block.appendChild(h('div.notesv__second-foot', null, weg));
-        const satz = renderSecondNetSentence(result);
-        if (satz) block.appendChild(satz);
+      const netzMarke = renderSecondNet(result);
+      if (netzMarke) {
+        block.appendChild(h('div.notesv__second-foot', null, netzMarke));
+        const gegangen = renderSecondNetSentence(result);
+        if (gegangen) block.appendChild(gegangen);
       }
       return block;
     }
@@ -1079,8 +1079,8 @@ function createNotesView(container, ctx) {
       renderSecondNet(result),
       h('p.hint', null,
         text(`Diese beiden Teile stammen von ${wer}. Sie sind nicht belegt – lies sie gegen den Text.`))));
-    const satz = renderSecondNetSentence(result);
-    if (satz) block.appendChild(satz);
+    const gegangen = renderSecondNetSentence(result);
+    if (gegangen) block.appendChild(gegangen);
     return block;
   }
 
