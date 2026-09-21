@@ -23,6 +23,26 @@
     transition is invisible unless the stored choice contradicts the system.
   -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23111' stroke-width='1.6' stroke-linecap='round'%3E%3Ccircle cx='10' cy='4.6' r='2.1'/%3E%3Ccircle cx='4.6' cy='14.4' r='2.1'/%3E%3Ccircle cx='15.4' cy='14.4' r='2.1'/%3E%3Cpath d='M8.5 6.3 5.8 12.4M11.5 6.3l2.7 6.1M6.7 14.4h6.6'/%3E%3C/svg%3E">
+  <!--
+    Zum Home-Bildschirm hinzufuegen, auf iPad und iPhone.
+
+    Neural OS gibt es nicht im App Store und wird es nicht geben: es ist keine
+    App, sondern ein Programm, das auf einem eigenen Rechner laeuft. Was es
+    stattdessen gibt, steht hier: mit Manifest und einem echten PNG-Symbol legt
+    Safari beim "Zum Home-Bildschirm" ein richtiges Symbol an und oeffnet die
+    Oberflaeche ohne Browserleiste. Das SVG-Favicon oben reicht dafuer nicht --
+    iOS nimmt an dieser Stelle ausschliesslich PNG.
+
+    `apple-mobile-web-app-capable` ist veraltet und steht trotzdem hier: die
+    iPad-Fassungen, die im Umlauf sind, lesen weiterhin nur diese Zeile und
+    ignorieren `display: standalone` aus dem Manifest.
+  -->
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" href="./icons/icon-180.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Neural OS">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="stylesheet" href="./app.css">
 </head>
 <body>

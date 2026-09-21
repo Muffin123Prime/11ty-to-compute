@@ -1085,4 +1085,83 @@ test('Modelle: die Übersicht sondiert nicht, die Aktualisierung schon', async (
   }, { ctx: { registry } });
 });
 
+/* ------------------------------------------------- Zum Home-Bildschirm */
+
+/**
+ * Warum diese vier Pruefungen hier stehen
+ * ---------------------------------------
+ * Neural OS gibt es nicht im App Store. Auf einem iPad entsteht das
+ * App-Symbol ausschliesslich ueber "Zum Home-Bildschirm", und dafuer muessen
+ * vier Dinge gleichzeitig stimmen: ein Manifest, ein PNG (iOS nimmt an dieser
+ * Stelle KEIN SVG), die Verweise darauf im HTML, und die Dateien im Cache des
+ * Service Workers. Faellt eines davon weg, bekommt der Nutzer statt eines
+ * Symbols ein graues Rechteck -- und merkt es erst auf dem Geraet, wo kein
+ * Test mehr hinreicht.
+ */
+const WEB = path.join(__dirname, '..', 'web');
+
+test('das Manifest fuer den Home-Bildschirm ist vollstaendig, und seine Symbole gibt es wirklich', () => {
+  const roh = fs.readFileSync(path.join(WEB, 'manifest.webmanifest'), 'utf8');
+  const manifest = JSON.parse(roh);
+
+  assert.equal(manifest.name, 'Neural OS');
+  assert.equal(manifest.display, 'standalone', 'ohne "standalone" oeffnet das Symbol nur einen Safari-Tab');
+  assert.ok(manifest.start_url, 'ohne start_url weiss das Geraet nicht, was es oeffnen soll');
+  assert.ok(Array.isArray(manifest.icons) && manifest.icons.length >= 2, 'zu wenige Symbole');
+
+  for (const symbol of manifest.icons) {
+    const datei = path.join(WEB, symbol.src.replace(/^\.\//, ''));
+    assert.ok(fs.existsSync(datei), `das Manifest nennt ${symbol.src}, die Datei fehlt aber`);
+    // Die ersten acht Bytes einer PNG-Datei sind festgelegt. Ein leeres oder
+    // halb geschriebenes Symbol faellt hier auf, nicht erst auf dem Geraet.
+    const kopf = fs.readFileSync(datei).subarray(0, 8);
+    assert.deepEqual([...kopf], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+      `${symbol.src} ist keine PNG-Datei`);
+  }
+  assert.ok(manifest.icons.some((s) => s.purpose === 'maskable'),
+    'ohne ein maskable-Symbol schneidet Android die Marke an');
+});
+
+test('index.html verweist auf Manifest und ein PNG-Symbol, das es gibt', () => {
+  const html = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
+
+  assert.match(html, /<link[^>]+rel="manifest"[^>]+href="\.\/manifest\.webmanifest"/,
+    'ohne den Manifest-Verweis findet das Geraet das Manifest nicht');
+  const touch = html.match(/<link[^>]+rel="apple-touch-icon"[^>]+href="([^"]+)"/);
+  assert.ok(touch, 'kein apple-touch-icon — auf iOS bleibt das Symbol dann ein Bildschirmausschnitt');
+  assert.ok(touch[1].endsWith('.png'), `iOS nimmt hier nur PNG, hier steht: ${touch[1]}`);
+  assert.ok(fs.existsSync(path.join(WEB, touch[1].replace(/^\.\//, ''))),
+    `index.html verweist auf ${touch[1]}, die Datei fehlt`);
+  assert.match(html, /name="apple-mobile-web-app-capable"\s+content="yes"/,
+    'die im Umlauf befindlichen iPad-Fassungen lesen weiterhin nur diese Zeile');
+});
+
+test('der Service Worker legt Manifest und Symbol mit in den Cache', () => {
+  const sw = fs.readFileSync(path.join(WEB, 'sw.js'), 'utf8');
+  for (const datei of ['./manifest.webmanifest', './icons/icon-180.png']) {
+    assert.ok(sw.includes(`'${datei}'`),
+      `${datei} fehlt in SHELL_ASSETS — ein vom Home-Bildschirm gestartetes Fenster zeigt dann beim ersten Start ohne Server kein Symbol`);
+  }
+});
+
+test('die Bildmarke im Symbol-Werkzeug ist dieselbe wie in der Oberflaeche', () => {
+  // Die Marke steht an zwei Stellen, weil das Werkzeug ohne Browser laeuft und
+  // web/app.js ein ES-Modul ist. Zwei Kopien laufen frueher oder spaeter
+  // auseinander -- dann traegt die Anwendung ein anderes Zeichen als ihr
+  // Symbol auf dem Home-Bildschirm, und das faellt niemandem auf.
+  const werkzeug = fs.readFileSync(path.join(__dirname, '..', 'tools', 'make-icons.js'), 'utf8');
+  const app = fs.readFileSync(path.join(WEB, 'app.js'), 'utf8');
+
+  const ausWerkzeug = werkzeug.match(/const MARK = ([\s\S]*?);\n/);
+  assert.ok(ausWerkzeug, 'MARK in tools/make-icons.js nicht gefunden');
+  const ausApp = app.match(/brand:\s*'([^']*)'/);
+  assert.ok(ausApp, 'ICONS.brand in web/app.js nicht gefunden');
+
+  // Aus dem Werkzeug kommt ein mehrzeiliger Ausdruck mit + verknuepfter
+  // Zeichenketten; hier interessiert nur, was am Ende dasteht.
+  const zusammengesetzt = [...ausWerkzeug[1].matchAll(/'([^']*)'/g)].map((m) => m[1]).join('');
+  assert.equal(zusammengesetzt, ausApp[1],
+    'die Marke im Werkzeug und die in der Oberflaeche sind verschieden');
+});
+
 module.exports = { name: 'server', tests: drain() };

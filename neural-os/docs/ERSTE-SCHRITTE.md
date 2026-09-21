@@ -21,6 +21,10 @@ WLAN, nicht über das Internet.
 
 ## Teil 1 · Einmalig auf dem Windows-Rechner
 
+> Dieser ganze Teil gilt **nur für den Windows-Rechner**. Auf dem iPad ist
+> nichts davon zu tun — dort wird nichts installiert und nichts
+> heruntergeladen. Für das iPad ist Teil 3 zuständig.
+
 ### 1.1 Node.js installieren
 
 Neural OS ist ein Programm, das Node.js ausführt — so wie ein Word-Dokument
@@ -35,7 +39,7 @@ Das ist die einzige Installation in dieser ganzen Anleitung. **Jeder weitere
 Rechner, der später den Stick benutzt, braucht sie nicht** — auf dem Stick
 liegt Node mit drauf.
 
-### 1.2 Neural OS herunterladen
+### 1.2 Neural OS auf den Windows-Rechner holen
 
 1. Im Browser die Seite des Zweigs öffnen:
    `https://github.com/Muffin123Prime/11ty-to-compute/tree/claude/neural-os-personal-ai-nr8xf8`
@@ -153,31 +157,67 @@ herunterladen. Dafür brauchst du einmal einen Mac, an dem du denselben Schritt
 
 ## Teil 3 · Das iPad
 
-Das iPad kann Neural OS **nicht selbst ausführen**. iPadOS lässt keine
-Programme von einem USB-Stick starten und hat kein Node. Das ist eine Grenze des
-iPads, keine fehlende Funktion hier.
+### Es gibt Neural OS nicht im App Store — und das ist kein Versehen
 
-Was geht: das iPad als **Bildschirm** für die Instanz, die auf deinem Windows-Rechner
-oder vom Stick läuft. Beide Geräte im selben WLAN.
+Such nicht danach, du wirst es nicht finden. Neural OS ist **keine App**,
+sondern ein Programm, das auf deinem eigenen Rechner läuft und seine Oberfläche
+im Browser zeigt. Genau darum geht es ja: deine Daten liegen auf deinem Gerät
+und nicht bei einem Anbieter, der eine App verteilt.
 
-1. Am Rechner: **Einstellungen → Freigabe im lokalen Netz**.
-2. „Freigabe im lokalen Netz erlauben" einschalten.
-3. Adresse auf **`0.0.0.0` – alle Netzwerkkarten** stellen und Neural OS einmal
-   neu starten (Fenster schließen, `npm start` erneut).
-4. **Token erzeugen** drücken. Das Token wird **genau einmal** angezeigt —
-   abschreiben oder gleich am iPad eintippen.
-5. Die lokale Adresse des Rechners herausfinden: im schwarzen Fenster
-   `ipconfig` eintippen, die Zeile „IPv4-Adresse" lesen, etwa `192.168.1.42`.
-6. Am iPad in Safari öffnen: `http://192.168.1.42:7777`, Token eintragen.
+Auf dem iPad **installierst du also gar nichts**. Du öffnest eine Adresse in
+Safari. Wenn du willst, legst du dir davon ein Symbol auf den Home-Bildschirm —
+das sieht dann aus wie eine App und öffnet sich auch so, ohne Browserleiste.
 
-Ohne Token kommt kein Gerät herein — auch keines aus deinem eigenen WLAN.
-Die Freigabe lässt sich jederzeit wieder abschalten, einzelne Token einzeln
+iPadOS kann Neural OS auch nicht selbst ausführen: es startet keine Programme
+von einem USB-Stick und hat kein Node.js. Das ist eine Grenze des iPads und
+wird sich nicht ändern. Das iPad ist der **Bildschirm** für die Instanz, die
+auf deinem Windows-Rechner oder vom Stick läuft.
+
+### 3.1 Am Windows-Rechner: Freigabe einschalten
+
+Beide Geräte müssen im selben WLAN sein.
+
+1. In Neural OS auf **Einstellungen → Freigabe im lokalen Netz**.
+2. **„Freigabe im lokalen Netz erlauben"** einschalten.
+3. Bei „Adresse, auf der der Server hört" auf **`0.0.0.0` – alle
+   Netzwerkkarten** stellen.
+4. Neural OS einmal neu starten, damit das wirkt: schwarzes Fenster schließen,
+   neu öffnen, `npm start`.
+5. **Token erzeugen** drücken. Das Token wird **genau einmal angezeigt** —
+   liegen lassen, bis du es am iPad eingetippt hast.
+6. Die Adresse des Rechners herausfinden: im schwarzen Fenster `ipconfig`
+   eintippen und die Zeile **IPv4-Adresse** lesen, etwa `192.168.1.42`.
+
+### 3.2 Am iPad: öffnen
+
+1. **Safari** öffnen (nicht Chrome — das Symbol auf dem Home-Bildschirm
+   funktioniert nur aus Safari heraus richtig).
+2. In die Adresszeile tippen: `http://192.168.1.42:7777`
+   — mit *deiner* Zahl aus Schritt 6 und ohne `https`.
+3. Das Token eintragen, das der Rechner angezeigt hat.
+
+Fertig. Ohne Token kommt kein Gerät herein, auch keines aus deinem eigenen
+WLAN. Die Freigabe lässt sich jederzeit abschalten, einzelne Token einzeln
 entziehen.
 
-**Tipp:** in Safari auf „Teilen" → „Zum Home-Bildschirm" — dann hast du ein
-Symbol wie bei einer App.
+### 3.3 Als Symbol auf den Home-Bildschirm
 
----
+1. In Safari unten (Querformat: oben rechts) auf **Teilen** — das Quadrat mit
+   dem Pfeil nach oben.
+2. Nach unten wischen zu **„Zum Home-Bildschirm"**.
+3. Name bestätigen, **Hinzufügen**.
+
+Auf dem Home-Bildschirm liegt danach ein richtiges Symbol, und ein Tipp darauf
+öffnet Neural OS im Vollbild ohne Safari-Leisten. Es ist trotzdem keine App aus
+dem App Store, sondern eine Verknüpfung zu deinem eigenen Rechner — läuft der
+nicht, ist auch das Symbol leer. Genau das ist gewollt: es gibt nichts in der
+Wolke, das weiterlaufen könnte.
+
+### Querformat
+
+Die Oberfläche passt sich an: bei schmalem Bild wandert die Seitenleiste nach
+unten wie in einer App. Die Bedienung mit dem Finger ist gerade in Arbeit —
+bis das fertig ist, sind einige Knöpfe kleiner, als sie sein sollten.
 
 ## Teil 4 · Sicherung
 
@@ -222,4 +262,7 @@ Ehrlichkeitshalber, damit du nicht danach suchst:
   mit, aber die Antworten nicht: auf einem fremden Rechner ohne Ollama siehst du
   alles, bekommst aber keine Chat-Antwort.
 * **Das Design** ist noch nicht überarbeitet.
-* Neural OS **auf** dem iPad ausführen geht nicht und wird nicht gehen.
+* **Die Fingerbedienung auf dem iPad** ist noch nicht fertig — rund die Hälfte
+  der Knöpfe ist kleiner als das, was Apple für einen Finger empfiehlt.
+* Neural OS **auf** dem iPad ausführen geht nicht und wird nicht gehen. Es gibt
+  auch nichts im App Store; siehe Teil 3.

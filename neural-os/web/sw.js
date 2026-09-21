@@ -21,7 +21,7 @@
  * an open session is never served half of one build and half of another.
  */
 
-const VERSION = 'v2';
+const VERSION = 'v3';
 const CACHE_NAME = `neural-os-shell-${VERSION}`;
 
 /**
@@ -35,6 +35,12 @@ const SHELL_ASSETS = [
   './index.html',
   './app.css',
   './app.js',
+  // Manifest und Startbildschirm-Symbol: ohne sie zeigt ein vom
+  // Home-Bildschirm gestartetes Fenster beim ersten Start ohne Server ein
+  // leeres Symbol -- also genau dort, wo der Cache etwas taugen soll.
+  './manifest.webmanifest',
+  './icons/icon-180.png',
+  './icons/icon-192.png',
   './lib/api.js',
   './lib/dom.js',
 ];
