@@ -491,6 +491,12 @@ function createVectorStore({ paths, vaultCrypto, logger, autoFlushMs = 0 } = {})
       return entries.has(id);
     },
 
+    /** Every indexed id, so a caller can find entries the vault no longer has. */
+    ids() {
+      ready();
+      return [...entries.keys()];
+    },
+
     /** Stored metadata without copying the vector -- the hot path of reindexing. */
     meta(id) {
       ready();
@@ -664,7 +670,9 @@ function createVectorStore({ paths, vaultCrypto, logger, autoFlushMs = 0 } = {})
     compact() {
       ready();
       const live = entries.size;
-      const before = slots;
+      // The high-water mark, not the allocated capacity: rows above it were
+      // never written and are not "gaps" the user could have caused.
+      const before = highWater;
       if (!live) {
         const freed = before;
         data = new Float32Array(0);

@@ -9,9 +9,9 @@ teilweise oder gar nicht funktioniert, steht weiter unten — ungeschönt.
 ## Messwerte
 
 ```
-npm test          387 Tests, 387 bestanden, 0 fehlgeschlagen   (~18 s)
+npm test          509 Tests, 509 bestanden, 0 fehlgeschlagen   (~28 s)
 npm run proof     15 Prüfpunkte bestanden, 0 fehlgeschlagen
-npm run doctor    11 von 11 Subsystemen geladen
+npm run doctor    13 von 13 Subsystemen geladen
 ```
 
 | Testdatei | Tests | Gegenstand |
@@ -30,6 +30,10 @@ npm run doctor    11 von 11 Subsystemen geladen
 | `integration.test.js` | 15 | Ende-zu-Ende über den echten Stapel |
 | `harden.test.js` | 14 | Prozessweite Durchsetzung der Netzpolicy |
 | `vaultcrypto.test.js` | 9 | AES-256-GCM, scrypt, Passphrase-Wechsel |
+| `sync.test.js` | 40 | Zusammenführung, Konflikte, Idempotenz, Abbruch |
+| `extract.test.js` | 30 | PDF, DOCX, XLSX, PPTX, HTML, Kodierungen |
+| `embeddings.test.js` | 28 | Einbettungen, Modellwechsel, Abbruch |
+| `vectors.test.js` | 24 | Vektorspeicher, Ähnlichkeit, Persistenz |
 | `audit-regressions.test.js` | 13 | die Defekte aus dem Sicherheitsaudit |
 
 ## Bewiesen, nicht behauptet
@@ -95,13 +99,30 @@ ausschließlich `127.0.0.1`.
   Bis etwa 100 000 Datensätze ist das unproblematisch; darüber hinaus braucht es
   eine echte Datenbank hinter der `Store`-Schnittstelle.
 
+### Seit dem letzten Stand fertiggestellt
+- **Geräte-Synchronisation.** Zwei Geräte gleichen ihre Datenbestände direkt ab,
+  ohne Zwischenstation. Geprüft zwischen zwei echten laufenden Instanzen:
+  einseitige Änderungen kommen an, und wenn **beide** Geräte denselben Eintrag
+  geändert haben, entsteht ein Konflikt mit beiden Fassungen — nichts wird
+  überschrieben. Bewusst nicht abgeglichen werden Token, Netz-Freigaben, Agenten
+  mit ihren Berechtigungen und die Partnerliste: ein Partnergerät kann sich
+  darüber weder Rechte noch Netzzugang verschaffen.
+- **Semantische Suche.** Vektorindex in `vault/vectors.bin`, Kosinus-Ähnlichkeit,
+  von der Vault-Verschlüsselung gedeckt. Braucht ein Einbettungsmodell
+  (`ollama pull nomic-embed-text`); fehlt es, sagt die App das mit Anleitung und
+  weicht **nicht** heimlich auf die Stichwortsuche aus.
+- **Textextraktion** aus PDF, DOCX, XLSX, PPTX, EPUB, ODT, HTML, RTF und
+  Klartext — eigene Parser, inklusive ZIP-Leser über `node:zlib`. Ein gescanntes
+  PDF ohne Textebene liefert eine ehrliche Warnung statt erfundenem Text.
+- **Zeitachse** als zweite Perspektive aufs Gehirn: Spuren je Typ, Zoomstufen
+  Tag/Woche/Monat/Jahr, Auswahl eines Zeitraums mit Sprung in den Graphen.
+
 ### Nicht gebaut
-- **Geräte-Synchronisation.** Halb gebaut verliert sie Daten, und man merkt es
-  spät. Das Operationslog ist die richtige Grundlage dafür. Heute möglich:
-  Freigabe im eigenen Netz — mehrere Geräte sehen dieselbe Instanz.
-- **Semantische Suche per Embeddings.** Braucht ein zweites Modell und einen
-  Vektorindex. Die Provider-Schnittstelle hat `embed()` bereits vorgesehen.
 - **Sprachein- und -ausgabe, Bildverarbeitung, Plugin-System.**
+- **Texterkennung (OCR)** für gescannte PDFs.
+- **Mobil-App.** Die Oberfläche läuft im Browser eines Tablets, ist aber für
+  den Laptop gebaut — und iPadOS kann den Server selbst nicht ausführen
+  (siehe `docs/ANLEITUNG.md`).
 
 ## Sicherheitsaudit
 
