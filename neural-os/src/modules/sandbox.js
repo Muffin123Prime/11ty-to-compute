@@ -369,6 +369,16 @@ function createSandbox(deps = {}) {
   const log = makeLogger(loggerDep, 'modules');
 
   /** `registry` is overloaded in the contract; sort it out by shape, not by name. */
+  /**
+   * The time limit for one synchronous stretch of module code. Configurable
+   * because "long enough" depends on the machine, not on us -- a Raspberry Pi
+   * needs more than a laptop for the same honest work.
+   */
+  const configuredTimeout = config.modules && Number.isFinite(config.modules.timeoutMs)
+    && config.modules.timeoutMs > 0
+    ? config.modules.timeoutMs
+    : DEFAULT_TIMEOUT_MS;
+
   let models = deps.models || (deps.registry && typeof deps.registry.chat === 'function' ? deps.registry : null);
   let moduleRegistry = deps.registry && typeof deps.registry.reportFailure === 'function' ? deps.registry : null;
 
@@ -429,7 +439,7 @@ function createSandbox(deps = {}) {
   function createRealm(spec) {
     const { id, name } = spec;
     const timeoutMs = Number.isFinite(spec.timeoutMs) && spec.timeoutMs > 0
-      ? spec.timeoutMs : DEFAULT_TIMEOUT_MS;
+      ? spec.timeoutMs : configuredTimeout;
     const filename = spec.filename || 'modul.js';
     const timers = new Set();
     const moduleObject = { exports: {} };

@@ -672,7 +672,7 @@ Erstellt: ${new Date().toISOString().slice(0, 10)}
 
 function archiveCorrupt(what, detail) {
   return new StorageError(
-    `Das heruntergeladene Archiv (${what}) ist beschaedigt oder unvollstaendig (${detail}). Es wurde nichts auf den Stick geschrieben.`,
+    `Das heruntergeladene Archiv (${what}) ist beschädigt oder unvollständig (${detail}). Es wurde nichts auf den Stick geschrieben.`,
     { archive: what, detail },
   );
 }
@@ -752,7 +752,7 @@ function createTarPicker(matches, maxBytes) {
         if (capture) {
           capture.bytes += n;
           if (capture.bytes > maxBytes) {
-            throw new StorageError(`Die Datei im Archiv ist groesser als erlaubt (${humanBytes(maxBytes)}); der Vorgang wurde abgebrochen.`);
+            throw new StorageError(`Die Datei im Archiv ist größer als erlaubt (${humanBytes(maxBytes)}); der Vorgang wurde abgebrochen.`);
           }
           capture.chunks.push(Buffer.from(pending.subarray(0, n)));
         }
@@ -768,7 +768,7 @@ function createTarPicker(matches, maxBytes) {
       const block = Buffer.from(pending.subarray(0, 512));
       pending = pending.subarray(512);
       if (block.every((b) => b === 0)) return false; // end-of-archive marker
-      if (!tarHeaderValid(block)) throw archiveCorrupt('tar', 'ungueltige Pruefsumme im Kopfsatz');
+      if (!tarHeaderValid(block)) throw archiveCorrupt('tar', 'ungültige Prüfsumme im Kopfsatz');
 
       const rawName = cstr(block, 0, 100);
       const prefix = cstr(block, 345, 155);
@@ -845,7 +845,7 @@ const SIG_LOCAL = 0x04034b50;
  * coincidence inside compressed data.
  */
 function pickFromZip(buffer, matches, maxBytes) {
-  if (buffer.length < 22) throw archiveCorrupt('zip', 'zu kurz fuer ein Archiv');
+  if (buffer.length < 22) throw archiveCorrupt('zip', 'zu kurz für ein Archiv');
   let eocd = -1;
   const lowest = Math.max(0, buffer.length - 22 - 0xffff);
   for (let i = buffer.length - 22; i >= lowest; i--) {
@@ -857,7 +857,7 @@ function pickFromZip(buffer, matches, maxBytes) {
 
   const count = buffer.readUInt16LE(eocd + 10);
   let p = buffer.readUInt32LE(eocd + 16);
-  if (p < 0 || p >= buffer.length) throw archiveCorrupt('zip', 'ungueltiger Verzeichnis-Zeiger');
+  if (p < 0 || p >= buffer.length) throw archiveCorrupt('zip', 'ungültiger Verzeichnis-Zeiger');
 
   for (let k = 0; k < count; k++) {
     if (p + 46 > buffer.length || buffer.readUInt32LE(p) !== SIG_CENTRAL) break;
@@ -876,10 +876,10 @@ function pickFromZip(buffer, matches, maxBytes) {
 
     if (!matches(name)) continue;
     if (size > maxBytes) {
-      throw new StorageError(`Die Datei "${name}" im Archiv ist groesser als erlaubt (${humanBytes(maxBytes)}).`);
+      throw new StorageError(`Die Datei "${name}" im Archiv ist größer als erlaubt (${humanBytes(maxBytes)}).`);
     }
     if (localOffset + 30 > buffer.length || buffer.readUInt32LE(localOffset) !== SIG_LOCAL) {
-      throw archiveCorrupt('zip', `Eintrag "${name}" hat keinen gueltigen Kopfsatz`);
+      throw archiveCorrupt('zip', `Eintrag "${name}" hat keinen gültigen Kopfsatz`);
     }
     const start = localOffset + 30 + buffer.readUInt16LE(localOffset + 26) + buffer.readUInt16LE(localOffset + 28);
     const end = start + compressedSize;
@@ -890,7 +890,7 @@ function pickFromZip(buffer, matches, maxBytes) {
     try {
       return zlib.inflateRawSync(raw, { maxOutputLength: maxBytes });
     } catch (err) {
-      throw archiveCorrupt('zip', `Eintrag "${name}" liess sich nicht entpacken`);
+      throw archiveCorrupt('zip', `Eintrag "${name}" ließ sich nicht entpacken`);
     }
   }
   return null;
@@ -917,7 +917,7 @@ function createStick(deps = {}) {
     const raw = typeof configured === 'string' && configured ? configured : process.version;
     const v = raw.startsWith('v') ? raw : `v${raw}`;
     if (!/^v\d+\.\d+\.\d+$/.test(v)) {
-      throw new ValidationError(`"${raw}" ist keine gueltige Node-Version (erwartet z. B. v22.11.0).`);
+      throw new ValidationError(`"${raw}" ist keine gültige Node-Version (erwartet z. B. v22.11.0).`);
     }
     return v;
   }
@@ -950,7 +950,7 @@ function createStick(deps = {}) {
     const data = dataDirOf(root);
     if (isInside(data, target)) {
       throw new StorageError(
-        `Abgebrochen: "${target}" liegt im Datenordner. Eine Aktualisierung darf den Datenbestand nie veraendern.`,
+        `Abgebrochen: "${target}" liegt im Datenordner. Eine Aktualisierung darf den Datenbestand nie verändern.`,
         { target, dataDir: data },
       );
     }
@@ -959,29 +959,29 @@ function createStick(deps = {}) {
   function warnFilesystem(fsInfo, warnings) {
     if (fsInfo.enforcesModes === false) {
       warnings.push(
-        'Das Dateisystem dieses Sticks kennt keine Zugriffsrechte (typisch fuer exFAT und FAT32). '
-        + 'Die Dateirechte 0600/0700 laufen dort ins Leere - sie schuetzen deine Daten hier NICHT. '
-        + 'Schalte deshalb die Verschluesselung ein; sie ist auf einem Stick der einzige wirksame Schutz.',
+        'Das Dateisystem dieses Sticks kennt keine Zugriffsrechte (typisch für exFAT und FAT32). '
+        + 'Die Dateirechte 0600/0700 laufen dort ins Leere - sie schützen deine Daten hier NICHT. '
+        + 'Schalte deshalb die Verschlüsselung ein; sie ist auf einem Stick der einzige wirksame Schutz.',
       );
     } else if (fsInfo.enforcesModes === null && process.platform === 'win32') {
       warnings.push(
-        'Unter Windows werden Unix-Dateirechte nicht abgebildet; der Schutz haengt an den Rechten des '
-        + 'Laufwerks. Auf einem Stick heisst das praktisch: Verschluesselung einschalten.',
+        'Unter Windows werden Unix-Dateirechte nicht abgebildet; der Schutz hängt an den Rechten des '
+        + 'Laufwerks. Auf einem Stick heißt das praktisch: Verschlüsselung einschalten.',
       );
     }
     if (fsInfo.maxFileBytes !== null && fsInfo.maxFileBytes !== undefined && fsInfo.maxFileBytes < 4 * 1024 * 1024 * 1024) {
       warnings.push(
-        `Der Stick ist mit ${fsInfo.typeName} formatiert. Dort kann keine einzelne Datei groesser als 4 GB sein - `
-        + 'ein groesseres KI-Modell passt also nicht darauf. Fuer Modelle brauchst du exFAT oder NTFS.',
+        `Der Stick ist mit ${fsInfo.typeName} formatiert. Dort kann keine einzelne Datei größer als 4 GB sein - `
+        + 'ein größeres KI-Modell passt also nicht darauf. Für Modelle brauchst du exFAT oder NTFS.',
       );
     } else if (fsInfo.enforcesModes === false && fsInfo.typeName === 'unbekannt') {
       warnings.push(
-        'Der Typ des Dateisystems liess sich nicht bestimmen. Falls es FAT32 ist, passt keine Datei '
-        + 'ueber 4 GB darauf - das betrifft groessere KI-Modelle.',
+        'Der Typ des Dateisystems ließ sich nicht bestimmen. Falls es FAT32 ist, passt keine Datei '
+        + 'über 4 GB darauf - das betrifft größere KI-Modelle.',
       );
     }
     if (fsInfo.error) {
-      warnings.push(`Beim Pruefen des Dateisystems trat ein Fehler auf: ${fsInfo.error}`);
+      warnings.push(`Beim Prüfen des Dateisystems trat ein Fehler auf: ${fsInfo.error}`);
     }
   }
 
@@ -995,7 +995,7 @@ function createStick(deps = {}) {
       for (const id of includeRuntimes) {
         if (!PLATFORMS[id]) {
           throw new ValidationError(
-            `"${id}" ist keine bekannte Plattform. Moeglich sind: ${Object.keys(PLATFORMS).join(', ')}.`,
+            `"${id}" ist keine bekannte Plattform. Möglich sind: ${Object.keys(PLATFORMS).join(', ')}.`,
           );
         }
         if (id !== LOCAL_PLATFORM) extra.push(id);
@@ -1042,7 +1042,7 @@ function createStick(deps = {}) {
       if (err && err.code === 'ENOSPC') {
         throw new StorageError(
           'Der Stick wurde beim Kopieren der Laufzeit voll. Die Laufzeit ist rund '
-          + `${humanBytes(sizeOf(process.execPath))} gross. Schaffe Platz und versuche es erneut.`,
+          + `${humanBytes(sizeOf(process.execPath))} groß. Schaffe Platz und versuche es erneut.`,
           { code: 'ENOSPC' },
         );
       }
@@ -1088,7 +1088,7 @@ function createStick(deps = {}) {
   async function fetchFromDist(url, { purpose, maxBytes }) {
     if (!gate) {
       throw new ValidationError(
-        'Ohne Netzschleuse kann keine zusaetzliche Laufzeit geholt werden. '
+        'Ohne Netzschleuse kann keine zusätzliche Laufzeit geholt werden. '
         + 'Starte Neural OS normal (dann ist die Schleuse da) oder kopiere die Laufzeit von Hand '
         + `nach ${LAYOUT.runtime}/<plattform>/.`,
       );
@@ -1129,9 +1129,9 @@ function createStick(deps = {}) {
     if (!err || err.code !== 'NETWORK_BLOCKED') return err;
     const hint =
       `Die Netzschleuse hat den Zugriff auf ${DIST_HOST} blockiert. Grund: ${err.message} `
-      + `Damit eine zusaetzliche Laufzeit geholt werden kann, brauchst du entweder den Netzmodus 'online' `
-      + `mit ${DIST_HOST} auf der Freigabeliste, oder eine Freigabe fuer den Bereich '${RUNTIME_SCOPE}'. `
-      + 'Das ist kein Fehler des Stick-Werkzeugs: Der Stick laeuft auch ohne die zusaetzlichen Laufzeiten '
+      + `Damit eine zusätzliche Laufzeit geholt werden kann, brauchst du entweder den Netzmodus 'online' `
+      + `mit ${DIST_HOST} auf der Freigabeliste, oder eine Freigabe für den Bereich '${RUNTIME_SCOPE}'. `
+      + 'Das ist kein Fehler des Stick-Werkzeugs: Der Stick läuft auch ohne die zusätzlichen Laufzeiten '
       + 'auf jedem Rechner mit demselben Betriebssystem wie diesem hier.';
     return new NetworkBlockedError(hint, {
       ...(err.details || {}),
@@ -1164,7 +1164,7 @@ function createStick(deps = {}) {
     const filename = `node-${version}-${platform}.${ext}`;
     const base = `${DIST_BASE}/${version}`;
 
-    onProgress({ phase: 'laufzeit', message: `Pruefsummen fuer ${platform} werden geladen …`, platform });
+    onProgress({ phase: 'runtime', message: `Prüfsummen für ${platform} werden geladen …`, platform });
     const sumsResponse = await fetchFromDist(`${base}/SHASUMS256.txt`, {
       purpose: `stick.runtime.checksums:${platform}`,
       maxBytes: MAX_SHASUMS_BYTES,
@@ -1173,13 +1173,13 @@ function createStick(deps = {}) {
     const expected = findShasum(sums, filename);
     if (!expected) {
       throw new StorageError(
-        `In SHASUMS256.txt von nodejs.org gibt es keinen Eintrag fuer "${filename}". `
-        + `Gibt es Node ${version} fuer ${platform} ueberhaupt? Es wurde nichts geschrieben.`,
+        `In SHASUMS256.txt von nodejs.org gibt es keinen Eintrag für "${filename}". `
+        + `Gibt es Node ${version} für ${platform} überhaupt? Es wurde nichts geschrieben.`,
         { filename, version, platform },
       );
     }
 
-    onProgress({ phase: 'laufzeit', message: `Laufzeit fuer ${platform} wird geladen (${filename}) …`, platform });
+    onProgress({ phase: 'runtime', message: `Laufzeit für ${platform} wird geladen (${filename}) …`, platform });
     const archiveResponse = await fetchFromDist(`${base}/${filename}`, {
       purpose: `stick.runtime.download:${platform}`,
       maxBytes: MAX_ARCHIVE_BYTES,
@@ -1189,14 +1189,14 @@ function createStick(deps = {}) {
     const actual = crypto.createHash('sha256').update(archive).digest('hex');
     if (actual !== expected) {
       throw new StorageError(
-        `Die Pruefsumme von "${filename}" stimmt nicht mit der von nodejs.org veroeffentlichten ueberein. `
+        `Die Prüfsumme von "${filename}" stimmt nicht mit der von nodejs.org veröffentlichten überein. `
         + 'Die Datei wurde VERWORFEN und nichts auf den Stick geschrieben. Das kann an einer abgebrochenen '
-        + 'Uebertragung liegen - oder daran, dass jemand unterwegs etwas ausgetauscht hat.',
+        + 'Übertragung liegen - oder daran, dass jemand unterwegs etwas ausgetauscht hat.',
         { filename, expected, actual },
       );
     }
 
-    onProgress({ phase: 'laufzeit', message: `Laufzeit fuer ${platform} wird entpackt …`, platform });
+    onProgress({ phase: 'runtime', message: `Laufzeit für ${platform} wird entpackt …`, platform });
     const wanted = spec.member;
     const matches = (name) => name === wanted || name.endsWith(`/${wanted}`);
     const binary = spec.archive === 'zip'
@@ -1222,7 +1222,7 @@ function createStick(deps = {}) {
       rmrf(tmp);
       if (err && err.code === 'ENOSPC') {
         throw new StorageError(
-          `Der Stick hat nicht genug Platz fuer die Laufzeit ${platform} (${humanBytes(binary.length)}).`,
+          `Der Stick hat nicht genug Platz für die Laufzeit ${platform} (${humanBytes(binary.length)}).`,
           { platform, needed: binary.length },
         );
       }
@@ -1252,23 +1252,23 @@ function createStick(deps = {}) {
     // Copying a tree into itself produces an ever-growing copy. Refuse early.
     if (isInside(sourceRoot, root)) {
       throw new ValidationError(
-        `Der Stick-Ordner ${root} liegt im Quelltext-Ordner ${sourceRoot}. Waehle einen Ordner ausserhalb, `
+        `Der Stick-Ordner ${root} liegt im Quelltext-Ordner ${sourceRoot}. Wähle einen Ordner ausserhalb, `
         + 'sonst wuerde sich die Kopie endlos selbst kopieren.',
       );
     }
     if (isInside(root, sourceRoot)) {
-      throw new ValidationError(`Der Quelltext liegt im Zielordner ${root}. Waehle einen anderen Zielordner.`);
+      throw new ValidationError(`Der Quelltext liegt im Zielordner ${root}. Wähle einen anderen Zielordner.`);
     }
 
     const plan = resolvePlatforms(opts.includeRuntimes);
     if (!plan.local) {
       warnings.push(
-        'Es wurde ausdruecklich keine Laufzeit mitkopiert. Der Stick laeuft dann nur auf Rechnern, '
+        'Es wurde ausdruecklich keine Laufzeit mitkopiert. Der Stick läuft dann nur auf Rechnern, '
         + 'auf denen Node.js (Version 20 oder neuer) bereits installiert ist.',
       );
     }
 
-    progress({ phase: 'pruefen', message: 'Quelltext wird vermessen …' });
+    progress({ phase: 'check', message: 'Quelltext wird vermessen …' });
     const source = collectTree(sourceRoot);
     warnings.push(...source.warnings);
 
@@ -1277,7 +1277,7 @@ function createStick(deps = {}) {
       const homeDir = opts.sourceHome || (appPaths && appPaths.home);
       if (!homeDir) {
         throw new ValidationError(
-          'Fuer eine Sicherung des Datenbestands fehlt der Quellordner. Uebergib sourceHome, '
+          'Für eine Sicherung des Datenbestands fehlt der Quellordner. Uebergib sourceHome, '
           + 'oder erzeuge das Werkzeug mit paths aus einer laufenden Instanz.',
         );
       }
@@ -1297,16 +1297,16 @@ function createStick(deps = {}) {
     const withHeadroom = required + Math.max(MIN_HEADROOM_BYTES, Math.round(required * 0.05));
     const free = freeBytes(root);
     if (free === null) {
-      warnings.push('Der freie Platz auf dem Stick liess sich nicht ermitteln; der Vorgang laeuft ohne diese Pruefung.');
+      warnings.push('Der freie Platz auf dem Stick ließ sich nicht ermitteln; der Vorgang läuft ohne diese Prüfung.');
     } else if (free < withHeadroom) {
       throw new StorageError(
         `Auf dem Stick sind nur ${humanBytes(free)} frei, gebraucht werden mindestens ${humanBytes(withHeadroom)} `
         + `(Quelltext ${humanBytes(source.bytes)}`
         + (localRuntimeBytes ? `, Laufzeit ${humanBytes(localRuntimeBytes)}` : '')
         + (home ? `, Datenbestand ${humanBytes(home.bytes)}` : '')
-        + (plan.extra.length ? `, ${plan.extra.length} weitere Laufzeit(en) geschaetzt ${humanBytes(plan.extra.length * ESTIMATED_RUNTIME_BYTES)}` : '')
+        + (plan.extra.length ? `, ${plan.extra.length} weitere Laufzeit(en) geschätzt ${humanBytes(plan.extra.length * ESTIMATED_RUNTIME_BYTES)}` : '')
         + '). Es wurde nichts geschrieben - ein halb kopierter Stick waere schlimmer als keiner. '
-        + 'Schaffe Platz oder lass die zusaetzlichen Laufzeiten weg.',
+        + 'Schaffe Platz oder lass die zusätzlichen Laufzeiten weg.',
         { free, required: withHeadroom },
       );
     }
@@ -1314,8 +1314,8 @@ function createStick(deps = {}) {
     const fsInfo = probeFilesystem(root);
     if (!fsInfo.writable) {
       throw new StorageError(
-        `In ${root} laesst sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}). `
-        + 'Ist der Stick schreibgeschuetzt oder nur lesend eingehaengt?',
+        `In ${root} lässt sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}). `
+        + 'Ist der Stick schreibgeschützt oder nur lesend eingehängt?',
         { root, error: fsInfo.error },
       );
     }
@@ -1323,19 +1323,19 @@ function createStick(deps = {}) {
 
     const recovered = cleanStale(root);
     if (recovered.restored.length) {
-      warnings.push(`Ein frueher abgebrochener Kopiervorgang wurde repariert (wiederhergestellt: ${recovered.restored.join(', ')}).`);
+      warnings.push(`Ein früher abgebrochener Kopiervorgang wurde repariert (wiederhergestellt: ${recovered.restored.join(', ')}).`);
     }
 
     // ---- source tree: build beside, then swap ----
-    progress({ phase: 'quelltext', message: 'Quelltext wird kopiert …', total: source.files.length });
+    progress({ phase: 'source', message: 'Quelltext wird kopiert …', total: source.files.length });
     const tmpApp = path.join(root, `.${LAYOUT.app}.tmp-${randomSuffix()}`);
     rmrf(tmpApp);
     mkdirp(tmpApp);
     let written;
     try {
       written = copyFiles(source.files, tmpApp, {
-        label: 'quelltext',
-        onFile: (p) => progress({ phase: 'quelltext', message: `Quelltext wird kopiert (${p.copied}/${p.total}) …`, ...p }),
+        label: 'source',
+        onFile: (p) => progress({ phase: 'source', message: `Quelltext wird kopiert (${p.copied}/${p.total}) …`, ...p }),
       });
       swapIntoPlace(path.join(root, LAYOUT.app), tmpApp);
     } catch (err) {
@@ -1355,22 +1355,22 @@ function createStick(deps = {}) {
       const existing = fs.readdirSync(dataDir).filter((n) => !n.startsWith('.'));
       if (existing.length) {
         throw new StorageError(
-          `In ${dataDir} liegt bereits ein Datenbestand. prepare() ueberschreibt niemals Daten. `
-          + 'Nutze "Stick aktualisieren", um nur den Quelltext zu erneuern, oder waehle einen leeren Ordner.',
+          `In ${dataDir} liegt bereits ein Datenbestand. prepare() überschreibt niemals Daten. `
+          + 'Nutze "Stick aktualisieren", um nur den Quelltext zu erneuern, oder wähle einen leeren Ordner.',
           { dataDir },
         );
       }
-      progress({ phase: 'daten', message: 'Datenbestand wird auf den Stick kopiert …', total: home.files.length });
+      progress({ phase: 'data', message: 'Datenbestand wird auf den Stick kopiert …', total: home.files.length });
       const copiedHome = copyFiles(home.files, dataDir, {
-        label: 'daten',
-        onFile: (p) => progress({ phase: 'daten', message: `Datenbestand wird kopiert (${p.copied}/${p.total}) …`, ...p }),
+        label: 'data',
+        onFile: (p) => progress({ phase: 'data', message: `Datenbestand wird kopiert (${p.copied}/${p.total}) …`, ...p }),
       });
       totalBytes += copiedHome.bytes;
       totalFiles += copiedHome.files;
       if (fsInfo.enforcesModes === false) {
         warnings.push(
           'Der Datenbestand liegt jetzt auf einem Dateisystem ohne Zugriffsrechte. Falls die Sicherung '
-          + 'unverschluesselt war, kann sie jeder lesen, der den Stick findet.',
+          + 'unverschlüsselt war, kann sie jeder lesen, der den Stick findet.',
         );
       }
     }
@@ -1378,7 +1378,7 @@ function createStick(deps = {}) {
     // ---- runtimes ----
     const runtimes = [];
     if (plan.local) {
-      progress({ phase: 'laufzeit', message: `Laufzeit fuer ${LOCAL_PLATFORM || 'dieses System'} wird kopiert …` });
+      progress({ phase: 'runtime', message: `Laufzeit für ${LOCAL_PLATFORM || 'dieses System'} wird kopiert …` });
       const localRuntime = copyLocalRuntime(root, warnings);
       if (localRuntime) {
         runtimes.push(localRuntime);
@@ -1387,8 +1387,8 @@ function createStick(deps = {}) {
         const check = checkExecutable(localRuntime.file);
         if (!check.ok) {
           warnings.push(
-            `Die kopierte Laufzeit liess sich auf dem Stick nicht starten (${check.reason}). `
-            + 'Haeufigster Grund: der Stick ist mit "noexec" eingehaengt. Auf einem anderen Rechner '
+            `Die kopierte Laufzeit ließ sich auf dem Stick nicht starten (${check.reason}). `
+            + 'Häufigster Grund: der Stick ist mit "noexec" eingehängt. Auf einem anderen Rechner '
             + 'funktioniert sie in der Regel trotzdem; notfalls den Ordner auf die Festplatte kopieren.',
           );
         }
@@ -1405,13 +1405,13 @@ function createStick(deps = {}) {
         // A missing extra runtime must never invalidate an otherwise good
         // stick. It is reported in full and the work continues.
         const message = err && err.message ? err.message : String(err);
-        warnings.push(`Laufzeit fuer ${platform} wurde NICHT auf den Stick gelegt: ${message}`);
+        warnings.push(`Laufzeit für ${platform} wurde NICHT auf den Stick gelegt: ${message}`);
         log.warn(`Laufzeit ${platform} fehlgeschlagen: ${message}`);
       }
     }
 
     // ---- launchers, readme, marker ----
-    progress({ phase: 'abschluss', message: 'Starter und Hinweise werden geschrieben …' });
+    progress({ phase: 'finish', message: 'Starter und Hinweise werden geschrieben …' });
     const launchers = deployLaunchers(root, sourceRoot);
     warnings.push(...launchers.warnings);
 
@@ -1426,7 +1426,7 @@ function createStick(deps = {}) {
       nodeVersion: process.version,
     });
 
-    progress({ phase: 'fertig', message: 'Der Stick ist fertig.', bytes: totalBytes, files: totalFiles });
+    progress({ phase: 'done', message: 'Der Stick ist fertig.', bytes: totalBytes, files: totalFiles });
     return { root, bytes: totalBytes, files: totalFiles, runtimes, warnings };
   }
 
@@ -1450,7 +1450,7 @@ function createStick(deps = {}) {
     const appDir = path.join(root, LAYOUT.app);
     assertOutsideData(root, appDir);
 
-    progress({ phase: 'pruefen', message: 'Quelltext wird vermessen …' });
+    progress({ phase: 'check', message: 'Quelltext wird vermessen …' });
     const source = collectTree(sourceRoot);
     warnings.push(...source.warnings);
 
@@ -1460,8 +1460,8 @@ function createStick(deps = {}) {
     const needed = source.bytes + MIN_HEADROOM_BYTES;
     if (free !== null && free < needed) {
       throw new StorageError(
-        `Fuer die Aktualisierung werden ${humanBytes(needed)} frei gebraucht, vorhanden sind ${humanBytes(free)}. `
-        + 'Es wurde nichts veraendert; der bisherige Stand auf dem Stick bleibt unberuehrt.',
+        `Für die Aktualisierung werden ${humanBytes(needed)} frei gebraucht, vorhanden sind ${humanBytes(free)}. `
+        + 'Es wurde nichts verändert; der bisherige Stand auf dem Stick bleibt unberührt.',
         { free, required: needed },
       );
     }
@@ -1469,7 +1469,7 @@ function createStick(deps = {}) {
     const fsInfo = probeFilesystem(root);
     if (!fsInfo.writable) {
       throw new StorageError(
-        `In ${root} laesst sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}). Ist der Stick schreibgeschuetzt?`,
+        `In ${root} lässt sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}). Ist der Stick schreibgeschützt?`,
         { root },
       );
     }
@@ -1477,10 +1477,10 @@ function createStick(deps = {}) {
 
     const recovered = cleanStale(root);
     if (recovered.restored.length) {
-      warnings.push(`Ein frueher abgebrochener Kopiervorgang wurde repariert (wiederhergestellt: ${recovered.restored.join(', ')}).`);
+      warnings.push(`Ein früher abgebrochener Kopiervorgang wurde repariert (wiederhergestellt: ${recovered.restored.join(', ')}).`);
     }
 
-    progress({ phase: 'quelltext', message: 'Quelltext wird erneuert …', total: source.files.length });
+    progress({ phase: 'source', message: 'Quelltext wird erneuert …', total: source.files.length });
     const tmpApp = path.join(root, `.${LAYOUT.app}.tmp-${randomSuffix()}`);
     assertOutsideData(root, tmpApp);
     rmrf(tmpApp);
@@ -1488,8 +1488,8 @@ function createStick(deps = {}) {
     let written;
     try {
       written = copyFiles(source.files, tmpApp, {
-        label: 'quelltext',
-        onFile: (p) => progress({ phase: 'quelltext', message: `Quelltext wird erneuert (${p.copied}/${p.total}) …`, ...p }),
+        label: 'source',
+        onFile: (p) => progress({ phase: 'source', message: `Quelltext wird erneuert (${p.copied}/${p.total}) …`, ...p }),
       });
       swapIntoPlace(appDir, tmpApp);
     } catch (err) {
@@ -1497,7 +1497,7 @@ function createStick(deps = {}) {
       throw err;
     }
 
-    progress({ phase: 'abschluss', message: 'Starter und Hinweise werden erneuert …' });
+    progress({ phase: 'finish', message: 'Starter und Hinweise werden erneuert …' });
     for (const launcher of LAUNCHERS) assertOutsideData(root, path.join(root, launcher.target));
     const launchers = deployLaunchers(root, sourceRoot);
     warnings.push(...launchers.warnings);
@@ -1511,7 +1511,7 @@ function createStick(deps = {}) {
     }));
     writeMarker(root, { nodeVersion: process.version });
 
-    progress({ phase: 'fertig', message: 'Der Quelltext auf dem Stick ist aktuell.', bytes: written.bytes, files: written.files });
+    progress({ phase: 'done', message: 'Der Quelltext auf dem Stick ist aktuell.', bytes: written.bytes, files: written.files });
     return { root, bytes: written.bytes, files: written.files, warnings, dataDir: dataDirOf(root) };
   }
 
@@ -1541,7 +1541,7 @@ function createStick(deps = {}) {
     };
 
     if (!exists) {
-      add('error', 'NO_STICK', `Der Ordner ${root} existiert nicht.`, 'Stecke den Stick ein und waehle den richtigen Ordner.');
+      add('error', 'NO_STICK', `Der Ordner ${root} existiert nicht.`, 'Stecke den Stick ein und wähle den richtigen Ordner.');
       return { ok: false, problems, layout, freeBytes: null };
     }
 
@@ -1568,7 +1568,7 @@ function createStick(deps = {}) {
       add(layout.app.exists ? 'warn' : 'error', 'INTERRUPTED_COPY',
         `Es liegen Reste eines abgebrochenen Kopiervorgangs auf dem Stick (${stale.join(', ')}).`,
         layout.app.exists
-          ? 'Sie koennen geloescht werden; "Stick aktualisieren" raeumt sie automatisch auf.'
+          ? 'Sie koennen geloescht werden; "Stick aktualisieren" räumt sie automatisch auf.'
           : 'Der Ordner "app" fehlt dadurch. Rufe "Stick aktualisieren" auf - dabei wird der vorherige Stand wiederhergestellt.');
     }
 
@@ -1579,14 +1579,14 @@ function createStick(deps = {}) {
       // state that otherwise only shows up as a confusing crash at startup.
       for (const rel of ['bin/neural-os.js', 'src/app.js', 'src/kernel/paths.js', 'web/index.html', 'package.json']) {
         if (!fs.existsSync(path.join(layout.app.path, rel))) {
-          add('error', 'APP_INCOMPLETE', `Im Programmordner fehlt "${rel}" - die Kopie ist unvollstaendig.`,
+          add('error', 'APP_INCOMPLETE', `Im Programmordner fehlt "${rel}" - die Kopie ist unvollständig.`,
             'Rufe "Stick aktualisieren" auf; dabei wird der Quelltext vollstaendig neu geschrieben.');
         }
       }
     }
 
     if (!layout.data.exists) {
-      add('warn', 'DATA_MISSING', 'Der Datenordner fehlt.', 'Er wird beim naechsten Start automatisch angelegt.');
+      add('warn', 'DATA_MISSING', 'Der Datenordner fehlt.', 'Er wird beim nächsten Start automatisch angelegt.');
     }
 
     layout.runtimes = detectPlatforms(root);
@@ -1595,7 +1595,7 @@ function createStick(deps = {}) {
         'Bereite den Stick erneut vor - dabei wird die Laufzeit dieses Rechners immer mitkopiert.');
     } else if (LOCAL_PLATFORM && !layout.runtimes.some((r) => r.platform === LOCAL_PLATFORM)) {
       add('warn', 'NO_LOCAL_RUNTIME',
-        `Fuer dieses System (${LOCAL_PLATFORM}) liegt keine Laufzeit auf dem Stick; vorhanden sind: `
+        `Für dieses System (${LOCAL_PLATFORM}) liegt keine Laufzeit auf dem Stick; vorhanden sind: `
         + `${layout.runtimes.map((r) => r.platform).join(', ')}.`,
         'Auf diesem Rechner startet der Stick nur, wenn Node.js installiert ist. "Stick aktualisieren" auf diesem Rechner legt die passende Laufzeit an.');
     }
@@ -1612,17 +1612,17 @@ function createStick(deps = {}) {
 
     const fsInfo = probeFilesystem(root);
     if (!fsInfo.writable) {
-      add('error', 'READ_ONLY', `Auf den Stick laesst sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}).`,
-        'Schreibschutz-Schalter pruefen, oder der Stick ist nur lesend eingehaengt. Ohne Schreibrecht kann Neural OS nichts speichern.');
+      add('error', 'READ_ONLY', `Auf den Stick lässt sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}).`,
+        'Schreibschutz-Schalter prüfen, oder der Stick ist nur lesend eingehängt. Ohne Schreibrecht kann Neural OS nichts speichern.');
     } else if (fsInfo.enforcesModes === false) {
       add('warn', 'NO_PERMISSIONS',
-        `Das Dateisystem (${fsInfo.typeName}) kennt keine Zugriffsrechte - die Daten sind fuer jeden lesbar, der den Stick hat.`,
-        'Schalte in den Einstellungen die Verschluesselung ein.');
+        `Das Dateisystem (${fsInfo.typeName}) kennt keine Zugriffsrechte - die Daten sind für jeden lesbar, der den Stick hat.`,
+        'Schalte in den Einstellungen die Verschlüsselung ein.');
     }
     if (fsInfo.maxFileBytes !== null && fsInfo.maxFileBytes !== undefined && fsInfo.maxFileBytes < 4 * 1024 * 1024 * 1024) {
       add('warn', 'MAX_FILE_SIZE',
-        `Auf ${fsInfo.typeName} kann keine Datei groesser als 4 GB sein; groessere KI-Modelle passen nicht darauf.`,
-        'Fuer Modelle den Stick mit exFAT formatieren (Achtung: dabei gehen alle Daten verloren - vorher sichern).');
+        `Auf ${fsInfo.typeName} kann keine Datei größer als 4 GB sein; größere KI-Modelle passen nicht darauf.`,
+        'Für Modelle den Stick mit exFAT formatieren (Achtung: dabei gehen alle Daten verloren - vorher sichern).');
     }
 
     const free = freeBytes(root);
@@ -1651,7 +1651,7 @@ function createStick(deps = {}) {
     requireStick(root, 'addRuntime()');
     if (!PLATFORMS[platform]) {
       throw new ValidationError(
-        `"${platform}" ist keine bekannte Plattform. Moeglich sind: ${Object.keys(PLATFORMS).join(', ')}.`,
+        `"${platform}" ist keine bekannte Plattform. Möglich sind: ${Object.keys(PLATFORMS).join(', ')}.`,
       );
     }
     const progress = makeProgress(opts.onProgress, log);
@@ -1659,7 +1659,7 @@ function createStick(deps = {}) {
     mkdirp(path.join(root, LAYOUT.runtime));
 
     if (platform === LOCAL_PLATFORM) {
-      progress({ phase: 'laufzeit', message: `Laufzeit fuer ${platform} wird vom laufenden System kopiert …`, platform });
+      progress({ phase: 'runtime', message: `Laufzeit für ${platform} wird vom laufenden System kopiert …`, platform });
       const copied = copyLocalRuntime(root, warnings);
       if (!copied) throw new StorageError('Die Laufzeit des laufenden Systems konnte nicht kopiert werden.');
       return { ...copied, warnings };
@@ -1685,7 +1685,7 @@ function createStick(deps = {}) {
       const detected = require('../kernel/paths').detectPortable();
       if (!detected) {
         throw new ValidationError(
-          'detectPlatforms() braucht den Pfad zum Stick: diese Instanz laeuft nicht von einem portablen Medium.',
+          'detectPlatforms() braucht den Pfad zum Stick: diese Instanz läuft nicht von einem portablen Medium.',
         );
       }
       root = detected.root;

@@ -1147,8 +1147,9 @@ function createFolderSync(deps = {}) {
     if (box.encrypted && !vault.enabled) {
       throw mailboxInvalid(
         `Das Postfach von "${box.deviceName || remoteId}" ist verschlüsselt, der Vault dieses Geräts aber nicht. `
-        + 'Ohne die Passphrase des anderen Geräts lässt es sich nicht lesen. Richte auf diesem Gerät die '
-        + 'Verschlüsselung mit derselben Passphrase ein.',
+        + 'Ohne den Schlüssel des anderen Geräts lässt es sich nicht lesen -- und dieselbe Passphrase allein '
+        + 'genügt nicht, weil jeder Vault einen eigenen Zufallsschlüssel hat. Übernimm die secrets.json des '
+        + 'anderen Geräts, dann können sich beide verschlüsselt abgleichen.',
       );
     }
 
@@ -1278,13 +1279,18 @@ function createFolderSync(deps = {}) {
       }
     };
 
+    // Opened before the loop below so that "this mailbox cannot be decrypted"
+    // stays the precise error it is instead of being wrapped in a report about
+    // a partially applied run that never started.
+    const source = byteSource(file, box.encrypted);
+
     try {
       const decoder = new StringDecoder('utf8');
       let pending = '';
       let discarding = false;
 
       await pipeline(
-        byteSource(file, box.encrypted),
+        source,
         zlib.createGunzip(),
         async function consume(chunks) {
           for await (const chunk of chunks) {
