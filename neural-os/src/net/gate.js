@@ -256,14 +256,43 @@ function classify(hostOrIp) {
 }
 
 /** Canonical form of an address, so obfuscated notations compare equal. */
+/**
+ * One canonical key per address, whatever notation it arrived in.
+ *
+ * An IPv4-mapped IPv6 address (`::ffff:1.2.3.4`) reaches exactly the same host
+ * as `1.2.3.4`, so it must produce the same key -- otherwise a blocklist entry
+ * written in the obvious notation is bypassed by writing the address the other
+ * way round, and a denylist that can be sidestepped by spelling is not a
+ * denylist. classify() already folds these; the matcher has to fold them too,
+ * or the two disagree about what the same machine is.
+ */
 function ipKey(host) {
   const h = normaliseHost(host);
   if (!h) return null;
   const v4 = parseIPv4(h);
   if (v4 !== null) return `4:${v4 >>> 0}`;
   const v6 = parseIPv6(h);
-  if (v6) return `6:${v6.join('.')}`;
-  return null;
+  if (!v6) return null;
+  const mapped = mappedIPv4(v6);
+  if (mapped !== null) return `4:${mapped >>> 0}`;
+  return `6:${v6.join('.')}`;
+}
+
+/**
+ * The IPv4 address inside an IPv4-mapped (::ffff:a.b.c.d) or IPv4-compatible
+ * (::a.b.c.d) IPv6 address, as an unsigned 32-bit number. null otherwise.
+ * `parseIPv6` returns 16 bytes.
+ */
+function mappedIPv4(bytes) {
+  if (!Array.isArray(bytes) || bytes.length !== 16) return null;
+  for (let i = 0; i < 10; i++) if (bytes[i] !== 0) return null;
+  const isMapped = bytes[10] === 0xff && bytes[11] === 0xff;
+  const isCompat = bytes[10] === 0 && bytes[11] === 0;
+  if (!isMapped && !isCompat) return null;
+  // ::0.0.0.0 and ::0.0.0.1 are the unspecified address and loopback, not
+  // embedded IPv4 hosts; folding them would rename ::1 into 0.0.0.1.
+  if (isCompat && (bytes[12] | bytes[13] | bytes[14]) === 0 && bytes[15] <= 1) return null;
+  return ((bytes[12] << 24) | (bytes[13] << 16) | (bytes[14] << 8) | bytes[15]) >>> 0;
 }
 
 function ipFamily(host) {
@@ -505,7 +534,57 @@ function createGate(deps = {}) {
    * resolved to; it decides the classification while the name is still used
    * for pattern matching, because users write names into allow/block lists.
    */
-  function decide({ host, ip, port, scope, purpose }) {
+  /**
+   * A caller may hand down its own ceiling. It can only ever NARROW the
+   * decision, never widen it.
+   *
+   * This exists because "what the device permits" and "what this caller
+   * permits" are different questions. An agent restricted to the local
+   * network asked the first question and got an answer to the second: the
+   * device was in 'online' mode, so its request to a public host sailed
+   * through even though the agent's own permission said LAN only. A ceiling
+   * evaluated on the RESOLVED address closes that, and because it is applied
+   * per hop it also survives a redirect.
+   */
+  function applyCallerLimit(decision, names, port, limit) {
+    if (!decision.allowed || !limit) return decision;
+    // Loopback is exempt for the same reason the device policy exempts it in
+    // step 2: it never leaves the machine. A host list exists to say which
+    // OUTSIDE hosts may be reached; applying it to 127.0.0.1 would cut an
+    // agent off from the local model, which is the opposite of the intent.
+    if (decision.classification === 'loopback') return decision;
+    const { maxLevel, allowedHosts } = limit;
+    if (maxLevel && !levelCovers(maxLevel, decision.classification)) {
+      return {
+        ...decision,
+        allowed: false,
+        level: 'blocked',
+        reason: `Der Aufrufer ist auf '${MODE_LABEL[maxLevel] || maxLevel}' begrenzt; ${CLASS_LABEL[decision.classification]} (${decision.ip || decision.host}) liegt darüber.`,
+      };
+    }
+    if (Array.isArray(allowedHosts) && !matchAnyHost(allowedHosts, names, port)) {
+      return {
+        ...decision,
+        allowed: false,
+        level: 'blocked',
+        reason: allowedHosts.length
+          ? `${decision.host} steht nicht auf der Hostliste des Aufrufers.`
+          : `Der Aufrufer hat keine Hosts freigegeben.`,
+      };
+    }
+    return decision;
+  }
+
+  function decide(opts) {
+    const limit = (opts.maxLevel || opts.allowedHosts) ? { maxLevel: opts.maxLevel, allowedHosts: opts.allowedHosts } : null;
+    const raw = decideDevice(opts);
+    const names = [];
+    if (opts.host) names.push(normaliseHost(opts.host));
+    if (opts.ip && normaliseHost(opts.ip) !== names[0]) names.push(normaliseHost(opts.ip));
+    return applyCallerLimit(raw, names, opts.port, limit);
+  }
+
+  function decideDevice({ host, ip, port, scope, purpose }) {
     const names = [];
     if (host) names.push(normaliseHost(host));
     if (ip && normaliseHost(ip) !== names[0]) names.push(normaliseHost(ip));
@@ -686,6 +765,8 @@ function createGate(deps = {}) {
       const scope = opts.scope || 'global';
       const port = opts.port === undefined ? null : opts.port;
       const purpose = opts.purpose || 'dns.resolve';
+      const maxLevel = opts.maxLevel || null;
+      const allowedHosts = Array.isArray(opts.allowedHosts) ? opts.allowedHosts : null;
 
       // Literals need no resolver at all.
       const family = ipFamily(name);
@@ -693,7 +774,7 @@ function createGate(deps = {}) {
       // RFC 6761: localhost must never reach a resolver.
       if (name === 'localhost' || name.endsWith('.localhost')) return { ip: '127.0.0.1', family: 4, resolved: false };
 
-      const pre = decide({ host: name, port, scope, purpose });
+      const pre = decide({ host: name, port, scope, purpose, maxLevel, allowedHosts });
       if (!pre.allowed) {
         record(pre, 'network.dns.block');
         throw blockedError(pre);
@@ -710,7 +791,7 @@ function createGate(deps = {}) {
       // the policy would refuse means the name is smuggling a destination, and
       // picking the "good" one would be exactly the rebinding hole this guards.
       for (const a of addresses) {
-        const post = decide({ host: name, ip: a.address, port, scope, purpose });
+        const post = decide({ host: name, ip: a.address, port, scope, purpose, maxLevel, allowedHosts });
         if (!post.allowed) {
           record(post, 'network.dns.block');
           throw blockedError(post);
@@ -1085,6 +1166,10 @@ function createGate(deps = {}) {
       throw new ValidationError("gate.fetch() benötigt init.scope (z. B. 'global', 'chat:<id>' oder 'run:<id>').");
     }
     const purpose = init.purpose || 'fetch';
+    // Caller-supplied ceiling. Re-evaluated on every hop, so a redirect cannot
+    // walk an agent off its own host list.
+    const maxLevel = init.maxLevel || null;
+    const allowedHosts = Array.isArray(init.allowedHosts) ? init.allowedHosts : null;
     let target;
     try {
       target = new URL(String(url));
@@ -1121,14 +1206,14 @@ function createGate(deps = {}) {
 
       // Provisional decision on the name. Recorded only when it denies, because
       // otherwise the decision on the pinned address below supersedes it.
-      const pre = decide({ host, port, scope, purpose });
+      const pre = decide({ host, port, scope, purpose, maxLevel, allowedHosts });
       if (!pre.allowed) {
         record(pre);
         throw blockedError(pre);
       }
 
-      const pinned = await gate.resolve(host, { scope, port, purpose });
-      const post = decide({ host, ip: pinned.ip, port, scope, purpose });
+      const pinned = await gate.resolve(host, { scope, port, purpose, maxLevel, allowedHosts });
+      const post = decide({ host, ip: pinned.ip, port, scope, purpose, maxLevel, allowedHosts });
       if (!post.allowed) {
         record(post);
         throw blockedError(post);

@@ -309,6 +309,7 @@ async function openStore(options = {}) {
   /** id -> previous record object (or undefined when it did not exist) */
   let txJournal = null;
   let opsSinceSnapshot = 0;
+  let snapshotDue = false;
 
   function openSegment() {
     if (fd !== null) return;
@@ -359,6 +360,17 @@ async function openStore(options = {}) {
   }
 
   /** Append one operation. Inside a transaction it is only staged. */
+  /**
+   * Durable first, in memory second.
+   *
+   * Every caller writes the log entry BEFORE touching the in-memory state.
+   * The other order loses data silently: if the write throws -- a locked
+   * vault, a full disk, an encryption failure -- the record is already gone
+   * from memory, the log never learned about it, and the next compact() turns
+   * that discrepancy into a permanent deletion of something the user was told
+   * could be restored. Writing first means a failed write changes nothing at
+   * all, and the error reaches the caller with the data still intact.
+   */
   function append(entry) {
     const line = encodeLine(entry);
     if (pending) {
@@ -367,6 +379,18 @@ async function openStore(options = {}) {
     }
     writeLines([line]);
     opsSinceSnapshot += 1;
+    // The snapshot may NOT be taken here. Since append() now runs before the
+    // in-memory state is updated, a snapshot at this instant would record a
+    // state one record behind the log position it stamps -- and the replay on
+    // the next open, which skips everything at or below that position, would
+    // drop exactly that record. It is taken once memory has caught up.
+    snapshotDue = true;
+  }
+
+  /** Take the deferred snapshot now that memory and the log agree again. */
+  function settleSnapshot() {
+    if (!snapshotDue) return;
+    snapshotDue = false;
     maybeSnapshot();
   }
 
@@ -435,6 +459,7 @@ async function openStore(options = {}) {
     if (previous) removeFromLiveIndexes(previous);
     addToIndexes(record);
     return record;
+    settleSnapshot();
   }
 
   function drop(id) {
@@ -446,6 +471,7 @@ async function openStore(options = {}) {
     const set = byType.get(previous.type);
     if (set) { set.delete(id); if (!set.size) byType.delete(previous.type); }
     return previous;
+    settleSnapshot();
   }
 
   function restoreJournal(journal) {
@@ -771,8 +797,8 @@ async function openStore(options = {}) {
     }
     const at = nowIso();
     const record = { id, type, createdAt: at, updatedAt: at, deletedAt: null, rev: 1, data: normalised };
-    place(record);
     append({ v: LOG_VERSION, seq: nextSeq(), op: 'create', at, id, type, rev: 1, data: normalised });
+    place(record);
     const out = expose(record);
     publish('record.created', { id, type, record: out });
     if (type === 'edge') publish('edge.created', { id, edge: out });
@@ -810,8 +836,8 @@ async function openStore(options = {}) {
       rev: existing.rev + 1,
       data: { ...existing.data, ...normalised },
     };
-    place(record);
     append({ v: LOG_VERSION, seq: nextSeq(), op: 'update', at, id, type: record.type, rev: record.rev, patch: normalised });
+    place(record);
     const out = expose(record);
     publish('record.updated', { id, type: record.type, record: out, patch: clone(normalised) });
     return out;
@@ -831,13 +857,13 @@ async function openStore(options = {}) {
         for (const edgeId of incidentEdgeIds(id, 'both')) {
           const edge = byId.get(edgeId);
           if (!edge) continue;
-          drop(edgeId);
           append({ v: LOG_VERSION, seq: nextSeq(), op: 'purge', at, id: edgeId, type: 'edge', rev: edge.rev });
+          drop(edgeId);
           cascaded.push(expose(edge));
         }
       }
-      drop(id);
       append({ v: LOG_VERSION, seq: nextSeq(), op: 'purge', at, id, type: existing.type, rev: existing.rev });
+      drop(id);
       const out = expose(existing);
       for (const edge of cascaded) publish('edge.deleted', { id: edge.id, edge, cascaded: true });
       publish('record.deleted', { id, type: existing.type, record: out, hard: true, cascadedEdges: cascaded.length });
@@ -847,8 +873,8 @@ async function openStore(options = {}) {
 
     if (existing.deletedAt) return expose(existing); // already a tombstone
     const record = { ...existing, deletedAt: at, updatedAt: at, rev: existing.rev + 1 };
-    place(record);
     append({ v: LOG_VERSION, seq: nextSeq(), op: 'delete', at, id, type: record.type, rev: record.rev });
+    place(record);
     const out = expose(record);
     publish('record.deleted', { id, type: record.type, record: out, hard: false });
     if (record.type === 'edge') publish('edge.deleted', { id, edge: out });
@@ -876,8 +902,8 @@ async function openStore(options = {}) {
     }
     const at = nowIso();
     const record = { ...existing, deletedAt: null, updatedAt: at, rev: existing.rev + 1 };
-    place(record);
     append({ v: LOG_VERSION, seq: nextSeq(), op: 'restore', at, id, type: record.type, rev: record.rev });
+    place(record);
     const out = expose(record);
     publish('record.updated', { id, type: record.type, record: out, restored: true });
     if (record.type === 'edge') publish('edge.created', { id, edge: out, restored: true });

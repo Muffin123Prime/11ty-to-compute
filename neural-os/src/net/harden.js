@@ -64,6 +64,7 @@ const RESOLVE_METHODS = [
 ];
 
 const PATCHED = Symbol('neural-os.harden.patched');
+const INTERNAL_LOOKUP = Symbol('neural-os.harden.internal-lookup');
 
 /** Node's own argument normalisation for net.connect / socket.connect. */
 function isPipeName(value) {
@@ -159,7 +160,7 @@ function harden(gate, opts = {}) {
   /**
    * @returns {NetworkBlockedError|null} null means "let it through"
    */
-  function verdict({ layer, host, port, options }) {
+  function verdict({ layer, host, ip, port, options }) {
     if (isInternalContext() || hasInternalMarker(options)) {
       counters.passthrough++;
       countLayer(layer, 'passthrough');
@@ -174,7 +175,7 @@ function harden(gate, opts = {}) {
       }
     }
     counters.checked++;
-    const decision = gate.check({ host, port, scope: scope || 'global', purpose: layer });
+    const decision = gate.check({ host, ip: ip || null, port, scope: scope || 'global', purpose: layer });
     if (decision.allowed) {
       counters.allowed++;
       countLayer(layer, 'allowed');
@@ -246,6 +247,8 @@ function harden(gate, opts = {}) {
     patch(mod, key, (original) => function patchedHttp(...args) {
       const target = targetFromHttpArgs(args, secure);
       if (target.unix) return original.apply(this, args);
+      const foreign = rejectForeignLookup(target.options, label);
+      if (foreign) throw foreign;
       const err = verdict({ layer: label, host: target.host, port: target.port, options: target.options });
       if (err) throw err; // synchronous: the caller has no request object yet
       return original.apply(this, args);
@@ -257,6 +260,8 @@ function harden(gate, opts = {}) {
   patch(net.Socket.prototype, 'connect', (original) => function patchedSocketConnect(...args) {
     const target = targetFromSocketArgs(args);
     if (target.unix || target.unusable) return original.apply(this, args);
+    const foreign = rejectForeignLookup(target.options, 'net.Socket.connect');
+    if (foreign) throw foreign;
     const err = verdict({ layer: 'net.Socket.connect', host: target.host, port: target.port, options: target.options });
     if (err) throw err;
     return original.apply(this, args);
@@ -266,6 +271,8 @@ function harden(gate, opts = {}) {
     patch(net, key, (original) => function patchedNetConnect(...args) {
       const target = targetFromSocketArgs(args);
       if (target.unix || target.unusable) return original.apply(this, args);
+      const foreign = rejectForeignLookup(target.options, `net.${key}`);
+      if (foreign) throw foreign;
       const err = verdict({ layer: `net.${key}`, host: target.host, port: target.port, options: target.options });
       if (err) throw err;
       return original.apply(this, args);
@@ -275,12 +282,66 @@ function harden(gate, opts = {}) {
   patch(tls, 'connect', (original) => function patchedTlsConnect(...args) {
     const target = targetFromTlsArgs(args);
     if (target.unix || target.reusedSocket || target.unusable) return original.apply(this, args);
+    const foreign = rejectForeignLookup(target.options, 'tls.connect');
+    if (foreign) throw foreign;
     const err = verdict({ layer: 'tls.connect', host: target.host, port: target.port, options: target.options });
     if (err) throw err;
     return original.apply(this, args);
   }, 'tls.connect');
 
   /* -------------------------------------------------------------------- dns */
+
+
+  /**
+   * Verify what the resolver actually answered.
+   *
+   * Checking the NAME alone is not enough, and the gap is not theoretical:
+   * 'nas.example.com' classifies as 'unknown', which a LAN-level grant covers,
+   * so the query is permitted -- and then the resolver answers with a public
+   * address and Node connects straight to it. A grant that reads "local
+   * network only" would silently open the public internet.
+   *
+   * The name check stays: it stops the query from being sent at all when the
+   * class is blocked anyway, so the hostname never reaches a resolver. But the
+   * ANSWER is what decides whether the connection may happen. Every address in
+   * the answer must pass -- picking the acceptable one out of a mixed answer is
+   * exactly the rebinding hole this exists to close.
+   */
+  function checkAnswers(hostname, addresses, layer) {
+    for (const address of addresses) {
+      if (!address) continue;
+      const err = verdict({ layer: `${layer}.answer`, host: hostname, ip: address, port: null });
+      if (err) return err;
+    }
+    return null;
+  }
+
+  /** Normalise the many shapes dns.lookup/resolve callbacks use into addresses. */
+  function addressesOf(value) {
+    if (!value) return [];
+    if (typeof value === 'string') return [value];
+    if (Array.isArray(value)) {
+      return value.map((v) => (typeof v === 'string' ? v : (v && (v.address || v.value)) || null)).filter(Boolean);
+    }
+    if (typeof value === 'object' && value.address) return [value.address];
+    return [];
+  }
+
+  /**
+   * A caller-supplied `lookup` bypasses the dns patches entirely, which would
+   * make every check above decorative. There is no legitimate use of it in this
+   * application (it has no dependencies), so it is refused rather than silently
+   * replaced -- a silent replacement would change behaviour the caller asked for.
+   */
+  function rejectForeignLookup(options, layer) {
+    if (!options || typeof options !== 'object') return null;
+    if (typeof options.lookup !== 'function') return null;
+    if (hasInternalMarker(options) || options.lookup[INTERNAL_LOOKUP] === true) return null;
+    return new NetworkBlockedError(
+      'Eine eigene lookup-Funktion umgeht die Netzwerkkontrolle und ist deshalb nicht erlaubt.',
+      { layer },
+    );
+  }
 
   /** localhost is answered here instead of being handed to a resolver. */
   function localAnswer(hostname, options) {
@@ -321,7 +382,14 @@ function harden(gate, opts = {}) {
         ? process.nextTick(cb, null, answer)
         : process.nextTick(cb, null, answer.address, answer.family);
     }
-    return original.call(this, hostname, options, callback);
+    if (typeof cb !== 'function') return original.call(this, hostname, options, callback);
+    return original.call(this, hostname, opts, (err, address, family) => {
+      if (err) return cb(err);
+      const answered = opts.all === true ? addressesOf(address) : addressesOf(address);
+      const blocked = checkAnswers(normaliseHost(hostname), answered, 'dns.lookup');
+      if (blocked) return cb(blocked);
+      return opts.all === true ? cb(null, address) : cb(null, address, family);
+    });
   }, 'dns.lookup');
 
   if (dns.promises && typeof dns.promises.lookup === 'function') {
@@ -330,7 +398,11 @@ function harden(gate, opts = {}) {
       const outcome = dnsVerdict(hostname, options, 'dns.promises.lookup');
       if (outcome.error) return Promise.reject(outcome.error);
       if (outcome.local) return Promise.resolve(localAnswer(hostname, options));
-      return original.call(this, hostname, options);
+      return original.call(this, hostname, options).then((answer) => {
+        const blocked = checkAnswers(normaliseHost(hostname), addressesOf(answer), 'dns.promises.lookup');
+        if (blocked) throw blocked;
+        return answer;
+      });
     }, 'dns.promises.lookup');
   }
 

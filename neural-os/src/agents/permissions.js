@@ -326,6 +326,21 @@ function networkScope(agent, runId) {
  * primitive: a read-only agent could start a write-everything agent and have
  * it do the work.
  */
+/**
+ * Is `child` permitted to be started by `parent`?
+ *
+ * A spawned agent must never be able to do more than the agent that started
+ * it, or delegation becomes a privilege ladder: an agent restricted to reading
+ * notes without network access spawns one that may write files and reach the
+ * internet, and the permission the user actually granted means nothing.
+ *
+ * Checking the boolean capabilities alone is not enough. Three further things
+ * carry authority and were previously unchecked -- the host allowlist (which
+ * decides WHERE a permitted network level may go), the approval requirement
+ * (a child without it performs unattended what the parent must ask for), and
+ * the step and time budgets (a child with a larger budget is a way to spend
+ * more of the user's machine than the parent was given).
+ */
 function subsetOf(child, parent, config) {
   const c = effective(child, config);
   const p = effective(parent, config);
@@ -334,11 +349,66 @@ function subsetOf(child, parent, config) {
     if (cap === 'network') continue;
     if (c[cap] === true && p[cap] !== true) missing.push(cap);
   }
-  if (networkRank(c.network) > networkRank(p.network)) missing.push(`network:${c.network}`);
+  // Compare the REQUESTED levels, not only the effective ones. effective()
+  // clamps both to the device mode, so on an offline device a child asking for
+  // 'online' looks identical to its offline parent -- and the stored
+  // permission outlives the mode, granting the escalation the moment the user
+  // switches the device online.
+  const cWanted = schema.normalisePermissions(agentData(child).permissions || {}).network;
+  const pWanted = schema.normalisePermissions(agentData(parent).permissions || {}).network;
+  if (networkRank(cWanted) > networkRank(pWanted)) missing.push(`network:${cWanted}`);
+  else if (networkRank(c.network) > networkRank(p.network)) missing.push(`network:${c.network}`);
   for (const root of c.fileRoots) {
     if (!canAccessPath(parent, root, { permissions: p })) missing.push(`fileRoot:${root}`);
   }
+
+  // An empty parent list means "no per-agent host restriction"; a non-empty one
+  // is a ceiling every child host has to fit under.
+  const parentHosts = Array.isArray(p.allowedHosts) ? p.allowedHosts : [];
+  const childHosts = Array.isArray(c.allowedHosts) ? c.allowedHosts : [];
+  if (parentHosts.length && !parentHosts.includes('*')) {
+    for (const host of childHosts) {
+      if (!hostCoveredBy(parentHosts, host)) missing.push(`host:${host}`);
+    }
+  }
+
+  // Dropping the approval requirement is an escalation, not a configuration.
+  if (p.requireApproval === true && c.requireApproval !== true) missing.push('requireApproval');
+
+  // Budgets are authority over the machine, so they may only shrink.
+  const budgets = [['maxSteps', 'maxSteps'], ['maxSeconds', 'maxSeconds']];
+  for (const [key, label] of budgets) {
+    const parentBudget = Number(p[key]);
+    const childBudget = Number(c[key]);
+    if (Number.isFinite(parentBudget) && Number.isFinite(childBudget) && childBudget > parentBudget) {
+      missing.push(`${label}:${childBudget}>${parentBudget}`);
+    }
+  }
+
   return { ok: missing.length === 0, missing };
+}
+
+/**
+ * Conservative host-pattern containment. Deliberately narrower than the gate's
+ * matcher: this decides whether to GRANT authority, so anything it cannot
+ * prove is covered counts as not covered.
+ */
+function hostCoveredBy(patterns, host) {
+  const needle = String(host || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!needle) return false;
+  for (const raw of patterns) {
+    const pattern = String(raw || '').trim().toLowerCase().replace(/\.$/, '');
+    if (!pattern) continue;
+    if (pattern === '*') return true;
+    if (pattern === needle) return true;
+    if (pattern.startsWith('*.')) {
+      const suffix = pattern.slice(1); // ".example.com"
+      // The child may itself be a wildcard; then its suffix must sit under ours.
+      const candidate = needle.startsWith('*.') ? needle.slice(1) : needle;
+      if (candidate === suffix || candidate.endsWith(suffix)) return true;
+    }
+  }
+  return false;
 }
 
 /* ---------------------------------------------------------------- describe */

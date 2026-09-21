@@ -953,8 +953,15 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           throw new ValidationError('Nur http und https sind erlaubt.');
         }
+        const perms = permsOf(ctx);
         const response = await gate.fetch(parsed.toString(), {
           scope: ctx.scope,
+          // The agent's own ceiling, enforced per hop: a redirect cannot walk
+          // it onto a host or a class its permissions never allowed.
+          maxLevel: perms && perms.network ? perms.network : 'offline',
+          allowedHosts: Array.isArray(perms && perms.allowedHosts) && perms.allowedHosts.length
+            ? perms.allowedHosts
+            : null,
           purpose: `Agent "${permissionsMod.agentName(agentOf(ctx))}" ruft ${parsed.hostname} ab`,
           signal: ctx.signal,
           timeoutMs: 20000,
@@ -1075,10 +1082,17 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
    *
    * Derived from the gate's own classifier rather than assumed: demanding
    * 'online' for every URL would forbid a LAN-permitted agent from reaching a
-   * machine on its own network, which is precisely the level it was given. An
-   * unresolved name counts as 'lan' because that is how the gate treats the
-   * 'unknown' class -- and the gate checks the real address again after DNS,
-   * so nothing is waved through here that it would not permit anyway.
+   * machine on its own network, which is precisely the level it was given.
+   *
+   * An unresolved NAME, however, counts as 'online'. The earlier reasoning --
+   * "the gate checks the real address after DNS anyway" -- was wrong in a way
+   * that mattered: the gate checks against the DEVICE's mode, not against this
+   * agent's level. On a device in 'online' mode an agent restricted to the
+   * local network therefore reached public hosts, while its own description
+   * and its system prompt both told it (and the user) the opposite. A name can
+   * resolve to anything, so it is treated as the most permissive class it
+   * might turn out to be, and the agent's ceiling is additionally handed to
+   * gate.fetch so the resolved address is judged against it on every hop.
    */
   function requiredLevelFor(host) {
     if (!gate || typeof gate.classify !== 'function') return 'online';
@@ -1088,8 +1102,9 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
     } catch {
       return 'online';
     }
-    if (classification === 'public') return 'online';
-    return 'lan'; // loopback, private and unknown all sit at or below LAN
+    if (classification === 'loopback') return 'offline';
+    if (classification === 'private') return 'lan';
+    return 'online'; // public AND unknown: a name may resolve anywhere
   }
 
   function assertPathAllowed(ctx, target, capability) {

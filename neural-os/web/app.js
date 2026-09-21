@@ -1537,11 +1537,42 @@ export function describeModels(status, stale) {
   const name = preferred && (preferred.model || preferred.id || preferred.name);
   const providers = (Array.isArray(models.providers) ? models.providers : []).filter((p) => p.available);
   const via = providers.length ? providers.map((p) => p.id || p.kind).join(', ') : null;
+  const remote = providers.filter((p) => !isLoopbackUrl(p.baseUrl));
+  const where = remote.length
+    ? `Läuft NICHT auf diesem Gerät: ${remote.map((p) => hostOf(p.baseUrl)).join(', ')}.`
+    : 'Läuft auf diesem Gerät.';
   return {
     key: 'ok',
     label: name ? String(name) : `${count} Modell${count === 1 ? '' : 'e'}`,
-    hint: `${count} Modell${count === 1 ? '' : 'e'} verfügbar${via ? ` über ${via}` : ''}. Läuft lokal.`,
+    hint: `${count} Modell${count === 1 ? '' : 'e'} verfügbar${via ? ` über ${via}` : ''}. ${where}`,
   };
+}
+
+/**
+ * Is this model backend really on this machine?
+ *
+ * The header used to state "Läuft lokal." unconditionally, which was a claim
+ * the interface had never checked: a backend configured on a LAN address or a
+ * remote API would have carried the same reassurance. Anything that is not
+ * provably loopback is reported as not local -- if this cannot tell, it says
+ * the less comfortable thing, because the comfortable one is what a user would
+ * rely on.
+ */
+function isLoopbackUrl(baseUrl) {
+  const host = hostOf(baseUrl);
+  if (!host) return false;
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '::1' || host === '[::1]') return true;
+  if (/^127\./.test(host)) return true;
+  return false;
+}
+
+function hostOf(baseUrl) {
+  try {
+    return new URL(String(baseUrl)).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
 }
 
 export function describeVault(status, stale) {

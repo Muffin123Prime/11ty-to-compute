@@ -1,6 +1,6 @@
 # Status — was funktioniert, was nicht
 
-Stand: 2026-09-20 · Neural OS 0.1.0 · Node 22.22.2
+Stand: 2026-09-21 · Neural OS 0.1.0 · Node 22.22.2
 
 Dieses Dokument behauptet nichts, was nicht ausgeführt wurde. Jede Zeile in der
 ersten Tabelle ist durch einen Test belegt, der mit `npm test` läuft. Was nur
@@ -9,7 +9,7 @@ teilweise oder gar nicht funktioniert, steht weiter unten — ungeschönt.
 ## Messwerte
 
 ```
-npm test          373 Tests, 373 bestanden, 0 fehlgeschlagen   (~15 s)
+npm test          382 Tests, 382 bestanden, 0 fehlgeschlagen   (~18 s)
 npm run proof     15 Prüfpunkte bestanden, 0 fehlgeschlagen
 npm run doctor    11 von 11 Subsystemen geladen
 ```
@@ -30,6 +30,7 @@ npm run doctor    11 von 11 Subsystemen geladen
 | `integration.test.js` | 14 | Ende-zu-Ende über den echten Stapel |
 | `harden.test.js` | 14 | Prozessweite Durchsetzung der Netzpolicy |
 | `vaultcrypto.test.js` | 9 | AES-256-GCM, scrypt, Passphrase-Wechsel |
+| `audit-regressions.test.js` | 9 | die Defekte aus dem Sicherheitsaudit |
 
 ## Bewiesen, nicht behauptet
 
@@ -101,6 +102,41 @@ ausschließlich `127.0.0.1`.
 - **Semantische Suche per Embeddings.** Braucht ein zweites Modell und einen
   Vektorindex. Die Provider-Schnittstelle hat `embed()` bereits vorgesehen.
 - **Sprachein- und -ausgabe, Bildverarbeitung, Plugin-System.**
+
+## Sicherheitsaudit
+
+Nach der Fertigstellung wurden die sicherheitskritischen Module gezielt
+angegriffen: fünf Prüfer suchten Wege, die Zusagen der Anwendung zu brechen,
+und jeder Fund musste anschließend drei unabhängige Widerlegungsversuche
+überstehen. Sieben Defekte wurden bestätigt und behoben — jeder mit einem
+Regressionstest, damit er nicht zurückkommen kann.
+
+| Defekt | Gebrochene Zusage | Behebung |
+|---|---|---|
+| Die Prozess-Härtung prüfte nur den Hostnamen, nie die Antwort des Resolvers. Eine Freigabe „nur lokales Netz" öffnete damit das öffentliche Internet, sobald ein Name auf eine öffentliche Adresse zeigte. | Offline/Freigaben | Jede zurückgegebene Adresse wird geprüft; eine einzige unerlaubte blockiert den Namen. |
+| Eine vom Aufrufer mitgegebene `lookup`-Funktion umging die DNS-Kontrolle vollständig. | Offline | Wird abgelehnt statt stillschweigend ersetzt. |
+| Ein Agent mit Stufe „lokales Netz" erreichte auf einem Gerät im Online-Modus öffentliche Hosts — Beschreibung und Systemprompt behaupteten das Gegenteil. | Agentenrechte | Die Schleuse nimmt jetzt eine Obergrenze des Aufrufers entgegen, die nur verengen kann und pro Weiterleitung neu greift. Ein unaufgelöster Name gilt als „öffentlich". |
+| Weiterleitungen führten einen Agenten auf Hosts außerhalb seiner Liste. | Agentenrechte | Die Hostliste wird pro Sprung geprüft. |
+| Ein Agent konnte einen Unteragenten mit **mehr** Rechten starten: Hostliste, Bestätigungspflicht und Budgets wurden nicht verglichen. | Agentenrechte | Alle vier werden geprüft, und zwar gegen die *angeforderte* Stufe, weil die gespeicherte Berechtigung den Gerätemodus überlebt. |
+| `::ffff:1.2.3.4` umging einen Sperrlisteneintrag `1.2.3.4`. | Offline | Beide Schreibweisen ergeben denselben Adressschlüssel. |
+| Ein fehlgeschlagener Schreibvorgang veränderte trotzdem den Speicher — ein abgelehntes hartes Löschen wurde beim nächsten `compact()` endgültig. | Datensicherheit | Log zuerst, Speicher danach. Der Snapshot wartet, bis beide übereinstimmen. |
+| Die Kopfzeile behauptete fest verdrahtet „Läuft lokal." — auch bei einem Modellserver im LAN oder in der Cloud. | Ehrlichkeit | Der Ort wird aus der tatsächlichen Adresse des Backends bestimmt; was nicht beweisbar lokal ist, wird als nicht lokal gemeldet. |
+
+Der Audit wurde nicht vollständig abgeschlossen: die Verifizierer für die
+HTTP-Oberfläche und die Benutzeroberfläche brachen wegen eines Nutzungslimits
+ab. Deren Funde sind ungeprüfte Kandidaten und stehen weiter unten.
+
+### Offene, ungeprüfte Kandidaten
+
+- Die generische Record-Route könnte die Normalisierung der Agentenrechte
+  umgehen (`POST /api/records` mit `type:'agent'` statt `POST /api/agents`).
+- `run.usedNetwork` könnte in einem Ablauf false bleiben, obwohl gesendet wurde.
+- Die Socket-Schicht protokolliert bei manchen Aufrufen `localhost:0` statt des
+  echten Ziels, was Audit-Einträge ungenau macht.
+
+Diese drei sind weder bestätigt noch behoben. Sie stehen hier, weil ein
+Sicherheitsbefund, den man verschweigt, gefährlicher ist als einer, den man
+offen als ungeprüft kennzeichnet.
 
 ## Bekannte Grenzen
 
