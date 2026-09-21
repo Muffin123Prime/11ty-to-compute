@@ -73,19 +73,21 @@ Das verwandelt den Wissensspeicher von einem Ablageort in etwas, das dir
 tatsächlich etwas beibringt. Für Notizen, die du behalten willst, ist das mehr
 wert als jede Suchfunktion.
 
-## 4 · Die Zwischenablage-Taste
+## 4 · Die Zwischenablage-Taste — **teilweise gebaut**
 
-**Nutzen: hoch · Aufwand: mittel · Offline: ja**
+**Strg+Umschalt+N** öffnet von überall in der App eine Zeile. Was du tippst, wird
+eine Notiz — oder eine Aufgabe, wenn ein Merker davorsteht (`- [ ]`, `TODO:`,
+`Offen:`, `Zu tun:`, dieselben, die auch die Vorschläge in einer Notiz finden).
+`#schlagwort` wird erkannt. Die Vorschau sagt **vorher**, was daraus wird.
 
-Eine Tastenkombination, die von überall aus ein Fenster öffnet, in das du einen
-Satz tippst — und es landet als Notiz oder Aufgabe im Tresor, ohne dass du das
-Programm wechselst. Nichts anderes senkt die Hürde zum Aufschreiben so stark.
+Strg+Enter speichert und lässt das Fenster offen, für mehrere Gedanken
+hintereinander. Danach steht dort, wo du es zurücknehmen kannst.
 
-Einschränkung, ehrlich gesagt: ein systemweites Tastenkürzel geht nicht aus dem
-Browser heraus. Das braucht ein kleines Zusatzprogramm pro Betriebssystem, und
-damit verlässt man das „ein Ordner, überall lauffähig"-Versprechen des Sticks.
-Als Kompromiss ginge: ein Lesezeichen im Browser und eine sehr schnelle
-Eingabezeile in der App selbst.
+**Was daran fehlt, und warum:** ein *systemweites* Tastenkürzel — eines, das auch
+wirkt, während du in einem anderen Programm bist — geht aus dem Browser heraus
+nicht. Das bräuchte ein kleines Zusatzprogramm pro Betriebssystem, und damit
+verlässt man das „ein Ordner, überall lauffähig"-Versprechen des Sticks. Das
+hier wirkt, solange ein Fenster von Neural OS offen ist. Mehr verspricht es nicht.
 
 ## 5 · Dateien beobachten statt importieren
 
