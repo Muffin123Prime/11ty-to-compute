@@ -32,10 +32,21 @@ const {
   mustGet,
 } = require('./support');
 
-/** Types a client may create directly. Everything else has its own route. */
-const CREATABLE = new Set(['note', 'project', 'task', 'entity', 'memory', 'file', 'chat', 'agent']);
+/**
+ * Types a client may create directly. Everything else has its own route.
+ *
+ * `agent` is deliberately NOT here. POST /api/agents requires the 'agents'
+ * capability and passes the permission block through
+ * schema.normalisePermissions, so anything the client left out falls back to
+ * "denied". Reachable from here, the generic route did neither: a shared token
+ * holding only 'write' could mint an agent with fileRoots ['/'], no approval
+ * requirement and full network access. A second door into a permission system
+ * is a hole in it.
+ */
+const CREATABLE = new Set(['note', 'project', 'task', 'entity', 'memory', 'file', 'chat']);
 
 const ROUTE_HINT = {
+  agent: 'Agenten entstehen über POST /api/agents - nur dort werden ihre Berechtigungen geprüft.',
   edge: 'Verknüpfungen entstehen über POST /api/edges.',
   grant: 'Netz-Freigaben entstehen über POST /api/network/grants.',
   token: 'Zugangstoken entstehen über POST /api/tokens.',
@@ -129,6 +140,13 @@ function register(router) {
     if (existing.type === 'token' || existing.type === 'grant') {
       throw new ValidationError(
         `Einträge der Art "${existing.type}" werden hier nicht geändert. ${ROUTE_HINT[existing.type] || ''}`.trim(),
+      );
+    }
+    // Same reasoning as CREATABLE: raising an agent's permissions must go
+    // through the route that checks the caller may do that at all.
+    if (existing.type === 'agent') {
+      throw new ValidationError(
+        `Agenten werden hier nicht geändert. ${ROUTE_HINT.agent}`,
       );
     }
     const patch = patchFrom(asObject(await rc.body()));

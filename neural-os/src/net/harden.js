@@ -77,7 +77,14 @@ function scopeOf(options) {
 }
 
 function targetFromSocketArgs(args) {
-  const a0 = args[0];
+  let a0 = args[0];
+  // Node normalises connect arguments into [options, callback] internally and
+  // then calls Socket.prototype.connect with that ARRAY. Read as an object it
+  // has no host, so the old code fell back to 'localhost' and port 0 -- and
+  // wrote that into the audit trail as a decision that had been made. A third
+  // of the entries for an ordinary request were fiction, on a log whose whole
+  // purpose is to be believable evidence of what left the machine.
+  if (Array.isArray(a0)) a0 = a0[0];
   if (isPipeName(a0)) return { unix: true };
   if (typeof a0 === 'number' || typeof a0 === 'string') {
     return { port: Number(a0), host: typeof args[1] === 'string' ? args[1] : 'localhost' };

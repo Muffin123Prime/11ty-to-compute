@@ -167,6 +167,27 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
    * Watch what the gate decides for this run. Returns a probe that answers,
    * at the end, whether anything actually left this machine.
    */
+  /**
+   * Which run started which. A spawned sub-agent gets its own `run:<id>` scope,
+   * so without this a parent run would report `usedNetwork: false` while a
+   * child it started was on the network on its behalf. The user reads that
+   * field as "did this action reach the outside", and for the action they
+   * actually triggered the answer has to include what it delegated.
+   *
+   * Entries are dropped when a run finishes, so this cannot grow unbounded.
+   */
+  const runParents = new Map();
+
+  /** Is `ancestor` this run, or anywhere above it in the spawn chain? */
+  function isDescendantOf(runToken, ancestorId) {
+    let current = runToken;
+    for (let hops = 0; current && hops < 16; hops++) {
+      if (current === ancestorId) return true;
+      current = runParents.get(current) || null;
+    }
+    return false;
+  }
+
   function watchNetwork(runId) {
     const runToken = `run:${runId}`;
     const hosts = new Set();
@@ -182,7 +203,10 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
         // make a run look like it phoned home.
         if (p.classification === 'loopback') return;
         const tokens = String(p.scope || '').split(/[\s,|]+/).filter(Boolean);
-        if (!tokens.includes(runToken)) return;
+        const ownRun = tokens.find((t) => t.startsWith('run:'));
+        const mine = tokens.includes(runToken)
+          || (ownRun && isDescendantOf(ownRun.slice(4), runId));
+        if (!mine) return;
         sawEgress = true;
         if (p.host) hosts.add(String(p.host));
       };
@@ -593,7 +617,17 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
 
   /* -------------------------------------------------------------- lifecycle */
 
+  const MAX_TRACKED_ANCESTRY = 500;
+
   function finish(runId, patch) {
+    // The ancestry link is NOT dropped when this run ends: a grandchild may
+    // still be running, and its chain has to stay walkable up to the root.
+    // Bounded pruning of the oldest entries keeps it from growing forever.
+    while (runParents.size > MAX_TRACKED_ANCESTRY) {
+      const oldest = runParents.keys().next();
+      if (oldest.done) break;
+      runParents.delete(oldest.value);
+    }
     try {
       return store.update(runId, { ...patch, finishedAt: new Date().toISOString() });
     } catch (err) {
@@ -648,6 +682,10 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
         stopReason: null,
         networkTargets: [],
       });
+
+      if (typeof opts.parentRunId === 'string' && opts.parentRunId) {
+        runParents.set(run.id, opts.parentRunId);
+      }
 
       const controller = new AbortController();
       const state = {

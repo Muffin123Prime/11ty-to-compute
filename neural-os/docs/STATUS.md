@@ -9,7 +9,7 @@ teilweise oder gar nicht funktioniert, steht weiter unten — ungeschönt.
 ## Messwerte
 
 ```
-npm test          382 Tests, 382 bestanden, 0 fehlgeschlagen   (~18 s)
+npm test          387 Tests, 387 bestanden, 0 fehlgeschlagen   (~18 s)
 npm run proof     15 Prüfpunkte bestanden, 0 fehlgeschlagen
 npm run doctor    11 von 11 Subsystemen geladen
 ```
@@ -27,10 +27,10 @@ npm run doctor    11 von 11 Subsystemen geladen
 | `auth.test.js` | 19 | Token, Host-Prüfung, CSRF, Ablauf und Widerruf |
 | `backup.test.js` | 17 | Export, Import, Rundlauf, Manifest |
 | `kernel.test.js` | 14 | Pfade, Konfiguration, Bus, Audit, Datenmodell |
-| `integration.test.js` | 14 | Ende-zu-Ende über den echten Stapel |
+| `integration.test.js` | 15 | Ende-zu-Ende über den echten Stapel |
 | `harden.test.js` | 14 | Prozessweite Durchsetzung der Netzpolicy |
 | `vaultcrypto.test.js` | 9 | AES-256-GCM, scrypt, Passphrase-Wechsel |
-| `audit-regressions.test.js` | 9 | die Defekte aus dem Sicherheitsaudit |
+| `audit-regressions.test.js` | 13 | die Defekte aus dem Sicherheitsaudit |
 
 ## Bewiesen, nicht behauptet
 
@@ -108,8 +108,12 @@ ausschließlich `127.0.0.1`.
 Nach der Fertigstellung wurden die sicherheitskritischen Module gezielt
 angegriffen: fünf Prüfer suchten Wege, die Zusagen der Anwendung zu brechen,
 und jeder Fund musste anschließend drei unabhängige Widerlegungsversuche
-überstehen. Sieben Defekte wurden bestätigt und behoben — jeder mit einem
+überstehen. **Elf Defekte wurden bestätigt und behoben** — jeder mit einem
 Regressionstest, damit er nicht zurückkommen kann.
+
+Der Audit ist abgeschlossen. Die Verifizierer für HTTP und Oberfläche waren an
+einem Nutzungslimit abgebrochen; ihre Funde wurden anschließend von Hand am
+laufenden System nachgewiesen und behoben.
 
 | Defekt | Gebrochene Zusage | Behebung |
 |---|---|---|
@@ -121,22 +125,13 @@ Regressionstest, damit er nicht zurückkommen kann.
 | `::ffff:1.2.3.4` umging einen Sperrlisteneintrag `1.2.3.4`. | Offline | Beide Schreibweisen ergeben denselben Adressschlüssel. |
 | Ein fehlgeschlagener Schreibvorgang veränderte trotzdem den Speicher — ein abgelehntes hartes Löschen wurde beim nächsten `compact()` endgültig. | Datensicherheit | Log zuerst, Speicher danach. Der Snapshot wartet, bis beide übereinstimmen. |
 | Die Kopfzeile behauptete fest verdrahtet „Läuft lokal." — auch bei einem Modellserver im LAN oder in der Cloud. | Ehrlichkeit | Der Ort wird aus der tatsächlichen Adresse des Backends bestimmt; was nicht beweisbar lokal ist, wird als nicht lokal gemeldet. |
+| `POST /api/records` legte Agenten an und umging dabei die Rechteprüfung der dedizierten Route: ein geteiltes Token mit nur „schreiben" konnte einen Agenten mit `fileRoots: ["/"]`, ohne Bestätigungspflicht und mit vollem Netzzugang erzeugen. | Agentenrechte | Agenten entstehen und ändern sich nur noch über `/api/agents`. Eine zweite Tür in ein Berechtigungssystem ist ein Loch darin. |
+| Eine eingefügte URL in der Sperrliste (`https://tracker.example.com/beacon`) traf auf nichts. Der Nutzer glaubte, einen Host gesperrt zu haben, während jede Anfrage durchging. | Offline | Muster werden normalisiert: Schema, Zugangsdaten, Pfad und abschließender Punkt fallen weg. Eine Liste, die ihre Einträge stillschweigend ignoriert, ist schlimmer als keine — weil man ihr vertraut. |
+| Die Socket-Schicht las Nodes interne `connect([options, callback])`-Form als Objekt ohne Host und protokollierte `localhost:0`. Ein Drittel der Einträge für eine gewöhnliche Anfrage war frei erfunden — und jedes Ziel wurde auf dieser Ebene als „lokal" durchgewinkt. | Ehrlichkeit, Offline | Die Array-Form wird erkannt. Das Protokoll nennt das echte Ziel, und ein Verbindungsversuch zu `8.8.8.8` in dieser Form wird jetzt blockiert. |
+| `run.usedNetwork` blieb bei einem Elternlauf `false`, während ein von ihm gestarteter Unteragent im Netz war — der Unteragent bekommt einen eigenen Lauf-Scope. | Ehrlichkeit | Der Netzverbrauch läuft über die Abstammungskette zum Elternlauf hoch. Wer eine Aktion auslöst, muss erfahren, was sie delegiert hat. |
 
-Der Audit wurde nicht vollständig abgeschlossen: die Verifizierer für die
-HTTP-Oberfläche und die Benutzeroberfläche brachen wegen eines Nutzungslimits
-ab. Deren Funde sind ungeprüfte Kandidaten und stehen weiter unten.
-
-### Offene, ungeprüfte Kandidaten
-
-- Die generische Record-Route könnte die Normalisierung der Agentenrechte
-  umgehen (`POST /api/records` mit `type:'agent'` statt `POST /api/agents`).
-- `run.usedNetwork` könnte in einem Ablauf false bleiben, obwohl gesendet wurde.
-- Die Socket-Schicht protokolliert bei manchen Aufrufen `localhost:0` statt des
-  echten Ziels, was Audit-Einträge ungenau macht.
-
-Diese drei sind weder bestätigt noch behoben. Sie stehen hier, weil ein
-Sicherheitsbefund, den man verschweigt, gefährlicher ist als einer, den man
-offen als ungeprüft kennzeichnet.
+Es sind keine offenen Funde aus diesem Audit mehr bekannt. Das heißt nicht,
+dass keine mehr existieren — es heißt, dass die gefundenen behoben sind.
 
 ## Bekannte Grenzen
 

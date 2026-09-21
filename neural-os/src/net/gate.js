@@ -304,8 +304,33 @@ function ipFamily(host) {
 
 /* --------------------------------------------------------- host patterns */
 
+/**
+ * Strip everything around the host in a pattern a person typed.
+ *
+ * People paste URLs. `https://tracker.example.com/beacon` in the blocklist
+ * matched nothing at all, so the user believed a host was blocked while every
+ * request to it sailed through -- a list that silently ignores its entries is
+ * worse than no list, because it is trusted. The allowlist had the mirror
+ * problem: an entry that looked correct simply never granted anything.
+ */
+function patternHost(raw) {
+  let s = String(raw === null || raw === undefined ? '' : raw).trim().toLowerCase();
+  if (!s) return '';
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, ''); // scheme
+  const at = s.lastIndexOf('@');
+  if (at !== -1) s = s.slice(at + 1); // user:pass@
+  for (const cut of ['/', '?', '#']) {
+    const i = s.indexOf(cut);
+    if (i !== -1) s = s.slice(0, i);
+  }
+  const zone = s.indexOf('%');
+  if (zone !== -1) s = s.slice(0, zone);
+  if (s.endsWith('.') && !s.endsWith('..')) s = s.slice(0, -1);
+  return s.trim();
+}
+
 function splitHostPort(pattern) {
-  let s = String(pattern === null || pattern === undefined ? '' : pattern).trim().toLowerCase();
+  let s = patternHost(pattern);
   if (!s) return { host: '', port: null };
   if (s.startsWith('[')) {
     const close = s.indexOf(']');

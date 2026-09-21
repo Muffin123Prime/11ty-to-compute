@@ -218,4 +218,82 @@ test('Z4: a write that fails leaves the record intact in memory', async () => {
   }
 });
 
+
+/* --------- Z1: patterns a person actually types must still work --------- */
+
+test('Z1: a pasted URL in the blocklist blocks that host', () => {
+  const gate = gateWith({
+    network: {
+      mode: 'online', strictAllowlist: false,
+      blockHosts: ['https://tracker.example.com/beacon', 'http://user:pw@ads.example.com'],
+    },
+  });
+  for (const host of ['tracker.example.com', 'ads.example.com']) {
+    const d = gate.check({ host, port: 443, scope: 'global', record: false });
+    assert.equal(d.allowed, false, `${host} must be blocked; a list that silently ignores entries is worse than none`);
+  }
+});
+
+test('Z1: a pasted URL in the allowlist grants that host', () => {
+  const gate = gateWith({
+    network: { mode: 'online', strictAllowlist: true, allowHosts: ['https://de.wikipedia.org/wiki/Test'] },
+  });
+  assert.equal(gate.check({ host: 'de.wikipedia.org', port: 443, scope: 'global', record: false }).allowed, true);
+  assert.equal(gate.check({ host: 'tracker.example.com', port: 443, scope: 'global', record: false }).allowed, false);
+});
+
+/* ------ Z1: the socket layer must see the real target, not a default ----- */
+
+test('Z1: connect() in the array form Node uses internally is checked', () => {
+  const net = require('node:net');
+  const gate = gateWith({ network: { mode: 'offline' } });
+  const hardening = harden(gate, { logger: null });
+  try {
+    const socket = new net.Socket();
+    assert.throws(
+      // Node normalises to [options, callback] and calls connect with that array.
+      () => socket.connect([{ host: '8.8.8.8', port: 80 }, () => {}]),
+      (err) => err.code === 'NETWORK_BLOCKED',
+      'the array form must not be read as a connection to localhost',
+    );
+    socket.destroy();
+  } finally {
+    hardening.restore();
+  }
+});
+
+test('Z5: the audit records the real destination, never an invented one', async () => {
+  const http = require('node:http');
+  const entries = [];
+  const config = configMod.defaults();
+  const gate = createGate({
+    config,
+    audit: { write(kind, data) { entries.push({ kind, host: data.host, port: data.port }); } },
+    bus: noBus,
+    logger: null,
+  });
+  const server = http.createServer((req, res) => res.end('ok'));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  const hardening = harden(gate, { logger: null });
+  try {
+    await new Promise((resolve, reject) => {
+      const req = http.get({ host: '127.0.0.1', port, path: '/' }, (res) => {
+        res.resume();
+        res.on('end', resolve);
+      });
+      req.on('error', reject);
+    });
+    const network = entries.filter((e) => String(e.kind).startsWith('network.'));
+    assert.ok(network.length > 0, 'the request must be audited');
+    for (const entry of network) {
+      assert.equal(entry.host, '127.0.0.1', `audited host must be the real one, got ${entry.host}`);
+      assert.equal(Number(entry.port), port, `audited port must be the real one, got ${entry.port}`);
+    }
+  } finally {
+    hardening.restore();
+    await new Promise((r) => server.close(r));
+  }
+});
+
 module.exports = { name: 'audit-regressions', tests: drain() };

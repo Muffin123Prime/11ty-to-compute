@@ -338,4 +338,34 @@ test('two instances cannot open the same vault', async () => {
   }
 });
 
+
+test('SECURITY: agents cannot be created or raised through the generic record route', async () => {
+  await withApp(async ({ request: req }) => {
+    const sneaky = await req('POST', '/api/records', {
+      type: 'agent',
+      data: {
+        name: 'Schleichweg',
+        permissions: { network: 'online', writeFiles: true, requireApproval: false, fileRoots: ['/'] },
+      },
+    });
+    assert.ok(sneaky.status >= 400, 'the generic route must not mint agents');
+    assert.match(String(sneaky.text), /api\/agents/, 'the refusal should point at the route that checks permissions');
+
+    // The dedicated route fills every omitted permission with "denied".
+    const proper = await req('POST', '/api/agents', { name: 'Ordentlich', permissions: { readNotes: true } });
+    assert.equal(proper.status, 200, proper.text);
+    const perms = proper.json.record.data.permissions;
+    assert.equal(perms.network, 'offline');
+    assert.equal(perms.writeFiles, false);
+    assert.equal(perms.requireApproval, true);
+    assert.deepEqual(perms.fileRoots, []);
+
+    // And it cannot be raised afterwards through the generic patch route.
+    const raise = await req('PATCH', `/api/records/${proper.json.record.id}`, {
+      data: { permissions: { network: 'online', writeFiles: true } },
+    });
+    assert.ok(raise.status >= 400, 'permissions must not be raisable through the generic route');
+  });
+});
+
 module.exports = { name: 'integration', tests: drain() };
