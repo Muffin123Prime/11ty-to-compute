@@ -2,33 +2,38 @@
 
 Stand: 2026-09-21 · Neural OS 0.1.0
 
-Du hast mich nach meinen eigenen Vorschlägen gefragt. Hier sind sie, ehrlich
-sortiert: nicht nach dem, was sich gut anhört, sondern nach dem Verhältnis von
-Nutzen zu Aufwand — und mit einer Liste am Ende, was ich **nicht** bauen würde
-und warum. Diese zweite Liste ist mir die wichtigere.
+Du hast mich nach meinen eigenen Vorschlägen gefragt. Das waren acht.
 
-Jede Idee steht mit einer Einschätzung:
+**Sieben davon sind inzwischen gebaut**, eine davon nur zur Hälfte (mit der
+Begründung, warum die andere Hälfte nicht geht). Bei jeder steht jetzt, was
+daraus geworden ist — und vor allem, was sie **nicht** kann. Eine erfüllte Idee,
+die weiter als Vorschlag dasteht, ist ein Dokument, dem man nach einem halben
+Jahr nicht mehr glaubt.
 
-- **Nutzen** — wie oft es dir tatsächlich Arbeit abnimmt
-- **Aufwand** — grob, in Arbeitseinheiten, gemessen an dem, was hier schon steht
-- **Offline?** — ob es ohne Internet und ohne Modell funktioniert
+Die achte, „Der Tresor auf dem Telefon", habe ich bewusst liegen lassen: sie ist
+keine Ergänzung, sondern eine zweite Oberfläche, und das ist eine Entscheidung,
+die du treffen solltest, nicht ich.
+
+Die Liste am Ende — **was ich nicht bauen würde** — ist mir die wichtigere von
+beiden, und sie ist unverändert.
 
 ---
 
-## 1 · Der Tagesbeginn
+## 1 · Der Tagesbeginn — **gebaut**
 
-**Nutzen: hoch · Aufwand: klein · Offline: ja**
+Der Bereich **Heute** (`g` dann `h`), ganz oben in der Seitenleiste.
 
-Ein Bildschirm, den du morgens einmal ansiehst, und der genau vier Dinge zeigt:
-was heute fällig ist, was seit gestern passiert ist, was die Automatik über
-Nacht vorgeschlagen hat, und die eine Notiz, die du vor drei Monaten geschrieben
-und seitdem nie wieder geöffnet hast.
+Der Kopfsatz ist eine Tatsache, keine Begrüßung: *„Zwei Aufgaben sind fällig,
+eine davon überfällig."* Steht nichts an, steht das da — das ist eine gute
+Nachricht und sieht auch so aus.
 
-Der Kern davon existiert schon: `activity.recent`, `tasks.list` und die
-Vorschläge liefern die Daten. Es fehlt nur die Seite, die sie zusammenzieht.
+Darunter, nach Dringlichkeit: was fällig ist (direkt abhakbar), **was ohne dich
+gelaufen ist**, was vorgeschlagen wurde, was sich seit gestern geändert hat, und
+eine Notiz zur Wiedervorlage. Jeder Block führt dorthin, wo man etwas tun kann.
 
-Warum ich das zuerst bauen würde: ein System, das man nur benutzt, wenn man
-etwas sucht, wird vergessen. Eines, das einen begrüßt, wird benutzt.
+Fehlt ein Teilsystem, steht es mit Grund dabei, statt dass der Block
+verschwindet — „nichts zu tun" und „konnte nicht nachsehen" sind verschiedene
+Aussagen.
 
 ## 2 · Rückgängig für alles — **gebaut**
 
@@ -61,17 +66,28 @@ nicht, wäre schlimmer als keines.
   würde Rückgängig genau das anrichten, wogegen es da ist. Ein ausdrückliches
   „trotzdem" gibt es, mit Warnung.
 
-## 3 · Kartenstapel zum Wiederholen
+## 3 · Kartenstapel zum Wiederholen — **gebaut**
 
-**Nutzen: mittel bis hoch · Aufwand: klein · Offline: ja**
+Der Bereich **Lernen** (`g` dann `l`). SM-2, kein Modell nötig.
 
-Aus jeder Notiz mit einer Überschrift und einem Absatz lässt sich eine Frage
-machen. Ein Stapel, der dir täglich fünf davon zeigt, in wachsenden Abständen.
-Kein Modell nötig — das Verfahren (SM-2) ist dreißig Jahre alt und funktioniert.
+Eine Karte zur Zeit, groß und ruhig. **Leertaste** zeigt die Rückseite, dann
+vier Knöpfe auf den Tasten **1–4**: Nochmal · Schwer · Gut · Leicht. Jeder sagt,
+wann die Karte wiederkommt — *„heute"*, *„morgen"*, *„in 6 Tagen"* —, und dieser
+Text kommt vom Server, damit Oberfläche und Rechnung nicht auseinanderlaufen
+können.
 
-Das verwandelt den Wissensspeicher von einem Ablageort in etwas, das dir
-tatsächlich etwas beibringt. Für Notizen, die du behalten willst, ist das mehr
-wert als jede Suchfunktion.
+Karten entstehen von Hand oder **aus einer Notiz**. Dabei wird nichts geraten:
+erkannt werden nur ausdrückliche Strukturen (`## Überschrift` + Absatz,
+`Begriff :: Erklärung`). Aus Fließtext entsteht keine Karte.
+
+Vier Entscheidungen, die im Code begründet stehen: `ease` fällt nie unter 1,3
+(sonst gerät eine Karte in eine Falle, aus der sie nicht herauskommt); das
+Intervall hat eine Obergrenze (neun Jahre sind keine Wiederholung mehr);
+`due` ist ein Datum **ohne Uhrzeit** (wer morgens lernt, soll abends nicht
+dieselbe Karte wiederbekommen); und „Nochmal" heißt heute, nicht morgen.
+
+**Keine Gamification** — keine Serien, keine Punkte, keine Abzeichen. Das steht
+weiter unten unter „Was ich nicht bauen würde", und daran habe ich mich gehalten.
 
 ## 4 · Die Zwischenablage-Taste — **teilweise gebaut**
 
@@ -89,40 +105,66 @@ nicht. Das bräuchte ein kleines Zusatzprogramm pro Betriebssystem, und damit
 verlässt man das „ein Ordner, überall lauffähig"-Versprechen des Sticks. Das
 hier wirkt, solange ein Fenster von Neural OS offen ist. Mehr verspricht es nicht.
 
-## 5 · Dateien beobachten statt importieren
+## 5 · Dateien beobachten statt importieren — **gebaut**
 
-**Nutzen: mittel · Aufwand: mittel · Offline: ja**
+**Einstellungen → Beobachtete Ordner.**
 
-Du gibst einen Ordner frei, und was dort hineinkommt, wird automatisch gelesen,
-verschlagwortet und im Gehirn verknüpft. Die Textextraktion für PDF, DOCX,
-XLSX, PPTX und HTML ist schon da und getestet — es fehlt nur die Beobachtung
-des Ordners (`fs.watch`) und die Entscheidung, was mit Änderungen passiert.
+Der Ablauf ist absichtlich dreistufig: anlegen → **erst ansehen** → einschalten.
+„Erst ansehen" zeigt, *was passieren würde*, und legt nichts an. Ein Ordner, der
+ab dem Anlegen still Dinge aufnimmt, wäre genau die unsichtbare Automatik, die
+dieses System sonst vermeidet.
 
-Wichtig dabei und der Grund, warum es nicht schon da ist: das muss sichtbar
-bleiben. Ein Ordner, der still Dinge in den Tresor schiebt, ist genau die Art
-von unsichtbarer Automatik, die dieses System sonst vermeidet. Also: eine Liste
-„das habe ich aufgenommen", jederzeit einsehbar, und ein Schalter pro Ordner.
+Ein aufklappbares **„Was wurde aufgenommen"** zeigt die echte Liste, inklusive
+der übersprungenen Dateien **mit Grund**.
 
-## 6 · Zwei Modelle, eine Antwort
+Was dabei nicht passiert, und zwar geprüft: einem symbolischen Link wird nicht
+gefolgt (sonst reichte ein Link nach `~/.ssh` im beobachteten Ordner); der Tresor
+selbst lässt sich nicht beobachten (sonst nimmt das System seine eigenen Dateien
+auf, bis die Platte voll ist); zu große Dateien werden mit Grund übersprungen
+statt halb gelesen; dieselbe Datei wird nicht zweimal aufgenommen; und im
+Quellordner wird **niemals** etwas geändert oder gelöscht.
 
-**Nutzen: mittel · Aufwand: klein · Offline: teilweise**
+Ein großer Durchlauf läuft durch denselben Schutzraum wie ein Import, damit er
+den Rückgängig-Verlauf nicht leerfegt.
 
-Wenn ein Online-Anbieter eingerichtet ist: dieselbe Frage an das lokale und an
-das Online-Modell schicken und beide Antworten nebeneinander zeigen. Du siehst
-sofort, wann sich das Internet lohnt und wann nicht — und in den meisten Fällen
-wirst du feststellen, dass es sich nicht lohnt.
+## 6 · Zwei Modelle, eine Antwort — **gebaut**
 
-Das ist die ehrlichste Art, für den Offline-Betrieb zu werben: nicht behaupten,
-das lokale Modell sei gleich gut, sondern es dich selbst sehen lassen.
+Im Chat, Knopf **„Zwei Modelle"**.
 
-## 7 · Ein zweiter Blick auf lange Texte
+Der heikle Punkt und der eigentliche Gegenstand: ein Vergleich mit einem
+Online-Anbieter schickt deinen Text an einen fremden Dienst. Das darf einem
+nicht *passieren*. Deshalb zeigt die Oberfläche vor dem Absenden den **Plan** —
+für jede Seite, wo das Modell liegt und was die Schleuse dazu sagt. Verlässt
+eine Seite das Gerät, steht das als Satz da, bevor man drückt, und Bestätigen
+ist ein eigener Klick.
 
-**Nutzen: mittel · Aufwand: klein · Offline: ja (mit Modell)**
+Scheitert eine Seite, liefert die andere trotzdem, und die gescheiterte trägt
+ihren echten Fehler. Nie wird die eine Antwort als beide ausgegeben. Ob eine
+Anfrage das Gerät verlassen hat, wird daraus gelesen, was die Schleuse
+*wirklich* entschieden hat — nicht daraus, was konfiguriert war.
 
-Ein Agent, der eine lange Notiz liest und dir drei Dinge zurückgibt: die
-Kernaussage in zwei Sätzen, die Stellen, an denen etwas offen bleibt, und die
-Begriffe, die schon anderswo im Tresor vorkommen. Kein „Zusammenfassen"-Knopf,
-sondern etwas, das eine Meinung hat.
+## 7 · Ein zweiter Blick auf lange Texte — **gebaut**
+
+Ein Knopf an einer langen Notiz. Drei Dinge zurück: die Kernaussage, die
+Stellen, an denen etwas offen bleibt, und die Begriffe, die schon anderswo im
+Tresor vorkommen.
+
+Das Entscheidende: **der dritte Teil braucht kein Modell.** „Welche Begriffe
+kommen anderswo vor" ist reine Textarbeit und der Volltextindex. Ohne Modell
+liefert er also trotzdem, setzt den Rest auf `null` statt ihn zu erfinden, und
+sagt warum:
+
+> Kernaussage und offene Stellen brauchen ein Sprachmodell; hier ist gerade
+> keines erreichbar. Die bekannten Begriffe unten stammen aus dem Volltextindex
+> und sind davon unabhängig.
+
+Die drei Teile sind in der Ansicht sichtbar **als verschieden gekennzeichnet**:
+der dritte ist belegbar, die ersten beiden stammen von einem Modell und sind es
+nicht. Diese Unterscheidung ist der Punkt.
+
+Eine Notiz unter 500 Zeichen wird abgewiesen — mit einer Begründung statt einer
+Sperre: *„Bei so wenig Text siehst du beim Lesen schon alles, was ein zweiter
+Blick sagen könnte."*
 
 ## 8 · Der Tresor auf dem Telefon
 
@@ -176,6 +218,19 @@ Das war Nummer 2, „Rückgängig für alles" — nicht weil sie die auffälligs
 sondern weil sie die Voraussetzung dafür ist, dass du die anderen überhaupt
 benutzt. Automatik, die man nicht zurücknehmen kann, schaltet man nicht ein.
 
-Deshalb ist sie inzwischen gebaut. Von den übrigen wäre der **Tagesbeginn**
-(Nummer 1) als Nächstes dran: die Daten dafür liegen alle schon vor, es fehlt
-nur die Seite, die sie zusammenzieht.
+Sie war die erste, die gebaut wurde. Danach kamen die übrigen sechs.
+
+## Was als Nächstes käme
+
+Nichts aus dieser Liste — sie ist abgearbeitet, bis auf die eine, die dir
+gehört. Was ich jetzt vorschlagen würde, wäre kleiner und langweiliger, und
+genau deshalb richtig:
+
+1. **Den Tagesbeginn zur Startseite machen**, wenn du ihn ein paar Tage benutzt
+   hast und er sich bewährt. Jetzt ist der Chat der Einstieg; das war richtig,
+   solange es „Heute" nicht gab.
+2. **Karten aus dem zweiten Blick.** Die offenen Stellen, die er findet, sind
+   fast schon Fragen. Der Weg von dort zu einer Lernkarte ist kurz.
+3. **Den Lernstand zwischen Geräten abgleichen.** Derzeit liegt dein
+   Kartenstapel auf einem Gerät — das steht unter „Bekannte Grenzen" in
+   `docs/STATUS.md` und ist die erste Zeile dort, die mich wirklich stört.
