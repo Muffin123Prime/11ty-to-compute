@@ -9,32 +9,64 @@ teilweise oder gar nicht funktioniert, steht weiter unten — ungeschönt.
 ## Messwerte
 
 ```
-npm test          509 Tests, 509 bestanden, 0 fehlgeschlagen   (~28 s)
-npm run proof     15 Prüfpunkte bestanden, 0 fehlgeschlagen
-npm run doctor    15 von 15 Subsystemen geladen
+npm test          705 Tests, 705 bestanden, 0 fehlgeschlagen   (~35 s)
+npm run check      95 Funktionen geprüft, 1 unklar, 0 defekt
+npm run proof      18 Prüfpunkte bestanden
+npm run ui         13 Ansichten geklickt, hell und dunkel, 0 Fehler
+npm run doctor     19 von 19 Subsystemen geladen
 ```
+
+Die vier Werkzeuge prüfen absichtlich Verschiedenes: `test` den Code,
+`check` jede Funktion über die echte HTTP-Schnittstelle, `proof` das
+Offline-Versprechen auf einer Maschine **mit** Internet, und `ui` ob ein Klick
+in der Oberfläche wirklich bis in den Tresor durchschlägt. Ein Fehler, den
+alle vier übersehen, ist noch möglich — aber er muss sich schon Mühe geben.
+
+### Geschwindigkeit (gemessen, nicht geschätzt)
+
+```
+Start (createApp)                  126 ms
+2.000 Notizen anlegen              189 ms
+Volltextsuche darüber                9 ms
+Link-Ableitung über 2.000 Notizen  110 ms   (zweiter Lauf: 42 ms, idempotent)
+Graph aus 2.000 Knoten bauen        16 ms
+Vorschläge prüfen                  116 ms
+Speicher bei 2.000 Notizen          28 MB
+```
+
+Die Link-Ableitung war vorher der Flaschenhals: 5.000 Notizen anzulegen
+dauerte 21 Sekunden, davon 20 in der Ableitung. Ein zwischengespeicherter,
+selbstheilender Index hat daraus 1,0 Sekunden gemacht — Faktor 21.
 
 | Testdatei | Tests | Gegenstand |
 |---|---:|---|
-| `models.test.js` | 55 | Ollama- und OpenAI-Protokoll, Streaming, Tool-Calls, Abbruch |
-| `agents.test.js` | 43 | Berechtigungen, Bestätigungen, Werkzeuge, Agentenschleife |
+| `models.test.js` | 68 | Ollama- und OpenAI-Protokoll, Streaming, Tool-Calls, Abbruch |
+| `sync.test.js` | 64 | Zusammenführung, Konflikte, Idempotenz, Abbruch |
+| `extract.test.js` | 50 | PDF, DOCX, XLSX, PPTX, HTML, Kodierungen |
+| `agents.test.js` | 47 | Berechtigungen, Bestätigungen, 24 Werkzeuge, Herkunftsstempel |
+| `modules.test.js` | 38 | Werkstatt: Installation, Versionen, Rücknahme |
 | `gate.test.js` | 38 | Klassifikation, Policy, Freigaben, DNS, Redirects |
+| `automation.test.js` | 38 | Zeitpläne, Auslöser, Entprellung, Schleifenschutz |
 | `store.test.js` | 36 | Persistenz, Absturzerholung, Kanten, Transaktionen |
 | `server.test.js` | 34 | Routen, CSRF, Header, SSE, Body-Limit |
 | `graph.test.js` | 31 | Linkableitung, Idempotenz, Graphaufbau, Cluster |
+| `folder-sync.test.js` | 30 | Abgleich über einen Ordner (Stick) |
+| `assist.test.js` | 29 | Sechs Vorschlagsverfahren, Idempotenz, Übernehmen |
 | `search.test.js` | 25 | BM25, deutsche Tokenisierung, Operatoren, Snippets |
 | `chat.test.js` | 24 | Kontextaufbau, Streaming, Abbruch, Fehlerpfade |
+| `stick.test.js` | 22 | Portabler Betrieb, Sicherung, Aktualisierung |
+| `sandbox.test.js` | 22 | Modul-Sandbox, Fähigkeitsgrenzen |
+| `embeddings.test.js` | 22 | Einbettungen, Modellwechsel, Abbruch |
 | `auth.test.js` | 19 | Token, Host-Prüfung, CSRF, Ablauf und Widerruf |
 | `backup.test.js` | 17 | Export, Import, Rundlauf, Manifest |
-| `kernel.test.js` | 14 | Pfade, Konfiguration, Bus, Audit, Datenmodell |
+| `vectors.test.js` | 16 | Vektorspeicher, Ähnlichkeit, Persistenz |
+| `modules-api.test.js` | 15 | HTTP-Schicht der Werkstatt |
 | `integration.test.js` | 15 | Ende-zu-Ende über den echten Stapel |
+| `kernel.test.js` | 14 | Pfade, Konfiguration, Bus, Audit, Datenmodell |
 | `harden.test.js` | 14 | Prozessweite Durchsetzung der Netzpolicy |
-| `vaultcrypto.test.js` | 9 | AES-256-GCM, scrypt, Passphrase-Wechsel |
-| `sync.test.js` | 40 | Zusammenführung, Konflikte, Idempotenz, Abbruch |
-| `extract.test.js` | 30 | PDF, DOCX, XLSX, PPTX, HTML, Kodierungen |
-| `embeddings.test.js` | 28 | Einbettungen, Modellwechsel, Abbruch |
-| `vectors.test.js` | 24 | Vektorspeicher, Ähnlichkeit, Persistenz |
+| `models-remote.test.js` | 13 | Online-Anbieter: Schlüssel, Schleuse, Verbindungstest |
 | `audit-regressions.test.js` | 13 | die Defekte aus dem Sicherheitsaudit |
+| `vaultcrypto.test.js` | 9 | AES-256-GCM, scrypt, Passphrase-Wechsel |
 
 ## Bewiesen, nicht behauptet
 
@@ -59,9 +91,18 @@ Verbindungen kamen trotzdem nicht zustande. Ein Testlauf auf einer Maschine
 ohne Internet hätte nichts bewiesen — deshalb misst das Werkzeug das zuerst
 und meldet solche Punkte als „nicht entscheidbar" statt als Erfolg.
 
-Zusätzlich im Browser geprüft (Chromium, 14 Ansichten, hell und dunkel):
-**null externe Requests, null JavaScript-Fehler.** Die Oberfläche kontaktierte
-ausschließlich `127.0.0.1`.
+Seit Neuestem prüft der Beweis auch, dass das **Nützlichste** ohne Netz und ohne
+Modell funktioniert — denn das ist die eigentliche Zusage: Vorschläge werden
+gefunden (Dublette, Aufgabe, fehlender Link, in 11 ms), ein übernommener
+Vorschlag legt die Aufgabe wirklich an, und die Automatik ist ab Werk aus und
+feuert von allein nichts.
+
+Zusätzlich im Browser geprüft (`npm run ui`, Chromium, 13 Ansichten, hell und
+dunkel, 1280 und 1000 px): **null externe Requests, null JavaScript-Fehler**,
+kein waagerechter Scrollbalken. Die Oberfläche kontaktierte ausschließlich
+`127.0.0.1`. Geprüft wird dabei nicht nur, ob etwas erscheint, sondern ob ein
+Klick bis in den Tresor wirkt: nach „Übernehmen" steht die Aufgabe wirklich im
+Speicher, und ein Zeitplan wird erst nach der Rückfrage eingeschaltet.
 
 ## Funktionsumfang
 
@@ -81,20 +122,37 @@ ausschließlich `127.0.0.1`.
   Tool-Calling nativ und als Textprotokoll-Fallback
 - **Chat** — Streaming, Abbruch mit erhaltener Teilantwort, Token-Budget,
   Kontextknoten aus dem Graphen, wahrheitsgemäße Netz-Kennzeichnung
-- **Agenten** — sechs Vorlagen, Berechtigungen einzeln schaltbar, Bestätigungen,
-  Schritt- und Zeitlimit, vollständiges Laufprotokoll
+- **Agenten** — sechs Vorlagen, 24 Werkzeuge (lesend und schreibend, jedes an
+  eine einzelne Berechtigung gebunden), Bestätigungen, Schritt- und Zeitlimit,
+  vollständiges Laufprotokoll
 - **Verschlüsselung** — AES-256-GCM, scrypt, Passphrase-Wechsel ohne Neuverschlüsselung
 - **Export/Import** — JSON und Markdown, Rundlauf getestet
-- **Oberfläche** — acht Ansichten, Dark und Light, Befehlspalette, Tastaturbedienung
+- **Oberfläche** — 13 Ansichten, Dark und Light, Befehlspalette, Tastaturbedienung
+- **Vorschläge** — sechs Verfahren ganz ohne Modell: Dubletten (Vier-Wort-Ketten,
+  Jaccard ≥ 0,72, Kandidaten über eine Skizze statt aller Paare), verwaiste
+  Notizen, Schlagwörter aus der Nachbarschaft, Aufgaben aus ausdrücklichen
+  Merkern, Wiedervorlage, unaufgelöste `[[Verweise]]`. Vorschlagen und
+  Ausführen sind streng getrennt; ein verworfener Vorschlag kommt nie wieder
+- **Automatik** — Zeitpläne (stündlich/täglich/wöchentlich) und Auslöser auf
+  Ereignisse, beide ab Werk aus. Vier Bremsen gegen Selbstauslösung:
+  Herkunftsstempel, Entprellung, Stundengrenze, höchstens drei gleichzeitige
+  Läufe. Drei verpasste Tage holen genau einen Lauf nach
+- **Online-Modus** — Anbieter mit Vorlage anlegen, Schlüssel aus einer
+  Umgebungsvariable, Host getrennt freigeben, Verbindung wirklich testen. Der
+  Schlüssel kommt über keine Route wieder heraus
+- **Herkunft** — jeder Satz aus einem Agentenlauf trägt `runId`, `agentId` und
+  `source: 'agent'`. Eine *Änderung* stempelt nicht um: eine Notiz des Nutzers
+  bleibt seine, auch wenn ein Agent sie angefasst hat
 
 ### Eingeschränkt
 - **Agenten sind nur so gut wie das Modell.** Mit einem 3B-Modell sind
   mehrstufige Werkzeugketten unzuverlässig — das Modell vergisst Zwischenstände
   oder erfindet Werkzeugnamen. Ab 7B wird es brauchbar. Das ist eine Eigenschaft
   kleiner Modelle, keine der Agentenschleife; das Schrittlimit fängt es ab.
-- **Große Dateien.** Text wird aus `.md`, `.txt`, `.json`, `.csv` und Quellcode
-  extrahiert. PDF, DOCX und Bilder werden gespeichert und verknüpft, ihr Inhalt
-  aber nicht durchsucht — die Parser wären je ein eigenes Projekt.
+- **Gescannte Dokumente.** Text wird inzwischen auch aus PDF, DOCX, XLSX, PPTX,
+  EPUB, ODT, HTML und RTF gelesen (eigene Parser, siehe unten). Ein *gescanntes*
+  PDF ohne Textebene bleibt unlesbar — dafür bräuchte es eine Texterkennung.
+  Die App sagt das, statt Text zu erfinden.
 - **Sehr große Wissensbestände.** Der gesamte Bestand liegt im Arbeitsspeicher.
   Bis etwa 100 000 Datensätze ist das unproblematisch; darüber hinaus braucht es
   eine echte Datenbank hinter der `Store`-Schnittstelle.
@@ -185,10 +243,34 @@ dass keine mehr existieren — es heißt, dass die gefundenen behoben sind.
 5. **Eine korrupte Zeile in der Mitte eines Logsegments** wird übersprungen und
    gemeldet, aber nicht repariert. Der betroffene Datensatz fehlt dann.
 6. **Kein Modell im Lieferumfang.** Einmalig `ollama pull llama3.2` mit Internet.
+7. **Der Schleifenschutz der Auslöser beantwortet zwei verschiedene Fragen
+   unterschiedlich gut.** Er weiß exakt, wer einen Satz *angelegt* hat (der
+   Stempel steht am Satz). Er weiß nicht, wer ein bestehendes Ereignis
+   *ausgelöst* hat. Konkret: ändert ein Agent eine Notiz des Nutzers, sieht das
+   für einen Auslöser aus wie eine Änderung des Nutzers. Dagegen helfen dann
+   nur noch die Mengenbremsen — Entprellung, Stundengrenze, drei gleichzeitige
+   Läufe. Das ist eine Begrenzung der Menge, keine Antwort auf die Frage, und
+   im Code steht es genauso.
+8. **Ein Schlüssel, den du direkt einträgst, liegt im Klartext** in
+   `config.json` (Dateirechte 0600). Die Umgebungsvariable ist der sichere Weg,
+   und die App sagt das auch — aber sie hindert dich nicht daran.
+9. **`npm run ui` braucht ein global installiertes Playwright.** Neural OS
+   selbst hat weiterhin null Abhängigkeiten; das Prüfwerkzeug läuft ohne
+   Playwright gar nicht und sagt dann, dass es nichts geprüft hat, statt
+   Entwarnung zu geben.
 
 ## Nächste sinnvolle Schritte
 
-1. Semantische Suche über `embed()` — der größte Gewinn fürs Wissensgehirn.
-2. Geräte-Synchronisation über den eigenen Server, aufbauend aufs Operationslog.
-3. Textextraktion für PDF und DOCX.
-4. Eine Zeitachsen-Ansicht als zweite Perspektive aufs Gehirn.
+Die vier Punkte, die hier früher standen — semantische Suche, Geräte-Abgleich,
+Textextraktion, Zeitachse — sind erledigt und stehen oben unter „fertiggestellt".
+Was ich als Nächstes bauen würde, mit Begründung und mit der Liste dessen, was
+ich **nicht** bauen würde, steht in `docs/IDEEN.md`. Die Kurzfassung:
+
+1. **Rückgängig für alles** — nicht nur im Editor, sondern für jede Änderung,
+   auch die eines Agenten, der nachts lief. Das ist die Voraussetzung dafür,
+   dass jemand die Automatik überhaupt einschaltet.
+2. **Ein Tagesbeginn** — ein Bildschirm mit dem, was heute fällig ist, was sich
+   seit gestern geändert hat und was die Automatik vorschlägt. Die Daten dafür
+   liegen alle schon vor.
+3. **Kartenstapel zum Wiederholen** — macht aus dem Wissensspeicher etwas, das
+   einem tatsächlich etwas beibringt. Braucht kein Modell.
