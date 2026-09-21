@@ -120,6 +120,83 @@ function body(record) {
 
 /* ------------------------------------------------------------------- areas */
 
+/**
+ * Jedes geladene Teilsystem hat mindestens eine erreichbare Route.
+ *
+ * Der Fehler, der in diesem Projekt dreimal passiert ist: ein Teilsystem wird
+ * gebaut, seine Tests sind gruen, und niemand kann es aufrufen, weil die
+ * Route fehlt. Die semantische Suche lag so 1600 Zeilen lang funktionsfaehig
+ * auf der Platte, die Textextraktion 2627.
+ *
+ * Diese Pruefung leitet sich aus `doctor()` ab, nicht aus einer Liste von
+ * Hand: ein neues Teilsystem, das jemand zu verdrahten vergisst, faellt beim
+ * naechsten Lauf von selbst auf -- ohne dass jemand daran denken muss, diese
+ * Datei zu erweitern. Steht fuer ein geladenes Teilsystem keine Route in der
+ * Tabelle, ist das selbst ein Befund.
+ */
+const SUBSYSTEM_ROUTES = {
+  store: '/api/records?type=note',
+  gate: '/api/network',
+  hardening: null,        // prozessweit, hat bewusst keine eigene Route
+  encryption: '/api/vault',
+  graph: '/api/graph',
+  models: '/api/models',
+  chat: '/api/chats',
+  agents: '/api/agents',
+  approvals: '/api/approvals',
+  assist: '/api/assist/detectors',
+  history: '/api/history',
+  scheduler: '/api/automation/schedules',
+  triggers: '/api/automation/triggers',
+  backup: '/api/vault',   // Export und Import haengen an /api/backup/*, POST
+  auth: '/api/tokens',
+  extraction: null,       // wirkt beim Datei-Upload, hat keine eigene Route
+  sync: '/api/peers',
+  modules: '/api/modules',
+  vectors: '/api/status',
+  embeddings: '/api/status',
+};
+
+async function checkWiring(app) {
+  area('0 · Alles Gebaute ist auch erreichbar');
+  const health = await app.doctor();
+  const geladen = Object.entries(health.subsystems || {})
+    .filter(([, state]) => state === true)
+    .map(([name]) => name);
+
+  await check('Jedes geladene Teilsystem hat eine bekannte Route', async () => {
+    const unbekannt = geladen.filter((name) => !(name in SUBSYSTEM_ROUTES));
+    assert(!unbekannt.length,
+      `nicht in der Tabelle, also vermutlich auch nicht verdrahtet: ${unbekannt.join(', ')}`);
+    return `${geladen.length} geladen`;
+  });
+
+  await check('Und antwortet dort auch', async () => {
+    const kaputt = [];
+    for (const name of geladen) {
+      const route = SUBSYSTEM_ROUTES[name];
+      if (!route) continue;
+      const res = await api.get(route);
+      // 503 mit einem Grund ist eine Antwort, kein Ausfall: so meldet die
+      // semantische Suche ein fehlendes Einbettungsmodell.
+      const antwortet = res.status === 200 || res.status === 503 || res.status === 403;
+      if (!antwortet) kaputt.push(`${name} (${route}: HTTP ${res.status})`);
+    }
+    assert(!kaputt.length, kaputt.join(', '));
+    const gezaehlt = geladen.filter((n) => SUBSYSTEM_ROUTES[n]).length;
+    return `${gezaehlt} Routen geprüft`;
+  });
+
+  await check('Jede Ansicht in der Seitenleiste hat ihre Datei', async () => {
+    const appjs = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+    const ids = [...appjs.matchAll(/\{ id: '([a-z]+)', title:/g)].map((m) => m[1]);
+    assert(ids.length >= 10, `nur ${ids.length} Ansichten gefunden — stimmt das Muster noch?`);
+    const fehlend = ids.filter((id) => !fs.existsSync(path.join(__dirname, '..', 'web', 'views', `${id}.js`)));
+    assert(!fehlend.length, `ohne Datei: ${fehlend.join(', ')}`);
+    return `${ids.length} Ansichten`;
+  });
+}
+
 async function checkStatus(app) {
   area('1 · Grundzustand');
   await check('Server antwortet', async () => {
@@ -1278,6 +1355,7 @@ async function checkHistory(app) {
 }
 
 const AREAS = {
+  verdrahtung: checkWiring,
   status: checkStatus,
   notizen: checkRecords,
   suche: checkSearch,
