@@ -428,7 +428,10 @@ function createVectorStore({ paths, vaultCrypto, logger, autoFlushMs = 0 } = {})
       v: MANIFEST_VERSION,
       model: modelName,
       dim: dimension,
-      slots,
+      // Only rows that were ever handed out are written. Capacity above the
+      // high-water mark is allocation slack, not data, and persisting it would
+      // put megabytes of zeroes on disk after a growth step.
+      slots: highWater,
       count: entries.size,
       createdAt: createdAt || nowIso(),
       updatedAt: updatedAt || nowIso(),
@@ -732,7 +735,7 @@ function createVectorStore({ paths, vaultCrypto, logger, autoFlushMs = 0 } = {})
       }
       if (!dirty) return { written: false, bytes: 0 };
       if (damaged) throw damagedError();
-      const bytes = floatsToBytes(data, slots * dimension);
+      const bytes = floatsToBytes(data, highWater * dimension);
       atomicWrite(binPath, encodeFile(Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)));
       atomicWrite(metaPath, encodeFile(Buffer.from(JSON.stringify(buildManifest()), 'utf8')));
       dirty = false;
