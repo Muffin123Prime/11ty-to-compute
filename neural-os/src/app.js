@@ -86,6 +86,17 @@ async function createApp(opts = {}) {
       throw err;
     }
   }
+  // Port 0 heisst "such dir einen freien aus". Das ist ein gueltiger Wunsch,
+  // aber kein gueltiger Eintrag in der gespeicherten Konfiguration: eine
+  // config.json, in der "port: 0" steht, sagt dem Menschen, der sie liest,
+  // nichts. `validateConfig` weist ihn deshalb zu Recht ab.
+  //
+  // Frueher fiel der Wunsch durch `if (opts.port)` stillschweigend unter den
+  // Tisch und wurde 7777 -- ein Werkzeug, das absichtlich neben einer
+  // laufenden Instanz starten wollte, scheiterte dann mit EADDRINUSE an einem
+  // Port, den es nie angefordert hatte. Jetzt wird er beiseitegelegt und an
+  // `listen()` weitergereicht, wo er hingehoert.
+  const ephemeralPort = opts.port === 0;
   if (opts.port) config.server.port = opts.port;
   if (opts.host) config.server.host = opts.host;
   configMod.validateConfig(config);
@@ -475,7 +486,7 @@ async function createApp(opts = {}) {
       const serverMod = require('./http/server');
       const created = await serverMod.createServer(app);
       app.server = created;
-      await created.listen(opts);
+      await created.listen(ephemeralPort && opts.port === undefined ? { ...opts, port: 0 } : opts);
       audit.write('server.listen', { host: config.server.host, port: config.server.port });
 
       // Automation starts here rather than in createApp(), so a command that

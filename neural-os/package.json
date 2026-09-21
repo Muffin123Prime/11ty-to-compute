@@ -19,7 +19,8 @@
     "doctor": "node bin/neural-os.js doctor",
     "export": "node bin/neural-os.js export",
     "proof": "node tools/offline-proof.js",
-    "check": "node tools/feature-check.js"
+    "check": "node tools/feature-check.js",
+    "ui": "node tools/ui-check.js"
   },
   "dependencies": {},
   "devDependencies": {}
