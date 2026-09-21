@@ -1163,6 +1163,120 @@ async function checkAutomation(app) {
   });
 }
 
+async function checkHistory(app) {
+  area('16 · Rückgängig');
+
+  const note = ok(await api.post('/api/records', {
+    type: 'note', data: { title: 'Rückgängig-Probe', body: 'Erster Text' },
+  }), 'notiz').record;
+
+  await check('Das Anlegen steht im Verlauf', async () => {
+    const r = ok(await api.get('/api/history?limit=50'), 'verlauf');
+    const eintrag = (r.items || []).find((e) => e.id === note.id && e.op === 'create');
+    assert(eintrag, `kein Eintrag für ${note.id}: ${JSON.stringify((r.items || []).slice(0, 3))}`);
+    assert(eintrag.actor && eintrag.actor.kind === 'user', `falscher Urheber: ${JSON.stringify(eintrag.actor)}`);
+    return `${r.total} Einträge, "${eintrag.label}"`;
+  });
+
+  let updateSeq = null;
+  await check('Eine Änderung lässt sich zurücknehmen', async () => {
+    ok(await api.patch(`/api/records/${note.id}`, { body: 'Zweiter Text' }), 'ändern');
+    const r = ok(await api.get('/api/history?limit=50'), 'verlauf');
+    const eintrag = (r.items || []).find((e) => e.id === note.id && e.op === 'update');
+    assert(eintrag, 'die Änderung steht nicht im Verlauf');
+    assert(eintrag.canUndo === true, `nicht rücknehmbar: ${eintrag.reason}`);
+    updateSeq = eintrag.seq;
+
+    const res = ok(await api.post(`/api/history/${updateSeq}/undo`), 'undo');
+    assert(res.applied && res.applied.op === 'update', `nichts ausgeführt: ${JSON.stringify(res.applied)}`);
+    const danach = ok(await api.get(`/api/records/${note.id}`), 'nachher');
+    assert(body(danach.record).body === 'Erster Text',
+      `der alte Text kam nicht zurück: ${JSON.stringify(body(danach.record).body)}`);
+    return 'Text steht wieder da';
+  });
+
+  await check('Zweimal zurücknehmen geht nicht', async () => {
+    const res = await api.post(`/api/history/${updateSeq}/undo`);
+    assert(res.status === 409 || res.status === 400, `HTTP ${res.status}`);
+    return `HTTP ${res.status}`;
+  });
+
+  await check('Ein Konflikt wird nicht still überschrieben', async () => {
+    // Ändern, aufzeichnen lassen, dann noch einmal ändern: das Zuruecknehmen
+    // der ersten Aenderung wuerde die zweite verschlucken. Genau das soll
+    // Rueckgaengig ja verhindern.
+    ok(await api.patch(`/api/records/${note.id}`, { body: 'Dritter Text' }), 'ändern');
+    const r = ok(await api.get('/api/history?limit=50'), 'verlauf');
+    const eintrag = (r.items || []).find((e) => e.id === note.id && e.op === 'update' && !e.undone);
+    assert(eintrag, 'die neue Änderung steht nicht im Verlauf');
+    ok(await api.patch(`/api/records/${note.id}`, { body: 'Vierter Text' }), 'noch einmal ändern');
+
+    const res = await api.post(`/api/history/${eintrag.seq}/undo`);
+    assert(res.status === 409, `HTTP ${res.status} statt 409 — eine neuere Änderung wäre verloren gegangen`);
+    const unveraendert = ok(await api.get(`/api/records/${note.id}`), 'nachher');
+    assert(body(unveraendert.record).body === 'Vierter Text', 'es wurde trotzdem etwas geändert');
+
+    // Mit ausdruecklichem "trotzdem" geht es -- aber nur dann.
+    const erzwungen = ok(await api.post(`/api/history/${eintrag.seq}/undo`, { force: true }), 'force');
+    assert(erzwungen.applied, 'auch mit force passierte nichts');
+    return 'abgelehnt, mit force erlaubt';
+  });
+
+  await check('Ein gelöschter Satz kommt zurück', async () => {
+    const weg = ok(await api.post('/api/records', {
+      type: 'note', data: { title: 'Wird gelöscht', body: 'Inhalt' },
+    }), 'notiz').record;
+    ok(await api.del(`/api/records/${weg.id}`), 'löschen');
+    const r = ok(await api.get('/api/history?limit=50'), 'verlauf');
+    const eintrag = (r.items || []).find((e) => e.id === weg.id && e.op === 'delete');
+    assert(eintrag, 'das Löschen steht nicht im Verlauf');
+    const res = ok(await api.post(`/api/history/${eintrag.seq}/undo`), 'undo');
+    const zurueck = await api.get(`/api/records/${res.applied.newId || weg.id}`);
+    assert(zurueck.status === 200, `der Satz ist nicht zurück: HTTP ${zurueck.status}`);
+    assert(body(zurueck.json.record).title === 'Wird gelöscht', 'ein anderer Satz kam zurück');
+    return res.applied.op === 'recreate' ? `neu angelegt als ${res.applied.newId}` : 'wiederhergestellt';
+  });
+
+  await check('Verknüpfungen werden bewusst nicht aufgezeichnet', async () => {
+    // Abgeleitete Kanten entstehen bei jedem Schreibvorgang neu. Ein
+    // Rueckgaengig dafuer waere ein Knopf, der sichtbar nichts tut.
+    const r = ok(await api.get('/api/history?limit=200'), 'verlauf');
+    const kanten = (r.items || []).filter((e) => e.type === 'edge');
+    assert(!kanten.length, `${kanten.length} Kanten im Verlauf — die würden beim nächsten Schreibvorgang neu entstehen`);
+    return 'keine Kanten im Journal';
+  });
+
+  await check('Eine Änderung durch einen Agenten wird als solche erkannt', async () => {
+    // Der einzige Punkt in dieser Datei, der nicht über HTTP geht -- und zwar
+    // notwendigerweise: ein echter Agentenlauf braucht ein Modell, und auf
+    // einer Maschine ohne Modell gäbe es nichts zu messen. Gemessen wird
+    // trotzdem das echte Teilsystem, nur der Auslöser ist direkt.
+    if (!app.history) return unklar('Änderungsverlauf nicht geladen');
+    const { withActor } = require('../src/kernel/actor');
+    const eigene = app.store.create('note', { title: 'Vom Nutzer geschrieben' });
+    await withActor({ kind: 'agent', runId: 'run_pruefung', agentId: 'agent_pruefung' }, async () => {
+      app.store.update(eigene.id, { body: 'Vom Agenten geändert' });
+    });
+    const eintrag = app.history.list({}).items.find((e) => e.id === eigene.id && e.op === 'update');
+    assert(eintrag, 'die Änderung steht nicht im Verlauf');
+    assert(eintrag.actor.kind === 'agent',
+      `dem Nutzer zugeschrieben, obwohl ein Agent sie gemacht hat: ${JSON.stringify(eintrag.actor)}`);
+    assert(eintrag.actor.runId === 'run_pruefung', `falscher Lauf: ${eintrag.actor.runId}`);
+    // Und die Notiz selbst bleibt die des Nutzers.
+    assert(app.store.get(eigene.id).data.runId === undefined,
+      'die Herkunft der Notiz wurde umgeschrieben — sie gehört weiterhin dem Nutzer');
+    return `Lauf ${eintrag.actor.runId}, erkannt über den ${eintrag.actor.via}`;
+  });
+
+  await check('Die Statistik sagt, wie viel ohne dich passiert ist', async () => {
+    const r = ok(await api.get('/api/history/stats'), 'stats');
+    assert(Number.isFinite(r.total), 'keine Gesamtzahl');
+    assert(r.byActor && Number.isFinite(r.byActor.user) && Number.isFinite(r.byActor.agent),
+      `keine Aufteilung nach Urheber: ${JSON.stringify(r.byActor)}`);
+    return `${r.total} Einträge, ${r.undoable} rücknehmbar, davon ${r.byActor.agent} ohne dich`;
+  });
+}
+
 const AREAS = {
   status: checkStatus,
   notizen: checkRecords,
@@ -1179,6 +1293,7 @@ const AREAS = {
   stick: checkStick,
   vorschlaege: checkAssist,
   automatik: checkAutomation,
+  rueckgaengig: checkHistory,
 };
 
 async function main() {

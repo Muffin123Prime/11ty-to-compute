@@ -232,6 +232,21 @@ async function main() {
       record('app', 'Automatik ist ab Werk aus und feuert nicht von allein', 'fail', 'Teilsystem nicht geladen');
     }
 
+    if (app.history) {
+      const eigene = app.store.create('note', { title: 'Ohne Netz geschrieben', body: 'Erster Text' });
+      app.store.update(eigene.id, { body: 'Geaendert' });
+      const eintrag = app.history.list({}).items.find((e) => e.id === eigene.id && e.op === 'update');
+      let zurueck = null;
+      if (eintrag) {
+        await app.history.undo(eintrag.seq);
+        zurueck = app.store.get(eigene.id).data.body;
+      }
+      record('app', 'Rückgängig funktioniert ohne Netz', zurueck === 'Erster Text' ? 'pass' : 'fail',
+        zurueck === 'Erster Text' ? 'der alte Text steht wieder da' : `zurück kam: ${JSON.stringify(zurueck)}`);
+    } else {
+      record('app', 'Rückgängig funktioniert ohne Netz', 'fail', 'Teilsystem nicht geladen');
+    }
+
     // ------------------------------------------------- 4. Modelle, ehrlich
     console.log(`\n${B}4. Modellanbindung${X}`);
     if (app.registry) {
