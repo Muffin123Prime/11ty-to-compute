@@ -30,22 +30,36 @@ Vorschläge liefern die Daten. Es fehlt nur die Seite, die sie zusammenzieht.
 Warum ich das zuerst bauen würde: ein System, das man nur benutzt, wenn man
 etwas sucht, wird vergessen. Eines, das einen begrüßt, wird benutzt.
 
-## 2 · Rückgängig für alles
+## 2 · Rückgängig für alles — **gebaut**
 
-**Nutzen: hoch · Aufwand: mittel · Offline: ja**
+Diese stand hier als Vorschlag. Sie existiert inzwischen, also steht hier jetzt,
+was daraus geworden ist und was sie nicht kann.
 
-Der Speicher ist ein Protokoll, das nur angehängt wird — jede Änderung steht
-mit Zeitpunkt darin. Daraus lässt sich ein echtes „Zurück" bauen: nicht nur für
-den Editor, sondern für jede Aktion, auch für die eines Agenten.
+Jede Änderung an einer Notiz, Aufgabe, einem Projekt, Chat, Agenten, einer
+Datei, Erinnerung, einem Zeitplan oder Auslöser wird in einem eigenen Journal
+festgehalten — mit dem Zustand davor und mit der Antwort auf die Frage, die man
+zuerst stellt: **wer war das?** Ein Agentenlauf setzt beim Start seinen Namen,
+und alles, was innerhalb geschrieben wird, trägt ihn. Auch das, was der
+Schreibvorgang seinerseits auslöst.
 
-Das ist die Funktion, die den Unterschied macht zwischen „ich lasse den Agenten
-mal laufen" und „ich traue mich nicht". Im Moment ist die einzige echte
-Absicherung die Bestätigungsabfrage vorher. Eine Korrektur hinterher ist
-bequemer und wirkt stärker.
+Das Journal ist absichtlich nicht das Schreib-Log der Datenbank: das wird alle
+2000 Vorgänge verdichtet und gelöscht. Ein Rückgängig, das mal geht und mal
+nicht, wäre schlimmer als keines.
 
-Technisch: die Sätze der letzten Stunde mit ihren Revisionen anzeigen, und pro
-Satz auf eine frühere Revision zurücksetzen. Die Daten sind da. Es ist eine
-Ansicht und eine Route.
+**Was es nicht kann**, und warum:
+
+- **Höchstens 2000 Einträge oder 30 Tage.** Danach ist es weg. Eine Sicherung
+  ist etwas anderes (Einstellungen → Sicherung).
+- **Verknüpfungen nicht.** Abgeleitete Links entstehen bei jedem Schreibvorgang
+  neu — ein Knopf dafür würde sichtbar nichts tun.
+- **Freigaben, Token und Läufe nicht.** Eine zurückgenommene Netz-Freigabe
+  wiederzubeleben wäre ein Sicherheitsloch, kein Komfort.
+- **Ein hart gelöschter Satz kommt unter neuer Kennung zurück**, und seine
+  früheren Verknüpfungen sind weg. Das System sagt das, statt so zu tun, als
+  wäre nichts gewesen.
+- **Wurde der Satz seit der Änderung wieder geändert**, wird abgelehnt — sonst
+  würde Rückgängig genau das anrichten, wogegen es da ist. Ein ausdrückliches
+  „trotzdem" gibt es, mit Warnung.
 
 ## 3 · Kartenstapel zum Wiederholen
 
@@ -156,6 +170,10 @@ Werkzeug, kein Spiel, und es soll dich nicht zu etwas überreden.
 
 ## Wenn ich nur eine Sache bauen dürfte
 
-Nummer 2, „Rückgängig für alles". Nicht weil sie die auffälligste ist, sondern
-weil sie die Voraussetzung dafür ist, dass du die anderen überhaupt benutzt.
-Automatik, die man nicht zurücknehmen kann, schaltet man nicht ein.
+Das war Nummer 2, „Rückgängig für alles" — nicht weil sie die auffälligste ist,
+sondern weil sie die Voraussetzung dafür ist, dass du die anderen überhaupt
+benutzt. Automatik, die man nicht zurücknehmen kann, schaltet man nicht ein.
+
+Deshalb ist sie inzwischen gebaut. Von den übrigen wäre der **Tagesbeginn**
+(Nummer 1) als Nächstes dran: die Daten dafür liegen alle schon vor, es fehlt
+nur die Seite, die sie zusammenzieht.
