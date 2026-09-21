@@ -26,13 +26,30 @@ unten. Aber fang mit dem einfachen Fall an — für die meisten ist er der richt
 
 ## Teil 1 · Den Stick vorbereiten
 
-Einmalig, auf deinem eigenen PC, auf dem Neural OS schon läuft:
+Einmalig, auf deinem eigenen PC, auf dem Neural OS schon läuft.
 
-```bash
-node bin/neural-os.js stick prepare /pfad/zum/stick
-```
+### So geht es mit der Maus
 
-Das legt an:
+1. In der Seitenleiste auf **Stick** (oder `g` dann `t`).
+2. Ganz oben steht, ob dieses Neural OS gerade von der Festplatte oder schon
+   **vom Stick** läuft. Lies das zuerst — es entscheidet, was du hier tun willst.
+3. Den **Pfad zum Stick** eintippen. Der Browser kennt keine Dateipfade; es gibt
+   keinen Ordnerwähler, der einen absoluten Pfad liefern darf, also muss er
+   getippt werden:
+   - Linux: `/media/<dein-name>/<stick>` oder `/run/media/…`
+   - macOS: `/Volumes/<stick>`
+   - Windows: `E:\` (oder welchen Buchstaben der Stick bekommen hat)
+4. **„Erst ansehen"** drücken. Jetzt steht da, was passieren *würde*: wie viele
+   Dateien, wie viel Platz gebraucht wird, wie viel frei ist, welche Laufzeit
+   dazukäme, was das Dateisystem kann — und ob irgendetwas dagegenspricht.
+   Geschrieben ist bis hierhin **nichts**.
+5. Willst du deine Notizen mitnehmen: **„Meinen Datenbestand mitnehmen"**
+   ankreuzen. Das Original auf diesem Rechner bleibt unverändert.
+6. **„Stick vorbereiten"**. Es kommt eine Rückfrage, dann läuft es — mit einem
+   Balken, dessen Prozentzahl aus wirklich kopierten Bytes stammt, nicht aus
+   einer Animation.
+
+Danach liegt auf dem Stick:
 
 ```
 DEIN-STICK/
@@ -47,31 +64,29 @@ DEIN-STICK/
   neural-os.portable           Markierung: "Daten liegen hier, nicht im PC"
 ```
 
-**Deine bisherigen Daten mitnehmen:**
-
-```bash
-node bin/neural-os.js stick prepare /pfad/zum/stick --include-vault
-```
-
-Kopiert deinen aktuellen Datenbestand auf den Stick. Das Original auf dem PC
-bleibt unverändert.
-
-**Für andere Betriebssysteme:** Der Befehl legt immer die Laufzeit des Rechners
-bei, auf dem du ihn ausführst — das geht ohne Internet. Willst du den Stick
-zusätzlich auf Windows *und* Mac benutzen, brauchst du einmalig Internet:
-
-```bash
-node bin/neural-os.js stick prepare /pfad/zum/stick --runtimes win-x64,darwin-arm64
-```
-
-Das lädt die offiziellen Node-Pakete, **prüft ihre Prüfsummen** und entpackt nur
-die Programmdatei. Es geht durch dieselbe Netzschleuse wie alles andere — du
-musst also den Netzmodus auf *Internet* stellen oder eine Freigabe für
-`stick:runtime` erteilen. Blockiert die Schleuse, ist das kein Fehler: der Stick
-läuft trotzdem auf deinem eigenen Betriebssystem.
+**Für andere Betriebssysteme:** Mitkopiert wird immer nur die Laufzeit des
+Rechners, an dem du gerade sitzt — das geht ohne Internet. Im selben Bereich
+steht unter **„Welche Rechner der Stick starten kann"** jede Plattform mit
+ihrem Zustand. Fehlt eine, holt **„Holen"** sie einmalig von nodejs.org: durch
+dieselbe Netzschleuse wie alles andere, mit Prüfsummenvergleich, und es wird
+nur die Programmdatei entpackt. Blockiert die Schleuse, ist das kein Fehler —
+der Stick läuft trotzdem auf deinem eigenen Betriebssystem.
 
 Platzbedarf: rund **120 MB pro Betriebssystem**, plus deine Daten. Ein 8-GB-Stick
 reicht für alles außer den KI-Modellen.
+
+### Derselbe Weg über die Kommandozeile
+
+Wer lieber tippt oder das Ganze in ein Skript packen will:
+
+```bash
+node bin/neural-os.js stick prepare /pfad/zum/stick
+node bin/neural-os.js stick prepare /pfad/zum/stick --include-vault
+node bin/neural-os.js stick prepare /pfad/zum/stick --runtimes win-x64,darwin-arm64
+```
+
+Es ist dieselbe Funktion, die auch hinter den Knöpfen steckt — `stick prepare`
+und die Ansicht rufen denselben Code auf und rechnen mit denselben Zahlen.
 
 ## Teil 2 · Den Stick benutzen
 
@@ -133,7 +148,24 @@ du vertraust. In einem Internetcafé würde ich ihn nicht einstecken.
 
 Falls du später ein KI-Modell mit auf den Stick nehmen willst: Modelle sind oft
 größer. **Formatiere den Stick als exFAT**, dann fällt diese Grenze weg. Der
-Vorbereitungsbefehl warnt dich, wenn er FAT32 vorfindet.
+Bereich **Stick** sagt dir unter „Was du vorher wissen solltest", welches
+Dateisystem er vorgefunden hat und ob diese Grenze gilt — und der
+Vorbereitungsbefehl warnt ebenfalls.
+
+### Das Sprachmodell kommt NICHT mit auf den Stick
+
+Das ist der Satz, der hinterher am meisten enttäuscht, deshalb steht er hier
+und im Bereich **Stick** ausdrücklich da: mitgenommen werden deine Notizen,
+Chats, Projekte, Dateien und Verknüpfungen. **Das Modell nicht.** Es ist
+mehrere Gigabyte groß und gehört einem Anbieter auf dem jeweiligen Rechner
+(z. B. Ollama), nicht Neural OS.
+
+Konkret heißt das: an einem fremden Rechner ohne eigenes Modell hast du dein
+gesamtes Wissen — und bekommst keine neuen Antworten. Suche, Notizen, Graph,
+Zeitachse und Export funktionieren vollständig; Chat und alles, was ein Modell
+braucht, sagen dann, dass keines erreichbar ist, statt etwas zu erfinden. Teil 6
+beschreibt den Weg, ein Modell doch mitzunehmen — Handarbeit, und nur auf einem
+schnellen Datenträger sinnvoll.
 
 ### Geschwindigkeit
 
@@ -143,17 +175,28 @@ eine interne Festplatte.
 
 ## Teil 4 · Das Programm auf dem Stick aktualisieren
 
+**Mit der Maus:** Bereich **Stick**, Pfad eintragen, **„Nur Programm
+erneuern"**.
+
+Das erneuert **nur** den Programmcode. `data/` wird dabei nicht angefasst — das
+ist die wichtigste Zusage dieses Vorgangs, sie ist im Code erzwungen
+(`assertOutsideData`) und durch einen Test abgesichert, der beweist, dass keine
+einzige Datei in `data/` sich verändert, nicht einmal ihr Zeitstempel.
+
+Ob mit dem Stick alles in Ordnung ist, sagt **„Stick prüfen"** daneben. Diese
+Prüfung **schreibt nichts** auf den Stick — auch keine Testdatei. Der Preis
+dafür ist ehrlich benannt: ob das Dateisystem Zugriffsrechte durchsetzt, lässt
+sich ohne Schreiben nicht feststellen, und dann steht dort genau das, statt
+eines beruhigenden Häkchens.
+
+Läuft gerade ein Vorgang auf demselben Stick — zum Beispiel weil ein zweiter
+Tab offen ist —, lehnt der zweite Aufruf sofort ab und sagt, was läuft. Zwei
+gleichzeitige Vorgänge würden einander die halbfertigen Ordner wegräumen.
+
+**Über die Kommandozeile:**
+
 ```bash
 node bin/neural-os.js stick update /pfad/zum/stick
-```
-
-Erneuert **nur** den Programmcode. `data/` wird dabei nicht angefasst — das ist
-die wichtigste Zusage dieses Befehls, und sie ist durch einen Test abgesichert,
-der beweist, dass keine einzige Datei in `data/` sich verändert.
-
-Prüfen, ob mit dem Stick alles in Ordnung ist:
-
-```bash
 node bin/neural-os.js stick verify /pfad/zum/stick
 ```
 
@@ -164,7 +207,8 @@ Beide haben eigene Notizen. Dann gleichst du über einen Ordner ab — ohne Netz
 ohne Server.
 
 In der App: **Abgleich** → *Ordner hinzufügen* → den `sync/`-Ordner auf dem
-Stick auswählen → *Jetzt abgleichen*.
+Stick auswählen → *Jetzt abgleichen*. (Der Bereich **Stick** ist für den
+Stick selbst zuständig, der Bereich **Abgleich** für das Zusammenführen.)
 
 So funktioniert es: Jedes Gerät legt im `sync/`-Ordner ein eigenes Postfach an
 und schreibt nur dort hinein. Beim Abgleich liest es die Postfächer der anderen
@@ -202,7 +246,9 @@ Stick — ist in den meisten Fällen die bessere.
 
 | Problem | Abhilfe |
 |---|---|
-| „Keine passende Laufzeit auf dem Stick" | Der Stick wurde für ein anderes Betriebssystem vorbereitet. `stick prepare --runtimes <plattform>` auf einem passenden Rechner. |
+| „Keine passende Laufzeit auf dem Stick" | Der Stick wurde für ein anderes Betriebssystem vorbereitet. Bereich **Stick** → „Welche Rechner der Stick starten kann" → bei diesem System „Jetzt kopieren" (ohne Internet) oder bei einem fremden „Holen" (einmalig Internet). Über die Kommandozeile: `stick runtime /pfad/zum/stick <plattform>`. |
+| Der Pfad wird nicht angenommen | „Erst ansehen" sagt in einem ganzen Satz, was mit dem getippten Pfad nicht stimmt — und schreibt dabei nichts. |
+| „Auf dem Stick läuft bereits …" | Ein zweiter Tab hat denselben Stick in Arbeit. Warten, bis er fertig ist; zwei gleichzeitige Vorgänge würden einander die halbfertigen Ordner wegräumen. |
 | Windows blockiert den Start | SmartScreen: *Weitere Informationen* → *Trotzdem ausführen*. |
 | macOS lässt nicht starten | Rechtsklick auf den Starter → *Öffnen* → bestätigen. |
 | Das Fenster schließt sich sofort | Starter aus einem Terminal aufrufen, dann bleibt die Fehlermeldung stehen. |
@@ -235,4 +281,6 @@ Festplatte oder eine zweite Platte.
 | Braucht es Internet? | Nur einmal, für ein KI-Modell und für zusätzliche Laufzeiten |
 | Brauche ich Synchronisation? | Nur, wenn ein PC einen eigenen Datenbestand hat |
 | Platzbedarf | ~120 MB je Betriebssystem plus deine Daten |
+| Kommt das KI-Modell mit? | **Nein.** Das Wissen reist mit, das Modell nicht. |
+| Wo steht das alles in der App? | Seitenleiste → **Stick** (oder `g` dann `t`) |
 | Wichtigste Maßnahme | **Verschlüsselung einschalten.** Ein Stick geht verloren. |

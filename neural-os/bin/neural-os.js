@@ -6,8 +6,8 @@
  *
  *   neural-os [start]          start the local server (default)
  *   neural-os doctor           report honestly what works and what does not
- *   neural-os export [--dir D] [--format json|markdown|both]
- *   neural-os import <dir>     [--mode merge|replace|fresh]
+ *   neural-os export [--dir D] [--format json|markdown|both] [--passphrase X]
+ *   neural-os import <dir>     [--mode merge|replace|fresh|restore] [--passphrase X]
  *   neural-os compact          snapshot the vault and truncate the log
  *   neural-os version
  *
@@ -277,8 +277,12 @@ async function cmdExport(flags) {
     if (!app.backup) throw new Error('Backup-Subsystem nicht verfügbar');
     const format = typeof flags.format === 'string' ? flags.format : 'both';
     const dir = typeof flags.dir === 'string' ? flags.dir : undefined;
-    const res = await app.backup.exportAll({ dir, format, includeFiles: flags['no-files'] !== true });
+    const passphrase = typeof flags.passphrase === 'string' ? flags.passphrase : undefined;
+    const res = await app.backup.exportAll({ dir, format, includeFiles: flags['no-files'] !== true, passphrase });
     console.log(`${G}✓${X} ${res.records} Einträge exportiert nach ${B}${res.dir}${X} (${res.files} Dateien, ${Math.round(res.bytes / 1024)} KB)`);
+    console.log(res.sealed
+      ? `  Mit eigener Passphrase verschlüsselt. Ohne sie ist diese Sicherung nicht mehr zu öffnen.`
+      : `  ${Y}Achtung:${X} Dieser Ordner liegt im Klartext. Mit --passphrase wird er verschlüsselt.`);
     return 0;
   } finally {
     await app.close();
@@ -292,9 +296,21 @@ async function cmdImport(flags, args) {
   try {
     if (!app.backup) throw new Error('Backup-Subsystem nicht verfügbar');
     const mode = typeof flags.mode === 'string' ? flags.mode : 'merge';
-    const run = () => app.backup.importAll({ dir: source, mode });
-    const res = typeof app.bulkWrite === 'function' ? await app.bulkWrite(run) : await run();
+    const passphrase = typeof flags.passphrase === 'string' ? flags.passphrase : undefined;
+    const run = () => app.backup.importAll({ dir: source, mode, passphrase });
+    let ableitung = null;
+    const res = typeof app.bulkWrite === 'function'
+      ? await app.bulkWrite(run, { onRederive: (b) => { ableitung = b; } })
+      : await run();
     console.log(`${G}✓${X} ${res.imported} übernommen, ${res.skipped} übersprungen, ${res.conflicts ? res.conflicts.length || res.conflicts : 0} Konflikte`);
+    if (res.purged && res.purged.records) {
+      console.log(`  ${res.purged.records} vorhandene Einträge wurden dabei gelöscht`
+        + (res.purged.files ? `, ${res.purged.files} Dateiinhalte entfernt` : '') + '.');
+    }
+    // Was die Wiederherstellung NICHT geleistet hat, gehört auf denselben
+    // Bildschirm wie die Zahl, die sie geleistet hat.
+    for (const w of Array.isArray(res.warnings) ? res.warnings : []) console.log(`  ${Y}!${X} ${w}`);
+    if (ableitung && !ableitung.ok) console.log(`  ${Y}!${X} ${ableitung.grund}`);
     return 0;
   } finally {
     await app.close();

@@ -71,13 +71,13 @@ function assert(condition, message) {
 
 let PORT = 0;
 
-function request(method, urlPath, body, headers = {}) {
+function request(method, urlPath, body, headers = {}, port = PORT) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
     const req = http.request({
       method,
       host: '127.0.0.1',
-      port: PORT,
+      port,
       path: urlPath,
       headers: {
         ...(payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}),
@@ -98,6 +98,11 @@ function request(method, urlPath, body, headers = {}) {
     if (payload) req.write(payload);
     req.end();
   });
+}
+
+/** Dieselbe Tuer, aber an einer ZWEITEN Anwendung (Zielgeraet einer Wiederherstellung). */
+function postTo(port, urlPath, body) {
+  return request('POST', urlPath, body === undefined ? {} : body, {}, port);
 }
 
 const api = {
@@ -146,7 +151,6 @@ const SUBSYSTEM_ROUTES = {
   agents: '/api/agents',
   approvals: '/api/approvals',
   assist: '/api/assist/detectors',
-  study: '/api/study/stats',
   compare: '/api/models',   // eigene Routen sind POST; /api/models zeigt, dass die Registry steht
   watcher: '/api/watch',
   // Nur als POST erreichbar. Ein GET auf dieselbe Adresse antwortet mit 405 --
@@ -160,6 +164,9 @@ const SUBSYSTEM_ROUTES = {
   auth: '/api/tokens',
   extraction: null,       // wirkt beim Datei-Upload, hat keine eigene Route
   sync: '/api/peers',
+  // Die Selbstauskunft: laeuft diese Instanz portabel, von wo, mit welchen
+  // Laufzeiten. Ohne Pfadargument und ohne Nebenwirkung.
+  stick: '/api/stick',
   modules: '/api/modules',
   vectors: '/api/status',
   embeddings: '/api/status',
@@ -673,23 +680,129 @@ async function checkVaultAndBackup(app) {
     assert(files.some((f) => f.endsWith('.json')), 'keine JSON-Datei');
     return `${r.records} Einträge in ${path.basename(r.dir)}`;
   });
-  await check('Export und Re-Import erhalten alles', async () => {
+  /**
+   * Der Rundlauf, und zwar durch dieselbe Tuer, die ein Mensch benutzt.
+   *
+   * Hier stand frueher `res.imported > 0` und „nicht weniger NOTIZEN als
+   * vorher". Beides blieb gruen, waehrend beim Import 19 Kantendubletten
+   * entstanden. Eine Sicherung, die „etwas" zurueckbringt, ist keine --
+   * sie muss DASSELBE zurueckbringen, Satzart fuer Satzart.
+   *
+   * Und sie laeuft ueber POST /api/backup/import statt ueber einen direkten
+   * Modulaufruf: die Stelle, die die Graph-Ableitung waehrend eines Imports
+   * stilllegt und danach einmal nachholt, sitzt in der Route (app.bulkWrite).
+   * Ein Modulaufruf daneben wuerde eine Zusage pruefen, die niemand nutzt.
+   */
+  async function rundlauf(what, modus, pruefen) {
     const { createApp } = require('../src/app');
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-roundtrip-'));
     let target = null;
     try {
       const exported = await app.backup.exportAll({ format: 'json', includeFiles: true });
-      const vorher = app.store.all('note').length;
-      target = await createApp({ home: tmp, logLevel: 'error', harden: false });
-      const res = await target.backup.importAll({ dir: exported.dir, mode: 'merge' });
-      const nachher = target.store.all('note').length;
-      assert(res.imported > 0, 'nichts importiert');
-      assert(nachher >= vorher, `${vorher} Notizen vorher, ${nachher} nachher`);
-      return `${res.imported} übernommen, ${nachher} Notizen`;
+      target = await createApp({ home: tmp, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false });
+      const server = await target.listen();
+      const port = server.server.address().port;
+      const res = ok(await postTo(port, '/api/backup/import', { dir: exported.dir, mode: modus }), 'import');
+      return await pruefen(target, res);
     } finally {
       if (target) await target.close().catch(() => {});
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  }
+
+  const zaehleJeArt = (store) => {
+    const schema = require('../src/store/schema');
+    const out = {};
+    for (const type of schema.TYPES) {
+      const n = store.list(type, { includeDeleted: true, limit: 100000, offset: 0 }).total;
+      if (n) out[type] = n;
+    }
+    return out;
+  };
+
+  await check('Export und Re-Import erhalten jede Satzart', async () => {
+    const vorher = zaehleJeArt(app.store);
+    return rundlauf('rundlauf', 'merge', async (target, res) => {
+      assert(res.imported > 0, 'nichts importiert');
+      const nachher = zaehleJeArt(target.store);
+      const arten = [...new Set([...Object.keys(vorher), ...Object.keys(nachher)])].sort();
+      const abweichung = arten
+        .filter((t) => (vorher[t] || 0) !== (nachher[t] || 0))
+        .map((t) => `${t}: ${vorher[t] || 0} → ${nachher[t] || 0}`);
+      assert(!abweichung.length, `Satzzahlen weichen ab — ${abweichung.join(', ')}`);
+      return `${res.imported} übernommen, ${arten.length} Satzarten identisch`;
+    });
+  });
+
+  await check('Kanten überleben den Import ohne Dubletten', async () => {
+    // Eine Kante hat keinen eigenen Namen: zwei Kanten mit gleichem
+    // from|to|kind sind fuer einen Menschen EINE Verknuepfung, fuer den
+    // Speicher zwei Saetze mit verschiedenen ids. Die blosse Zahl verraet
+    // deshalb nicht, dass daneben abgeleitet wurde.
+    const schluessel = (store) => {
+      const items = store.list('edge', { includeDeleted: true, limit: 100000, offset: 0 }).items;
+      return { gesamt: items.length, eindeutig: new Set(items.map((e) => `${e.data.from}|${e.data.to}|${e.data.kind}`)).size };
+    };
+    const hier = schluessel(app.store);
+    return rundlauf('kanten', 'merge', async (target, res) => {
+      const dort = schluessel(target.store);
+      assert(dort.gesamt === hier.gesamt, `${hier.gesamt} Kanten hier, ${dort.gesamt} nach dem Import`);
+      assert(dort.gesamt === dort.eindeutig, `${dort.gesamt - dort.eindeutig} Kantendubletten nach dem Import`);
+      assert(res.graph && res.graph.ok, `die Ableitung wurde nicht nachgeholt: ${res.graph && res.graph.grund}`);
+      return `${dort.gesamt} Kanten, keine Dublette`;
+    });
+  });
+
+  await check('„Alles ersetzen" stellt eine frische Installation wirklich her', async () => {
+    // Der gemessene Notfall: wer auf einem neuen Rechner wiederherstellt,
+    // findet dort die Erstausstattung des ersten Starts vor. „fresh" bricht
+    // dann ab, „merge" und „replace" lassen sie stehen. Nur „restore" liefert
+    // den gesicherten Stand.
+    const { createApp, seedIfEmpty } = require('../src/app');
+    const erwartet = zaehleJeArt(app.store);
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-restore-'));
+    let target = null;
+    try {
+      const exported = await app.backup.exportAll({ format: 'json', includeFiles: true });
+      target = await createApp({ home: tmp, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false });
+      await seedIfEmpty(target);
+      const vorbelegt = Object.values(zaehleJeArt(target.store)).reduce((a, b) => a + b, 0);
+      assert(vorbelegt > 0, 'seedIfEmpty hat nichts angelegt — dann prüft das hier nichts');
+      const server = await target.listen();
+      const port = server.server.address().port;
+
+      const gescheitert = await postTo(port, '/api/backup/import', { dir: exported.dir, mode: 'fresh' });
+      assert(gescheitert.status >= 400, `„fresh" hätte auf einer frischen Installation abbrechen müssen (HTTP ${gescheitert.status})`);
+
+      const vorschau = ok(await postTo(port, '/api/backup/preview', { dir: exported.dir, mode: 'restore' }), 'preview');
+      assert(vorschau.verschwindet.length > 0, 'die Vorschau nennt nicht, was verschwindet');
+      assert(zaehleJeArt(target.store).note !== undefined || vorbelegt > 0, 'Vorschau hat geschrieben');
+
+      const res = ok(await postTo(port, '/api/backup/import', { dir: exported.dir, mode: 'restore' }), 'restore');
+      const nachher = zaehleJeArt(target.store);
+      const arten = [...new Set([...Object.keys(erwartet), ...Object.keys(nachher)])].sort();
+      const abweichung = arten
+        .filter((t) => (erwartet[t] || 0) !== (nachher[t] || 0))
+        .map((t) => `${t}: ${erwartet[t] || 0} → ${nachher[t] || 0}`);
+      assert(!abweichung.length, `Satzzahlen weichen ab — ${abweichung.join(', ')}`);
+      assert(res.purged.records >= vorbelegt, `die Erstausstattung wurde nicht entfernt: ${JSON.stringify(res.purged)}`);
+      assert(res.warnings.some((w) => /rückgängig|rueckgaengig/.test(w)), 'das Ergebnis sagt nicht, dass das unumkehrbar war');
+      return `${vorbelegt} vorbelegte Sätze ersetzt, ${arten.length} Satzarten identisch`;
+    } finally {
+      if (target) await target.close().catch(() => {});
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  await check('Die Liste der Sicherungen nennt echte Ordner', async () => {
+    const r = ok(await api.get('/api/backup/list'), 'list');
+    assert(Array.isArray(r.items), 'keine Liste');
+    assert(r.items.length > 0, 'die vorher geschriebenen Exporte tauchen nicht auf');
+    for (const item of r.items) {
+      assert(fs.existsSync(path.join(item.dir, 'manifest.json')), `${item.dir} hat kein manifest.json`);
+      assert(typeof item.sealed === 'boolean', 'ob die Sicherung im Klartext liegt, muss dastehen');
+    }
+    return `${r.items.length} Sicherung(en), älteste zuletzt`;
   });
   await check('Absturz mitten im Schreiben zerstört nichts', async () => {
     const { createApp } = require('../src/app');
@@ -1007,11 +1120,47 @@ async function checkExtraction() {
   });
 }
 
+/**
+ * Einen Ereignisstrom (SSE) als ganze Antwort lesen.
+ *
+ * Der Server beendet den Strom, wenn der Vorgang fertig ist -- damit reicht
+ * dieselbe Anfrage wie fuer jede andere Route, und `text` enthaelt am Ende
+ * alle Ereignisse. Das ist absichtlich kein eigener Client: geprueft werden
+ * soll die echte Route, nicht ein Nachbau davon.
+ */
+async function sse(urlPath, body) {
+  const res = await request('POST', urlPath, body === undefined ? {} : body);
+  const events = [];
+  let name = null;
+  for (const zeile of String(res.text || '').split(/\r?\n/)) {
+    if (zeile.startsWith('event:')) name = zeile.slice(6).trim();
+    else if (zeile.startsWith('data:')) {
+      let daten = zeile.slice(5).trim();
+      try { daten = JSON.parse(daten); } catch { /* Klartext */ }
+      events.push({ event: name, data: daten });
+      name = null;
+    }
+  }
+  return { status: res.status, json: res.json, text: res.text, events };
+}
+
+/**
+ * Der Befund, der diesen Abschnitt zweimal gruen durchlaufen liess: hier
+ * wurde `createStick()` direkt aufgerufen. Damit war jede Zusage des Moduls
+ * geprueft -- und dass der Browser das Modul ueberhaupt nicht erreichen kann,
+ * fiel nicht auf. 1792 Zeilen Stick-Werkzeug, null Routen in src/http, null
+ * Treffer fuer "Stick" in web/**. Deshalb steht unten jetzt beides: die
+ * Zusagen des Moduls UND die Tuer, durch die ein Mensch geht.
+ */
 async function checkStick() {
   area('13 · USB-Stick');
   const { createStick, LOCAL_PLATFORM } = require('../src/portable/stick');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-usb-'));
   const src = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-src-'));
+  // Eigener Zielordner fuer die HTTP-Haelfte: die beiden Haelften duerfen
+  // einander nicht in die Quere kommen, sonst erklaert ein Fehlschlag nichts.
+  const httpZiel = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-usb-http-'));
+  const httpDaten = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-usb-daten-'));
   let app = null;
   try {
     const { createApp } = require('../src/app');
@@ -1064,10 +1213,110 @@ async function checkStick() {
       assert(nachher.problems.every((p) => p.message), 'Problem ohne Beschreibung');
       return `erkannt: ${nachher.problems[0].code}`;
     });
+
+    /* ---- und jetzt dieselben Zusagen durch die echte HTTP-Tuer ---- */
+
+    await check('Die Selbstauskunft ist ueber HTTP erreichbar', async () => {
+      const r = ok(await api.get('/api/stick'), 'GET /api/stick');
+      assert(typeof r.portabel === 'boolean', 'keine Aussage, ob diese Instanz portabel laeuft');
+      assert(r.portabel === false ? r.von === null : !!r.von, 'portabel und Herkunft widersprechen sich');
+      assert(Array.isArray(r.bekanntePlattformen) && r.bekanntePlattformen.length, 'keine Plattformliste');
+      assert(r.modell && r.modell.reistMit === false && r.modell.grund,
+        'die Ansicht koennte nicht sagen, dass das Modell NICHT mitreist');
+      return `portabel=${r.portabel}, dieser Rechner=${r.dieserRechner}`;
+    });
+
+    await check('/api/status sagt, ob von einem Stick gestartet wurde', async () => {
+      const r = ok(await api.get('/api/status'), 'status');
+      assert('portable' in r, 'der Browser kann nicht einmal erfahren, DASS er von einem Stick laeuft');
+      assert(r.subsystems && r.subsystems.stick === true, 'das Stick-Werkzeug haengt nicht am Server');
+      return `portable=${JSON.stringify(r.portable)}`;
+    });
+
+    await check('"Erst ansehen" sagt, was passieren wuerde, und legt nichts an', async () => {
+      const vorher = fs.readdirSync(httpZiel);
+      const r = ok(await api.get(`/api/stick/preview?path=${encodeURIComponent(httpZiel)}`), 'preview');
+      assert(r.source && r.source.files > 0, 'die Vorschau nennt keine Dateizahl');
+      assert(r.space && Number.isFinite(r.space.withHeadroom), 'die Vorschau nennt keinen Platzbedarf');
+      assert(Array.isArray(r.blockers) && r.blockers.length === 0, `unerwartetes Hindernis: ${JSON.stringify(r.blockers)}`);
+      const nachher = fs.readdirSync(httpZiel);
+      assert(vorher.join(',') === nachher.join(',') && nachher.length === 0,
+        `die Vorschau hat etwas angelegt: ${nachher.join(', ')}`);
+      return `${r.source.files} Dateien, ${Math.round(r.space.withHeadroom / 1048576)} MB noetig, nichts geschrieben`;
+    });
+
+    await check('Ein getippter Pfad ohne Stick wird mit einem ganzen Satz abgelehnt', async () => {
+      const r = await api.get(`/api/stick/preview?path=${encodeURIComponent(httpZiel)}&action=update`);
+      assert(r.status === 400, `HTTP ${r.status}`);
+      const satz = (r.json && r.json.error && r.json.error.message) || '';
+      assert(/kein Neural-OS-Stick/.test(satz), `kein brauchbarer Satz: ${satz.slice(0, 120)}`);
+      return `HTTP 400, "${satz.slice(0, 60)}…"`;
+    });
+
+    await check('Ein Stick laesst sich ueber HTTP wirklich vorbereiten', async () => {
+      const r = await sse('/api/stick/prepare', { path: httpZiel });
+      assert(r.status === 200, `HTTP ${r.status}: ${String(r.text).slice(0, 200)}`);
+      const arten = r.events.map((e) => e.event);
+      assert(arten.includes('fertig'), `kein Abschluss gemeldet: ${arten.join(',')}`);
+      assert(!arten.includes('fehler'), `Fehler im Strom: ${JSON.stringify(r.events.find((e) => e.event === 'fehler'))}`);
+      const fortschritt = r.events.filter((e) => e.event === 'fortschritt');
+      assert(fortschritt.length >= 3, `zu wenige Fortschrittsmeldungen fuer einen Balken: ${fortschritt.length}`);
+      const prozente = fortschritt.map((e) => e.data && e.data.percent).filter((v) => Number.isFinite(v));
+      assert(prozente.length && prozente[prozente.length - 1] === 100, `der Balken endet nicht bei 100: ${prozente.join(',')}`);
+      assert(fs.existsSync(path.join(httpZiel, 'neural-os.portable')), 'Marker fehlt');
+      assert(fs.existsSync(path.join(httpZiel, 'app', 'bin', 'neural-os.js')), 'Programm fehlt');
+      assert(fs.existsSync(path.join(httpZiel, 'runtime', LOCAL_PLATFORM)), 'Laufzeit fehlt');
+      return `${fortschritt.length} Meldungen, ${arten.filter((a) => a === 'fertig').length}× fertig`;
+    });
+
+    await check('Die Pruefung ueber HTTP schreibt nichts auf den Stick', async () => {
+      const vorher = fs.statSync(httpZiel).mtimeMs;
+      const r = ok(await api.get(`/api/stick/verify?path=${encodeURIComponent(httpZiel)}`), 'verify');
+      assert(r.ok === true, `frischer Stick gilt als kaputt: ${JSON.stringify(r.problems)}`);
+      assert(r.filesystem && r.filesystem.probed === false, 'die Pruefung hat eine Sonde geschrieben');
+      assert(fs.statSync(httpZiel).mtimeMs === vorher, 'der Wurzelordner wurde angefasst');
+      return `ok, ${r.problems.length} Hinweis(e), keine Sonde`;
+    });
+
+    await check('Zwei gleichzeitige Vorgaenge ergeben 409, nicht zwei halbe Sticks', async () => {
+      const erster = sse('/api/stick/update', { path: httpZiel });
+      // Kurz warten, damit der erste die Sperre wirklich haelt.
+      await new Promise((r) => { setTimeout(r, 30); });
+      const zweiter = await api.post('/api/stick/update', { path: httpZiel });
+      const fertig = await erster;
+      assert(fertig.status === 200, `der erste Lauf scheiterte: HTTP ${fertig.status}`);
+      assert(zweiter.status === 409, `der zweite Lauf bekam HTTP ${zweiter.status} statt 409`);
+      const satz = (zweiter.json && zweiter.json.error && zweiter.json.error.message) || '';
+      assert(/laeuft bereits/.test(satz), `kein brauchbarer Satz: ${satz.slice(0, 120)}`);
+      // Und der Stick ist danach heil -- genau das, was die Sperre schuetzt.
+      const nach = ok(await api.get(`/api/stick/verify?path=${encodeURIComponent(httpZiel)}`), 'verify danach');
+      assert(nach.ok === true, `der Stick ist beschaedigt: ${JSON.stringify(nach.problems)}`);
+      return `409 mit Grund, Stick danach in Ordnung`;
+    });
+
+    await check('Was nicht klappen kann, wird VOR dem ersten Byte abgelehnt', async () => {
+      // Der Datenbestand geht einmal mit -- das ist der Fall, um den es geht.
+      const erst = await sse('/api/stick/prepare', { path: httpDaten, includeVault: true });
+      assert(erst.status === 200, `erster Lauf: HTTP ${erst.status}: ${String(erst.text).slice(0, 200)}`);
+      assert(fs.readdirSync(path.join(httpDaten, 'data')).length > 0, 'der Datenbestand kam nicht mit');
+
+      // Und jetzt noch einmal: prepare ueberschreibt NIE Daten. Die Absage
+      // muss ein Statuscode sein, kein halber Ereignisstrom, in dem eine
+      // Fehlermeldung steht -- sonst haette der Browser schon einen Balken
+      // gezeichnet, bevor klar war, dass nichts passiert.
+      const zweit = await api.post('/api/stick/prepare', { path: httpDaten, includeVault: true });
+      assert(zweit.status === 409, `HTTP ${zweit.status} statt 409`);
+      assert(!/^event:/m.test(String(zweit.text)), 'es wurde doch ein Ereignisstrom geoeffnet');
+      const satz = (zweit.json && zweit.json.error && zweit.json.error.message) || '';
+      assert(/bereits ein Datenbestand/.test(satz), `kein brauchbarer Satz: ${satz.slice(0, 120)}`);
+      return `409 ohne Strom, "${satz.slice(0, 55)}…"`;
+    });
   } finally {
     if (app) await app.close().catch(() => {});
     fs.rmSync(tmp, { recursive: true, force: true });
     fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(httpZiel, { recursive: true, force: true });
+    fs.rmSync(httpDaten, { recursive: true, force: true });
   }
 }
 
@@ -1475,70 +1724,8 @@ async function checkToday(app) {
   });
 }
 
-async function checkStudy(app) {
-  area('18 · Lernen');
-
-  let karte = null;
-  await check('Eine Karte lässt sich anlegen und ist sofort fällig', async () => {
-    const r = ok(await api.post('/api/study/cards', {
-      front: 'Was ist Crema?', back: 'Die Schaumschicht auf dem Espresso.',
-    }), 'karte');
-    karte = r.record;
-    const due = ok(await api.get('/api/study/due'), 'due');
-    const ids = (due.items || []).map((i) => i.record && i.record.id);
-    assert(ids.includes(karte.id), `neue Karte nicht fällig: ${JSON.stringify(ids)}`);
-    return `${(due.items || []).length} fällig`;
-  });
-
-  await check('Jeder Knopf sagt vorher, wann die Karte wiederkommt', async () => {
-    const due = ok(await api.get('/api/study/due'), 'due');
-    const item = (due.items || []).find((i) => i.record.id === karte.id);
-    assert(item && Array.isArray(item.vorschau) && item.vorschau.length === 4,
-      `keine vier Vorschauen: ${JSON.stringify(item && item.vorschau)}`);
-    for (const v of item.vorschau) {
-      assert(typeof v.wann === 'string' && v.wann, `Note ${v.grade} ohne "wann": ${JSON.stringify(v)}`);
-    }
-    // "Nochmal" muss HEUTE heissen, sonst ist es kein Nochmal.
-    const nochmal = item.vorschau.find((v) => v.grade === 0);
-    assert(/heute/i.test(nochmal.wann), `"Nochmal" sagt "${nochmal.wann}" statt heute`);
-    return item.vorschau.map((v) => `${v.label}: ${v.wann}`).join(' · ');
-  });
-
-  await check('Eine Bewertung ändert den Satz wirklich', async () => {
-    const r = ok(await api.post(`/api/study/cards/${karte.id}/review`, { grade: 2 }), 'review');
-    const satz = body(ok(await api.get(`/api/records/${karte.id}`), 'karte').record);
-    assert(satz.reps === 1, `reps ist ${satz.reps}`);
-    assert(satz.due, 'kein Termin gesetzt');
-    assert(satz.lastReviewedAt, 'kein Zeitpunkt der Bewertung');
-    return `reps=${satz.reps} due=${satz.due} ease=${satz.ease}`;
-  });
-
-  await check('Eine unmögliche Note wird abgewiesen', async () => {
-    const r = await api.post(`/api/study/cards/${karte.id}/review`, { grade: 9 });
-    assert(r.status === 400, `HTTP ${r.status} statt 400`);
-    return 'abgelehnt';
-  });
-
-  await check('Aus Fließtext wird keine Karte geraten', async () => {
-    const note = ok(await api.post('/api/records', {
-      type: 'note',
-      data: {
-        title: 'Espresso',
-        body: 'Der Mahlgrad entscheidet über den Widerstand. Neun bar sind die Norm.\n\n'
-          + '## Was ist Crema?\n\nDie Schaumschicht auf dem Espresso.\n',
-      },
-    }), 'notiz').record;
-    const v = ok(await api.get(`/api/study/from-note/${note.id}`), 'vorschläge');
-    const items = v.items || v.vorschlaege || [];
-    assert(items.length >= 1, `keine Vorschläge aus der Überschrift: ${JSON.stringify(v).slice(0, 200)}`);
-    const ausProsa = items.filter((i) => /Der Mahlgrad entscheidet/.test(i.front || ''));
-    assert(!ausProsa.length, 'aus einem gewöhnlichen Satz wurde eine Karte geraten');
-    return `${items.length} aus ausdrücklichen Strukturen, 0 geraten`;
-  });
-}
-
 async function checkWatch(app) {
-  area('19 · Beobachtete Ordner');
+  area('18 · Beobachtete Ordner');
 
   const fsMod = require('node:fs');
   const osMod = require('node:os');
@@ -1614,7 +1801,7 @@ async function checkWatch(app) {
 }
 
 async function checkSecondLook(app) {
-  area('20 · Zweiter Blick');
+  area('19 · Zweiter Blick');
 
   const lang = 'Der Mahlgrad entscheidet über den Widerstand im Sieb. Ist er zu fein, steigt der Druck '
     + 'und der Espresso läuft nur tropfenweise; ist er zu grob, rauscht das Wasser durch und die Crema '
@@ -1686,7 +1873,6 @@ const AREAS = {
   automatik: checkAutomation,
   rueckgaengig: checkHistory,
   heute: checkToday,
-  lernen: checkStudy,
   ordner: checkWatch,
   zweiterblick: checkSecondLook,
 };

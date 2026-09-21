@@ -66,12 +66,6 @@ const GONE = 'gone';
  *  - `watch` names a path. A folder on one machine does not exist on the
  *    other, and a peer that could switch one on would have a way to make a
  *    foreign machine read a directory of its choosing.
- *  - `card` carries a review schedule (`due`, `ease`, `intervalDays`). Two
- *    devices studying the same deck would produce two schedules for one card,
- *    and merging them means picking a winner -- which is a decision about how
- *    well you know something, not about which timestamp is larger. Honest
- *    limitation, written down rather than papered over: your deck currently
- *    lives on one device.
  *  - `suggestion` is a local reading of a local vault. Once the notes it is
  *    about have travelled, the other device produces its own suggestions in
  *    milliseconds -- and a "dismissed" decision made there belongs to whoever

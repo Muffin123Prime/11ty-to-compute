@@ -21,7 +21,7 @@
  * an open session is never served half of one build and half of another.
  */
 
-const VERSION = 'v1';
+const VERSION = 'v2';
 const CACHE_NAME = `neural-os-shell-${VERSION}`;
 
 /**

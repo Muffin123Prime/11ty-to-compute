@@ -43,6 +43,24 @@
  *     additionally cannot hold a file over 4 GB, and a language model usually
  *     is one.
  *
+ *  6. NICHTS DAVON HAELT DEN SERVER AN. Dieselben Funktionen bedienen die
+ *     Kommandozeile UND eine HTTP-Route. Am Terminal stoert es niemanden, wenn
+ *     eine Kopie synchron laeuft; im Serverprozess steht waehrenddessen die
+ *     ganze Oberflaeche fuer jeden Benutzer still. Gemessen an 250 Dateien und
+ *     1 GB waren das 2864 ms ohne eine einzige Runde des Ereignisrings.
+ *     Deshalb kopiert dieses Modul ueber den Thread-Pool, und deshalb wird
+ *     kein Kindprozess mehr synchron abgewartet.
+ *
+ *  7. JEDER LANGE VORGANG LAESST SICH ABBRECHEN, UND ZWEI GLEICHZEITIGE GIBT
+ *     ES NICHT. Ein geschlossener Browsertab darf keine 8-GB-Kopie zu Ende
+ *     laufen lassen (`signal`), und zwei Tabs duerfen einander nicht die
+ *     halbfertigen Ordner wegraeumen (`lockRoot`) -- cleanStale() kann die
+ *     beiden Faelle auf der Platte nicht unterscheiden.
+ *
+ *  8. WAS NUR LIEST, SCHREIBT AUCH NICHTS. verify() beantwortet eine reine
+ *     Lesefrage; die Rechte-Sonde, die dafuer eine Datei anlegt, muss ein
+ *     Aufrufer ausdruecklich verlangen.
+ *
  * The one thing this module does NOT promise: that a runtime for a foreign
  * platform can always be fetched. That needs the network gate to allow
  * nodejs.org, and if it does not, that is a decision of the user's policy --
@@ -50,16 +68,19 @@
  */
 
 const fs = require('node:fs');
+const fsp = require('node:fs/promises');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const crypto = require('node:crypto');
-const { spawnSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 
 const {
   ValidationError,
   StorageError,
   NotFoundError,
   NetworkBlockedError,
+  PermissionError,
+  AbortedError,
   NeuralError,
 } = require('../kernel/errors');
 const { PORTABLE_MARKER } = require('../kernel/paths');
@@ -205,6 +226,211 @@ function nullLogger() {
   return { error() {}, warn() {}, info() {}, debug() {} };
 }
 
+/**
+ * Anteil in Prozent, aus Bytes wenn es sie gibt, sonst aus der Dateizahl.
+ * Ein Balken im Browser braucht eine Zahl, auch wenn alle Dateien 0 Byte haben.
+ */
+function percentOf(bytes, totalBytes, copied, total) {
+  const share = totalBytes > 0 ? bytes / totalBytes : (total > 0 ? copied / total : 1);
+  return Math.max(0, Math.min(100, Math.round(share * 100)));
+}
+
+/* ------------------------------------------- Fehler in ganzen Saetzen */
+
+/**
+ * Warum hier eigene Klassen stehen, obwohl kernel/errors.js eine Taxonomie hat:
+ *
+ *  - `NotFoundError` baut den Satz `${what} not found`. Die Aufrufer hier
+ *    beginnen deutsch ("Der Quellordner /media/usb"), in der Oberflaeche stuende
+ *    also "Der Quellordner /media/usb not found". Die Unterklasse erbt Code und
+ *    Status (NOT_FOUND / 404) unveraendert und setzt nur den fertigen deutschen
+ *    Satz ein; `instanceof NotFoundError` gilt weiterhin.
+ *  - `StorageError` antwortet mit Status 500. "Der Stick ist voll" ist aber
+ *    kein Defekt dieses Servers, sondern ein Zustand der Welt. 500 laedt die
+ *    Oberflaeche dazu ein, einen Fehlerbericht anzubieten, wo "Platz schaffen"
+ *    die richtige Handlung waere. 507 (Insufficient Storage) ist genau dieser
+ *    Fall. Die Klasse bleibt eine StorageError, damit niemand etwas verliert,
+ *    der darauf prueft.
+ *
+ * Fuer den dritten Fall gibt es die passende Klasse bereits: ein
+ * schreibgeschuetzter Stick ist eine `PermissionError` (403) -- ein Recht wurde
+ * gebraucht und nicht gewaehrt --, kein Serverdefekt.
+ */
+class StickNotFoundError extends NotFoundError {
+  constructor(satz, details) {
+    super(satz);
+    this.message = satz;
+    this.details = details ?? null;
+  }
+}
+
+/** Der Stick hat keinen Platz mehr. Status 507, nicht 500. */
+class StickFullError extends StorageError {
+  constructor(message, details) {
+    super(message, details);
+    this.name = 'StickFullError';
+    this.code = 'STICK_FULL';
+    this.status = 507;
+  }
+}
+
+/**
+ * Auf dem Stick liegt schon ein Datenbestand, und prepare() ueberschreibt nie
+ * Daten. Aus demselben Grund wie StickFullError keine 500: das ist kein Defekt
+ * dieses Servers, sondern der Zustand des Sticks, und die Oberflaeche soll
+ * "nimm Aktualisieren" anbieten statt eines Fehlerberichts. 409 (Conflict) ist
+ * genau dieser Fall. `instanceof StorageError` gilt weiterhin.
+ */
+class StickDataError extends StorageError {
+  constructor(message, details) {
+    super(message, details);
+    this.name = 'StickDataError';
+    this.code = 'STICK_DATA_PRESENT';
+    this.status = 409;
+  }
+}
+
+/** Auf derselben Stick-Wurzel laeuft schon ein Vorgang. Status 409. */
+class StickBusyError extends NeuralError {
+  constructor(message, details) {
+    super('STICK_BUSY', message, { status: 409, details });
+    this.name = 'StickBusyError';
+  }
+}
+
+/* --------------------------------------------------------------- Abbruch */
+
+/**
+ * Was ein Abbruch dem Benutzer sagen muss: nicht "aborted", sondern was jetzt
+ * auf dem Stick liegt. Halbe Kopien sind durch die zweistufige Umbenennung
+ * abgedeckt -- der bisherige Stand bleibt vollstaendig, das halbfertige
+ * Verzeichnis traegt einen Namen, den verify() erkennt.
+ */
+function abortedDuring(what) {
+  return new AbortedError(
+    `${what} wurde abgebrochen. Auf dem Stick steht weiterhin der Stand von vorher; `
+    + 'halb Kopiertes wurde entfernt. "Stick pruefen" zeigt, was jetzt da ist.',
+  );
+}
+
+function throwIfAborted(signal, what) {
+  if (signal && signal.aborted) throw abortedDuring(what);
+}
+
+/* ------------------------------------------------------ Platz, an EINER Stelle */
+
+/**
+ * Wie viel Platz ein Vorgang braucht.
+ *
+ * WARUM eine eigene Funktion: dieselbe Zahl beantwortet zwei Fragen, die weit
+ * auseinanderliegen -- "darf prepare() ueberhaupt anfangen?" und "was sagt die
+ * Vorschau im Browser, bevor jemand klickt?". Stuenden die beiden Formeln
+ * getrennt da, wuerde die Vorschau irgendwann etwas versprechen, das der
+ * Vorgang danach ablehnt. Genau diese Sorte Luege soll es hier nicht geben.
+ *
+ * `update` rechnet anders, und das ist kein Versehen: der alte `app/`-Ordner
+ * wird erst freigegeben, wenn der neue vollstaendig danebensteht -- gebraucht
+ * wird also die volle Groesse noch einmal, nicht die Differenz.
+ */
+function spaceNeeded(action, { sourceBytes = 0, runtimeBytes = 0, homeBytes = 0, extraRuntimes = 0 } = {}) {
+  if (action === 'update') {
+    return { required: sourceBytes, withHeadroom: sourceBytes + MIN_HEADROOM_BYTES };
+  }
+  const required = sourceBytes + runtimeBytes + homeBytes + extraRuntimes * ESTIMATED_RUNTIME_BYTES;
+  return { required, withHeadroom: required + Math.max(MIN_HEADROOM_BYTES, Math.round(required * 0.05)) };
+}
+
+/**
+ * Der Satz zu "es passt nicht" -- ebenfalls an einer Stelle, aus demselben
+ * Grund: die Vorschau lehnt mit demselben Wortlaut ab wie der Vorgang selbst.
+ */
+function stickFull(action, parts) {
+  const { free, withHeadroom, sourceBytes = 0, runtimeBytes = 0, homeBytes = 0, extraRuntimes = 0 } = parts;
+  if (action === 'update') {
+    return new StickFullError(
+      `Für die Aktualisierung werden ${humanBytes(withHeadroom)} frei gebraucht, vorhanden sind ${humanBytes(free)}. `
+      + 'Es wurde nichts verändert; der bisherige Stand auf dem Stick bleibt unberührt.',
+      { free, required: withHeadroom },
+    );
+  }
+  return new StickFullError(
+    `Auf dem Stick sind nur ${humanBytes(free)} frei, gebraucht werden mindestens ${humanBytes(withHeadroom)} `
+    + `(Quelltext ${humanBytes(sourceBytes)}`
+    + (runtimeBytes ? `, Laufzeit ${humanBytes(runtimeBytes)}` : '')
+    + (homeBytes ? `, Datenbestand ${humanBytes(homeBytes)}` : '')
+    + (extraRuntimes ? `, ${extraRuntimes} weitere Laufzeit(en) geschätzt ${humanBytes(extraRuntimes * ESTIMATED_RUNTIME_BYTES)}` : '')
+    + '). Es wurde nichts geschrieben - ein halb kopierter Stick waere schlimmer als keiner. '
+    + 'Schaffe Platz oder lass die zusätzlichen Laufzeiten weg.',
+    { free, required: withHeadroom },
+  );
+}
+
+/** Derselbe Satz fuer "da liegen schon Daten", aus demselben Grund. */
+function dataPresent(dataDir, entries) {
+  return new StickDataError(
+    `In ${dataDir} liegt bereits ein Datenbestand (${entries} Eintrag/Einträge). "Stick vorbereiten" überschreibt `
+    + 'niemals Daten. Nutze "Stick aktualisieren", um nur den Quelltext zu erneuern, oder wähle einen leeren Ordner.',
+    { dataDir, entries },
+  );
+}
+
+/** Der naechste Ordner nach oben, den es wirklich gibt. Fuer eine Vorschau auf einen Pfad, der noch nicht existiert. */
+function nearestExisting(dir) {
+  let probe = path.resolve(dir);
+  for (let i = 0; i < MAX_DEPTH; i++) {
+    if (fs.existsSync(probe)) return probe;
+    const parent = path.dirname(probe);
+    if (parent === probe) return null;
+    probe = parent;
+  }
+  return null;
+}
+
+/* ------------------------------------------------- eine Sperre je Stick */
+
+/**
+ * Prozessweite Sperre je Stick-Wurzel.
+ *
+ * WARUM prozessweit und nicht je Werkzeug-Instanz: cleanStale() entfernt JEDES
+ * `.name.tmp-XXXX` in der Wurzel -- auch das Arbeitsverzeichnis eines gerade
+ * laufenden zweiten Vorgangs. Ueber HTTP genuegen dafuer zwei Browsertabs, und
+ * jede Anfrage kann sich ihr eigenes createStick() holen. Die Sperre muss also
+ * am Pfad haengen, nicht am Objekt. Sie ist bewusst keine Warteschlange: der
+ * zweite Aufruf soll sofort eine Antwort bekommen, die er anzeigen kann.
+ */
+const busyRoots = new Map();
+
+// Windows unterscheidet in Pfaden keine Gross-/Kleinschreibung; ohne das waeren
+// "E:/stick" und "e:/stick" zwei verschiedene Sticks und die Sperre nutzlos.
+function rootKey(root) {
+  return process.platform === 'win32' ? root.toLowerCase() : root;
+}
+
+/** Laeuft auf dieser Wurzel gerade ein Vorgang? Sonst null. */
+function runningOn(root) {
+  return busyRoots.get(rootKey(root)) || null;
+}
+
+/** Der Satz zu "da laeuft schon etwas" -- einmal, fuer die Sperre und fuer die Vorschau. */
+function busyError(root, running) {
+  const seconds = Math.max(1, Math.round((Date.now() - running.since) / 1000));
+  return new StickBusyError(
+    `Auf ${root} laeuft bereits "${running.what}" (seit ${seconds} s). Zwei Vorgaenge auf demselben Stick `
+    + 'raeumen einander die halbfertigen Ordner weg und koennen ihn unbrauchbar machen. Warte, bis der '
+    + 'erste fertig ist, oder brich ihn ab.',
+    { root, running: running.what, seconds },
+  );
+}
+
+function lockRoot(root, what) {
+  const key = rootKey(root);
+  const running = busyRoots.get(key);
+  if (running) throw busyError(root, running);
+  const entry = { what, since: Date.now() };
+  busyRoots.set(key, entry);
+  return () => { if (busyRoots.get(key) === entry) busyRoots.delete(key); };
+}
+
 /** A throwing progress callback must never break a copy in flight. */
 function makeProgress(fn, log) {
   if (typeof fn !== 'function') return () => {};
@@ -245,6 +471,32 @@ function freeBytesOf(dir) {
   return null;
 }
 
+function emptyFsInfo() {
+  return {
+    writable: false,
+    enforcesModes: null,
+    probed: false,
+    type: null,
+    typeName: 'unbekannt',
+    maxFileBytes: null,
+    error: null,
+  };
+}
+
+/** Typ und Grenzen des Dateisystems. Reines Lesen, auf jedem Weg gleich. */
+function readFsType(dir, result) {
+  try {
+    const st = fs.statfsSync(dir);
+    result.type = Number(st.type);
+    const known = FS_TYPES[result.type >>> 0] || FS_TYPES[result.type];
+    if (known) {
+      result.typeName = known.name;
+      result.maxFileBytes = known.maxFileBytes;
+    }
+  } catch { /* not every platform reports a usable type */ }
+  return result;
+}
+
 /**
  * What can this filesystem actually do?
  *
@@ -253,19 +505,18 @@ function freeBytesOf(dir) {
  * On FAT/exFAT the mode comes back as 0777 or 0666, which is precisely the
  * fact the user needs to hear before they trust the stick with a vault.
  *
+ * Diese Sonde LEGT EINE DATEI AN. Sie gehoert deshalb in die Vorgaenge, die
+ * ohnehin schreiben (prepare, update) -- wer nur liest, nimmt
+ * inspectFilesystem() und bekommt eine ehrliche Luecke statt einer Nebenwirkung.
+ *
  * @param {string} dir an existing directory
- * @returns {{writable:boolean, enforcesModes:boolean|null, type:number|null,
- *            typeName:string, maxFileBytes:number|null, error:string|null}}
+ * @returns {{writable:boolean, enforcesModes:boolean|null, probed:boolean,
+ *            type:number|null, typeName:string, maxFileBytes:number|null,
+ *            error:string|null}}
  */
 function probeFilesystem(dir) {
-  const result = {
-    writable: false,
-    enforcesModes: null,
-    type: null,
-    typeName: 'unbekannt',
-    maxFileBytes: null,
-    error: null,
-  };
+  const result = emptyFsInfo();
+  result.probed = true;
 
   const probe = path.join(dir, `.neural-os-probe-${randomSuffix()}`);
   try {
@@ -284,17 +535,50 @@ function probeFilesystem(dir) {
     try { fs.unlinkSync(probe); } catch { /* the probe is disposable */ }
   }
 
-  try {
-    const st = fs.statfsSync(dir);
-    result.type = Number(st.type);
-    const known = FS_TYPES[result.type >>> 0] || FS_TYPES[result.type];
-    if (known) {
-      result.typeName = known.name;
-      result.maxFileBytes = known.maxFileBytes;
-    }
-  } catch { /* not every platform reports a usable type */ }
+  return readFsType(dir, result);
+}
 
-  return result;
+/**
+ * Dieselben Fragen, ohne eine einzige Schreiboperation.
+ *
+ * WARUM: verify() beantwortet eine reine Lesefrage und haengt an einer
+ * HTTP-Route, die ein Browser beim Oeffnen der Ansicht aufruft. Ein GET, das
+ * eine Datei anlegt, ist an dieser Stelle falsch -- auf einem
+ * schreibgeschuetzten Stick scheitert er, und auf einem gesunden hinterlaesst
+ * er Muell, wenn der Prozess zwischen Schreiben und Loeschen stirbt.
+ *
+ * Schreibrecht kommt aus access(W_OK), das nichts anlegt. Die Rechtefrage
+ * beantworten die Zeugen: Dateien, die prepare() mit einem BEKANNTEN Modus
+ * geschrieben hat. Stimmt der gelesene Modus nicht mehr mit dem geschriebenen
+ * ueberein, hat das Dateisystem ihn verworfen -- genau das, was die Sonde
+ * herausfindet. Gibt es keinen Zeugen, bleibt die Antwort null (= unbekannt)
+ * und verify() sagt das, statt es zu erfinden.
+ *
+ * @param {string} dir
+ * @param {Array<{path:string, mode:number}>} [witnesses]
+ */
+function inspectFilesystem(dir, witnesses = []) {
+  const result = emptyFsInfo();
+  try {
+    fs.accessSync(dir, fs.constants.W_OK);
+    result.writable = true;
+  } catch (err) {
+    result.error = (err && err.message) || String(err);
+  }
+
+  if (process.platform !== 'win32') {
+    let seen = 0;
+    let kept = 0;
+    for (const witness of witnesses) {
+      let stat;
+      try { stat = fs.statSync(witness.path); } catch { continue; }
+      seen++;
+      if ((stat.mode & 0o777) === witness.mode) kept++;
+    }
+    if (seen > 0) result.enforcesModes = kept === seen;
+  }
+
+  return readFsType(dir, result);
 }
 
 /** Write via a temporary file in the same directory, then rename into place. */
@@ -316,6 +600,30 @@ function mkdirp(dir, mode) {
 
 function rmrf(target) {
   try { fs.rmSync(target, { recursive: true, force: true }); } catch { /* best effort */ }
+}
+
+/**
+ * Dasselbe, ohne den Ereignisring anzuhalten. Ein abgebrochener Kopiervorgang
+ * hinterlaesst bis zu einem ganzen Quelltextbaum; ihn synchron wegzuraeumen
+ * wuerde den Server genau dort wieder blockieren, wo gerade abgebrochen wurde.
+ */
+async function rmrfAsync(target) {
+  try { await fsp.rm(target, { recursive: true, force: true }); } catch { /* best effort */ }
+}
+
+/**
+ * Alles entfernen, was seit `keep` dazugekommen ist -- der Rest bleibt stehen.
+ *
+ * Gezielt so und nicht "Ordner leeren": hier haengt der Datenbestand des
+ * Benutzers dran, und was schon vorher da war, gehoert nicht diesem Vorgang.
+ */
+async function removeNewEntries(dir, keep) {
+  let entries;
+  try { entries = await fsp.readdir(dir); } catch { return; }
+  for (const name of entries) {
+    if (keep.has(name)) continue;
+    await rmrfAsync(path.join(dir, name));
+  }
 }
 
 /**
@@ -348,7 +656,7 @@ function collectTree(root, { exclude = EXCLUDED_NAMES, dropLogs = true } = {}) {
   try {
     rootStat = fs.statSync(root);
   } catch (err) {
-    throw new NotFoundError(`Der Quellordner ${root}`);
+    throw new StickNotFoundError(`Den Quellordner ${root} gibt es nicht (oder er ist nicht lesbar).`, { root });
   }
   if (!rootStat.isDirectory()) {
     throw new ValidationError(`${root} ist kein Ordner.`);
@@ -410,24 +718,57 @@ function collectTree(root, { exclude = EXCLUDED_NAMES, dropLogs = true } = {}) {
  * a failure here can be cleaned up completely. ENOSPC is translated on the
  * spot: "the stick filled up" is a sentence the user can do something with,
  * `ENOSPC` is not.
+ *
+ * WARUM await je Datei statt fs.copyFileSync: gemessen an 250 Dateien / 1 GB
+ * stand der Ereignisring mit der synchronen Schleife 2864 ms komplett still --
+ * kein einziger von ~143 erwarteten Zeitgeber-Ticks kam durch. Im Serverprozess
+ * heisst das: die gesamte Oberflaeche haengt, minutenlang, fuer jeden Benutzer.
+ * fs.promises.copyFile gibt die Arbeit an den Thread-Pool von libuv ab; der
+ * Hauptthread ist waehrend des Kopierens frei, und das `await` gibt dem Ring
+ * zwischen zwei Dateien eine Runde. Das ist einer Stream-Pumpe (createReadStream
+ * -> createWriteStream) vorzuziehen, weil copyFile je nach Dateisystem
+ * copy_file_range/fcopyfile benutzt und damit die Daten gar nicht erst durch
+ * den JS-Prozess laufen. Nacheinander statt parallel: so bleibt der Fortschritt
+ * monoton, ENOSPC trifft genau eine Datei, und der Thread-Pool (vier Threads)
+ * bleibt fuer den Rest des Servers benutzbar.
  */
-function copyFiles(files, dest, { onFile, label }) {
+async function copyFiles(files, dest, { onFile, label, signal, what = 'Das Kopieren' } = {}) {
   let copied = 0;
   let bytes = 0;
   const madeDirs = new Set();
+  const total = files.length;
+  const planBytes = files.reduce((sum, f) => sum + (Number.isFinite(f.size) ? f.size : 0), 0);
+  let lastReport = 0;
+
+  const report = (force) => {
+    if (!onFile) return;
+    const now = Date.now();
+    // Alle 25 Dateien war fuer eine Zeile in der Kommandozeile gedacht: bei
+    // 10 Dateien kam damit ueberhaupt nur die Schlussmeldung an. Ein Balken im
+    // Browser braucht die erste Datei (damit er ueberhaupt erscheint), eine
+    // Zahl in Prozent, und auch bei wenigen grossen Dateien regelmaessig ein
+    // Lebenszeichen -- deshalb zusaetzlich die Zeitschranke.
+    if (!force && copied !== 1 && copied % 25 !== 0 && now - lastReport < 150) return;
+    lastReport = now;
+    onFile({
+      copied, total, bytes, totalBytes: planBytes,
+      percent: percentOf(bytes, planBytes, copied, total), label,
+    });
+  };
 
   for (const file of files) {
+    throwIfAborted(signal, what);
     const target = path.join(dest, file.rel);
     const dir = path.dirname(target);
     if (!madeDirs.has(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+      await fsp.mkdir(dir, { recursive: true });
       madeDirs.add(dir);
     }
     try {
-      fs.copyFileSync(file.abs, target);
+      await fsp.copyFile(file.abs, target);
     } catch (err) {
       if (err && err.code === 'ENOSPC') {
-        throw new StorageError(
+        throw new StickFullError(
           `Der Stick ist während des Kopierens voll geworden (bei "${file.rel}"). Es wurde nichts verändert: `
           + 'der halb kopierte Ordner wird wieder entfernt. Schaffe Platz und versuche es erneut.',
           { file: file.rel, code: 'ENOSPC' },
@@ -439,12 +780,12 @@ function copyFiles(files, dest, { onFile, label }) {
       );
     }
     // Keep the executable bit where the source had one (bin/neural-os.js).
-    try { fs.chmodSync(target, file.mode & 0o111 ? 0o755 : 0o644); } catch { /* FAT */ }
+    try { await fsp.chmod(target, file.mode & 0o111 ? 0o755 : 0o644); } catch { /* FAT */ }
     copied++;
     bytes += file.size;
-    if (onFile && copied % 25 === 0) onFile({ copied, total: files.length, bytes, label });
+    report(false);
   }
-  if (onFile) onFile({ copied, total: files.length, bytes, label });
+  report(true);
   return { files: copied, bytes };
 }
 
@@ -457,7 +798,7 @@ function copyFiles(files, dest, { onFile, label }) {
  * only vulnerable instant, and `cleanStale()` repairs exactly that state by
  * putting `.app.old-*` back when `app/` is missing.
  */
-function swapIntoPlace(finalPath, tmpPath) {
+async function swapIntoPlace(finalPath, tmpPath) {
   const parent = path.dirname(finalPath);
   const base = path.basename(finalPath);
   const oldPath = path.join(parent, `.${base}.old-${randomSuffix()}`);
@@ -477,7 +818,10 @@ function swapIntoPlace(finalPath, tmpPath) {
       { target: finalPath, code: err && err.code },
     );
   }
-  if (exists) rmrf(oldPath);
+  // Die beiden Umbenennungen bleiben synchron und unmittelbar hintereinander:
+  // dazwischen liegt das einzige verwundbare Fenster, und es soll so kurz wie
+  // moeglich sein. Nur das Wegraeumen des alten Baums danach darf warten.
+  if (exists) await rmrfAsync(oldPath);
 }
 
 /** Names this module leaves behind while it works. */
@@ -489,6 +833,10 @@ const STALE_RE = /^\.([A-Za-z0-9._ -]+)\.(tmp|old)-[0-9a-f]{8}$/;
  * `.x.tmp-*` is always garbage -- nothing ever read from it. `.x.old-*` is the
  * previous, complete version: if `x` is missing, the stick was pulled between
  * the two renames and putting it back is a genuine recovery, not a guess.
+ *
+ * ACHTUNG: "immer Muell" gilt nur, solange kein zweiter Vorgang auf derselben
+ * Wurzel laeuft -- dessen Arbeitsverzeichnis heisst genauso. Jeder schreibende
+ * Aufruf haelt deshalb lockRoot() (siehe oben), bevor er hier hereingeht.
  */
 function cleanStale(root) {
   const removed = [];
@@ -648,9 +996,11 @@ Mitgelieferte Laufzeiten
 ${runtimeList}
 
 Steht dein Betriebssystem nicht in der Liste, meldet der Starter das und sagt,
-was fehlt. Nachlegen kannst du es in Neural OS unter Einstellungen -> Stick,
-auf einem Rechner mit Internet. Alternativ genuegt ein installiertes Node.js
-(Version 20 oder neuer) auf dem fremden Rechner.
+was fehlt. Nachlegen kannst du es in Neural OS im Bereich "Stick" (Seitenleiste,
+oder g dann t): auf einem Rechner DIESES Systems genuegt dort "Jetzt kopieren"
+und es braucht kein Internet; fuer ein fremdes System "Holen", dafuer einmalig
+Internet. Alternativ genuegt ein installiertes Node.js (Version 20 oder neuer)
+auf dem fremden Rechner.
 
 Wenn gar nichts geht
 --------------------
@@ -664,8 +1014,8 @@ Wenn gar nichts geht
    "noexec" eingehaengt. Dann kopiere den ganzen Ordner auf die Festplatte und
    starte ihn von dort.
 4. Der Ordner "app" fehlt oder ist halb? Dann wurde der Stick beim Kopieren
-   abgezogen. In Neural OS unter Einstellungen -> Stick auf "Stick pruefen"
-   und danach "Stick aktualisieren" klicken.
+   abgezogen. In Neural OS im Bereich "Stick" erst "Stick pruefen" und danach
+   "Nur Programm erneuern" klicken - dein Datenordner bleibt dabei unberuehrt.
 
 Version: ${version}
 Erstellt: ${new Date().toISOString().slice(0, 10)}
@@ -945,7 +1295,10 @@ function createStick(deps = {}) {
 
   function requireStick(root, what) {
     if (!fs.existsSync(root)) {
-      throw new NotFoundError(`Der Ordner ${root}`);
+      throw new StickNotFoundError(
+        `Den Ordner ${root} gibt es nicht. Steckt der Stick noch, und stimmt der Pfad?`,
+        { root },
+      );
     }
     if (!readMarker(root)) {
       throw new ValidationError(
@@ -1026,6 +1379,21 @@ function createStick(deps = {}) {
     return path.join(root, LAYOUT.runtime, platform);
   }
 
+  /**
+   * Dateien, deren Modus prepare() ausdruecklich gesetzt hat.
+   *
+   * Sie beantworten die Rechtefrage, ohne etwas anzulegen: kommt der gesetzte
+   * Modus unveraendert zurueck, setzt das Dateisystem Rechte durch; kommt
+   * stattdessen 0777/0666 zurueck, hat es sie verworfen (exFAT, FAT32).
+   */
+  function modeWitnesses(root) {
+    const list = [{ path: dataDirOf(root), mode: 0o700 }];
+    for (const launcher of LAUNCHERS) {
+      list.push({ path: path.join(root, launcher.target), mode: launcher.executable ? 0o755 : 0o644 });
+    }
+    return list;
+  }
+
   function runtimeBinary(root, platform) {
     const spec = PLATFORMS[platform];
     return spec ? path.join(runtimeDir(root, platform), spec.file) : null;
@@ -1045,7 +1413,7 @@ function createStick(deps = {}) {
    * conditions -- this is what makes the stick work on the next machine of the
    * same kind, and it is the only runtime we can guarantee.
    */
-  function copyLocalRuntime(root, warnings) {
+  async function copyLocalRuntime(root, warnings, signal) {
     if (!LOCAL_PLATFORM) {
       warnings.push(
         `Dieses Betriebssystem (${process.platform}/${process.arch}) hat keine offizielle Node-Ausgabe; `
@@ -1059,12 +1427,14 @@ function createStick(deps = {}) {
     dropRuntimeScraps(dir);
     const target = runtimeBinary(root, LOCAL_PLATFORM);
     const tmp = path.join(dir, `.${path.basename(target)}.tmp-${randomSuffix()}`);
+    throwIfAborted(signal, 'Das Kopieren der Laufzeit');
     try {
-      fs.copyFileSync(process.execPath, tmp);
+      // Rund 110 MB am Stueck: synchron kopiert stuende der Server so lange.
+      await fsp.copyFile(process.execPath, tmp);
     } catch (err) {
-      rmrf(tmp);
+      await rmrfAsync(tmp);
       if (err && err.code === 'ENOSPC') {
-        throw new StorageError(
+        throw new StickFullError(
           'Der Stick wurde beim Kopieren der Laufzeit voll. Die Laufzeit ist rund '
           + `${humanBytes(sizeOf(process.execPath))} groß. Schaffe Platz und versuche es erneut.`,
           { code: 'ENOSPC' },
@@ -1090,17 +1460,44 @@ function createStick(deps = {}) {
    * not an error: the usual cause is a stick mounted `noexec`, which is a
    * property of this machine's mount options and not of the stick.
    */
-  function checkExecutable(binary) {
-    try {
-      const res = spawnSync(binary, ['-e', 'process.stdout.write(process.version)'], {
-        timeout: 20000, encoding: 'utf8', windowsHide: true,
+  function checkExecutable(binary, { signal } = {}) {
+    // WARUM kein spawnSync: die Zeitgrenze ist 20 s, und spawnSync haelt so
+    // lange den ganzen Prozess an. Auf einem "noexec"-Stick -- dem Fall, den
+    // diese Pruefung finden soll -- waere das im Server 20 s Stillstand.
+    return new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn(binary, ['-e', 'process.stdout.write(process.version)'], {
+          timeout: 20000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (err) {
+        resolve({ ok: false, reason: (err && err.message) || String(err) });
+        return;
+      }
+
+      let out = '';
+      let settled = false;
+      const onAbort = () => { try { child.kill('SIGKILL'); } catch { /* schon beendet */ } };
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        if (signal) signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      };
+      if (signal) {
+        if (signal.aborted) { onAbort(); finish({ ok: false, reason: 'abgebrochen' }); return; }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      child.stdout.on('data', (chunk) => { if (out.length < 200) out += String(chunk); });
+      child.stderr.on('data', () => { /* verworfen, muss aber gelesen werden */ });
+      child.on('error', (err) => finish({ ok: false, reason: err.code || err.message }));
+      child.on('close', (code, sig) => {
+        if (sig) return finish({ ok: false, reason: `Beendet durch Signal ${sig}` });
+        if (code !== 0) return finish({ ok: false, reason: `Beendet mit Status ${code}` });
+        finish({ ok: true, version: out.trim() });
       });
-      if (res.error) return { ok: false, reason: res.error.code || res.error.message };
-      if (res.status !== 0) return { ok: false, reason: `Beendet mit Status ${res.status}` };
-      return { ok: true, version: String(res.stdout || '').trim() };
-    } catch (err) {
-      return { ok: false, reason: (err && err.message) || String(err) };
-    }
+    });
   }
 
   /* ------------------------------------------------------------ download */
@@ -1109,7 +1506,7 @@ function createStick(deps = {}) {
    * Everything that leaves this machine goes through here, so there is exactly
    * one place where the scope, the ceiling and the host list are set.
    */
-  async function fetchFromDist(url, { purpose, maxBytes }) {
+  async function fetchFromDist(url, { purpose, maxBytes, signal }) {
     if (!gate) {
       throw new ValidationError(
         'Ohne Netzschleuse kann keine zusätzliche Laufzeit geholt werden. '
@@ -1126,6 +1523,7 @@ function createStick(deps = {}) {
         allowedHosts: [DIST_HOST],
         maxBytes,
         timeoutMs: RUNTIME_TIMEOUT_MS,
+        signal,
       });
     } catch (err) {
       throw explainBlocked(err, url);
@@ -1181,7 +1579,7 @@ function createStick(deps = {}) {
    * origin, and a binary whose hash does not match is never written. Half a
    * verification is no verification.
    */
-  async function downloadRuntime(root, platform, onProgress) {
+  async function downloadRuntime(root, platform, onProgress, signal) {
     const spec = PLATFORMS[platform];
     const version = nodeVersion();
     const ext = spec.archive === 'zip' ? 'zip' : 'tar.gz';
@@ -1189,9 +1587,11 @@ function createStick(deps = {}) {
     const base = `${DIST_BASE}/${version}`;
 
     onProgress({ phase: 'runtime', message: `Prüfsummen für ${platform} werden geladen …`, platform });
+    throwIfAborted(signal, `Das Holen der Laufzeit ${platform}`);
     const sumsResponse = await fetchFromDist(`${base}/SHASUMS256.txt`, {
       purpose: `stick.runtime.checksums:${platform}`,
       maxBytes: MAX_SHASUMS_BYTES,
+      signal,
     });
     const sums = await sumsResponse.text();
     const expected = findShasum(sums, filename);
@@ -1204,9 +1604,11 @@ function createStick(deps = {}) {
     }
 
     onProgress({ phase: 'runtime', message: `Laufzeit für ${platform} wird geladen (${filename}) …`, platform });
+    throwIfAborted(signal, `Das Holen der Laufzeit ${platform}`);
     const archiveResponse = await fetchFromDist(`${base}/${filename}`, {
       purpose: `stick.runtime.download:${platform}`,
       maxBytes: MAX_ARCHIVE_BYTES,
+      signal,
     });
     const archive = Buffer.from(await archiveResponse.arrayBuffer());
 
@@ -1246,7 +1648,7 @@ function createStick(deps = {}) {
     } catch (err) {
       rmrf(tmp);
       if (err && err.code === 'ENOSPC') {
-        throw new StorageError(
+        throw new StickFullError(
           `Der Stick hat nicht genug Platz für die Laufzeit ${platform} (${humanBytes(binary.length)}).`,
           { platform, needed: binary.length },
         );
@@ -1264,16 +1666,33 @@ function createStick(deps = {}) {
    *
    * @param {string} targetDir
    * @param {{includeRuntimes?:boolean|'all'|string[], includeVault?:boolean,
-   *          sourceHome?:string, sourceRoot?:string, onProgress?:Function}} [opts]
+   *          sourceHome?:string, sourceRoot?:string, onProgress?:Function,
+   *          signal?:AbortSignal}} [opts]
+   *   `signal` bricht den Vorgang ab -- der Fall "Browsertab zu, waehrend 8 GB
+   *   kopiert werden". Ohne ihn laeuft alles wie bisher.
    * @returns {Promise<{root:string, bytes:number, files:number, runtimes:object[], warnings:string[]}>}
    */
   async function prepare(targetDir, opts = {}) {
     const root = requireTarget(targetDir, 'prepare()');
+    const release = lockRoot(root, 'Stick vorbereiten');
+    try {
+      return await prepareLocked(root, opts);
+    } finally {
+      release();
+    }
+  }
+
+  async function prepareLocked(root, opts) {
+    const signal = opts.signal || null;
+    const what = 'Das Vorbereiten des Sticks';
+    throwIfAborted(signal, what);
     const sourceRoot = path.resolve(opts.sourceRoot || APP_ROOT);
     const progress = makeProgress(opts.onProgress, log);
     const warnings = [];
 
-    if (!fs.existsSync(sourceRoot)) throw new NotFoundError(`Der Quelltext-Ordner ${sourceRoot}`);
+    if (!fs.existsSync(sourceRoot)) {
+      throw new StickNotFoundError(`Den Quelltext-Ordner ${sourceRoot} gibt es nicht.`, { sourceRoot });
+    }
     // Copying a tree into itself produces an ever-growing copy. Refuse early.
     if (isInside(sourceRoot, root)) {
       throw new ValidationError(
@@ -1306,7 +1725,9 @@ function createStick(deps = {}) {
           + 'oder erzeuge das Werkzeug mit paths aus einer laufenden Instanz.',
         );
       }
-      if (!fs.existsSync(homeDir)) throw new NotFoundError(`Der Datenordner ${homeDir}`);
+      if (!fs.existsSync(homeDir)) {
+        throw new StickNotFoundError(`Den Datenordner ${homeDir} gibt es nicht.`, { homeDir });
+      }
       if (isInside(homeDir, root) || isInside(root, homeDir)) {
         throw new ValidationError(`Der Datenordner ${homeDir} und der Stick-Ordner ${root} duerfen nicht ineinander liegen.`);
       }
@@ -1317,28 +1738,23 @@ function createStick(deps = {}) {
     // ---- the space check, before a single byte of content is written ----
     mkdirp(root);
     const localRuntimeBytes = plan.local && LOCAL_PLATFORM ? sizeOf(process.execPath) : 0;
-    const required = source.bytes + localRuntimeBytes + (home ? home.bytes : 0)
-      + plan.extra.length * ESTIMATED_RUNTIME_BYTES;
-    const withHeadroom = required + Math.max(MIN_HEADROOM_BYTES, Math.round(required * 0.05));
+    const bedarf = {
+      sourceBytes: source.bytes,
+      runtimeBytes: localRuntimeBytes,
+      homeBytes: home ? home.bytes : 0,
+      extraRuntimes: plan.extra.length,
+    };
+    const { withHeadroom } = spaceNeeded('prepare', bedarf);
     const free = freeBytes(root);
     if (free === null) {
       warnings.push('Der freie Platz auf dem Stick ließ sich nicht ermitteln; der Vorgang läuft ohne diese Prüfung.');
     } else if (free < withHeadroom) {
-      throw new StorageError(
-        `Auf dem Stick sind nur ${humanBytes(free)} frei, gebraucht werden mindestens ${humanBytes(withHeadroom)} `
-        + `(Quelltext ${humanBytes(source.bytes)}`
-        + (localRuntimeBytes ? `, Laufzeit ${humanBytes(localRuntimeBytes)}` : '')
-        + (home ? `, Datenbestand ${humanBytes(home.bytes)}` : '')
-        + (plan.extra.length ? `, ${plan.extra.length} weitere Laufzeit(en) geschätzt ${humanBytes(plan.extra.length * ESTIMATED_RUNTIME_BYTES)}` : '')
-        + '). Es wurde nichts geschrieben - ein halb kopierter Stick waere schlimmer als keiner. '
-        + 'Schaffe Platz oder lass die zusätzlichen Laufzeiten weg.',
-        { free, required: withHeadroom },
-      );
+      throw stickFull('prepare', { ...bedarf, free, withHeadroom });
     }
 
     const fsInfo = probeFilesystem(root);
     if (!fsInfo.writable) {
-      throw new StorageError(
+      throw new PermissionError(
         `In ${root} lässt sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}). `
         + 'Ist der Stick schreibgeschützt oder nur lesend eingehängt?',
         { root, error: fsInfo.error },
@@ -1358,13 +1774,21 @@ function createStick(deps = {}) {
     mkdirp(tmpApp);
     let written;
     try {
-      written = copyFiles(source.files, tmpApp, {
+      written = await copyFiles(source.files, tmpApp, {
         label: 'source',
-        onFile: (p) => progress({ phase: 'source', message: `Quelltext wird kopiert (${p.copied}/${p.total}) …`, ...p }),
+        signal,
+        what,
+        onFile: (p) => progress({
+          phase: 'source',
+          message: `Quelltext wird kopiert (${p.copied}/${p.total}, ${p.percent} %) …`,
+          ...p,
+        }),
       });
-      swapIntoPlace(path.join(root, LAYOUT.app), tmpApp);
+      await swapIntoPlace(path.join(root, LAYOUT.app), tmpApp);
     } catch (err) {
-      rmrf(tmpApp); // an interrupted copy leaves nothing behind
+      // Auch bei Abbruch: das halbfertige Verzeichnis verschwindet, der
+      // vorherige Stand bleibt unangetastet.
+      await rmrfAsync(tmpApp);
       throw err;
     }
 
@@ -1378,18 +1802,28 @@ function createStick(deps = {}) {
 
     if (home) {
       const existing = fs.readdirSync(dataDir).filter((n) => !n.startsWith('.'));
-      if (existing.length) {
-        throw new StorageError(
-          `In ${dataDir} liegt bereits ein Datenbestand. prepare() überschreibt niemals Daten. `
-          + 'Nutze "Stick aktualisieren", um nur den Quelltext zu erneuern, oder wähle einen leeren Ordner.',
-          { dataDir },
-        );
-      }
+      if (existing.length) throw dataPresent(dataDir, existing.length);
       progress({ phase: 'data', message: 'Datenbestand wird auf den Stick kopiert …', total: home.files.length });
-      const copiedHome = copyFiles(home.files, dataDir, {
-        label: 'data',
-        onFile: (p) => progress({ phase: 'data', message: `Datenbestand wird kopiert (${p.copied}/${p.total}) …`, ...p }),
-      });
+      const vorhandene = new Set(fs.readdirSync(dataDir));
+      let copiedHome;
+      try {
+        copiedHome = await copyFiles(home.files, dataDir, {
+          label: 'data',
+          signal,
+          what,
+          onFile: (p) => progress({
+            phase: 'data',
+            message: `Datenbestand wird kopiert (${p.copied}/${p.total}, ${p.percent} %) …`,
+            ...p,
+          }),
+        });
+      } catch (err) {
+        // Eine halbe Sicherung sieht aus wie eine ganze und ist deshalb
+        // schlimmer als keine -- also wird zurueckgenommen, was dieser Vorgang
+        // angelegt hat, und nur das.
+        await removeNewEntries(dataDir, vorhandene);
+        throw err;
+      }
       totalBytes += copiedHome.bytes;
       totalFiles += copiedHome.files;
       if (fsInfo.enforcesModes === false) {
@@ -1403,13 +1837,21 @@ function createStick(deps = {}) {
     // ---- runtimes ----
     const runtimes = [];
     if (plan.local) {
-      progress({ phase: 'runtime', message: `Laufzeit für ${LOCAL_PLATFORM || 'dieses System'} wird kopiert …` });
-      const localRuntime = copyLocalRuntime(root, warnings);
+      throwIfAborted(signal, what);
+      // platform gehoert in jede Laufzeit-Meldung: eine Fortschrittsanzeige
+      // zeigt sonst bei der lokalen Laufzeit ein leeres Feld, wo bei jeder
+      // anderen der Plattformname steht.
+      progress({
+        phase: 'runtime',
+        message: `Laufzeit für ${LOCAL_PLATFORM || 'dieses System'} wird kopiert …`,
+        platform: LOCAL_PLATFORM,
+      });
+      const localRuntime = await copyLocalRuntime(root, warnings, signal);
       if (localRuntime) {
         runtimes.push(localRuntime);
         totalBytes += localRuntime.bytes;
         totalFiles += 1;
-        const check = checkExecutable(localRuntime.file);
+        const check = await checkExecutable(localRuntime.file, { signal });
         if (!check.ok) {
           warnings.push(
             `Die kopierte Laufzeit ließ sich auf dem Stick nicht starten (${check.reason}). `
@@ -1421,12 +1863,16 @@ function createStick(deps = {}) {
     }
 
     for (const platform of plan.extra) {
+      throwIfAborted(signal, what);
       try {
-        const got = await downloadRuntime(root, platform, progress);
+        const got = await downloadRuntime(root, platform, progress, signal);
         runtimes.push(got);
         totalBytes += got.bytes;
         totalFiles += 1;
       } catch (err) {
+        // Ein Abbruch ist keine fehlende Laufzeit: er gilt dem ganzen Vorgang
+        // und darf nicht als Hinweis unter den Tisch fallen.
+        if (err instanceof AbortedError || (err && err.code === 'ABORTED')) throw err;
         // A missing extra runtime must never invalidate an otherwise good
         // stick. It is reported in full and the work continues.
         const message = err && err.message ? err.message : String(err);
@@ -1436,7 +1882,8 @@ function createStick(deps = {}) {
     }
 
     // ---- launchers, readme, marker ----
-    progress({ phase: 'finish', message: 'Starter und Hinweise werden geschrieben …' });
+    throwIfAborted(signal, what);
+    progress({ phase: 'finish', message: 'Starter und Hinweise werden geschrieben …', percent: 99 });
     const launchers = deployLaunchers(root, sourceRoot);
     warnings.push(...launchers.warnings);
 
@@ -1451,7 +1898,7 @@ function createStick(deps = {}) {
       nodeVersion: process.version,
     });
 
-    progress({ phase: 'done', message: 'Der Stick ist fertig.', bytes: totalBytes, files: totalFiles });
+    progress({ phase: 'done', message: 'Der Stick ist fertig.', bytes: totalBytes, files: totalFiles, percent: 100 });
     return { root, bytes: totalBytes, files: totalFiles, runtimes, warnings };
   }
 
@@ -1464,6 +1911,18 @@ function createStick(deps = {}) {
   async function update(targetDir, opts = {}) {
     const root = requireTarget(targetDir, 'update()');
     requireStick(root, 'update()');
+    const release = lockRoot(root, 'Stick aktualisieren');
+    try {
+      return await updateLocked(root, opts);
+    } finally {
+      release();
+    }
+  }
+
+  async function updateLocked(root, opts) {
+    const signal = opts.signal || null;
+    const what = 'Das Aktualisieren des Sticks';
+    throwIfAborted(signal, what);
     const sourceRoot = path.resolve(opts.sourceRoot || APP_ROOT);
     const progress = makeProgress(opts.onProgress, log);
     const warnings = [];
@@ -1480,20 +1939,14 @@ function createStick(deps = {}) {
     warnings.push(...source.warnings);
 
     const free = freeBytes(root);
-    // The old app/ is only released after the new one is complete, so the
-    // requirement is the full size once more, not the difference.
-    const needed = source.bytes + MIN_HEADROOM_BYTES;
+    const { withHeadroom: needed } = spaceNeeded('update', { sourceBytes: source.bytes });
     if (free !== null && free < needed) {
-      throw new StorageError(
-        `Für die Aktualisierung werden ${humanBytes(needed)} frei gebraucht, vorhanden sind ${humanBytes(free)}. `
-        + 'Es wurde nichts verändert; der bisherige Stand auf dem Stick bleibt unberührt.',
-        { free, required: needed },
-      );
+      throw stickFull('update', { free, withHeadroom: needed, sourceBytes: source.bytes });
     }
 
     const fsInfo = probeFilesystem(root);
     if (!fsInfo.writable) {
-      throw new StorageError(
+      throw new PermissionError(
         `In ${root} lässt sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}). Ist der Stick schreibgeschützt?`,
         { root },
       );
@@ -1512,17 +1965,24 @@ function createStick(deps = {}) {
     mkdirp(tmpApp);
     let written;
     try {
-      written = copyFiles(source.files, tmpApp, {
+      written = await copyFiles(source.files, tmpApp, {
         label: 'source',
-        onFile: (p) => progress({ phase: 'source', message: `Quelltext wird erneuert (${p.copied}/${p.total}) …`, ...p }),
+        signal,
+        what,
+        onFile: (p) => progress({
+          phase: 'source',
+          message: `Quelltext wird erneuert (${p.copied}/${p.total}, ${p.percent} %) …`,
+          ...p,
+        }),
       });
-      swapIntoPlace(appDir, tmpApp);
+      await swapIntoPlace(appDir, tmpApp);
     } catch (err) {
-      rmrf(tmpApp);
+      await rmrfAsync(tmpApp);
       throw err;
     }
 
-    progress({ phase: 'finish', message: 'Starter und Hinweise werden erneuert …' });
+    throwIfAborted(signal, what);
+    progress({ phase: 'finish', message: 'Starter und Hinweise werden erneuert …', percent: 99 });
     for (const launcher of LAUNCHERS) assertOutsideData(root, path.join(root, launcher.target));
     const launchers = deployLaunchers(root, sourceRoot);
     warnings.push(...launchers.warnings);
@@ -1536,8 +1996,207 @@ function createStick(deps = {}) {
     }));
     writeMarker(root, { nodeVersion: process.version });
 
-    progress({ phase: 'done', message: 'Der Quelltext auf dem Stick ist aktuell.', bytes: written.bytes, files: written.files });
+    progress({
+      phase: 'done',
+      message: 'Der Quelltext auf dem Stick ist aktuell.',
+      bytes: written.bytes,
+      files: written.files,
+      percent: 100,
+    });
     return { root, bytes: written.bytes, files: written.files, warnings, dataDir: dataDirOf(root) };
+  }
+
+  /**
+   * Was WUERDE passieren? Eine reine Lesefrage, mit denselben Zahlen.
+   *
+   * WARUM es das gibt: im Browser gibt es keinen Ordnerwaehler, der einen
+   * absoluten Pfad liefert -- der Pfad wird getippt. Ein getippter Pfad und
+   * ein Knopf, der sofort 8 GB kopiert, ist eine Falle. Dieselbe Antwort gibt
+   * `src/http/api/watch.js` mit seinem "Erst ansehen", und aus demselben
+   * Grund: bevor dieses Programm eine fremde Stelle der Platte anfasst, soll
+   * dastehen, WELCHE Stelle das ist und was dort passieren wuerde.
+   *
+   * Diese Funktion schreibt nichts -- keine Sonde, kein mkdir. Die Rechtefrage
+   * wird deshalb ueber access(W_OK) und die Zeugen beantwortet (siehe
+   * inspectFilesystem), nicht durch Anlegen einer Datei.
+   *
+   * Sie wirft nur, wenn sie gar nicht antworten kann (unbrauchbarer Pfad,
+   * unlesbarer Quelltext, kein Stick fuer update/runtime). Alles, woran der
+   * Vorgang scheitern WUERDE, steht als Satz in `blockers` -- damit die
+   * Oberflaeche es anzeigen kann, statt einen Fehler zu werfen.
+   *
+   * @param {string} targetDir
+   * @param {{action?:'prepare'|'update'|'runtime', includeVault?:boolean,
+   *          includeRuntimes?:*, platform?:string, sourceRoot?:string,
+   *          sourceHome?:string}} [opts]
+   */
+  function preview(targetDir, opts = {}) {
+    const action = opts.action === 'update' || opts.action === 'runtime' ? opts.action : 'prepare';
+    const label = action === 'update' ? 'Die Vorschau auf "Stick aktualisieren"'
+      : action === 'runtime' ? 'Die Vorschau auf "Laufzeit holen"' : 'Die Vorschau auf "Stick vorbereiten"';
+    const root = requireTarget(targetDir, label);
+    if (action !== 'prepare') requireStick(root, label);
+
+    const warnings = [];
+    const blockers = [];
+    const block = (err) => blockers.push({ code: err.code, status: err.status, message: err.message });
+
+    const exists = fs.existsSync(root);
+    const marker = readMarker(root);
+
+    // Ein laufender Vorgang ist der haeufigste Grund, aus dem ein zweiter
+    // Klick nichts tun darf -- und der einzige, den man auf der Platte nicht
+    // sehen kann.
+    const running = runningOn(root);
+    if (running) block(busyError(root, running));
+
+    // ---- Quelltext ----
+    const sourceRoot = path.resolve(opts.sourceRoot || APP_ROOT);
+    let source = { files: [], bytes: 0, warnings: [] };
+    if (action !== 'runtime') {
+      if (!fs.existsSync(sourceRoot)) {
+        throw new StickNotFoundError(`Den Quelltext-Ordner ${sourceRoot} gibt es nicht.`, { sourceRoot });
+      }
+      if (isInside(sourceRoot, root)) {
+        throw new ValidationError(
+          `Der Stick-Ordner ${root} liegt im Quelltext-Ordner ${sourceRoot}. Wähle einen Ordner ausserhalb, `
+          + 'sonst wuerde sich die Kopie endlos selbst kopieren.',
+        );
+      }
+      if (isInside(root, sourceRoot)) {
+        throw new ValidationError(`Der Quelltext liegt im Zielordner ${root}. Wähle einen anderen Zielordner.`);
+      }
+      source = collectTree(sourceRoot);
+      warnings.push(...source.warnings);
+    }
+
+    // ---- Datenbestand ----
+    let home = null;
+    let homeDir = null;
+    if (action === 'prepare' && opts.includeVault) {
+      homeDir = opts.sourceHome || (appPaths && appPaths.home) || null;
+      if (!homeDir) {
+        throw new ValidationError(
+          'Für eine Sicherung des Datenbestands fehlt der Quellordner. Uebergib sourceHome, '
+          + 'oder erzeuge das Werkzeug mit paths aus einer laufenden Instanz.',
+        );
+      }
+      if (!fs.existsSync(homeDir)) {
+        throw new StickNotFoundError(`Den Datenordner ${homeDir} gibt es nicht.`, { homeDir });
+      }
+      if (isInside(homeDir, root) || isInside(root, homeDir)) {
+        throw new ValidationError(`Der Datenordner ${homeDir} und der Stick-Ordner ${root} duerfen nicht ineinander liegen.`);
+      }
+      home = collectTree(homeDir, { exclude: HOME_EXCLUDED_NAMES, dropLogs: false });
+      warnings.push(...home.warnings);
+    }
+
+    // ---- Laufzeiten ----
+    let plan;
+    if (action === 'runtime') {
+      if (!PLATFORMS[opts.platform]) {
+        throw new ValidationError(
+          `"${opts.platform}" ist keine bekannte Plattform. Möglich sind: ${Object.keys(PLATFORMS).join(', ')}.`,
+        );
+      }
+      plan = { local: opts.platform === LOCAL_PLATFORM, extra: opts.platform === LOCAL_PLATFORM ? [] : [opts.platform] };
+    } else if (action === 'update') {
+      plan = { local: false, extra: [] };
+    } else {
+      plan = resolvePlatforms(opts.includeRuntimes);
+    }
+    const onStick = detectPlatforms(root);
+    const runtimeBytes = plan.local && LOCAL_PLATFORM ? sizeOf(process.execPath) : 0;
+
+    // ---- Platz, mit derselben Formel wie der Vorgang ----
+    const bedarf = {
+      sourceBytes: source.bytes,
+      runtimeBytes,
+      homeBytes: home ? home.bytes : 0,
+      extraRuntimes: plan.extra.length,
+    };
+    const { required, withHeadroom } = spaceNeeded(action, bedarf);
+    const free = freeBytes(root);
+    let fits = null;
+    if (free === null) {
+      warnings.push('Der freie Platz ließ sich hier nicht ermitteln; der Vorgang läuft dann ohne diese Prüfung.');
+    } else {
+      fits = free >= withHeadroom;
+      if (!fits) {
+        const err = stickFull(action, { ...bedarf, free, withHeadroom });
+        // addRuntime() rechnet vorher nicht nach -- ein Download ist geschaetzt,
+        // und eine Vorschau darf nicht schaerfer ablehnen als der Vorgang.
+        if (action === 'runtime') warnings.push(`${err.message} (Die Groesse einer Laufzeit ist geschätzt.)`);
+        else block(err);
+      }
+    }
+
+    // ---- Dateisystem, ohne Sonde ----
+    const probeDir = exists ? root : nearestExisting(root);
+    const filesystem = probeDir
+      ? inspectFilesystem(probeDir, exists ? modeWitnesses(root) : [])
+      : emptyFsInfo();
+    if (!probeDir) {
+      warnings.push(`Von ${root} existiert kein einziger übergeordneter Ordner; der Pfad ist vermutlich falsch getippt.`);
+    } else if (!filesystem.writable) {
+      block(new PermissionError(
+        exists
+          ? `In ${root} lässt sich nicht schreiben (${filesystem.error || 'unbekannter Grund'}). `
+            + 'Ist der Stick schreibgeschützt oder nur lesend eingehängt?'
+          : `Den Ordner ${root} gibt es noch nicht, und in ${probeDir} lässt sich nichts anlegen `
+            + `(${filesystem.error || 'unbekannter Grund'}).`,
+        { root },
+      ));
+    }
+    warnFilesystem(filesystem, warnings);
+
+    // ---- Datenordner auf dem Stick ----
+    const dataDir = dataDirOf(root);
+    let dataEntries = [];
+    try {
+      dataEntries = fs.readdirSync(dataDir).filter((n) => !n.startsWith('.'));
+    } catch { /* gibt es noch nicht */ }
+    if (action === 'prepare' && home && dataEntries.length) {
+      block(dataPresent(dataDir, dataEntries.length));
+    }
+
+    const stale = [];
+    try {
+      for (const entry of fs.readdirSync(root)) if (STALE_RE.test(entry)) stale.push(entry);
+    } catch { /* der Ordner muss noch nicht existieren */ }
+
+    return {
+      action,
+      root,
+      exists,
+      isStick: !!marker,
+      marker: marker ? {
+        createdAt: marker.createdAt || null,
+        updatedAt: marker.updatedAt || null,
+        preparedBy: marker.preparedBy || null,
+        nodeVersion: marker.nodeVersion || null,
+      } : null,
+      source: action === 'runtime' ? null : {
+        root: sourceRoot,
+        version: appVersion(sourceRoot),
+        files: source.files.length,
+        bytes: source.bytes,
+      },
+      home: home ? { root: homeDir, files: home.files.length, bytes: home.bytes } : null,
+      data: { path: dataDir, exists: fs.existsSync(dataDir), entries: dataEntries.length },
+      runtimes: {
+        local: LOCAL_PLATFORM,
+        copyLocal: plan.local,
+        download: plan.extra,
+        onStick: onStick.map((r) => ({ platform: r.platform, bytes: r.bytes, version: r.version, isLocal: r.isLocal })),
+      },
+      space: { free, required, withHeadroom, fits },
+      filesystem,
+      running,
+      stale,
+      blockers,
+      warnings,
+    };
   }
 
   /**
@@ -1546,9 +2205,20 @@ function createStick(deps = {}) {
    * Everything reported is something the user can act on; each problem carries
    * a `fix` sentence, because "layout invalid" helps nobody standing in front
    * of a stick that will not start.
+   *
+   * Diese Pruefung SCHREIBT NICHTS. Sie haengt an einer Route, die ein Browser
+   * beim Oeffnen der Ansicht aufruft, und ein GET, das eine Datei anlegt, ist
+   * an dieser Stelle falsch -- auf einem schreibgeschuetzten Stick scheitert er,
+   * und stirbt der Prozess zwischen Anlegen und Loeschen, bleibt sein Muell
+   * liegen. Wer die Schreibsonde trotzdem will, verlangt sie ausdruecklich:
+   * `verify(pfad, { probe: true })`.
+   *
+   * @param {string} targetDir
+   * @param {{probe?:boolean}} [opts]
    */
-  async function verify(targetDir) {
+  async function verify(targetDir, opts = {}) {
     const root = requireTarget(targetDir, 'verify()');
+    const probeWrite = opts.probe === true;
     const problems = [];
     const add = (level, code, message, fix) => problems.push({ level, code, message, fix });
 
@@ -1589,7 +2259,21 @@ function createStick(deps = {}) {
     try {
       for (const entry of fs.readdirSync(root)) if (STALE_RE.test(entry)) stale.push(entry);
     } catch { /* handled by the checks below */ }
-    if (stale.length) {
+    // Ein gerade laufender Vorgang sieht auf der Platte genauso aus wie ein
+    // abgebrochener -- gleiche Namen, gleiche halbe Ordner. Ihn als Abbruch zu
+    // melden waere ein erfundener Befund, und der zweite Browsertab macht das
+    // ueber HTTP zum Normalfall.
+    const running = runningOn(root);
+    if (running) {
+      add('info', 'OPERATION_RUNNING',
+        `Auf diesem Stick läuft gerade "${running.what}". Was hier steht, ist eine Momentaufnahme mittendrin.`,
+        'Warte, bis der Vorgang fertig ist, und prüfe dann noch einmal.');
+    }
+    if (stale.length && running) {
+      add('info', 'COPY_IN_PROGRESS',
+        `Die Ordner ${stale.join(', ')} gehören zum laufenden Vorgang, nicht zu einem Abbruch.`,
+        'Nichts tun - sie verschwinden, sobald er fertig ist.');
+    } else if (stale.length) {
       add(layout.app.exists ? 'warn' : 'error', 'INTERRUPTED_COPY',
         `Es liegen Reste eines abgebrochenen Kopiervorgangs auf dem Stick (${stale.join(', ')}).`,
         layout.app.exists
@@ -1635,7 +2319,7 @@ function createStick(deps = {}) {
       }
     }
 
-    const fsInfo = probeFilesystem(root);
+    const fsInfo = probeWrite ? probeFilesystem(root) : inspectFilesystem(root, modeWitnesses(root));
     if (!fsInfo.writable) {
       add('error', 'READ_ONLY', `Auf den Stick lässt sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}).`,
         'Schreibschutz-Schalter prüfen, oder der Stick ist nur lesend eingehängt. Ohne Schreibrecht kann Neural OS nichts speichern.');
@@ -1643,6 +2327,12 @@ function createStick(deps = {}) {
       add('warn', 'NO_PERMISSIONS',
         `Das Dateisystem (${fsInfo.typeName}) kennt keine Zugriffsrechte - die Daten sind für jeden lesbar, der den Stick hat.`,
         'Schalte in den Einstellungen die Verschlüsselung ein.');
+    } else if (fsInfo.enforcesModes === null && !fsInfo.probed && process.platform !== 'win32') {
+      // Keine erfundene Entwarnung: ohne Zeugen und ohne Sonde ist die Frage
+      // schlicht offen, und das steht hier statt eines stillen Häkchens.
+      add('info', 'PERMISSIONS_UNKNOWN',
+        'Ob dieses Dateisystem Zugriffsrechte durchsetzt, ist hier nicht zu sehen - die Prüfung schreibt nichts auf den Stick.',
+        'Beim Vorbereiten oder Aktualisieren wird es geprüft und gemeldet; bis dahin gilt: auf einem Stick schützt nur Verschlüsselung.');
     }
     if (fsInfo.maxFileBytes !== null && fsInfo.maxFileBytes !== undefined && fsInfo.maxFileBytes < 4 * 1024 * 1024 * 1024) {
       add('warn', 'MAX_FILE_SIZE',
@@ -1679,18 +2369,38 @@ function createStick(deps = {}) {
         `"${platform}" ist keine bekannte Plattform. Möglich sind: ${Object.keys(PLATFORMS).join(', ')}.`,
       );
     }
+    // Dieselbe Sperre wie prepare/update: addRuntime schreibt in dieselbe
+    // Wurzel, und dropRuntimeScraps() raeumt dort nach denselben Regeln auf.
+    const release = lockRoot(root, `Laufzeit ${platform} holen`);
+    try {
+      return await addRuntimeLocked(root, platform, opts);
+    } finally {
+      release();
+    }
+  }
+
+  async function addRuntimeLocked(root, platform, opts) {
+    const signal = opts.signal || null;
+    throwIfAborted(signal, `Das Holen der Laufzeit ${platform}`);
     const progress = makeProgress(opts.onProgress, log);
     const warnings = [];
     mkdirp(path.join(root, LAYOUT.runtime));
 
     if (platform === LOCAL_PLATFORM) {
-      progress({ phase: 'runtime', message: `Laufzeit für ${platform} wird vom laufenden System kopiert …`, platform });
-      const copied = copyLocalRuntime(root, warnings);
+      progress({
+        phase: 'runtime',
+        message: `Laufzeit für ${platform} wird vom laufenden System kopiert …`,
+        platform,
+        percent: 0,
+      });
+      const copied = await copyLocalRuntime(root, warnings, signal);
       if (!copied) throw new StorageError('Die Laufzeit des laufenden Systems konnte nicht kopiert werden.');
+      progress({ phase: 'done', message: `Laufzeit ${platform} liegt auf dem Stick.`, platform, percent: 100 });
       return { ...copied, warnings };
     }
 
-    const got = await downloadRuntime(root, platform, progress);
+    const got = await downloadRuntime(root, platform, progress, signal);
+    progress({ phase: 'done', message: `Laufzeit ${platform} liegt auf dem Stick.`, platform, percent: 100 });
     return { ...got, warnings };
   }
 
@@ -1751,8 +2461,12 @@ function createStick(deps = {}) {
     update,
     verify,
     addRuntime,
+    /** Was WUERDE passieren -- dieselben Zahlen, ohne eine Zeile zu schreiben. */
+    preview,
     detectPlatforms,
     probeFilesystem,
+    /** Dieselben Fragen wie probeFilesystem(), ohne eine Zeile zu schreiben. */
+    inspectFilesystem,
     LOCAL_PLATFORM,
     PLATFORMS,
     LAYOUT,
@@ -1780,6 +2494,7 @@ module.exports = {
   RUNTIME_SCOPE,
   DIST_HOST,
   probeFilesystem,
+  inspectFilesystem,
   freeBytesOf,
   collectTree,
   cleanStale,

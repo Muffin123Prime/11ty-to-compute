@@ -38,8 +38,8 @@ const G = '\u001b[32m'; const R = '\u001b[31m'; const Y = '\u001b[33m';
 const D = '\u001b[2m'; const B = '\u001b[1m'; const X = '\u001b[0m';
 
 const ALL_VIEWS = [
-  'today', 'chat', 'notes', 'projects', 'graph', 'agents', 'assist', 'study',
-  'automation', 'network', 'timeline', 'sync', 'workshop', 'search', 'settings',
+  'today', 'chat', 'notes', 'projects', 'graph', 'agents', 'assist',
+  'automation', 'network', 'timeline', 'sync', 'stick', 'workshop', 'search', 'backup', 'settings',
 ];
 
 let failed = 0;
@@ -318,30 +318,8 @@ async function main() {
     check(store.get(faellig.id).data.status === 'done', 'Eine Aufgabe lässt sich von hier aus abhaken',
       `im Tresor: ${store.get(faellig.id).data.status}`);
 
-    /* ------------------------------- 7. Lernen: bewerten wirkt im Tresor */
-    console.log(`\n${B}7 · „Lernen" rechnet den nächsten Termin wirklich aus${X}`);
-    const karte = store.create('card', { front: 'Was ist Crema?', back: 'Die Schaumschicht.' });
-    await store.flush();
-    await page.goto(`${base}/#/study`, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(1000);
-    const vorne = await page.locator('main').innerText();
-    check(/Was ist Crema/.test(vorne), 'Die Karte wird gezeigt');
-    await page.keyboard.press('Space');
-    await page.waitForTimeout(600);
-    const hinten = await page.locator('main').innerText();
-    check(/Schaumschicht/.test(hinten), 'Die Leertaste zeigt die Rückseite');
-    // "heute", "morgen", "in 6 Tagen" -- der Server liefert den Text, damit
-    // Oberflaeche und Rechnung nicht auseinanderlaufen koennen.
-    check(/heute|morgen|Tag|Woche|Monat/i.test(hinten), 'Die Knöpfe sagen, wann die Karte wiederkommt',
-      hinten.replace(/\s+/g, ' ').slice(0, 120));
-    await page.keyboard.press('3');
-    await page.waitForTimeout(1300);
-    const danach = store.get(karte.id).data;
-    check(danach.reps === 1 && !!danach.due, 'Eine Bewertung landet wirklich im Tresor',
-      `reps=${danach.reps} due=${danach.due} ease=${danach.ease}`);
-
-    /* ------------------------ 8. Schnellerfassung von ueberall aus */
-    console.log(`\n${B}8 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
+    /* ------------------------ 7. Schnellerfassung von ueberall aus */
+    console.log(`\n${B}7 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
     // Absichtlich aus dem Gehirn heraus: der ganze Sinn ist, dass man nicht
     // erst irgendwohin navigieren muss.
     await page.goto(`${base}/#/graph`, { waitUntil: 'domcontentloaded' });
@@ -367,8 +345,8 @@ async function main() {
         neu ? JSON.stringify(neu.data.tags) : 'Notiz nicht gefunden');
     }
 
-    /* --------------- 9. Beobachtete Ordner: erst ansehen, dann aufnehmen */
-    console.log(`\n${B}9 · Ein beobachteter Ordner nimmt erst auf, wenn er eingeschaltet ist${X}`);
+    /* --------------- 8. Beobachtete Ordner: erst ansehen, dann aufnehmen */
+    console.log(`\n${B}8 · Ein beobachteter Ordner nimmt erst auf, wenn er eingeschaltet ist${X}`);
     const eingang = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-eingang-'));
     fs.writeFileSync(path.join(eingang, 'notiz.md'), '# Espresso\n\nNeun bar, 93 Grad.\n');
     fs.writeFileSync(path.join(eingang, 'liste.txt'), 'Bohnen\nFilter\n');
@@ -426,8 +404,8 @@ async function main() {
       fs.rmSync(eingang, { recursive: true, force: true });
     }
 
-    /* ------------------------------- 10. Der Modellvergleich ist da */
-    console.log(`\n${B}10 · Zwei Modelle nebeneinander${X}`);
+    /* ------------------------------- 9. Der Modellvergleich ist da */
+    console.log(`\n${B}9 · Zwei Modelle nebeneinander${X}`);
     const probe = store.create('chat', { title: 'Probe' });
     await store.flush();
     await page.goto(`${base}/#/chat?id=${probe.id}`, { waitUntil: 'domcontentloaded' });
@@ -438,8 +416,8 @@ async function main() {
     check(/kein lokales Modell|Kein Modell/i.test(chatText),
       'Ohne Modell sagt der Chat warum, statt leer zu bleiben');
 
-    /* ------------------- 11. Zweiter Blick: belegbar vs. nicht belegbar */
-    console.log(`\n${B}11 · Der zweite Blick trennt Belegbares von Nichtbelegbarem${X}`);
+    /* ------------------- 10. Zweiter Blick: belegbar vs. nicht belegbar */
+    console.log(`\n${B}10 · Der zweite Blick trennt Belegbares von Nichtbelegbarem${X}`);
     const langerText = 'Der Mahlgrad entscheidet über den Widerstand im Sieb. Ist er zu fein, steigt '
       + 'der Druck und der Espresso läuft nur tropfenweise; ist er zu grob, rauscht das Wasser durch '
       + 'und die Crema bleibt dünn. Die Brühtemperatur liegt bei rund 93 Grad, bei dunklen Röstungen '
@@ -469,6 +447,93 @@ async function main() {
     await page.waitForTimeout(1200);
     check(await page.getByRole('button', { name: /Zweiter Blick/ }).count() === 0,
       'An einer kurzen Notiz gibt es ihn gar nicht erst');
+
+    /* ---------------- 11. Sichern: der Knopf muss einen Ordner hinterlassen */
+    console.log(`\n${B}11 · „Jetzt sichern" legt wirklich einen Ordner an${X}`);
+    // Der Punkt dieser Pruefung: eine gruene Meldung beweist gar nichts. Eine
+    // Sicherung ist erst dann eine, wenn danach Dateien auf der Platte liegen,
+    // die man wieder einlesen kann. Deshalb wird hier nach dem Klick im
+    // Dateisystem nachgesehen und die Sicherung anschliessend geprueft.
+    const sicherungsZiel = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-ui-sicher-'));
+    /** Der Ordner, den der Klick wirklich angelegt hat -- nicht der getippte. */
+    let geschrieben = null;
+    try {
+      await page.goto(`${base}/#/backup`, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(1200);
+      const bkpText = await page.locator('main').innerText();
+      check(/Zuletzt gesichert|noch keine Sicherung/i.test(bkpText),
+        'Der Bereich sagt zuerst, wann zuletzt gesichert wurde');
+      check(/Klartext|verschlüsselt/i.test(bkpText),
+        'und ob die Sicherung im Klartext liegt — nicht kleingedruckt');
+
+      const zielFeld = page.getByLabel('Zielordner der Sicherung');
+      check(await zielFeld.count() > 0, 'Das Ziel lässt sich auswählen');
+      if (await zielFeld.count()) {
+        await zielFeld.fill(sicherungsZiel);
+        const sichernKnopf = page.getByRole('button', { name: /^Jetzt sichern/ });
+        check(await sichernKnopf.count() > 0, 'Der Knopf „Jetzt sichern" ist da');
+        if (await sichernKnopf.count()) {
+          await sichernKnopf.first().click();
+          // Der Export laeuft serverseitig; gewartet wird auf die Datei, nicht
+          // auf eine Meldung. Im gewaehlten Ziel entsteht ein Unterordner mit
+          // Zeitstempel -- so ueberschreibt die naechste Sicherung nicht die
+          // letzte gute, und genau das wird hier mitgeprueft.
+          for (let i = 0; i < 60 && !geschrieben; i++) {
+            await page.waitForTimeout(500);
+            try {
+              geschrieben = fs.readdirSync(sicherungsZiel)
+                .map((name) => path.join(sicherungsZiel, name))
+                .find((dir) => fs.existsSync(path.join(dir, 'manifest.json'))) || null;
+            } catch { geschrieben = null; }
+          }
+          const dateien = geschrieben ? fs.readdirSync(geschrieben) : [];
+          check(!!geschrieben && dateien.includes('export.json'),
+            'Nach dem Klick liegt eine echte Sicherung auf der Platte',
+            `${geschrieben || sicherungsZiel}: ${dateien.join(', ') || 'leer'}`);
+          if (geschrieben) {
+            const pruefung = await app.backup.verify(geschrieben);
+            check(pruefung.ok, 'und sie ist vollständig (Manifest und Prüfsummen stimmen)',
+              pruefung.ok ? `${dateien.length} Dateien` : JSON.stringify(pruefung.problems.slice(0, 2)));
+            const gemeldet = await page.locator('main').innerText();
+            check(gemeldet.includes(geschrieben), 'Die Oberfläche nennt denselben Pfad, der wirklich beschrieben wurde');
+            check(/Zeitstempel/i.test(gemeldet) || path.basename(geschrieben).startsWith('export-'),
+              'und sie liegt in einem eigenen Ordner, überschreibt also keine ältere',
+              path.basename(geschrieben));
+          }
+        }
+      }
+
+      /* --- und zurueck: ohne Vorschau wird nichts geschrieben --- */
+      const quelleFeld = page.getByLabel('Ordner oder Datei der Sicherung');
+      if (!geschrieben) {
+        hmm('Die Wiederherstellung lässt sich prüfen', 'es wurde keine Sicherung geschrieben');
+      } else if (!(await quelleFeld.count())) {
+        bad('Die Quelle einer Wiederherstellung lässt sich eintragen');
+      } else {
+        await quelleFeld.fill(geschrieben);
+        const zurueck = page.getByRole('button', { name: /^Wiederherstellen$/ });
+        check(await zurueck.count() > 0 && await zurueck.first().isDisabled(),
+          'Ohne Vorschau ist „Wiederherstellen" gesperrt');
+        const ansehen = page.getByRole('button', { name: /^Erst ansehen/ });
+        check(await ansehen.count() > 0, 'Es gibt einen Weg, vorher zu sehen was passiert');
+        if (await ansehen.count()) {
+          const saetzeVorher = store.count('note');
+          await ansehen.first().click();
+          await page.waitForTimeout(2500);
+          const vorschauText = await page.locator('main').innerText();
+          check(/geschrieben ist noch nichts/i.test(vorschauText),
+            'Die Vorschau sagt ausdrücklich, dass noch nichts geschrieben wurde');
+          check(store.count('note') === saetzeVorher,
+            'und sie hat wirklich nichts geschrieben', `${saetzeVorher} Notizen, unverändert`);
+          check(/Zugangstoken/i.test(vorschauText),
+            'Was NICHT mitreist, steht in der Vorschau');
+          check(await zurueck.first().isDisabled() === false,
+            'Erst danach wird „Wiederherstellen" frei');
+        }
+      }
+    } finally {
+      fs.rmSync(sicherungsZiel, { recursive: true, force: true });
+    }
 
     check(errors.length === 0, 'Keine Konsolenfehler während all dessen',
       errors.slice(0, 2).join(' | ').slice(0, 200));

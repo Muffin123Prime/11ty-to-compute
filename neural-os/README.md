@@ -10,7 +10,8 @@ npm start
 ```
 
 Oder komplett von einem USB-Stick, ohne dass der PC irgendetwas installiert hat:
-siehe `docs/STICK.md`.
+in der App auf **Stick**, Pfad eintippen, „Erst ansehen", „Stick vorbereiten".
+Einzelheiten in `docs/STICK.md`.
 
 Das ist der gesamte Installationsvorgang. Es gibt nichts zu installieren:
 **Neural OS hat null Abhängigkeiten** und benutzt ausschließlich die
@@ -36,6 +37,10 @@ Eine einzige Anwendung, die zusammenführt, wofür man sonst fünf Programme
   vollständigem Protokoll
 - **Projekte und Aufgaben**, verknüpft mit allem anderen
 - **Netzwerkkontrolle**, die tatsächlich durchgesetzt wird — nicht nur angezeigt
+- **Auf dem USB-Stick** — im Bereich *Stick* vorbereiten, und die ganze
+  Anwendung samt Node-Laufzeit und allen Notizen läuft danach an jedem Rechner
+  per Doppelklick, ohne Installation. Was nicht mitreist, steht dort genauso
+  deutlich: das Sprachmodell. Einzelheiten in `docs/STICK.md`
 
 ## Die drei Versprechen
 
@@ -91,7 +96,9 @@ npm run proof                   # Offline-Beweis
 npm test                        # Testsuite
 
 node bin/neural-os.js export --format both     # vollständige Sicherung
-node bin/neural-os.js import <ordner>          # wiederherstellen
+node bin/neural-os.js export --passphrase X    # ... verschlüsselt
+node bin/neural-os.js import <ordner>          # wiederherstellen (zusammenführen)
+node bin/neural-os.js import <ordner> --mode restore   # diese Installation ersetzen
 node bin/neural-os.js compact                  # Log zusammenfassen
 
 # Optionen: --home <ordner> --port <n> --host <adresse> --log debug
@@ -114,6 +121,14 @@ Alles unter **einem** Ordner, standardmäßig `~/.neural-os` (mit `--home` oder
   runs/                vollständige Agenten-Protokolle
   exports/             deine Sicherungen
 ```
+
+In der Oberfläche hat das einen eigenen Bereich: **Sicherung** (`g` dann `b`).
+Dort steht zuerst, wann zuletzt gesichert wurde, wohin und wie viel — und wenn
+noch nie, dann steht das da. Vor dem Zurückspielen sagt eine Vorschau, was
+passieren wird, *bevor* etwas geschrieben wird: was kommt, was verschwindet,
+und was bewusst nicht mitreist (Zugangstoken, der Netzmodus, das Netzprotokoll
+dieses Geräts). Dass `exports/` bei einem Plattendefekt mit verlorengeht, sagt
+der Bereich ebenfalls, statt es als Voreinstellung zu verschweigen.
 
 Das Operationslog ist Klartext-JSON, eine Zeile pro Änderung. Du kannst deinen
 gesamten Datenbestand mit `cat` lesen. Für ein System, dem du dein Denken

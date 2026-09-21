@@ -16,11 +16,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const crypto = require('node:crypto');
+const http = require('node:http');
 const { spawnSync } = require('node:child_process');
 
 const { test, drain, tempHome } = require('./harness');
 
 const { createStick, LOCAL_PLATFORM, probeFilesystem, cleanStale, pickFromZip } = require('../src/portable/stick');
+const { StorageError } = require('../src/kernel/errors');
 const paths = require('../src/kernel/paths');
 const configMod = require('../src/kernel/config');
 const { Bus } = require('../src/kernel/bus');
@@ -442,7 +444,11 @@ test('zu wenig Platz bricht ab, BEVOR irgendetwas geschrieben wird', async () =>
     await assert.rejects(
       () => tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false }),
       (err) => {
-        assert.equal(err.code, 'STORAGE_ERROR');
+        // 507 statt 500: ein voller Stick ist ein Zustand der Welt, kein
+        // Defekt dieses Servers -- und die Oberflaeche soll "Platz schaffen"
+        // anbieten statt eines Fehlerberichts.
+        assert.equal(err.code, 'STICK_FULL');
+        assert.equal(err.status, 507);
         assert.match(err.message, /frei/);
         assert.match(err.message, /nichts geschrieben/);
         return true;
@@ -523,7 +529,12 @@ test('prepare sichert den Datenbestand mit und ueberschreibt nie einen vorhanden
         sourceRoot: src.home, includeRuntimes: false, includeVault: true, sourceHome: home.home,
       }),
       (err) => {
-        assert.equal(err.code, 'STORAGE_ERROR');
+        // 409 statt 500, aus demselben Grund wie beim vollen Stick: "da liegen
+        // schon Daten" ist der Zustand des Sticks, kein Defekt dieses Servers.
+        // Wer bisher auf StorageError geprueft hat, verliert nichts.
+        assert.equal(err.code, 'STICK_DATA_PRESENT');
+        assert.equal(err.status, 409);
+        assert.ok(err instanceof StorageError);
         assert.match(err.message, /bereits ein Datenbestand/);
         return true;
       },
@@ -898,6 +909,790 @@ test('ein echter Stick laesst sich aus dem echten Quelltext bauen', async () => 
     assert.match(run.stdout.trim(), /^\d+\.\d+\.\d+/);
   } finally {
     stick.cleanup();
+  }
+});
+
+/* ------------------------------------------- Serverbetrieb: Punkte 1 bis 7 */
+
+/**
+ * Ein Quelltextbaum mit echtem Gewicht.
+ *
+ * Die Messungen brauchen eine Kopie, die lange genug dauert, um ueberhaupt
+ * etwas beobachten zu koennen -- mit zehn winzigen Dateien ist jede Aussage
+ * ueber den Ereignisring Zufall.
+ */
+function makeHeavySource(root, { files = 150, bytes = 1024 * 1024 } = {}) {
+  makeSource(root, { withJunk: false });
+  const blob = Buffer.alloc(bytes, 7);
+  const dir = path.join(root, 'gross');
+  fs.mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < files; i++) fs.writeFileSync(path.join(dir, `teil-${i}.bin`), blob);
+  return root;
+}
+
+/** Ein Ordner, in dem dieser Prozess nichts anlegen darf -- oder null. */
+function readOnlyDir() {
+  for (const dir of (process.platform === 'linux' ? ['/sys'] : [])) {
+    if (!fs.existsSync(dir)) continue;
+    const probe = path.join(dir, `.neural-os-test-${Date.now()}`);
+    try {
+      fs.writeFileSync(probe, 'x');
+      fs.unlinkSync(probe);
+    } catch {
+      return dir;
+    }
+  }
+  if (process.getuid && process.getuid() !== 0) {
+    const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'stick-ro-'));
+    fs.chmodSync(dir, 0o500);
+    return dir;
+  }
+  return null;
+}
+
+test('waehrend des Kopierens bleibt der Server bedienbar', async () => {
+  const stick = tempHome('stick-ring');
+  const src = tempHome('stick-src20');
+  try {
+    makeHeavySource(src.home);
+    const tool = createStick({});
+
+    // Der Zeitgeber steht fuer alles, was ein Server nebenher tun muss.
+    let ticks = 0;
+    const timer = setInterval(() => { ticks++; }, 5);
+    // Und das hier fuer eine zweite Anfrage, die waehrenddessen ankommt.
+    let fremdeAntwort = 0;
+    const fremderAufruf = new Promise((resolve) => {
+      setTimeout(() => { fremdeAntwort = Date.now(); resolve(); }, 20);
+    });
+
+    const begonnen = Date.now();
+    const result = await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: true });
+    const kopieFertig = Date.now();
+    await fremderAufruf;
+    clearInterval(timer);
+
+    const dauer = kopieFertig - begonnen;
+    assert.ok(dauer > 50, `die Kopie war mit ${dauer} ms zu kurz, um etwas zu messen`);
+    assert.ok(result.files > 150);
+    // Vor der Umstellung auf fs.promises.copyFile stand der Ring hier komplett
+    // still: null Ticks, und die zweite Anfrage kam erst NACH der Kopie an.
+    assert.ok(ticks >= 3, `der Ereignisring bekam waehrend ${dauer} ms nur ${ticks} Runden`);
+    assert.ok(fremdeAntwort > 0 && fremdeAntwort < kopieFertig,
+      'der andere Aufruf wurde erst nach der Kopie beantwortet - der Server stand still');
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('ein Abbruch stoppt die Kopie und laesst den alten Stand stehen', async () => {
+  const stick = tempHome('stick-abbruch');
+  const src = tempHome('stick-src21');
+  try {
+    makeHeavySource(src.home, { files: 60 });
+    const tool = createStick({});
+    await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
+    const alt = snapshotDir(path.join(stick.home, 'app'));
+
+    const controller = new AbortController();
+    let gesehen = 0;
+    await assert.rejects(
+      () => tool.update(stick.home, {
+        sourceRoot: src.home,
+        signal: controller.signal,
+        onProgress(p) { if (p.copied >= 1 && ++gesehen === 1) controller.abort(); },
+      }),
+      (err) => {
+        assert.equal(err.code, 'ABORTED');
+        assert.equal(err.status, 499);
+        assert.match(err.message, /abgebrochen/);
+        assert.ok(!/abort(ed)?\b/i.test(err.message.replace(/abgebrochen/gi, '')),
+          `die Meldung muss deutsch sein: ${err.message}`);
+        return true;
+      },
+    );
+
+    // Die zweistufige Umbenennung haelt ihr Versprechen: app/ ist weder halb
+    // noch weg, sondern unveraendert der vollstaendige Stand von vorher.
+    assert.deepEqual(snapshotDir(path.join(stick.home, 'app')), alt);
+    const reste = fs.readdirSync(stick.home).filter((n) => /^\.app\.(tmp|old)-/.test(n));
+    assert.deepEqual(reste, [], `nach dem Abbruch blieb liegen: ${reste.join(', ')}`);
+
+    const nachher = await tool.verify(stick.home);
+    assert.ok(!nachher.problems.some((p) => p.code === 'APP_MISSING' || p.code === 'APP_INCOMPLETE'),
+      `der Stick ist nach dem Abbruch benutzbar: ${JSON.stringify(nachher.problems)}`);
+    // Und die Sperre ist wieder frei.
+    const wieder = await tool.update(stick.home, { sourceRoot: src.home });
+    assert.ok(wieder.files > 0);
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('ein Abbruch beim ersten Anlegen hinterlaesst einen Zustand, den verify erklaert', async () => {
+  const stick = tempHome('stick-abbruch2');
+  const src = tempHome('stick-src22');
+  try {
+    makeHeavySource(src.home, { files: 60 });
+    const tool = createStick({});
+    const controller = new AbortController();
+    await assert.rejects(
+      () => tool.prepare(stick.home, {
+        sourceRoot: src.home,
+        includeRuntimes: false,
+        signal: controller.signal,
+        onProgress(p) { if (p.copied >= 1) controller.abort(); },
+      }),
+      (err) => err.code === 'ABORTED',
+    );
+
+    // Halbes darf nicht liegenbleiben, und was fehlt, muss verify benennen.
+    const reste = fs.readdirSync(stick.home).filter((n) => /^\.app\.tmp-/.test(n));
+    assert.deepEqual(reste, [], `halb kopierter Ordner blieb liegen: ${reste.join(', ')}`);
+    const geprueft = await tool.verify(stick.home);
+    assert.equal(geprueft.ok, false);
+    const fehlt = geprueft.problems.find((p) => p.code === 'APP_MISSING' || p.code === 'MARKER_MISSING');
+    assert.ok(fehlt, `verify muss den abgebrochenen Stick erklaeren: ${JSON.stringify(geprueft.problems)}`);
+    assert.ok(fehlt.fix && fehlt.fix.length > 10, 'und sagen, was zu tun ist');
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('ein bereits abgebrochenes Signal laesst nichts mehr anfangen', async () => {
+  const stick = tempHome('stick-abbruch3');
+  const ziel = tempHome('stick-abbruch3b');
+  const src = tempHome('stick-src23');
+  try {
+    makeSource(src.home);
+    const tool = createStick({});
+    await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
+    const vorher = snapshotDir(stick.home);
+
+    const controller = new AbortController();
+    controller.abort();
+    for (const lauf of [
+      () => tool.prepare(ziel.home, { sourceRoot: src.home, includeRuntimes: false, signal: controller.signal }),
+      () => tool.update(stick.home, { sourceRoot: src.home, signal: controller.signal }),
+      () => tool.addRuntime(stick.home, LOCAL_PLATFORM || 'linux-x64', { signal: controller.signal }),
+    ]) {
+      await assert.rejects(lauf, (err) => {
+        assert.equal(err.code, 'ABORTED');
+        return true;
+      });
+    }
+    assert.deepEqual(snapshotDir(stick.home), vorher, 'ein abgebrochener Aufruf darf nichts anfassen');
+  } finally {
+    stick.cleanup();
+    ziel.cleanup();
+    src.cleanup();
+  }
+});
+
+test('zwei Vorgaenge auf demselben Stick schliessen einander aus', async () => {
+  const stick = tempHome('stick-sperre');
+  const zweiter = tempHome('stick-sperre2');
+  const src = tempHome('stick-src24');
+  try {
+    makeHeavySource(src.home, { files: 80 });
+    const a = createStick({});
+    // Ein zweiter Browsertab holt sich sein eigenes Werkzeug: die Sperre muss
+    // deshalb am Pfad haengen, nicht am Objekt.
+    const b = createStick({});
+
+    const laeuft = a.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
+    await assert.rejects(
+      () => b.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false }),
+      (err) => {
+        assert.equal(err.code, 'STICK_BUSY');
+        assert.equal(err.status, 409);
+        assert.match(err.message, /laeuft bereits "Stick vorbereiten"/);
+        assert.match(err.message, /Warte/);
+        return true;
+      },
+    );
+    // Ein anderer Stick ist davon nicht betroffen.
+    const daneben = await b.prepare(zweiter.home, { sourceRoot: src.home, includeRuntimes: false });
+    assert.ok(daneben.files > 0);
+
+    const erste = await laeuft;
+    assert.ok(erste.files > 80);
+    // Der erste Vorgang ist vollstaendig durchgelaufen, nichts wurde ihm
+    // unter den Haenden weggeraeumt.
+    const geprueft = await a.verify(stick.home);
+    assert.ok(!geprueft.problems.some((p) => p.code === 'APP_INCOMPLETE' || p.code === 'INTERRUPTED_COPY'),
+      `der parallele Aufruf hat den Stick beschaedigt: ${JSON.stringify(geprueft.problems)}`);
+    // Danach ist die Wurzel wieder frei.
+    const nochmal = await b.update(stick.home, { sourceRoot: src.home });
+    assert.ok(nochmal.files > 0);
+  } finally {
+    stick.cleanup();
+    zweiter.cleanup();
+    src.cleanup();
+  }
+});
+
+test('ein abgebrochener Datenbestand bleibt nicht als halbe Sicherung liegen', async () => {
+  const stick = tempHome('stick-halbe-sicherung');
+  const src = tempHome('stick-src31');
+  const heim = tempHome('stick-heim');
+  try {
+    makeSource(src.home);
+    // Ein Datenbestand, gross genug, um mittendrin abgebrochen zu werden.
+    const blob = Buffer.alloc(512 * 1024, 5);
+    for (let i = 0; i < 60; i++) fs.writeFileSync(path.join(heim.home, `notiz-${i}.bin`), blob);
+    const tool = createStick({});
+
+    const controller = new AbortController();
+    await assert.rejects(
+      () => tool.prepare(stick.home, {
+        sourceRoot: src.home,
+        sourceHome: heim.home,
+        includeVault: true,
+        includeRuntimes: false,
+        signal: controller.signal,
+        onProgress(p) { if (p.label === 'data' && p.copied >= 1) controller.abort(); },
+      }),
+      (err) => err.code === 'ABORTED',
+    );
+
+    // Eine halbe Sicherung sieht aus wie eine ganze: genau das darf nicht
+    // liegenbleiben, sonst vertraut ihr jemand.
+    const geblieben = fs.readdirSync(path.join(stick.home, 'data'));
+    assert.deepEqual(geblieben, [], `halbe Sicherung geblieben: ${geblieben.join(', ')}`);
+
+    // Und danach laeuft dieselbe Sicherung vollstaendig durch.
+    const fertig = await tool.prepare(stick.home, {
+      sourceRoot: src.home, sourceHome: heim.home, includeVault: true, includeRuntimes: false,
+    });
+    assert.ok(fertig.files > 60);
+    assert.equal(fs.readdirSync(path.join(stick.home, 'data')).length, 60);
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+    heim.cleanup();
+  }
+});
+
+test('waehrend ein Vorgang laeuft, nennt verify das beim Namen', async () => {
+  const stick = tempHome('stick-laeuft');
+  const src = tempHome('stick-src30');
+  try {
+    makeHeavySource(src.home, { files: 80 });
+    const tool = createStick({});
+    await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
+
+    const laeuft = tool.update(stick.home, { sourceRoot: src.home });
+    const mittendrin = await tool.verify(stick.home);
+    await laeuft;
+
+    // Der Arbeitsordner eines laufenden Vorgangs heisst genauso wie der Rest
+    // eines abgebrochenen. Ihn als Abbruch zu melden waere ein erfundener Befund.
+    assert.ok(!mittendrin.problems.some((p) => p.code === 'INTERRUPTED_COPY'),
+      `ein laufender Vorgang ist kein Abbruch: ${JSON.stringify(mittendrin.problems)}`);
+    const hinweis = mittendrin.problems.find((p) => p.code === 'OPERATION_RUNNING');
+    assert.ok(hinweis, 'der laufende Vorgang muss dastehen');
+    assert.equal(hinweis.level, 'info');
+    assert.match(hinweis.message, /Stick aktualisieren/);
+
+    // Danach ist der Hinweis weg und der Stick wieder ein gewoehnlicher Stick.
+    const danach = await tool.verify(stick.home);
+    assert.ok(!danach.problems.some((p) => p.code === 'OPERATION_RUNNING' || p.code === 'INTERRUPTED_COPY'));
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('verify legt keine Datei an - die Sonde muss man verlangen', async () => {
+  const stick = tempHome('stick-lesen');
+  const src = tempHome('stick-src25');
+  try {
+    makeSource(src.home);
+    const tool = createStick({});
+    await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
+
+    const vorher = fs.statSync(stick.home, { bigint: true }).mtimeNs;
+    const gelesen = await tool.verify(stick.home);
+    assert.equal(gelesen.filesystem.probed, false);
+    assert.equal(fs.statSync(stick.home, { bigint: true }).mtimeNs, vorher,
+      'verify hat im Wurzelverzeichnis etwas angelegt oder geloescht');
+    assert.deepEqual(fs.readdirSync(stick.home).filter((n) => n.startsWith('.neural-os-probe')), []);
+
+    // Gegenprobe: mit ausdruecklicher Sonde AENDERT sich die Zeit. Damit misst
+    // der Test oben nachweislich das Richtige und nicht nur eine grobe Uhr.
+    const mitSonde = await tool.verify(stick.home, { probe: true });
+    assert.equal(mitSonde.filesystem.probed, true);
+    assert.notEqual(fs.statSync(stick.home, { bigint: true }).mtimeNs, vorher);
+    assert.deepEqual(fs.readdirSync(stick.home).filter((n) => n.startsWith('.neural-os-probe')), []);
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('die Rechtefrage beantwortet verify aus den Zeugen, nicht durch Schreiben', async () => {
+  if (process.platform === 'win32') return; // dort gibt es keine Unix-Modi
+  const stick = tempHome('stick-rechte');
+  const src = tempHome('stick-src26');
+  const fremd = tempHome('stick-fremd');
+  try {
+    makeSource(src.home);
+    const tool = createStick({});
+    await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
+
+    const gut = await tool.verify(stick.home);
+    assert.equal(gut.filesystem.enforcesModes, true);
+    assert.ok(!gut.problems.some((p) => p.code === 'NO_PERMISSIONS' || p.code === 'PERMISSIONS_UNKNOWN'));
+
+    // Genau das tut ein exFAT-Treiber: der gesetzte Modus kommt nicht zurueck.
+    fs.chmodSync(path.join(stick.home, 'data'), 0o777);
+    const ohneRechte = await tool.verify(stick.home);
+    assert.equal(ohneRechte.filesystem.enforcesModes, false);
+    const warnung = ohneRechte.problems.find((p) => p.code === 'NO_PERMISSIONS');
+    assert.ok(warnung, `ein Dateisystem ohne Rechte muss auffallen: ${JSON.stringify(ohneRechte.problems)}`);
+    assert.match(warnung.fix, /Verschlüsselung/);
+
+    // Ohne Zeugen wird nichts behauptet: die Frage bleibt offen und sagt das.
+    const unbekannt = await tool.verify(fremd.home);
+    assert.equal(unbekannt.filesystem.enforcesModes, null);
+    const offen = unbekannt.problems.find((p) => p.code === 'PERMISSIONS_UNKNOWN');
+    assert.ok(offen, 'eine ungeklaerte Frage muss als ungeklaert dastehen');
+    assert.equal(offen.level, 'info');
+    assert.ok(!unbekannt.problems.some((p) => p.code === 'NO_PERMISSIONS'));
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+    fremd.cleanup();
+  }
+});
+
+test('auch die Fehler aus der Fehlertaxonomie sind ganze deutsche Saetze', async () => {
+  const stick = tempHome('stick-deutsch');
+  const src = tempHome('stick-src27');
+  try {
+    makeSource(src.home);
+    const tool = createStick({});
+    const faelle = [
+      () => tool.prepare(stick.home, { sourceRoot: path.join(src.home, 'gibt-es-nicht') }),
+      () => tool.update(path.join(stick.home, 'auch-nicht'), { sourceRoot: src.home }),
+      () => tool.prepare(stick.home, {
+        sourceRoot: src.home,
+        includeRuntimes: false,
+        includeVault: true,
+        sourceHome: path.join(src.home, 'kein-zuhause'),
+      }),
+    ];
+    for (const fall of faelle) {
+      await assert.rejects(fall, (err) => {
+        assert.equal(err.code, 'NOT_FOUND');
+        assert.equal(err.status, 404);
+        // "Der Quellordner /media/usb not found" ist kein deutscher Satz.
+        assert.ok(!/not found/i.test(err.message), `englischer Rest in: ${err.message}`);
+        assert.match(err.message, /gibt es nicht/);
+        assert.match(err.message, /[.?]$/, 'ein ganzer Satz endet auch wie einer');
+        return true;
+      });
+    }
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('ein voller oder schreibgeschuetzter Stick ist kein Serverdefekt', async () => {
+  const stick = tempHome('stick-status');
+  const src = tempHome('stick-src28');
+  try {
+    makeSource(src.home);
+    const eng = createStick({ freeBytes: () => 4096 });
+    await assert.rejects(
+      () => eng.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false }),
+      (err) => {
+        assert.equal(err.status, 507, 'kein Platz ist 507, nicht 500');
+        assert.equal(err.code, 'STICK_FULL');
+        // Wer bisher auf StorageError geprueft hat, verliert nichts.
+        assert.ok(err instanceof StorageError);
+        return true;
+      },
+    );
+
+    const gesperrt = readOnlyDir();
+    if (gesperrt) {
+      const tool = createStick({ freeBytes: () => 1e12 });
+      await assert.rejects(
+        () => tool.prepare(gesperrt, { sourceRoot: src.home, includeRuntimes: false }),
+        (err) => {
+          assert.equal(err.status, 403, 'Schreibschutz ist ein fehlendes Recht, kein Defekt');
+          assert.equal(err.code, 'PERMISSION_DENIED');
+          assert.match(err.message, /schreiben/);
+          return true;
+        },
+      );
+    }
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('der Fortschritt traegt Prozent, Plattform und mehr als nur die Schlussmeldung', async () => {
+  const stick = tempHome('stick-fortschritt');
+  const src = tempHome('stick-src29');
+  try {
+    makeSource(src.home, { withJunk: false });
+    const events = [];
+    const tool = createStick({});
+    await tool.prepare(stick.home, {
+      sourceRoot: src.home,
+      includeRuntimes: true,
+      onProgress(evt) { events.push(evt); },
+    });
+
+    const kopie = events.filter((e) => e.label === 'source');
+    // Vorher gab es bei weniger als 25 Dateien ueberhaupt nur die Schlussmeldung.
+    assert.ok(kopie.length >= 2, `zu wenige Meldungen fuer einen Balken: ${kopie.length}`);
+    assert.equal(kopie[0].copied, 1, 'die erste Datei meldet sich sofort');
+    for (const evt of kopie) {
+      assert.equal(typeof evt.percent, 'number');
+      assert.ok(evt.percent >= 0 && evt.percent <= 100, `Prozent ausserhalb 0..100: ${evt.percent}`);
+      assert.ok(evt.total > 0 && evt.copied <= evt.total);
+      assert.equal(typeof evt.totalBytes, 'number');
+    }
+    assert.equal(kopie[kopie.length - 1].percent, 100);
+    let letzte = -1;
+    for (const evt of kopie) {
+      assert.ok(evt.percent >= letzte, 'der Balken darf nicht zurueckspringen');
+      letzte = evt.percent;
+    }
+
+    // Die lokale Laufzeit meldete ihre Plattform bisher nicht -- eine Anzeige
+    // haette dort ein leeres Feld gezeigt, wo bei addRuntime der Name steht.
+    const laufzeit = events.filter((e) => e.phase === 'runtime');
+    assert.ok(laufzeit.length > 0);
+    if (LOCAL_PLATFORM) {
+      assert.ok(laufzeit.some((e) => e.platform === LOCAL_PLATFORM),
+        `keine Laufzeitmeldung mit platform: ${JSON.stringify(laufzeit)}`);
+    }
+    const fertig = events.find((e) => e.phase === 'done');
+    assert.equal(fertig.percent, 100);
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+/* ==================================================================== */
+/* Die Vorschau -- und die Tuer, durch die ein Mensch geht               */
+/* ==================================================================== */
+
+test('die Vorschau sagt, was passieren wuerde, und schreibt dabei nichts', async () => {
+  const stick = tempHome('stick-preview');
+  const src = tempHome('stick-src-preview');
+  try {
+    makeSource(src.home);
+    const tool = createStick({});
+
+    const vorher = snapshotDir(stick.home);
+    const mtime = fs.statSync(stick.home).mtimeMs;
+    const v = tool.preview(stick.home, { action: 'prepare', sourceRoot: src.home, includeRuntimes: false });
+
+    assert.equal(v.action, 'prepare');
+    assert.equal(v.isStick, false);
+    assert.ok(v.source.files > 0, 'die Vorschau nennt keine Dateizahl');
+    assert.equal(v.source.bytes > 0, true);
+    assert.deepEqual(v.blockers, [], 'auf einem leeren, beschreibbaren Ordner spricht nichts dagegen');
+    // Der eigentliche Punkt: eine Vorschau, die etwas anlegt, ist keine.
+    assert.deepEqual(snapshotDir(stick.home), vorher, 'die Vorschau hat etwas geschrieben');
+    assert.equal(fs.statSync(stick.home).mtimeMs, mtime, 'der Zielordner wurde angefasst');
+    assert.equal(v.filesystem.probed, false, 'die Vorschau hat eine Sonde gelegt');
+
+    // Und auf einem Pfad, den es noch gar nicht gibt, antwortet sie trotzdem.
+    const nochNicht = tool.preview(path.join(stick.home, 'gibt', 'es', 'nicht'), {
+      action: 'prepare', sourceRoot: src.home, includeRuntimes: false,
+    });
+    assert.equal(nochNicht.exists, false);
+    assert.ok(Number.isFinite(nochNicht.space.free), 'ohne Zielordner keine Platzangabe');
+    assert.equal(fs.existsSync(path.join(stick.home, 'gibt')), false, 'die Vorschau hat den Ordner angelegt');
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('Vorschau und Vorgang rechnen mit derselben Formel', async () => {
+  const stick = tempHome('stick-formel');
+  const src = tempHome('stick-src-formel');
+  try {
+    makeSource(src.home);
+    // Derselbe kuenstlich enge Stick, mit dem prepare() weiter oben abbricht.
+    const eng = createStick({ freeBytes: () => 4096 });
+    const v = eng.preview(stick.home, { action: 'prepare', sourceRoot: src.home, includeRuntimes: false });
+
+    assert.equal(v.space.fits, false);
+    const voll = v.blockers.find((b) => b.code === 'STICK_FULL');
+    assert.ok(voll, `kein Hindernis "voll": ${JSON.stringify(v.blockers)}`);
+    assert.equal(voll.status, 507);
+
+    // Wortgleich: wuerde die Vorschau anders formulieren als der Vorgang,
+    // haette der Benutzer zwei verschiedene Wahrheiten vor sich.
+    let gefangen = null;
+    await eng.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false }).catch((err) => { gefangen = err; });
+    assert.ok(gefangen, 'prepare haette ablehnen muessen');
+    assert.equal(gefangen.code, 'STICK_FULL');
+    assert.equal(gefangen.message, voll.message,
+      'Vorschau und Vorgang sagen nicht dasselbe');
+    assert.deepEqual(fs.readdirSync(stick.home), [], 'trotz Absage wurde etwas geschrieben');
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('die Vorschau meldet einen laufenden Vorgang, statt ihn zu uebersehen', async () => {
+  const stick = tempHome('stick-preview-busy');
+  const src = tempHome('stick-src-preview-busy');
+  try {
+    makeSource(src.home);
+    const tool = createStick({});
+    await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
+
+    let gesehen = null;
+    const lauf = tool.update(stick.home, {
+      sourceRoot: src.home,
+      onProgress: (p) => {
+        if (p.phase === 'source' && !gesehen) {
+          gesehen = tool.preview(stick.home, { action: 'update', sourceRoot: src.home });
+        }
+      },
+    });
+    await lauf;
+
+    assert.ok(gesehen, 'waehrend des Laufs kam keine Vorschau zustande');
+    assert.ok(gesehen.running, 'der laufende Vorgang fehlt in der Vorschau');
+    const busy = gesehen.blockers.find((b) => b.code === 'STICK_BUSY');
+    assert.ok(busy, `kein Hindernis "laeuft schon": ${JSON.stringify(gesehen.blockers)}`);
+    assert.equal(busy.status, 409);
+
+    // Danach ist die Wurzel wieder frei.
+    const danach = tool.preview(stick.home, { action: 'update', sourceRoot: src.home });
+    assert.equal(danach.running, null);
+    assert.deepEqual(danach.blockers, []);
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------- HTTP */
+
+/**
+ * Warum diese Tests ueber einen echten Server laufen
+ * --------------------------------------------------
+ * Der Befund, der diesen Bereich ausgeloest hat, war nicht "die Funktion ist
+ * kaputt" -- sie war tadellos und vollstaendig getestet. Der Befund war: sie
+ * hat keine Tuer. 1792 Zeilen Stick-Werkzeug, null Routen, null Treffer fuer
+ * "Stick" in web/**. Ein Test, der `createStick()` direkt aufruft, kann das
+ * per Bauart nicht bemerken. Deshalb hier: echter Server, echte Anfragen.
+ */
+function httpRequest(base, method, urlPath, body) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlPath, base);
+    const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
+    const req = http.request({
+      method,
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname + url.search,
+      headers: {
+        ...(payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}),
+        ...(method !== 'GET' && method !== 'HEAD' ? { 'x-neural-os': '1' } : {}),
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = raw ? JSON.parse(raw) : null; } catch { /* ein Ereignisstrom ist kein JSON */ }
+        // Ereignisse eines SSE-Stroms, falls es einer war.
+        const events = [];
+        let name = null;
+        for (const zeile of raw.split(/\r?\n/)) {
+          if (zeile.startsWith('event:')) name = zeile.slice(6).trim();
+          else if (zeile.startsWith('data:')) {
+            let daten = zeile.slice(5).trim();
+            try { daten = JSON.parse(daten); } catch { /* Klartext */ }
+            events.push({ event: name, data: daten });
+            name = null;
+          }
+        }
+        resolve({ status: res.statusCode, text: raw, json, events });
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function withStickServer(fn) {
+  const { createServer } = require('../src/http/server');
+  const vault = tempHome('stick-http-home');
+  const src = tempHome('stick-http-src');
+  const ziel = tempHome('stick-http-ziel');
+  makeSource(src.home);
+
+  const appPaths = paths.ensureLayout(paths.layout(path.join(vault.home, 'tresor')));
+  const config = configMod.defaults();
+  config.server.host = '127.0.0.1';
+  const bus = new Bus();
+  const { openStore } = require('../src/store/engine');
+  const silent = () => ({ error() {}, warn() {}, info() {}, debug() {} });
+  const store = await openStore({ paths: appPaths, bus, logger: silent });
+  // Ein Datenbestand, der wirklich etwas enthaelt: sonst kopiert
+  // includeVault null Dateien, und "prepare ueberschreibt nie Daten" liesse
+  // sich gar nicht ausloesen -- der Test wuerde gruen sein, ohne etwas zu zeigen.
+  store.create('note', { title: 'Auf dem Stick', body: 'Diese Notiz soll mitreisen.' });
+  fs.writeFileSync(path.join(appPaths.home, 'config.json'), JSON.stringify(configMod.defaults(), null, 2));
+  const stick = createStick({ paths: appPaths, config, logger: silent });
+
+  const server = await createServer({
+    version: 'test', config, paths: appPaths, store, bus, stick, logger: silent, failures: [],
+  });
+  await server.listen({ port: 0, host: '127.0.0.1' });
+  const base = `http://127.0.0.1:${server.server.address().port}`;
+  const req = (method, urlPath, body) => httpRequest(base, method, urlPath, body);
+
+  try {
+    await fn({ req, stick, ziel: ziel.home, quelle: src.home, appPaths });
+  } finally {
+    await server.close().catch(() => {});
+    await store.close().catch(() => {});
+    vault.cleanup();
+    src.cleanup();
+    ziel.cleanup();
+  }
+}
+
+test('der Stick ist ueber HTTP erreichbar, und die Selbstauskunft sagt die Wahrheit', async () => {
+  await withStickServer(async ({ req, ziel, appPaths }) => {
+    const selbst = await req('GET', '/api/stick');
+    assert.equal(selbst.status, 200, selbst.text);
+    assert.equal(selbst.json.portabel, false, 'ein Server aus einem Tresorordner laeuft nicht portabel');
+    assert.equal(selbst.json.von, null);
+    assert.equal(selbst.json.datenOrdner, appPaths.home);
+    assert.equal(selbst.json.modell.reistMit, false);
+    assert.match(selbst.json.modell.grund, /Modell/);
+    assert.ok(selbst.json.bekanntePlattformen.includes('win-x64'));
+
+    const status = await req('GET', '/api/status');
+    assert.equal(status.status, 200, status.text);
+    assert.ok('portable' in status.json, 'der Browser kann nicht erfahren, ob er von einem Stick laeuft');
+    assert.equal(status.json.portable, null);
+    assert.equal(status.json.subsystems.stick, true);
+
+    // Ohne Pfad: ein ganzer Satz, kein "path required".
+    const ohne = await req('GET', '/api/stick/preview');
+    assert.equal(ohne.status, 400, ohne.text);
+    assert.match(ohne.json.error.message, /Pfad zum Stick/);
+    assert.match(ohne.json.error.message, /getippt/);
+
+    const vorschau = await req('GET', `/api/stick/preview?path=${encodeURIComponent(ziel)}`);
+    assert.equal(vorschau.status, 200, vorschau.text);
+    assert.equal(vorschau.json.blockers.length, 0);
+    assert.deepEqual(fs.readdirSync(ziel), [], 'die Vorschau hat etwas angelegt');
+  });
+});
+
+test('ein langer Vorgang kommt als Ereignisstrom, und die Absage kommt davor', async () => {
+  await withStickServer(async ({ req, ziel }) => {
+    const lauf = await req('POST', '/api/stick/prepare', { path: ziel });
+    assert.equal(lauf.status, 200, lauf.text);
+    const arten = lauf.events.map((e) => e.event);
+    assert.ok(arten.includes('start'), `kein Anfang gemeldet: ${arten.join(',')}`);
+    assert.ok(arten.includes('fertig'), `kein Abschluss gemeldet: ${arten.join(',')}`);
+    assert.ok(!arten.includes('fehler'), `Fehler im Strom: ${lauf.text.slice(0, 300)}`);
+    const prozente = lauf.events
+      .filter((e) => e.event === 'fortschritt')
+      .map((e) => e.data && e.data.percent)
+      .filter((v) => Number.isFinite(v));
+    assert.ok(prozente.length >= 2, `zu wenige Prozentmeldungen fuer einen Balken: ${prozente.length}`);
+    assert.equal(prozente[prozente.length - 1], 100);
+    assert.ok(fs.existsSync(path.join(ziel, 'neural-os.portable')), 'Marker fehlt');
+    assert.ok(fs.existsSync(path.join(ziel, 'app', 'bin', 'neural-os.js')), 'Programm fehlt');
+
+    // Die Pruefung haengt hinter einem GET und darf deshalb nichts schreiben.
+    const vorherMtime = fs.statSync(ziel).mtimeMs;
+    const pruefung = await req('GET', `/api/stick/verify?path=${encodeURIComponent(ziel)}`);
+    assert.equal(pruefung.status, 200, pruefung.text);
+    assert.equal(pruefung.json.ok, true, JSON.stringify(pruefung.json.problems));
+    assert.equal(pruefung.json.filesystem.probed, false);
+    assert.equal(fs.statSync(ziel).mtimeMs, vorherMtime);
+
+    // Und jetzt der Punkt: was vorher entscheidbar ist, wird VOR dem ersten
+    // Byte entschieden -- als Statuscode, nicht als halber Ereignisstrom.
+    const mitDaten = await req('POST', '/api/stick/prepare', { path: ziel, includeVault: true });
+    assert.equal(mitDaten.status, 200, mitDaten.text);
+    const nochmal = await req('POST', '/api/stick/prepare', { path: ziel, includeVault: true });
+    assert.equal(nochmal.status, 409, nochmal.text);
+    assert.equal(nochmal.json.error.code, 'STICK_DATA_PRESENT');
+    assert.equal(nochmal.events.length, 0, 'es wurde doch ein Ereignisstrom geoeffnet');
+    assert.match(nochmal.json.error.message, /bereits ein Datenbestand/);
+  });
+});
+
+test('zwei Anfragen auf denselben Stick ergeben 409, nicht zwei halbe Sticks', async () => {
+  await withStickServer(async ({ req, ziel }) => {
+    const erst = await req('POST', '/api/stick/prepare', { path: ziel });
+    assert.equal(erst.status, 200, erst.text);
+
+    const beide = await Promise.all([
+      req('POST', '/api/stick/update', { path: ziel }),
+      req('POST', '/api/stick/update', { path: ziel }),
+    ]);
+    const stroeme = beide.filter((r) => r.events.length > 0);
+    const abgelehnt = beide.filter((r) => r.status === 409);
+    assert.equal(stroeme.length, 1, `es liefen ${stroeme.length} Vorgaenge gleichzeitig`);
+    assert.equal(abgelehnt.length, 1, `Statuscodes: ${beide.map((r) => r.status).join(',')}`);
+    assert.equal(abgelehnt[0].json.error.code, 'STICK_BUSY');
+    assert.match(abgelehnt[0].json.error.message, /laeuft bereits/);
+
+    // Der Stick hat es unbeschadet ueberstanden -- genau das schuetzt die Sperre.
+    const danach = await req('GET', `/api/stick/verify?path=${encodeURIComponent(ziel)}`);
+    assert.equal(danach.json.ok, true, JSON.stringify(danach.json.problems));
+  });
+});
+
+test('ohne Stick-Werkzeug sagt die Route das, statt so zu tun als ob', async () => {
+  const { createServer } = require('../src/http/server');
+  const vault = tempHome('stick-http-ohne');
+  const appPaths = paths.ensureLayout(paths.layout(path.join(vault.home, 'tresor')));
+  const config = configMod.defaults();
+  config.server.host = '127.0.0.1';
+  const bus = new Bus();
+  const { openStore } = require('../src/store/engine');
+  const silent = () => ({ error() {}, warn() {}, info() {}, debug() {} });
+  const store = await openStore({ paths: appPaths, bus, logger: silent });
+  const server = await createServer({
+    version: 'test', config, paths: appPaths, store, bus, stick: null, logger: silent, failures: [],
+  });
+  await server.listen({ port: 0, host: '127.0.0.1' });
+  const base = `http://127.0.0.1:${server.server.address().port}`;
+  try {
+    const r = await httpRequest(base, 'GET', '/api/stick');
+    assert.equal(r.status, 503, r.text);
+    assert.equal(r.json.error.code, 'SUBSYSTEM_UNAVAILABLE');
+    assert.match(r.json.error.message, /Stick-Werkzeug/);
+    const status = await httpRequest(base, 'GET', '/api/status');
+    assert.equal(status.json.subsystems.stick, false, 'ein fehlendes Teilsystem wird verschwiegen');
+  } finally {
+    await server.close().catch(() => {});
+    await store.close().catch(() => {});
+    vault.cleanup();
   }
 });
 

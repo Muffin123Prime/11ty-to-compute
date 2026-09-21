@@ -35,7 +35,9 @@ const {
   optionalString,
 } = require('./support');
 
-const MODES = new Set(['merge', 'replace', 'fresh']);
+const { IMPORT_MODES } = require('../../store/backup');
+
+const MODES = new Set(IMPORT_MODES);
 const FORMATS = new Set(['json', 'markdown', 'both']);
 
 function publish(rc, name, payload) {
@@ -158,11 +160,45 @@ function register(router) {
     if (!FORMATS.has(format)) throw new ValidationError(`Unbekanntes Format "${format}". Erlaubt: json, markdown, both.`);
     const result = await backup.exportAll({
       dir: optionalString(body.dir, 'dir', { max: 4096 }) || undefined,
+      // „parent" ist der Ordner, IN DEM eine neue Sicherung mit Zeitstempel
+      // entsteht. Das ist, was ein Mensch meint, wenn er ein Ziel auswaehlt --
+      // „dir" wuerde die dort liegende aeltere Sicherung ersetzen, und dann
+      // haette man immer genau eine.
+      parent: optionalString(body.parent, 'parent', { max: 4096 }) || undefined,
       format,
       includeFiles: body.includeFiles !== false,
+      // Ohne Passphrase bleibt der Export Klartext und sagt das selbst. Die
+      // Verschluesselung war in der Sicherung fertig, aber ueber HTTP nicht
+      // erreichbar -- eine Funktion, die niemand aufrufen kann, ist keine.
+      passphrase: optionalString(body.passphrase, 'passphrase', { max: 1024, trim: false }) || undefined,
     });
-    audit(rc, 'backup.export', { dir: result.dir, records: result.records, format });
+    audit(rc, 'backup.export', { dir: result.dir, records: result.records, format, sealed: result.sealed });
     return result;
+  });
+
+  /**
+   * Was ein Import taete -- ohne etwas zu schreiben.
+   *
+   * POST und nicht GET, weil die Passphrase einer verschluesselten Sicherung
+   * im Koerper stehen muss und nicht in einer URL, die in jedem Protokoll
+   * landet. Geschrieben wird trotzdem nichts; darauf baut die Ansicht auf,
+   * die das beim Oeffnen aufruft.
+   */
+  router.post('/api/backup/preview', async (rc) => {
+    rc.requireOwner('Die Vorschau einer Wiederherstellung');
+    const backup = needMethod(rc.ctx.backup, 'preview', 'Die Sicherung');
+    const body = asObject(await rc.body());
+    const dir = optionalString(body.dir, 'dir', { max: 4096 });
+    const file = optionalString(body.file, 'file', { max: 4096 });
+    if (!dir && !file) throw new ValidationError('Die Vorschau braucht "dir" oder "file".');
+    const mode = optionalString(body.mode, 'mode', { max: 20 }) || 'merge';
+    if (!MODES.has(mode)) throw new ValidationError(`Unbekannter Modus "${mode}". Erlaubt: ${[...MODES].join(', ')}.`);
+    return backup.preview({
+      dir: dir || undefined,
+      file: file || undefined,
+      mode,
+      passphrase: optionalString(body.passphrase, 'passphrase', { max: 1024, trim: false }) || undefined,
+    });
   });
 
   router.post('/api/backup/import', async (rc) => {
@@ -173,17 +209,109 @@ function register(router) {
     const file = optionalString(body.file, 'file', { max: 4096 });
     if (!dir && !file) throw new ValidationError('Der Import braucht "dir" oder "file".');
     const mode = optionalString(body.mode, 'mode', { max: 20 }) || 'merge';
-    if (!MODES.has(mode)) throw new ValidationError(`Unbekannter Modus "${mode}". Erlaubt: merge, replace, fresh.`);
+    if (!MODES.has(mode)) throw new ValidationError(`Unbekannter Modus "${mode}". Erlaubt: ${[...MODES].join(', ')}.`);
     // A restore is a bulk write. Feeding every record to the embedding model
     // on the way in would cost one model call and one full index write per
     // record -- slower than the import itself, and pointless: one reindex
     // afterwards produces exactly the same index.
-    const run = () => backup.importAll({ dir: dir || undefined, file: file || undefined, mode });
+    //
+    // `bulkWrite` legt waehrenddessen auch die Ableitung der Verknuepfungen
+    // still und holt sie danach EINMAL nach; ohne das kamen zu 24 gesicherten
+    // Kanten 19 abgeleitete Dubletten hinzu. Ob das Nachholen gelungen ist,
+    // wandert ins Ergebnis -- eine Wiederherstellung, deren Graph nicht
+    // nachgezogen wurde, darf nicht wie eine vollstaendige aussehen.
+    const run = () => backup.importAll({
+      dir: dir || undefined,
+      file: file || undefined,
+      mode,
+      passphrase: optionalString(body.passphrase, 'passphrase', { max: 1024, trim: false }) || undefined,
+    });
+    let ableitung = null;
     const result = typeof rc.ctx.bulkWrite === 'function'
-      ? await rc.ctx.bulkWrite(run)
+      ? await rc.ctx.bulkWrite(run, { onRederive: (bericht) => { ableitung = bericht; } })
       : await run();
-    audit(rc, 'backup.import', { dir, file, mode, imported: result.imported });
+    if (ableitung) {
+      result.graph = ableitung;
+      if (!ableitung.ok) {
+        if (!Array.isArray(result.warnings)) result.warnings = [];
+        result.warnings.push(ableitung.grund);
+      }
+    }
+    audit(rc, 'backup.import', { dir, file, mode, imported: result.imported, purged: result.purged && result.purged.records });
     return result;
+  });
+
+  /**
+   * Die vorhandenen Sicherungen, damit die Ansicht nicht raten muss, ob je
+   * eine geschrieben wurde. Gelesen wird nur `manifest.json` -- die Sicherung
+   * selbst wird dabei nicht geoeffnet und nicht geprueft; das tut
+   * `/api/backup/verify` auf Wunsch fuer eine einzelne.
+   */
+  router.get('/api/backup/list', (rc) => {
+    rc.requireOwner('Die Liste der Sicherungen');
+    const paths = need(rc.ctx.paths, 'Die Verzeichnisstruktur');
+    const orte = [];
+    const merken = (dir, label) => {
+      if (typeof dir !== 'string' || !dir) return;
+      if (orte.some((o) => o.dir === dir)) return;
+      orte.push({ dir, label });
+    };
+    merken(paths.exports, 'Im Programmverzeichnis');
+    // Wer woanders hin sichert, soll seine Sicherungen auch wiederfinden. Der
+    // Server kennt dieses Ziel nicht von sich aus -- die Ansicht reicht es
+    // durch. Gelesen wird dabei nur, was dort liegt.
+    const gewaehlt = rc.query.get('dir');
+    if (gewaehlt) {
+      if (gewaehlt.length > 4096) throw new ValidationError('Der Pfad ist zu lang.');
+      merken(path.resolve(gewaehlt), 'Gewähltes Ziel');
+    }
+    // Auf einem Stick zeigt paths.home auf den Stick selbst. Dort liegen
+    // Sicherungen, die einen Plattendefekt ueberleben -- sie gehoeren in
+    // dieselbe Liste, sonst sieht der Mensch nur die, die mit untergehen.
+    if (rc.ctx.portable && paths.home) merken(path.join(paths.home, 'exports'), 'Auf dem Stick');
+
+    const items = [];
+    const orteGeprueft = [];
+    for (const ort of orte) {
+      let namen = [];
+      try {
+        namen = fs.readdirSync(ort.dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+      } catch {
+        orteGeprueft.push({ ...ort, lesbar: false });
+        continue;
+      }
+      orteGeprueft.push({ ...ort, lesbar: true });
+      for (const name of namen) {
+        const dir = path.join(ort.dir, name);
+        let manifest;
+        try {
+          manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
+        } catch {
+          continue; // kein Manifest: kein Export, sondern irgendein Ordner
+        }
+        if (!manifest || manifest.kind !== 'neural-os-manifest') continue;
+        let bytes = 0;
+        for (const f of Array.isArray(manifest.files) ? manifest.files : []) {
+          if (Number.isFinite(f && f.bytes)) bytes += f.bytes;
+        }
+        const counts = manifest.counts || {};
+        items.push({
+          dir,
+          name,
+          ort: ort.label,
+          at: manifest.at || null,
+          format: manifest.format || null,
+          sealed: manifest.sealed === true,
+          includeFiles: manifest.includeFiles !== false,
+          bytes,
+          records: Number.isFinite(counts.records) ? counts.records : null,
+          files: Number.isFinite(counts.files) ? counts.files : null,
+          byType: counts.byType && typeof counts.byType === 'object' ? counts.byType : {},
+        });
+      }
+    }
+    items.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+    return { items, total: items.length, orte: orteGeprueft, exportsDir: paths.exports, home: paths.home, portable: !!rc.ctx.portable };
   });
 
   /**

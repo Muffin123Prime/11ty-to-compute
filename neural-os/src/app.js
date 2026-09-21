@@ -156,8 +156,19 @@ async function createApp(opts = {}) {
 
   // Derived links are maintained as a side effect of every write, so the graph
   // can never drift away from the data it claims to describe.
+  //
+  // `derivationSuspended` ist der Grund, warum eine Wiederherstellung fruueher
+  // mehr Kanten zurueckbrachte, als gesichert worden waren: jeder eingespielte
+  // Satz feuert `record.created`, die Ableitung sieht darin `[[Links]]` und
+  // Schlagworte und legt daraus EIGENE Kanten an -- zusaetzlich zu den Kanten,
+  // die im selben Import gerade aus der Sicherung kommen. Sie tragen neue ids,
+  // also greift auch die Dublettenpruefung in `store.edges.add` nicht. Gemessen
+  // wurden aus 24 gesicherten Kanten 43. Waehrend eines Massenschreibvorgangs
+  // ruht die Ableitung deshalb; `bulkWrite` leitet danach EINMAL sauber ab.
+  let derivationSuspended = 0;
   if (graph && typeof graph.deriveFor === 'function') {
     const rederive = (evt) => {
+      if (derivationSuspended > 0) return;
       const record = evt && evt.payload && evt.payload.record;
       if (!record || record.type === 'edge') return;
       try {
@@ -168,6 +179,38 @@ async function createApp(opts = {}) {
     };
     bus.on('record.created', rederive);
     bus.on('record.updated', rederive);
+  }
+
+  // --- Altlast: Lernkarten aus einer frueheren Fassung ----------------------
+  //
+  // Der Bereich "Lernen" ist entfallen. Vorhandene 'card'-Saetze werden hier
+  // EINMAL in Notizen umgewandelt, statt liegenzubleiben: der Typ steht nicht
+  // mehr in schema.TYPES, also fielen sie still aus jeder neuen Sicherung
+  // heraus -- weg waeren sie genau dann, wenn man sie braucht.
+  //
+  // Erst hier und nicht direkt nach openStore(): ab dieser Zeile haengt die
+  // Ableitung der Verknuepfungen am Bus, also bekommen die neuen Notizen ihre
+  // [[Links]] wie jede andere Notiz auch. Und noch immer, bevor irgendein
+  // Teilsystem den Tresor gelesen hat.
+  const migrationsMod = tryRequire('./store/migrations');
+  if (migrationsMod && typeof migrationsMod.lernkartenZuNotizen === 'function') {
+    try {
+      const bericht = migrationsMod.lernkartenZuNotizen(store, { logger });
+      if (bericht.gefunden) {
+        log.info(`Lernkarten: ${bericht.umgewandelt} in Notizen umgewandelt, ${bericht.verworfen} geloeschte entfernt.`);
+        audit.write('vault.migration.cards', bericht);
+        if (bericht.fehler.length) {
+          failures.push({ subsystem: 'migration/lernkarten', reason: `${bericht.fehler.length} Karte(n) nicht umgewandelt` });
+        }
+      }
+    } catch (err) {
+      // Eine gescheiterte Umwandlung darf den Start nicht verhindern -- die
+      // Karten liegen dann noch da und koennen es beim naechsten Mal wieder
+      // versuchen. Verschwiegen wird sie trotzdem nicht.
+      const e = asNeuralError(err);
+      failures.push({ subsystem: 'migration/lernkarten', reason: e.message, code: e.code });
+      log.error(`Lernkarten-Umwandlung fehlgeschlagen: ${e.message}`);
+    }
   }
 
   // --- models --------------------------------------------------------------
@@ -230,16 +273,6 @@ async function createApp(opts = {}) {
   const assistMod = tryRequire('./assist/engine');
   const assist = assistMod
     ? optional(failures, 'assist', () => assistMod.createAssist({ store, graph, bus, config, logger }))
-    : null;
-
-  // --- Lernkarten -----------------------------------------------------------
-  //
-  // Wie die Vorschlaege: braucht kein Modell. SM-2 ist dreissig Jahre alt und
-  // funktioniert, und das Nuetzlichste soll nicht der Teil sein, fuer den man
-  // erst 5 GB herunterlaedt.
-  const studyMod = tryRequire('./study/cards');
-  const study = studyMod
-    ? optional(failures, 'study', () => studyMod.createStudy({ store, bus, config, logger }))
     : null;
 
   // --- undo -----------------------------------------------------------------
@@ -388,13 +421,35 @@ async function createApp(opts = {}) {
 
   // --- support services ----------------------------------------------------
   const backupMod = tryRequire('./store/backup');
+  // `vaultCrypto` gehoert hier hinein, obwohl die Sicherung selbst nie
+  // verschluesselt: der Aenderungsverlauf (vault/history.jsonl) liegt in einem
+  // verschluesselten Tresor zeilenweise versiegelt da. Ohne den Schluessel
+  // zaehlt die Sicherung diese Zeilen als "versiegelt" und laesst sie weg --
+  // ausgerechnet bei dem, der seinen Tresor geschuetzt hat, waere der Verlauf
+  // nach einem Umzug also leer, und niemand haette es gesagt.
   const backup = backupMod
-    ? optional(failures, 'backup', () => backupMod.createBackup({ store, paths, config, logger }))
+    ? optional(failures, 'backup', () => backupMod.createBackup({ store, paths, config, logger, vaultCrypto }))
     : null;
 
   const authMod = tryRequire('./http/auth');
   const auth = authMod
     ? optional(failures, 'auth', () => authMod.createAuth({ store, config, logger, audit }))
+    : null;
+
+  // --- der USB-Stick ---------------------------------------------------------
+  //
+  // EINMAL hier und nicht je Anfrage: die Sperre, die zwei gleichzeitige
+  // Vorgaenge auf derselben Stick-Wurzel verhindert, haengt zwar am Pfad und
+  // nicht am Objekt -- aber `gate`, `paths` und `config` gehoeren ohnehin
+  // dieser Instanz, und eine Route soll sich kein eigenes Werkzeug bauen
+  // muessen. `rc.ctx.stick` ist damit in jeder Route da.
+  //
+  // Nach `gate`, weil eine zusaetzliche Laufzeit durch die Netzschleuse geholt
+  // wird; ohne sie bliebe nur die Laufzeit dieses Rechners -- was der
+  // Normalfall ist und kein Fehler.
+  const stickMod = tryRequire('./portable/stick');
+  const stick = stickMod
+    ? optional(failures, 'stick', () => stickMod.createStick({ gate, logger, paths, config }))
     : null;
 
   if (sync && typeof sync.setAuth === 'function' && auth) sync.setAuth(auth);
@@ -405,10 +460,15 @@ async function createApp(opts = {}) {
     toolbox.attachModules(modules);
   }
 
+  // Einmal ermittelt und an zwei Stellen gebraucht: der Startbanner sagt es,
+  // und `doctor()`/`/api/status` muessen es sagen koennen -- sonst kann der
+  // Browser nicht einmal erfahren, DASS er von einem Stick laeuft.
+  const portable = pathsMod.portableInfo(paths.home);
+
   const app = {
     version: VERSION,
     paths,
-    portable: pathsMod.portableInfo(paths.home),
+    portable,
     config,
     bus,
     audit,
@@ -424,7 +484,6 @@ async function createApp(opts = {}) {
     toolbox,
     runtime,
     assist,
-    study,
     compare,
     secondLook,
     watcher,
@@ -433,6 +492,7 @@ async function createApp(opts = {}) {
     triggers,
     backup,
     auth,
+    stick,
     modules,
     vectors,
     embeddings,
@@ -444,7 +504,7 @@ async function createApp(opts = {}) {
     /**
      * Einen Massenschreibvorgang ausführen: Import, Wiederherstellung.
      *
-     * Zwei Dinge werden dabei ausgesetzt, aus zwei verschiedenen Gründen:
+     * Drei Dinge werden dabei ausgesetzt, aus drei verschiedenen Gründen:
      *
      * - **Die Einbettungen.** 50 000 Sätze wären 50 000 Modellaufrufe und
      *   50 000 Indexschreibvorgänge -- langsamer als der Import selbst und
@@ -454,15 +514,58 @@ async function createApp(opts = {}) {
      *   da ist: deine letzten echten Änderungen. Und „einen einzelnen Satz aus
      *   einem Import zurücknehmen" bedeutet ohnehin nichts -- wer einen Import
      *   rückgängig machen will, spielt die vorige Sicherung ein.
+     * - **Die Ableitung der Verknüpfungen.** Anders als die beiden oberen ist
+     *   das keine Frage der Kosten, sondern der Richtigkeit: die Ableitung
+     *   hört am Bus mit und legt zu jedem eingespielten Satz eigene Kanten an
+     *   -- zusätzlich zu den Kanten, die derselbe Import gerade aus der
+     *   Sicherung zurückholt. Gemessen wurden aus 24 gesicherten Kanten 43,
+     *   davon 19 Dubletten. Deshalb ruht sie hier und wird danach EINMAL
+     *   vollständig nachgeholt.
+     *
+     * Das Nachholen ist Teil der Zusage, nicht Beiwerk: wer die Ableitung
+     * aussetzt und nicht nachholt, verliert die Verknüpfungen frisch
+     * aufgenommener Sätze (der Ordnerbeobachter schreibt auch über diesen
+     * Weg). Gelingt es nicht, wird das über `opts.onRederive` gemeldet --
+     * still fehlen darf es nicht.
+     *
+     * @param {Function} fn
+     * @param {{rederive?:boolean, onRederive?:(bericht:object)=>void}} [opts]
      */
-    async bulkWrite(fn) {
+    async bulkWrite(fn, opts = {}) {
+      const kannAbleiten = !!(graph && typeof graph.scanAll === 'function');
+      const willAbleiten = opts.rederive !== false;
       indexingSuspended++;
+      if (willAbleiten) derivationSuspended++;
+      let ergebnis;
       try {
-        if (history && typeof history.suspend === 'function') return await history.suspend(fn);
-        return await fn();
+        ergebnis = history && typeof history.suspend === 'function'
+          ? await history.suspend(fn)
+          : await fn();
       } finally {
         indexingSuspended = Math.max(0, indexingSuspended - 1);
+        if (willAbleiten) derivationSuspended = Math.max(0, derivationSuspended - 1);
       }
+      // Erst wenn der äußerste Massenschreibvorgang fertig ist: ein
+      // verschachtelter Aufruf würde sonst mitten im Import ableiten, wo die
+      // Endpunkte der Kanten noch gar nicht alle da sind.
+      if (willAbleiten && derivationSuspended === 0) {
+        let bericht;
+        if (!kannAbleiten) {
+          bericht = { ok: false, grund: 'Die Ableitung der Verknüpfungen ist nicht geladen; sie wurde nach dem Import nicht nachgeholt.' };
+        } else {
+          try {
+            const r = graph.scanAll(store);
+            bericht = { ok: true, geprueft: r.scanned, angelegt: r.created, entfernt: r.removed, ms: r.ms };
+          } catch (err) {
+            bericht = { ok: false, grund: `Die Verknüpfungen konnten nicht neu abgeleitet werden: ${err && err.message}` };
+            log.warn(bericht.grund);
+          }
+        }
+        if (typeof opts.onRederive === 'function') {
+          try { opts.onRederive(bericht); } catch { /* der Aufrufer meldet selbst */ }
+        }
+      }
+      return ergebnis;
     },
 
     /** Früherer Name von `bulkWrite`. Bleibt, damit nichts still bricht. */
@@ -495,7 +598,6 @@ async function createApp(opts = {}) {
         agents: !!runtime,
         approvals: !!approvals,
         assist: !!assist,
-        study: !!study,
         compare: !!compare,
         secondLook: !!secondLook,
         watcher: !!watcher,
@@ -504,6 +606,7 @@ async function createApp(opts = {}) {
         triggers: !!triggers,
         backup: !!backup,
         auth: !!auth,
+        stick: !!stick,
         extraction: !!extract,
         sync: !!sync,
         modules: !!modules,
@@ -541,6 +644,7 @@ async function createApp(opts = {}) {
         version: VERSION,
         node: process.version,
         home: paths.home,
+        portable: pathsMod.describePortable(portable),
         network: { mode: config.network.mode, hardened: !!hardening, strictAllowlist: config.network.strictAllowlist },
         vault: { ...(store.stats ? store.stats() : {}), encryption: vaultCrypto ? vaultCrypto.state : 'unavailable' },
         subsystems,
@@ -552,7 +656,6 @@ async function createApp(opts = {}) {
         },
         assistance: assist && typeof assist.stats === 'function' ? assist.stats() : null,
         undo: history && typeof history.stats === 'function' ? history.stats() : null,
-        lernen: study && typeof study.stats === 'function' ? study.stats() : null,
         ordner: watcher && typeof watcher.status === 'function' ? watcher.status() : null,
         extensions: modules && typeof modules.status === 'function' ? modules.status() : null,
         peers: sync && typeof sync.summary === 'function' ? sync.summary() : null,
@@ -632,7 +735,6 @@ async function createApp(opts = {}) {
         // Auch die, die nur am Bus haengen: ein Abonnement, das ein
         // heruntergefahrenes Teilsystem ueberlebt, arbeitet auf einem Speicher
         // weiter, den gerade jemand schliesst.
-        ['study', () => study && study.stop && study.stop()],
         ['history', () => history && history.stop && history.stop()],
         ['scheduler', () => scheduler && scheduler.stop && scheduler.stop()],
         ['triggers', () => triggers && triggers.stop && triggers.stop()],
@@ -655,6 +757,22 @@ async function createApp(opts = {}) {
       return problems;
     },
   };
+
+  // Jeder Import laeuft durch `bulkWrite`, egal wer ihn aufruft.
+  //
+  // Der Schutzraum (Einbettungen, Journal und vor allem die Ableitung der
+  // Verknuepfungen ruhen, danach EINMAL neu ableiten) sass bisher an den
+  // Aufrufstellen: in der Route und im Kommandozeilenbefehl. Gemessen kostete
+  // ein Aufruf daneben 19 Kantendubletten -- und eine Zusage, an die sich
+  // jeder Aufrufer erinnern muss, ist keine. Deshalb sitzt sie jetzt am
+  // Teilsystem selbst. Verschachtelt ist das harmlos: die Zaehler sind
+  // Zaehler, `history.suspend` merkt sich seinen vorigen Stand, und die
+  // Neuableitung laeuft erst, wenn der aeusserste Vorgang fertig ist -- also
+  // genau einmal, und mit dem `onRederive` des aeussersten Aufrufers.
+  if (backup && typeof backup.importAll === 'function') {
+    const roh = backup.importAll.bind(backup);
+    backup.importAll = (opts) => app.bulkWrite(() => roh(opts));
+  }
 
   return app;
 }

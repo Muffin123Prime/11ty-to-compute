@@ -66,9 +66,10 @@ const OUT = (() => {
 })();
 const VIEWS = [
   ['today', 'heute'], ['chat', 'chat'], ['notes', 'notizen'], ['projects', 'projekte'],
-  ['graph', 'gehirn'], ['agents', 'agenten'], ['assist', 'vorschlaege'], ['study', 'lernen'],
+  ['graph', 'gehirn'], ['agents', 'agenten'], ['assist', 'vorschlaege'],
   ['automation', 'automatik'], ['network', 'netz'], ['timeline', 'zeitachse'], ['sync', 'abgleich'],
-  ['workshop', 'werkstatt'], ['search', 'suche'], ['settings', 'einstellungen'],
+  ['stick', 'stick'], ['workshop', 'werkstatt'], ['search', 'suche'],
+  ['backup', 'sicherung'], ['settings', 'einstellungen'],
 ];
 
 let n = 0;
@@ -249,24 +250,7 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ==================================================== 5 · Lernen */
-  {
-    const { c, p } = await mach('light');
-    await los(p, base, 'study', 1400);
-    await weg(p);
-    await step('Lernkarte: Vorderseite', async () => { await shot(p, 'lernen-vorderseite-hell'); });
-    await step('Lernkarte: Rückseite', async () => {
-      await klick(p, /Rückseite zeigen/, { warten: 700 });
-      await shot(p, 'lernen-rueckseite-noten-hell');
-    });
-    await step('Karten aus einer Notiz', async () => {
-      await klick(p, /Aus einer Notiz/, { warten: 1400 });
-      await shot(p, 'lernen-aus-notiz-hell');
-    });
-    await c.close();
-  }
-
-  /* ====================================================== 6 · Chat */
+  /* ====================================================== 5 · Chat */
   {
     const { c, p } = await mach('dark');
     await los(p, base, 'chat', 1600);
@@ -298,7 +282,7 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ==================================================== 7 · Agenten */
+  /* ==================================================== 6 · Agenten */
   {
     const { c, p } = await mach('light');
     await los(p, base, 'agents', 1600);
@@ -337,7 +321,7 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ================================================= 8 · Vorschläge */
+  /* ================================================= 7 · Vorschläge */
   {
     const { c, p } = await mach('light');
     await los(p, base, 'assist', 1600);
@@ -364,7 +348,7 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ================================================== 9 · Automatik */
+  /* ================================================== 8 · Automatik */
   {
     const { c, p } = await mach('dark');
     await los(p, base, 'automation', 1500);
@@ -392,7 +376,7 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ====================================================== 10 · Netz */
+  /* ====================================================== 9 · Netz */
   {
     const { c, p } = await mach('light');
     await los(p, base, 'network', 1500);
@@ -423,7 +407,7 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ================================================== 11 · Zeitachse */
+  /* ================================================== 10 · Zeitachse */
   {
     const { c, p } = await mach('dark');
     await los(p, base, 'timeline', 1800);
@@ -443,7 +427,7 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ==================================================== 12 · Suche */
+  /* ==================================================== 11 · Suche */
   {
     const { c, p } = await mach('light');
     await los(p, base, 'search', 1300);
@@ -461,7 +445,7 @@ async function weg(page) {
     await c.close();
   }
 
-  /* =============================================== 13 · Einstellungen */
+  /* =============================================== 12 · Einstellungen */
   {
     const { c, p } = await mach('light');
     await los(p, base, 'settings', 1600);
@@ -489,7 +473,7 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ================================================= 14 · Projekte */
+  /* ================================================= 13 · Projekte */
   {
     const { c, p } = await mach('dark');
     await los(p, base, 'projects', 1500);
@@ -501,7 +485,7 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ================================================= 15 · Werkstatt */
+  /* ================================================= 14 · Werkstatt */
   {
     const { c, p } = await mach('dark');
     await los(p, base, 'workshop', 1800);
@@ -536,7 +520,7 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ========================================== 15b · Einzelne Zustaende */
+  /* ========================================== 14b · Einzelne Zustaende */
   {
     const { c, p } = await mach('light');
     await los(p, base, 'today', 1400);
@@ -588,12 +572,6 @@ async function weg(page) {
       await klick(p, /Im Gehirn zeigen/, { warten: 2800 });
       await shot(p, 'notiz-im-gehirn-hell');
     });
-    await step('Lernen: Karte benotet', async () => {
-      await los(p, base, 'study', 1500);
-      await klick(p, /Rückseite zeigen/, { warten: 800 });
-      await klick(p, /Gewusst|Richtig|Leicht|Gut/, { warten: 1400 });
-      await shot(p, 'lernen-nach-note-hell');
-    });
     await step('Zeitachse: Inspektor', async () => {
       await los(p, base, 'timeline', 1800);
       await klick(p, /^Inspektor$/, { warten: 1200 });
@@ -602,7 +580,63 @@ async function weg(page) {
     await c.close();
   }
 
-  /* =============================================== 16 · Schmales Fenster */
+  /* ============================================== 14c · Sicherung */
+  //
+  // Die Sicherung ist der Grund, aus dem jemand dieses Programm ueberhaupt
+  // einem Dienst vorzieht -- und war bis vor kurzem auf keinem einzigen der
+  // 93 Bilder zu sehen. Drei Zustaende sind es wert, festgehalten zu werden:
+  // "noch nie gesichert" (der Zustand, in dem die meisten sind), die fertige
+  // Sicherung samt Pfad, und die Vorschau vor dem Zurueckspielen.
+  {
+    const { c, p } = await mach('light');
+    // Bewusst OHNE eigenes Ziel: der Vorgabeordner ist genau der, in dem die
+    // Liste nachsieht. Ein Bild von einer Sicherung, die anschliessend in der
+    // eigenen Liste fehlt, waere eine Anleitung zum Missverstaendnis.
+    const exportOrdner = path.join(home, 'exports');
+    await los(p, base, 'backup', 1400);
+    await weg(p);
+    await step('Sicherung: noch nie gesichert', async () => {
+      await shot(p, 'sicherung-noch-keine-hell');
+    });
+    await step('Sicherung: geschrieben', async () => {
+      await klick(p, /^Jetzt sichern/, { warten: 600 });
+      // Auf die Datei warten, nicht auf eine Meldung: was gezeigt wird, soll
+      // dem entsprechen, was wirklich auf der Platte liegt.
+      for (let i = 0; i < 40; i++) {
+        await p.waitForTimeout(400);
+        try {
+          if (fs.readdirSync(exportOrdner).some((d) => fs.existsSync(path.join(exportOrdner, d, 'manifest.json')))) break;
+        } catch { /* noch nicht da */ }
+      }
+      await p.waitForTimeout(1500);
+      await shot(p, 'sicherung-geschrieben-hell');
+    });
+    await step('Sicherung: Liste und Prüfung', async () => {
+      await klick(p, /^Prüfen$/, { warten: 2500 });
+      await shot(p, 'sicherung-geprueft-hell');
+    });
+    await step('Sicherung: Vorschau vor dem Zurückspielen', async () => {
+      await klick(p, /Zum Wiederherstellen wählen/, { warten: 2500 });
+      await shot(p, 'sicherung-vorschau-hell');
+    });
+    await step('Sicherung: alles ersetzen', async () => {
+      await p.getByRole('radio', { name: /vollständig ersetzen/ }).first().check();
+      await klick(p, /^Erst ansehen/, { warten: 2500 });
+      await shot(p, 'sicherung-alles-ersetzen-hell');
+    });
+    await c.close();
+  }
+
+  /* ============================================= 14d · Sicherung, dunkel */
+  {
+    const { c, p } = await mach('dark');
+    await los(p, base, 'backup', 1400);
+    await weg(p);
+    await step('Sicherung: dunkel', async () => { await shot(p, 'sicherung-zustand-dunkel'); });
+    await c.close();
+  }
+
+  /* =============================================== 15 · Schmales Fenster */
   {
     const c = await browser.newContext({ viewport: { width: 1024, height: 768 }, colorScheme: 'light' });
     const p = await c.newPage();

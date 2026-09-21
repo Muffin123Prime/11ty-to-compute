@@ -16,6 +16,7 @@
  */
 
 const configMod = require('../../kernel/config');
+const { describePortable } = require('../../kernel/paths');
 const {
   need,
   asObject,
@@ -157,6 +158,11 @@ function register(router) {
       node: process.version,
       uptime: Math.round(process.uptime()),
       home: (ctx.paths && ctx.paths.home) || null,
+      // Laeuft dieser Prozess von einem Stick? Bisher stand das nur im
+      // Startbanner im Terminal -- der Browser konnte nicht einmal erfahren,
+      // DASS er von einem Stick bedient wird, obwohl genau das die Antwort auf
+      // "wo liegen meine Daten gerade" ist. null heisst: von der Platte.
+      portable: describePortable(ctx.portable),
       network: networkState(ctx),
       vault: vaultState(ctx),
       models: modelState(ctx),
@@ -172,6 +178,7 @@ function register(router) {
         approvals: !!ctx.approvals,
         backup: !!ctx.backup,
         auth: !!ctx.auth,
+        stick: !!ctx.stick,
         vaultCrypto: !!ctx.vaultCrypto,
       },
       // Whatever failed at boot is part of the status, not a secret.

@@ -81,11 +81,13 @@ echo   Betriebssystem oder einer anderen Prozessorarchitektur vorbereitet.
 echo.
 echo   So legst du die fehlende Laufzeit nach:
 echo     1. Stick in einen Windows-Rechner stecken, auf dem Neural OS schon
-echo        laeuft, und dort unter Einstellungen -^> Stick auf
-echo        "Stick aktualisieren" klicken. Die passende Laufzeit wird dabei
-echo        immer mitkopiert.
-echo     2. Oder: auf einem Rechner mit Internet unter Einstellungen -^> Stick
-echo        die Laufzeit "%PLAT%" hinzufuegen.
+echo        laeuft. Dort in der Seitenleiste den Bereich "Stick" oeffnen
+echo        (oder g dann t), den Pfad des Sticks eintragen und unter
+echo        "Welche Rechner der Stick starten kann" bei diesem System auf
+echo        "Jetzt kopieren" klicken. Das braucht kein Internet.
+echo     2. Oder: auf einem Rechner MIT Internet denselben Bereich oeffnen
+echo        und dort die Laufzeit "%PLAT%" holen; sie wird dann als
+echo        offizielles Node-Paket geladen und geprueft.
 echo     3. Oder: Node.js ab Version 20 auf diesem Rechner installieren
 echo        (nodejs.org) und dann in diesem Ordner ausfuehren:
 echo            node app\bin\neural-os.js start --open
@@ -99,9 +101,9 @@ echo   Gesucht wurde:  %STICK%app\bin\neural-os.js
 echo.
 echo   Das passiert, wenn der Stick waehrend des Kopierens abgezogen wurde.
 echo   Stecke ihn in den Rechner, auf dem du ihn vorbereitet hast, und rufe
-echo   dort unter Einstellungen -^> Stick erst "Stick pruefen" und dann
-echo   "Stick aktualisieren" auf. Deine Daten in "data" sind davon nicht
-echo   betroffen - die werden beim Aktualisieren nie angefasst.
+echo   dort im Bereich "Stick" erst "Stick pruefen" und dann
+echo   "Nur Programm erneuern" auf. Deine Daten in "data" sind davon
+echo   nicht betroffen - die werden beim Erneuern nie angefasst.
 echo.
 goto :end
 

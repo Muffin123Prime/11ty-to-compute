@@ -286,10 +286,29 @@ Alles liegt unter **einem** Ordner, standardmäßig `~/.neural-os`
   exports/             deine Sicherungen
 ```
 
-**Sichern:**
+**Sichern — in der Oberfläche:**
+
+In der Seitenleiste **Sicherung** (oder `g` dann `b`). Ganz oben steht die
+Frage, die man im Ernstfall stellt: *wann zuletzt gesichert, wohin, wie groß,
+wie viele Sätze* — und wenn noch nie, dann steht genau das da. Darunter
+**„Jetzt sichern"** mit einem Zielordner.
+
+Das Ziel ist die eigentliche Entscheidung. Ab Werk landet die Sicherung in
+`~/.neural-os/exports` — also auf derselben Platte wie der Tresor, und damit
+genau dort, wo sie bei einem Plattendefekt mit verlorengeht. Trag einen Pfad
+auf einem USB-Stick oder einer zweiten Platte ein; läuft Neural OS schon von
+einem Stick, wird der Stick angeboten.
+
+Ohne Passphrase liegt eine Sicherung **im Klartext**: der gesamte Tresor,
+lesbar für jeden, der den Ordner öffnet. Das steht auch so dort. Mit
+Passphrase wird sie verschlüsselt — und ist ohne diese Passphrase endgültig
+nicht mehr zu öffnen, auch für dich nicht. Deshalb ist sie nicht voreingestellt.
+
+**Sichern — auf der Kommandozeile:**
 
 ```bash
 node bin/neural-os.js export --format both
+node bin/neural-os.js export --format both --passphrase "..."   # verschlüsselt
 ```
 
 Das schreibt eine vollständige JSON-Datei (wiederherstellbar) **und** eine
@@ -298,11 +317,67 @@ willst — auf einen USB-Stick, eine externe Platte, wohin auch immer.
 
 **Wiederherstellen oder auf einen neuen Rechner umziehen:**
 
+Im Bereich **Sicherung** den Ordner eintragen und **„Erst ansehen"** drücken.
+Das schreibt nichts, sondern sagt vorher, was passieren wird: wie viele Sätze
+kommen, was hier liegt, was dabei verschwindet — und was grundsätzlich nicht
+mitreist. Erst danach wird „Wiederherstellen" anklickbar.
+
+Vier Wege gibt es, und der Unterschied ist wichtig:
+
+| Modus | Was er tut |
+|---|---|
+| **Zusammenführen** (Voreinstellung) | Vorhandenes bleibt. Nur was fehlt, kommt hinzu. |
+| **Einträge ersetzen** | Gleiche Kennung wird überschrieben; was hier zusätzlich liegt, bleibt. |
+| **Nur in einen leeren Tresor** | Bricht ab, sobald hier etwas liegt. |
+| **Diese Installation vollständig ersetzen** | Löscht alles hier — auch die Erstausstattung des ersten Starts — und spielt dann die Sicherung ein. Danach ist dieser Tresor genau der gesicherte. Nicht umkehrbar. |
+
+Der letzte ist der, den man auf einem **neuen Rechner** will. Grund: eine
+frische Installation ist nicht leer — beim ersten Start legt Neural OS eine
+Willkommensnotiz, ein Beispielprojekt, zwei Aufgaben und sechs eingebaute
+Agenten an. „Nur in einen leeren Tresor" scheitert daran, und die beiden
+anderen lassen diese vierzehn Sätze stehen: man bekommt dann seinen Stand
+*plus* die Erstausstattung, nicht seinen Stand.
+
+Auf der Kommandozeile:
+
 ```bash
-node bin/neural-os.js import /pfad/zum/export
+node bin/neural-os.js import /pfad/zum/export                    # zusammenführen
+node bin/neural-os.js import /pfad/zum/export --mode restore     # alles ersetzen
+node bin/neural-os.js import /pfad/zum/export --passphrase "..." # verschlüsselte Sicherung
 ```
 
 Oder einfach den ganzen Ordner `~/.neural-os` kopieren. Mehr ist es nicht.
+
+**Was eine Sicherung bewusst NICHT mitnimmt:**
+
+- **Zugangstoken** für das lokale Netz. Das sind Zugangsdaten für die Tür
+  *eines bestimmten Geräts*, kein Wissen. Auf dem neuen Gerät legst du neue an.
+- **Den Zugangsschlüssel gekoppelter Geräte.** Die Kopplung wird dort neu bestätigt.
+- **Den Netzmodus.** Er steht in der Sicherung und wird beim Wiederherstellen
+  *gemeldet*, aber nicht gesetzt: eine Datei darf ein Gerät, das absichtlich
+  offline ist, nicht stillschweigend öffnen.
+- **Das Schlüsselmaterial der Verschlüsselung.** Nach dem Wiederherstellen ist
+  der Tresor unverschlüsselt, bis du die Verschlüsselung hier einschaltest.
+  Auch das sagt das Ergebnis.
+- **`audit.jsonl`**, das Netzprotokoll. Das gehört diesem Gerät.
+
+Alles davon steht auch in der Vorschau, bevor etwas geschrieben wird.
+
+**Alles mitnehmen — auf einem Stick:**
+
+In der Seitenleiste **Stick** (oder `g` dann `t`). Dort steht zuerst, ob diese
+Instanz gerade von der Festplatte oder schon vom Stick läuft. Pfad zum Stick
+eintippen — der Browser kennt keine Dateipfade, es gibt keinen Ordnerwähler,
+der einen absoluten Pfad liefern darf —, dann **„Erst ansehen"**: das sagt, was
+passieren würde, bevor ein einziges Byte geschrieben ist. Danach **„Stick
+vorbereiten"**, wahlweise mit deinem Datenbestand.
+
+Auf dem Stick liegt danach alles, auch die Node-Laufzeit: ein fremder Rechner
+braucht nichts. Zwei Dinge sagt der Bereich dabei ausdrücklich, weil sie sonst
+hinterher enttäuschen: auf den meisten Sticks (exFAT, FAT32) gibt es **keine
+Zugriffsrechte** — dort schützt nur die Verschlüsselung —, und das
+**Sprachmodell kommt nicht mit**. Dein Wissen reist, das Modell bleibt. Die
+ganze Geschichte steht in `docs/STICK.md`.
 
 **Anderen Speicherort verwenden:**
 
@@ -344,14 +419,13 @@ erlaubten. Ein Protokoll, das nur Blockaden zeigt, würde nichts beweisen.
 
 ## Teil 6 · Was dir Arbeit abnimmt
 
-Sieben Dinge, und **fünf davon funktionieren ohne jedes KI-Modell**. Das ist
+Sechs Dinge, und **vier davon funktionieren ohne jedes KI-Modell**. Das ist
 Absicht: das Nützlichste soll nicht der Teil sein, für den du 5 GB herunterladen
 musst.
 
 | | Braucht ein Modell? |
 |---|---|
 | **Heute** — was fällig ist, was ohne dich lief | nein |
-| **Lernen** — Kartenstapel mit wachsenden Abständen | nein |
 | **Vorschläge** — Dubletten, Waisen, Merker, fehlende Links | nein |
 | **Automatik** — Zeitpläne und Auslöser | nein (die Agenten darin schon) |
 | **Beobachtete Ordner** — Dateien automatisch aufnehmen | nein |
@@ -375,26 +449,6 @@ Darunter, in dieser Reihenfolge, weil sie nach Dringlichkeit sortiert ist:
 5. **Wiedervorlage** — eine Notiz, die du lange nicht angesehen hast
 
 Steht nichts an, steht das da. Das ist eine gute Nachricht und sieht auch so aus.
-
-### Lernen (`g` dann `l`)
-
-Ein Kartenstapel mit wachsenden Abständen. Braucht **kein** Modell — das
-Verfahren (SM-2) ist dreißig Jahre alt.
-
-| Taste | | Bedeutung |
-|---|---|---|
-| **Leertaste** | | Rückseite zeigen |
-| **1** | Nochmal | Nicht gewusst — die Karte kommt **heute** noch einmal |
-| **2** | Schwer | Gewusst, aber mühsam |
-| **3** | Gut | Der Normalfall |
-| **4** | Leicht | Sofort da — größerer Abstand |
-
-Jeder Knopf sagt, wann die Karte wiederkommt („heute", „morgen", „in 6 Tagen").
-
-Karten legst du von Hand an oder **aus einer Notiz**. Dabei wird nichts geraten:
-erkannt werden nur ausdrückliche Strukturen — eine `## Überschrift` mit
-folgendem Absatz, oder eine Zeile `Begriff :: Erklärung`. Aus gewöhnlichem Text
-entsteht keine Karte.
 
 ### Zwei Modelle nebeneinander (im Chat)
 
@@ -562,7 +616,7 @@ Gegenteil voneinander.
 | PDF liefert keinen Text | Ein gescanntes PDF ohne Textebene. Dafür bräuchte es eine Texterkennung, die Neural OS nicht hat. Die App sagt das, statt etwas zu erfinden. |
 | Ich will wissen, was wirklich passiert ist | `cat ~/.neural-os/audit.jsonl` — jede Netzentscheidung, chronologisch. |
 | „Heute" zeigt einen Block nicht | Steht dort ein Grund? Dann fehlt das Teilsystem. Steht kein Grund, ist der Block wirklich leer. |
-| „Aus einer Notiz" findet keine Karten | Normal: erkannt werden nur `## Überschrift` + Absatz und `Begriff :: Erklärung`. Aus Fließtext wird nichts geraten. |
+| Meine Lernkarten sind verschwunden | Der Bereich „Lernen" gibt es nicht mehr. Deine Karten sind beim ersten Start **Notizen** geworden: Vorderseite als Titel, Rückseite als Text, Schlagwort `lernkarte`. Such nach `tag:lernkarte`. |
 | Der beobachtete Ordner nimmt nichts auf | Ist er eingeschaltet? „Erst ansehen" legt absichtlich nichts an. Unter „Was wurde aufgenommen" steht, was übersprungen wurde und warum. |
 | Eine Datei wurde übersprungen | Der Grund steht daneben: zu groß, unlesbar, schon vorhanden, oder ein symbolischer Link (dem wird bewusst nicht gefolgt). |
 | „Zweiter Blick" liefert nur Begriffe | Kein Modell erreichbar. Der dritte Teil kommt aus dem Volltextindex und geht immer; die ersten beiden brauchen ein Modell. |

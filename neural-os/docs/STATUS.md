@@ -9,11 +9,11 @@ teilweise oder gar nicht funktioniert, steht weiter unten — ungeschönt.
 ## Messwerte
 
 ```
-npm test          843 Tests, 843 bestanden, 0 fehlgeschlagen   (~39 s)
-npm run check     108 Funktionen geprüft, 1 unklar, 0 defekt
+npm test          879 Tests, 879 bestanden, 0 fehlgeschlagen   (~45 s)
+npm run check     131 Funktionen geprüft, 1 unklar, 0 defekt
 npm run proof      19 Prüfpunkte bestanden
 npm run ui         15 Ansichten geklickt, hell und dunkel, 0 Fehler
-npm run doctor     23 von 23 Subsystemen geladen
+npm run doctor     24 von 24 Subsystemen geladen
 ```
 
 Die vier Werkzeuge prüfen absichtlich Verschiedenes: `test` den Code,
@@ -58,33 +58,39 @@ selbstheilender Index hat daraus 1,0 Sekunden gemacht — Faktor 21.
 
 | Testdatei | Tests | Gegenstand |
 |---|---:|---|
-| `models.test.js` | 68 | Ollama- und OpenAI-Protokoll, Streaming, Tool-Calls, Abbruch |
-| `sync.test.js` | 64 | Zusammenführung, Konflikte, Idempotenz, Abbruch |
+| `models.test.js` | 55 | Ollama- und OpenAI-Protokoll, Streaming, Tool-Calls, Abbruch |
 | `extract.test.js` | 50 | PDF, DOCX, XLSX, PPTX, HTML, Kodierungen |
-| `agents.test.js` | 47 | Berechtigungen, Bestätigungen, 24 Werkzeuge, Herkunftsstempel |
-| `modules.test.js` | 38 | Werkstatt: Installation, Versionen, Rücknahme |
+| `agents.test.js` | 48 | Berechtigungen, Bestätigungen, 24 Werkzeuge, Herkunftsstempel |
 | `gate.test.js` | 38 | Klassifikation, Policy, Freigaben, DNS, Redirects |
 | `automation.test.js` | 38 | Zeitpläne, Auslöser, Entprellung, Schleifenschutz |
 | `store.test.js` | 36 | Persistenz, Absturzerholung, Kanten, Transaktionen |
+| `sync.test.js` | 35 | Zusammenführung, Konflikte, Idempotenz, Abbruch |
+| `history.test.js` | 35 | Änderungsverlauf, Rückgängig, Ablehnung bei Fremdänderung |
+| `stick.test.js` | 41 | Portabler Betrieb, Vorschau, HTTP-Routen, Sicherung |
 | `server.test.js` | 34 | Routen, CSRF, Header, SSE, Body-Limit |
+| `secondlook.test.js` | 32 | Zweiter Blick: belegbar vs. nicht belegbar |
 | `graph.test.js` | 31 | Linkableitung, Idempotenz, Graphaufbau, Cluster |
 | `folder-sync.test.js` | 30 | Abgleich über einen Ordner (Stick) |
+| `backup.test.js` | 36 | Export, Import, Rundlauf, Manifest, „alles ersetzen" |
 | `assist.test.js` | 29 | Sechs Vorschlagsverfahren, Idempotenz, Übernehmen |
+| `today.test.js` | 28 | „Heute": Fälliges, Agentenläufe, ehrliche Leerzustände |
+| `watch.test.js` | 25 | Beobachtete Ordner: erst ansehen, dann aufnehmen |
 | `search.test.js` | 25 | BM25, deutsche Tokenisierung, Operatoren, Snippets |
 | `chat.test.js` | 24 | Kontextaufbau, Streaming, Abbruch, Fehlerpfade |
-| `stick.test.js` | 22 | Portabler Betrieb, Sicherung, Aktualisierung |
+| `modules.test.js` | 23 | Werkstatt: Installation, Versionen, Rücknahme |
 | `sandbox.test.js` | 22 | Modul-Sandbox, Fähigkeitsgrenzen |
 | `embeddings.test.js` | 22 | Einbettungen, Modellwechsel, Abbruch |
 | `auth.test.js` | 19 | Token, Host-Prüfung, CSRF, Ablauf und Widerruf |
-| `backup.test.js` | 17 | Export, Import, Rundlauf, Manifest |
 | `vectors.test.js` | 16 | Vektorspeicher, Ähnlichkeit, Persistenz |
 | `modules-api.test.js` | 15 | HTTP-Schicht der Werkstatt |
-| `integration.test.js` | 15 | Ende-zu-Ende über den echten Stapel |
+| `integration.test.js` | 18 | Ende-zu-Ende über den echten Stapel |
 | `kernel.test.js` | 14 | Pfade, Konfiguration, Bus, Audit, Datenmodell |
 | `harden.test.js` | 14 | Prozessweite Durchsetzung der Netzpolicy |
+| `compare.test.js` | 14 | Zwei Modelle nebeneinander, Fehler je Seite |
 | `models-remote.test.js` | 13 | Online-Anbieter: Schlüssel, Schleuse, Verbindungstest |
 | `audit-regressions.test.js` | 13 | die Defekte aus dem Sicherheitsaudit |
 | `vaultcrypto.test.js` | 9 | AES-256-GCM, scrypt, Passphrase-Wechsel |
+| `migrations.test.js` | 7 | Alte Lernkarten werden zu Notizen, genau einmal |
 
 ## Bewiesen, nicht behauptet
 
@@ -115,7 +121,7 @@ gefunden (Dublette, Aufgabe, fehlender Link, in 11 ms), ein übernommener
 Vorschlag legt die Aufgabe wirklich an, und die Automatik ist ab Werk aus und
 feuert von allein nichts.
 
-Zusätzlich im Browser geprüft (`npm run ui`, Chromium, 13 Ansichten, hell und
+Zusätzlich im Browser geprüft (`npm run ui`, Chromium, 15 Ansichten, hell und
 dunkel, 1280 und 1000 px): **null externe Requests, null JavaScript-Fehler**,
 kein waagerechter Scrollbalken. Die Oberfläche kontaktierte ausschließlich
 `127.0.0.1`. Geprüft wird dabei nicht nur, ob etwas erscheint, sondern ob ein
@@ -145,7 +151,20 @@ Speicher, und ein Zeitplan wird erst nach der Rückfrage eingeschaltet.
   vollständiges Laufprotokoll
 - **Verschlüsselung** — AES-256-GCM, scrypt, Passphrase-Wechsel ohne Neuverschlüsselung
 - **Export/Import** — JSON und Markdown, Rundlauf getestet
-- **Oberfläche** — 13 Ansichten, Dark und Light, Befehlspalette, Tastaturbedienung
+- **USB-Stick** — der Bereich „Stick": Selbstauskunft (läuft diese Instanz
+  portabel, von wo, wie viel Platz, welche Laufzeiten), „Erst ansehen" vor dem
+  ersten geschriebenen Byte, Vorbereiten/Erneuern/Laufzeit-Holen als
+  Ereignisstrom mit gemessenem Fortschritt. Zwei gleichzeitige Vorgänge auf
+  demselben Stick ergeben 409 statt zwei halber Sticks; das Prüfen schreibt
+  nichts. Der ganze Kreis ist gefahren worden: Tresor füllen → Stick
+  vorbereiten (mit Daten) → Quellordner löschen → NUR vom Stick starten →
+  Notiz schreiben → beenden → wieder NUR vom Stick starten → die Notiz ist da
+- **Umwandlung alter Lernkarten** — der Bereich „Lernen" ist entfallen;
+  vorhandene Karten werden beim ersten Start einmalig zu Notizen (Vorderseite →
+  Titel, Rückseite → Text, Schlagwort `lernkarte`, Verknüpfung zur Quellnotiz
+  bleibt). Nicht gelöscht und nicht liegengelassen: ein Satz eines Typs, den es
+  nicht mehr gibt, fiele still aus jeder neuen Sicherung heraus
+- **Oberfläche** — 15 Ansichten, Dark und Light, Befehlspalette, Tastaturbedienung
 - **Vorschläge** — sechs Verfahren ganz ohne Modell: Dubletten (Vier-Wort-Ketten,
   Jaccard ≥ 0,72, Kandidaten über eine Skizze statt aller Paare), verwaiste
   Notizen, Schlagwörter aus der Nachbarschaft, Aufgaben aus ausdrücklichen
@@ -165,10 +184,6 @@ Speicher, und ein Zeitplan wird erst nach der Rückfrage eingeschaltet.
   sind fällig, eine davon überfällig"), nicht mit einer Begrüßung. Fällig,
   was ohne dich lief, Vorschläge, seit gestern, Wiedervorlage. Fehlt ein
   Teilsystem, steht der Grund dabei
-- **Lernen** — Kartenstapel nach SM-2, ohne Modell. Vier Noten auf den Tasten
-  1–4, jede sagt wann die Karte wiederkommt; der Text dafür kommt vom Server,
-  damit Oberfläche und Rechnung nicht auseinanderlaufen. Karten aus einer Notiz
-  nur aus ausdrücklichen Strukturen, nie geraten. Keine Gamification
 - **Beobachtete Ordner** — anlegen → erst ansehen → einschalten. Symbolischen
   Links wird nicht gefolgt, der Tresor selbst lässt sich nicht beobachten, im
   Quellordner wird nie etwas geändert. Ein großer Durchlauf läuft am
@@ -300,17 +315,11 @@ dass keine mehr existieren — es heißt, dass die gefundenen behoben sind.
 8. **Ein Schlüssel, den du direkt einträgst, liegt im Klartext** in
    `config.json` (Dateirechte 0600). Die Umgebungsvariable ist der sichere Weg,
    und die App sagt das auch — aber sie hindert dich nicht daran.
-9. **Der Lernstand liegt auf einem Gerät.** Karten werden bewusst nicht
-   abgeglichen: zwei Geräte hätten zwei Terminpläne für dieselbe Karte, und
-   welcher gilt, ist eine Aussage darüber, wie gut du etwas kannst — nicht
-   darüber, welcher Zeitstempel größer ist. Das ist die Grenze in dieser Liste,
-   die mich am meisten stört, und der erste Punkt unter „Was als Nächstes käme"
-   in `docs/IDEEN.md`.
-10. **Ein beobachteter Ordner liest, sobald er eingeschaltet ist.** `fs.watch`
+9. **Ein beobachteter Ordner liest, sobald er eingeschaltet ist.** `fs.watch`
    ist auf Netzlaufwerken und unter macOS unzuverlässig; deshalb läuft
    zusätzlich ein langsamer Rundlauf. Eine Datei kann also mit Verzögerung
    ankommen, aber sie geht nicht verloren.
-11. **`npm run ui` braucht ein global installiertes Playwright.** Neural OS
+10. **`npm run ui` braucht ein global installiertes Playwright.** Neural OS
    selbst hat weiterhin null Abhängigkeiten; das Prüfwerkzeug läuft ohne
    Playwright gar nicht und sagt dann, dass es nichts geprüft hat, statt
    Entwarnung zu geben.
@@ -324,9 +333,4 @@ ist, sondern eine zweite Oberfläche, und das eine Entscheidung des Nutzers ist.
 Was jetzt anstünde, steht am Ende von `docs/IDEEN.md` und ist kleiner und
 langweiliger als das Bisherige — genau deshalb richtig:
 
-1. **Den Lernstand zwischen Geräten abgleichen.** Punkt 9 unter „Bekannte
-   Grenzen", und die einzige dort, die sich wie ein Mangel anfühlt statt wie
-   eine Entscheidung.
-2. **Karten aus dem zweiten Blick.** Was er an offenen Stellen findet, ist fast
-   schon eine Frage.
-3. **„Heute" zur Startseite machen**, wenn es sich im Alltag bewährt.
+1. **„Heute" zur Startseite machen**, wenn es sich im Alltag bewährt.

@@ -88,6 +88,29 @@ function portableInfo(home) {
 }
 
 /**
+ * Der portable Betrieb, in einer Form, die ueber HTTP gehen kann.
+ *
+ * `detectPortable()` gibt die rohe Markierungsdatei zurueck; davon geht hier
+ * nur weiter, was jemand vor dem Bildschirm auch gebrauchen kann: von wo
+ * gestartet wurde, wo die Daten liegen, wann der Stick angelegt und zuletzt
+ * angefasst wurde. `null` heisst "dieser Prozess laeuft von der Platte" -- und
+ * das ist die Auskunft, die der Browser bisher ueberhaupt nicht bekam.
+ */
+function describePortable(portable) {
+  if (!portable) return null;
+  const info = portable.info || {};
+  return {
+    root: portable.root,
+    dataDir: portable.dataDir,
+    marker: portable.marker,
+    createdAt: info.createdAt || null,
+    updatedAt: info.updatedAt || null,
+    preparedBy: info.preparedBy || null,
+    nodeVersion: info.nodeVersion || null,
+  };
+}
+
+/**
  * @param {string} [explicitHome]
  * @returns {{
  *   home:string, config:string, vault:string, log:string, snapshot:string,
@@ -146,4 +169,7 @@ function safeJoin(root, relative) {
   return target;
 }
 
-module.exports = { resolveHome, layout, ensureLayout, safeJoin, detectPortable, portableInfo, PORTABLE_MARKER };
+module.exports = {
+  resolveHome, layout, ensureLayout, safeJoin,
+  detectPortable, portableInfo, describePortable, PORTABLE_MARKER,
+};

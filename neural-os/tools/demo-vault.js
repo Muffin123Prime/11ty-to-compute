@@ -121,11 +121,6 @@ async function befuellen(app) {
   s.create('message', { chatId: chat.id, role: 'assistant', content: 'Meist ist der Mahlgrad zu grob. Stell ihn eine Stufe feiner und miss die Durchlaufzeit: 25 Sekunden für 30 ml sind ein guter Richtwert.', ordinal: 1 });
   s.create('chat', { title: 'Beetplanung 2027' });
 
-  // --- Lernkarten --------------------------------------------------------
-  s.create('card', { front: 'Was ist Crema?', back: 'Die Schaumschicht auf dem Espresso, aus gelöstem CO₂ der Bohne.', noteId: ids['Crema'] });
-  s.create('card', { front: 'Welche Brühtemperatur?', back: 'Rund 93 Grad, bei dunklen Röstungen eher 90.', noteId: ids['Brühtemperatur'] });
-  s.create('card', { front: 'Was ist Fruchtfolge?', back: 'Nicht zweimal hintereinander dieselbe Familie ins selbe Beet.', deck: 'Garten' });
-
   // --- Dateien -----------------------------------------------------------
   try {
     s.files.put(Buffer.from('# Handbuch\n\nEin kurzes Handbuch.\n'), { name: 'handbuch.md', mime: 'text/markdown' });

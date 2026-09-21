@@ -368,4 +368,234 @@ test('SECURITY: agents cannot be created or raised through the generic record ro
   });
 });
 
+/**
+ * Die beiden Zusagen, ohne die eine Sicherung keine ist: der wiederhergestellte
+ * Tresor hat DIESELBEN Sätze und DIESELBEN Verknüpfungen wie der gesicherte.
+ *
+ * Warum das hier steht und nicht in test/backup.test.js: beide Fehler hängen
+ * an der Verdrahtung in src/app.js, nicht an backup.js. Die Graph-Ableitung
+ * hört am Bus mit und legte während des Imports zu jedem eingespielten Satz
+ * eigene Kanten an -- zusätzlich zu den Kanten aus der Sicherung, mit neuen
+ * ids, an denen auch die Dublettenprüfung des Speichers vorbeigeht. Gemessen:
+ * 24 gesicherte Kanten wurden beim Import zu 43. Nur ein Test gegen die echte
+ * App sieht das.
+ */
+function zaehleJeArt(store) {
+  const schema = require('../src/store/schema');
+  const out = {};
+  for (const type of schema.TYPES) {
+    const n = store.list(type, { includeDeleted: true, limit: 100000, offset: 0 }).total;
+    if (n) out[type] = n;
+  }
+  return out;
+}
+
+function kanten(store) {
+  const items = store.list('edge', { includeDeleted: true, limit: 100000, offset: 0 }).items;
+  return {
+    gesamt: items.length,
+    eindeutig: new Set(items.map((e) => `${e.data.from}|${e.data.to}|${e.data.kind}`)).size,
+  };
+}
+
+/** Ein Tresor mit echten Wiki-Links und Schlagworten -- daraus leitet der Graph ab. */
+function fuellen(store) {
+  const projekt = store.create('project', { name: 'Küche', description: 'Espresso und #technik', tags: ['haushalt'] });
+  const a = store.create('note', {
+    title: 'Espresso',
+    body: 'Der Mahlgrad bestimmt den Druck. Siehe [[Mahlgrad]] und [[Brühtemperatur]]. #kaffee #technik',
+    tags: ['kaffee'],
+  });
+  const b = store.create('note', { title: 'Mahlgrad', body: 'Fein heißt viel Widerstand. Siehe [[Espresso]]. #kaffee', tags: ['kaffee'] });
+  store.create('note', { title: 'Brühtemperatur', body: 'Rund 93 Grad. #technik', tags: ['technik'] });
+  store.create('task', { title: 'Sieb nachmessen', projectId: projekt.id });
+  store.create('task', { title: 'Dichtung bestellen', projectId: projekt.id });
+  store.edges.add({ from: a.id, to: b.id, kind: 'related', source: 'manual', reason: 'selbst gezogen' });
+  return { projekt, a, b };
+}
+
+/**
+ * Den Graphen dieses Tresors in den Zustand bringen, den er behaupten sollte.
+ *
+ * Nötig, weil die Ableitung beim Schreiben nur EINEN Satz ansieht: eine Notiz,
+ * die auf eine später angelegte verweist, bekommt ihre Kante nie nachgetragen.
+ * Das ist eine bekannte Grenze (siehe Kopf von src/graph/derive.js), und
+ * `scanAll` ist die dokumentierte Heilung -- dieselbe, die
+ * POST /api/graph/rescan anbietet.
+ *
+ * Für diese Tests ist das der Unterschied zwischen einer echten und einer
+ * erfundenen Erwartung: nach einem Import läuft `scanAll`, und der würde genau
+ * diese fehlenden Kanten ergänzen. „Vorher gleich nachher" ist deshalb nur
+ * prüfbar, wenn der Ausgangstresor selbst nicht veraltet ist. Ein Import, der
+ * eine veraltete Ableitung repariert, ist kein Fehler -- aber er wäre auch
+ * kein Beweis gegen Dubletten.
+ */
+function graphInOrdnungBringen(app) {
+  const r = app.graph.scanAll(app.store);
+  assert.ok(r.scanned > 0, 'scanAll hat nichts angesehen');
+  return r;
+}
+
+test('DATA SAFETY: ein Import erzeugt keine Kantendubletten', async () => {
+  const { home: sourceHome, cleanup: cleanSource } = tempHome('nos-kanten-src');
+  const { home: targetHome, cleanup: cleanTarget } = tempHome('nos-kanten-dst');
+  let source = null;
+  let target = null;
+  try {
+    source = await createApp({ home: sourceHome, logLevel: 'error', harden: false });
+    fuellen(source.store);
+    graphInOrdnungBringen(source);
+    await source.store.flush();
+    const hier = kanten(source.store);
+    assert.ok(hier.gesamt >= 5, `zu wenig abgeleitete Kanten zum Pruefen: ${hier.gesamt}`);
+    assert.equal(hier.gesamt, hier.eindeutig, 'schon die Quelle haette Dubletten');
+
+    const exported = await source.backup.exportAll({ format: 'json', includeFiles: false });
+
+    target = await createApp({ home: targetHome, logLevel: 'error', harden: false });
+    let ableitung = null;
+    await target.bulkWrite(
+      () => target.backup.importAll({ dir: exported.dir, mode: 'merge' }),
+      { onRederive: (b) => { ableitung = b; } },
+    );
+    await target.store.flush();
+
+    const dort = kanten(target.store);
+    assert.equal(dort.gesamt, hier.gesamt,
+      `${hier.gesamt} Kanten gesichert, ${dort.gesamt} nach dem Import — die Ableitung hat waehrend des Imports mitgeschrieben`);
+    assert.equal(dort.gesamt, dort.eindeutig, `${dort.gesamt - dort.eindeutig} Kantendubletten nach dem Import`);
+
+    // Das Nachholen der Ableitung ist Teil der Zusage und muss gemeldet werden.
+    assert.ok(ableitung, 'bulkWrite muss ueber die Neuableitung Auskunft geben');
+    assert.equal(ableitung.ok, true, `die Neuableitung ist gescheitert: ${ableitung.grund}`);
+    assert.ok(ableitung.geprueft > 0, 'die Neuableitung hat nichts angesehen');
+  } finally {
+    if (source) await source.close().catch(() => {});
+    if (target) await target.close().catch(() => {});
+    cleanSource();
+    cleanTarget();
+  }
+});
+
+test('DATA SAFETY: die Ableitung laeuft nach dem Import wieder — sie bleibt nicht aus', async () => {
+  // Gegenprobe zum Test darueber: das Stilllegen waehrend des Imports darf
+  // die Ableitung nicht dauerhaft abschalten. Sonst waere die naechste Notiz
+  // ohne Verknuepfungen -- ein Schaden, der erst Wochen spaeter auffaellt.
+  const { home, cleanup } = tempHome('nos-kanten-danach');
+  let app = null;
+  try {
+    app = await createApp({ home, logLevel: 'error', harden: false });
+    const ziel = app.store.create('note', { title: 'Zielnotiz', body: 'da' });
+    await app.bulkWrite(async () => {
+      app.store.create('note', { title: 'Waehrend', body: 'Verweist auf [[Zielnotiz]].' });
+    });
+    // Nach dem Massenschreibvorgang holt bulkWrite die Ableitung nach.
+    assert.ok(app.store.edges.for(ziel.id, { direction: 'in' }).length > 0,
+      'die waehrend des Imports entstandene Verknuepfung muss nachgetragen worden sein');
+
+    const spaeter = app.store.create('note', { title: 'Danach', body: 'Auch auf [[Zielnotiz]].' });
+    assert.ok(app.store.edges.between(spaeter.id, ziel.id).length > 0,
+      'eine ganz normale Notiz danach muss wieder sofort abgeleitet werden');
+  } finally {
+    if (app) await app.close().catch(() => {});
+    cleanup();
+  }
+});
+
+test('DATA SAFETY: "restore" stellt eine frische Installation wirklich her', async () => {
+  const { home: sourceHome, cleanup: cleanSource } = tempHome('nos-restore-src');
+  const { home: targetHome, cleanup: cleanTarget } = tempHome('nos-restore-dst');
+  let source = null;
+  let target = null;
+  try {
+    source = await createApp({ home: sourceHome, logLevel: 'error', harden: false });
+    fuellen(source.store);
+    graphInOrdnungBringen(source);
+    await source.store.flush();
+    const erwartet = zaehleJeArt(source.store);
+    const kantenA = kanten(source.store);
+    const exported = await source.backup.exportAll({ format: 'json', includeFiles: true });
+
+    // Eine frische Installation: nicht leer, sondern mit Erstausstattung.
+    target = await createApp({ home: targetHome, logLevel: 'error', harden: false });
+    const geseht = await seedIfEmpty(target);
+    assert.equal(geseht, true, 'seedIfEmpty muss hier wirklich saeen, sonst prueft der Test nichts');
+    assert.ok(target.store.count('agent') > 0, 'die Erstausstattung legt eingebaute Agenten an');
+
+    // ... und genau deshalb scheitert "fresh".
+    await assert.rejects(
+      () => target.backup.importAll({ dir: exported.dir, mode: 'fresh' }),
+      /leeren Vault/,
+      '"fresh" muss auf einer frischen Installation abbrechen — das ist der Grund fuer "restore"',
+    );
+
+    const ergebnis = await target.bulkWrite(() => target.backup.importAll({ dir: exported.dir, mode: 'restore' }));
+    await target.store.flush();
+
+    assert.deepEqual(zaehleJeArt(target.store), erwartet,
+      `je Satzart identisch erwartet.\n  vorher: ${JSON.stringify(erwartet)}\n  nachher: ${JSON.stringify(zaehleJeArt(target.store))}`);
+    assert.equal(kanten(target.store).gesamt, kantenA.gesamt, 'gleich viele Kanten');
+    assert.equal(kanten(target.store).eindeutig, kantenA.eindeutig, 'und keine Dublette');
+    assert.equal(target.store.count('agent'), 0, 'die eingebauten Agenten der Erstausstattung muessen weg sein');
+    assert.ok(ergebnis.purged.records >= 14, `es wurde zu wenig geloescht: ${JSON.stringify(ergebnis.purged)}`);
+    assert.ok(ergebnis.warnings.some((w) => /nicht rueckgaengig|nicht rückgängig/.test(w)),
+      'das Ergebnis muss sagen, dass das nicht umkehrbar ist');
+  } finally {
+    if (source) await source.close().catch(() => {});
+    if (target) await target.close().catch(() => {});
+    cleanSource();
+    cleanTarget();
+  }
+});
+
+test('der Aenderungsverlauf eines verschluesselten Tresors reist mit', async () => {
+  // Warum dieser Test hier steht und nicht in backup.test.js: der Fehler lag
+  // nicht in der Sicherung, sondern in ihrer Verdrahtung. src/store/backup.js
+  // konnte den versiegelten Verlauf schon immer lesen -- es bekam nur den
+  // Schluessel nie gereicht. Genau deshalb faellt so etwas nur auf, wenn man
+  // die ECHTE Anwendung startet statt das Modul einzeln zu pruefen.
+  const home = tempHome('int-krypt');
+  let app = null;
+  try {
+    app = await createApp({ home: home.home, port: 0, host: '127.0.0.1', logLevel: 'error' });
+    await seedIfEmpty(app);
+    await app.loadModules({});
+    await app.vaultCrypto.initialise('ein-langes-gutes-geheimnis');
+    await app.close();
+
+    app = await createApp({
+      home: home.home, port: 0, host: '127.0.0.1', logLevel: 'error',
+      passphrase: 'ein-langes-gutes-geheimnis',
+    });
+    await app.loadModules({});
+    assert.equal(app.vaultCrypto.enabled, true, 'der Tresor muesste verschluesselt sein');
+
+    const notiz = app.store.create('note', { title: 'Butterblume', body: 'Nur im verschluesselten Tresor.' });
+    app.store.update(notiz.id, { body: 'Geaendert, damit der Verlauf etwas zu erzaehlen hat.' });
+    await app.store.flush();
+
+    // Auf der Platte liegen diese Zeilen versiegelt -- das ist die
+    // Voraussetzung des Tests, nicht sein Ergebnis. Ginge sie verloren,
+    // wuerde der Test unten gruen bleiben, ohne noch etwas zu beweisen.
+    const zeilen = fs.readFileSync(path.join(home.home, 'vault', 'history.jsonl'), 'utf8')
+      .split('\n').filter((z) => z.trim());
+    const versiegelt = zeilen.filter((z) => z.trim()[0] !== '{').length;
+    assert.ok(versiegelt >= 2, `im Verlauf muessten versiegelte Zeilen stehen, gefunden: ${versiegelt}`);
+
+    const res = await app.backup.exportAll({ dir: path.join(home.home, 'exports', 'krypt'), format: 'json' });
+    const payload = JSON.parse(fs.readFileSync(path.join(res.dir, 'export.json'), 'utf8'));
+    const verlauf = payload.history || {};
+
+    assert.equal(verlauf.sealed || 0, 0,
+      `die Sicherung konnte ${verlauf.sealed} Zeilen nicht lesen -- vaultCrypto fehlt in createBackup()`);
+    assert.equal((verlauf.entries || []).length, zeilen.length,
+      `im Export stehen ${(verlauf.entries || []).length} von ${zeilen.length} Verlaufszeilen`);
+    assert.ok(JSON.stringify(verlauf).includes('Butterblume'),
+      'die im verschluesselten Zustand geschriebene Aenderung fehlt im Verlauf der Sicherung');
+  } finally {
+    if (app) await app.close().catch(() => {});
+    home.cleanup();
+  }
+});
+
 module.exports = { name: 'integration', tests: drain() };

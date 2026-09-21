@@ -53,8 +53,6 @@ const ICONS = {
   // Eine aufgehende Sonne ueber dem Horizont. "Heute" ist eine Tageszeit,
   // keine Taetigkeit -- und ein Kalenderblatt waere ein Termin, was es nicht ist.
   today: '<path d="M2.6 14.6h14.8"/><path d="M5.4 14.6a4.6 4.6 0 0 1 9.2 0"/><path d="M10 3.4v2M4.2 5.8l1.4 1.4M15.8 5.8l-1.4 1.4"/>',
-  // Zwei gestapelte Karten. Das Bild fuer einen Stapel, den man durchgeht.
-  study: '<rect x="4.6" y="6.4" width="12" height="9.2" rx="2.2"/><path d="M3.4 12.8V5.6a2 2 0 0 1 2-2h7.2"/>',
   // Ein Posteingang, keine Gluehbirne: dieser Bereich ist eine Liste von
   // Vorschlaegen, ueber die jemand entscheidet -- nicht ein Geistesblitz.
   assist: '<path d="M4.4 3.4h11.2l2 7.6v3.6a2 2 0 0 1-2 2H4.4a2 2 0 0 1-2-2v-3.6z"/><path d="M2.4 11h4.2l1.2 2h4.4l1.2-2h4.2"/>',
@@ -79,6 +77,17 @@ const ICONS = {
   more: '<circle cx="4.6" cy="10" r="1.25"/><circle cx="10" cy="10" r="1.25"/><circle cx="15.4" cy="10" r="1.25"/>',
   keyboard: '<rect x="2.4" y="5" width="15.2" height="10" rx="2.4"/><path d="M5.6 8.2h.01M8.4 8.2h.01M11.2 8.2h.01M14 8.2h.01M6.6 11.6h6.8"/>',
   home: '<path d="M3.4 9 10 3.4 16.6 9v6.8a1.6 1.6 0 0 1-1.6 1.6H5a1.6 1.6 0 0 1-1.6-1.6z"/>',
+  // Ein USB-Stick: Gehaeuse mit Kontaktstueck. Kein Koffer und kein Pfeil --
+  // der Bereich handelt von DIESEM Gegenstand, den man in der Hand haelt.
+  stick: '<rect x="6.6" y="6.2" width="6.8" height="11.2" rx="1.6"/>'
+    + '<path d="M8.4 6.2V3.4a1.6 1.6 0 0 1 1.6-1.6h0a1.6 1.6 0 0 1 1.6 1.6v2.8"/>'
+    + '<path d="M8.8 10.2h2.4M8.8 12.8h2.4"/>',
+  // Ein Tresor mit Buegel. Kein Wolkensymbol und kein Pfeil nach unten: es
+  // geht um Verwahren an einem Ort, den man selbst in der Hand hat, nicht um
+  // Hochladen und nicht um Herunterladen.
+  backup: '<rect x="3" y="7.6" width="14" height="9.2" rx="2.2"/>'
+    + '<path d="M6.4 7.6V5.4a3.6 3.6 0 0 1 7.2 0v2.2"/>'
+    + '<circle cx="10" cy="12" r="1.5"/>',
 };
 
 /**
@@ -110,14 +119,17 @@ const VIEWS = [
   { id: 'graph', title: 'Gehirn', icon: ICONS.graph, key: 'g', primary: true, group: 'arbeiten', keywords: 'graph netz verknüpfungen karte' },
   { id: 'agents', title: 'Agenten', icon: ICONS.agents, key: 'a', primary: true, group: 'helfer', keywords: 'automatik werkzeuge läufe runs' },
   { id: 'assist', title: 'Vorschläge', icon: ICONS.assist, key: 'v', primary: true, group: 'helfer', keywords: 'hinweise dubletten waisen aufgaben schlagwörter aufräumen posteingang' },
-  { id: 'study', title: 'Lernen', icon: ICONS.study, key: 'l', primary: false, group: 'helfer', keywords: 'karten wiederholen abstand merken auswendig spaced repetition' },
   { id: 'automation', title: 'Automatik', icon: ICONS.automation, key: 'u', primary: false, group: 'helfer', keywords: 'zeitplan auslöser trigger regelmäßig von allein wiederkehrend' },
   { id: 'network', title: 'Netzwerk', icon: ICONS.network, key: 'w', primary: false, group: 'system', keywords: 'internet schleuse gate freigaben audit' },
   { id: 'timeline', title: 'Zeitachse', icon: ICONS.timeline, key: 'z', primary: false, group: 'system', keywords: 'verlauf chronik historie wann zeit' },
   { id: 'sync', title: 'Abgleich', icon: ICONS.sync, key: 'y', primary: false, group: 'system', keywords: 'synchronisation geräte partner peer konflikte' },
+  { id: 'stick', title: 'Stick', icon: ICONS.stick, key: 't', primary: false, group: 'system', keywords: 'usb portabel mitnehmen unterwegs laufzeit fremder rechner reisen tragbar' },
   { id: 'workshop', title: 'Werkstatt', icon: ICONS.workshop, key: 'e', primary: false, group: 'system', keywords: 'erweiterungen module code einfügen ändern plugin anpassen' },
   { id: 'search', title: 'Suche', icon: ICONS.search, key: 'f', primary: false, group: 'system', keywords: 'finden volltext' },
-  { id: 'settings', title: 'Einstellungen', icon: ICONS.settings, key: 's', primary: true, group: 'system', keywords: 'konfiguration tresor modelle sicherung' },
+  // Eigener Bereich und nicht laenger ein Abschnitt in den Einstellungen: was
+  // man im Notfall braucht, darf nicht erst gefunden werden muessen.
+  { id: 'backup', title: 'Sicherung', icon: ICONS.backup, key: 'b', primary: false, group: 'system', keywords: 'export import backup wiederherstellen notfall datenverlust umzug neues gerät retten kopie' },
+  { id: 'settings', title: 'Einstellungen', icon: ICONS.settings, key: 's', primary: true, group: 'system', keywords: 'konfiguration tresor modelle darstellung' },
 ];
 
 const VIEW_IDS = new Set(VIEWS.map((v) => v.id));

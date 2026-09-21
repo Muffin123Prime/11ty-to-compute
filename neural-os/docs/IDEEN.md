@@ -54,7 +54,7 @@ nicht, wäre schlimmer als keines.
 **Was es nicht kann**, und warum:
 
 - **Höchstens 2000 Einträge oder 30 Tage.** Danach ist es weg. Eine Sicherung
-  ist etwas anderes (Einstellungen → Sicherung).
+  ist etwas anderes (eigener Bereich **Sicherung**, `g` dann `b`).
 - **Verknüpfungen nicht.** Abgeleitete Links entstehen bei jedem Schreibvorgang
   neu — ein Knopf dafür würde sichtbar nichts tun.
 - **Freigaben, Token und Läufe nicht.** Eine zurückgenommene Netz-Freigabe
@@ -66,28 +66,20 @@ nicht, wäre schlimmer als keines.
   würde Rückgängig genau das anrichten, wogegen es da ist. Ein ausdrückliches
   „trotzdem" gibt es, mit Warnung.
 
-## 3 · Kartenstapel zum Wiederholen — **gebaut**
+## 3 · Kartenstapel zum Wiederholen — **gebaut und wieder entfernt**
 
-Der Bereich **Lernen** (`g` dann `l`). SM-2, kein Modell nötig.
+War gebaut: der Bereich **Lernen**, SM-2, kein Modell nötig. Ist auf Wunsch
+wieder entfernt worden — vollständig, mitsamt Schema, Routen und Ansicht.
 
-Eine Karte zur Zeit, groß und ruhig. **Leertaste** zeigt die Rückseite, dann
-vier Knöpfe auf den Tasten **1–4**: Nochmal · Schwer · Gut · Leicht. Jeder sagt,
-wann die Karte wiederkommt — *„heute"*, *„morgen"*, *„in 6 Tagen"* —, und dieser
-Text kommt vom Server, damit Oberfläche und Rechnung nicht auseinanderlaufen
-können.
+Hier steht er trotzdem noch, weil ein Verzeichnis der Ideen, aus dem die
+verworfenen verschwinden, kein Verzeichnis mehr ist, sondern eine Erfolgsliste.
 
-Karten entstehen von Hand oder **aus einer Notiz**. Dabei wird nichts geraten:
-erkannt werden nur ausdrückliche Strukturen (`## Überschrift` + Absatz,
-`Begriff :: Erklärung`). Aus Fließtext entsteht keine Karte.
-
-Vier Entscheidungen, die im Code begründet stehen: `ease` fällt nie unter 1,3
-(sonst gerät eine Karte in eine Falle, aus der sie nicht herauskommt); das
-Intervall hat eine Obergrenze (neun Jahre sind keine Wiederholung mehr);
-`due` ist ein Datum **ohne Uhrzeit** (wer morgens lernt, soll abends nicht
-dieselbe Karte wiederbekommen); und „Nochmal" heißt heute, nicht morgen.
-
-**Keine Gamification** — keine Serien, keine Punkte, keine Abzeichen. Das steht
-weiter unten unter „Was ich nicht bauen würde", und daran habe ich mich gehalten.
+Was mit vorhandenen Karten passiert: sie werden beim ersten Start **in Notizen
+umgewandelt** — Vorderseite wird Titel, Rückseite wird Text, das Schlagwort
+`lernkarte` hält die Herkunft fest, und die Verknüpfung zur Quellnotiz bleibt.
+Nicht gelöscht, und auch nicht liegengelassen: ein Satz eines Typs, den es nicht
+mehr gibt, fiele still aus jeder neuen Sicherung heraus und wäre genau dann weg,
+wenn man ihn braucht.
 
 ## 4 · Die Zwischenablage-Taste — **teilweise gebaut**
 
@@ -229,8 +221,3 @@ genau deshalb richtig:
 1. **Den Tagesbeginn zur Startseite machen**, wenn du ihn ein paar Tage benutzt
    hast und er sich bewährt. Jetzt ist der Chat der Einstieg; das war richtig,
    solange es „Heute" nicht gab.
-2. **Karten aus dem zweiten Blick.** Die offenen Stellen, die er findet, sind
-   fast schon Fragen. Der Weg von dort zu einer Lernkarte ist kurz.
-3. **Den Lernstand zwischen Geräten abgleichen.** Derzeit liegt dein
-   Kartenstapel auf einem Gerät — das steht unter „Bekannte Grenzen" in
-   `docs/STATUS.md` und ist die erste Zeile dort, die mich wirklich stört.

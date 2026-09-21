@@ -245,7 +245,6 @@ test('die Abgleich-Liste bleibt eine Erlaubnisliste, und diese Arten stehen nich
     ['suggestion', 'die lokale Lesart eines lokalen Tresors'],
     ['module', 'fremder Code, der auf dem Zielgeraet ausgefuehrt wuerde'],
     ['watch', 'ein Pfad auf dem einen Rechner existiert auf dem anderen nicht'],
-    ['card', 'zwei Geraete haetten zwei Terminplaene fuer dieselbe Karte'],
   ];
   for (const [type, grund] of niemals) {
     assert.equal(merge.SYNC_TYPES.includes(type), false, `${type} wird abgeglichen — ${grund}`);

@@ -62,24 +62,6 @@ const DENSITIES = [
   { value: 'compact', label: 'Dicht', hint: 'Mehr Inhalt auf einem Bildschirm.' },
 ];
 
-const IMPORT_MODES = [
-  {
-    value: 'merge',
-    label: 'Zusammenführen',
-    consequence: 'Vorhandene Einträge bleiben, wie sie sind. Nur Einträge, die es hier noch nicht gibt, kommen hinzu. Nichts wird überschrieben.',
-  },
-  {
-    value: 'replace',
-    label: 'Ersetzen',
-    consequence: 'Einträge mit gleicher Kennung werden mit der Fassung aus der Sicherung überschrieben. Deine aktuelle Fassung ist danach weg.',
-  },
-  {
-    value: 'fresh',
-    label: 'Nur in leeren Tresor',
-    consequence: 'Der Import bricht ab, wenn schon Daten vorhanden sind. Der sicherste Weg, eine Sicherung auf einem neuen Gerät einzuspielen.',
-  },
-];
-
 const TOKEN_PERMISSIONS = [
   { key: 'read', label: 'Lesen', hint: 'Notizen, Chats und den Graphen ansehen.' },
   { key: 'write', label: 'Schreiben', hint: 'Einträge anlegen, ändern und löschen.' },
@@ -180,12 +162,6 @@ export default {
 
       freshToken: null, // {token, record} -- shown exactly once
       busy: {},          // keyed flags for long-running buttons
-      exportStarted: 0,
-      exportResult: null,
-      exportError: null,
-      importPreview: null,
-      importError: null,
-      importResult: null,
     };
     view = self;
 
@@ -214,7 +190,6 @@ function teardown() {
     try { off(); } catch { /* listener already gone */ }
   }
   self.cleanups.length = 0;
-  if (self.clockTimer) clearInterval(self.clockTimer);
 }
 
 function request(self, run) {
@@ -402,7 +377,7 @@ function buildLayout(self) {
       section('Darstellung', 'Gilt sofort und wird im Profil dieses Geräts gespeichert.', dom.appearance),
       section('Tresor', 'Wo deine Daten liegen und wie viel Platz sie brauchen.', dom.vault),
       section('Verschlüsselung', null, dom.encryption),
-      section('Sicherung', 'Export und Import deiner vollständigen Daten.', dom.backup),
+      section('Sicherung', null, dom.backup),
       section('Beobachtete Ordner',
         'Ein freigegebener Ordner wird gelesen, und was darin auftaucht, landet als Datei im Tresor. '
         + 'Gelesen wird nur \u2013 im Ordner selbst wird nichts gel\u00f6scht und nichts ge\u00e4ndert. '
@@ -416,7 +391,32 @@ function buildLayout(self) {
       section('Diagnose', 'Was dieses System über sich selbst weiß. Nichts hier ist geraten.', dom.diagnosis)));
 
   container.appendChild(dom.root);
-  buildBackup(self);
+  buildBackupHinweis(self);
+}
+
+/**
+ * Nur noch ein Verweis. Die Bedienung liegt seit dieser Fassung im eigenen
+ * Bereich „Sicherung".
+ *
+ * Warum hier ueberhaupt noch etwas steht: wer eine Sicherung sucht, sucht sie
+ * erfahrungsgemaess in den Einstellungen. Ein leerer Abschnitt wuerde diesen
+ * Menschen ratlos zuruecklassen. Was hier NICHT steht, sind Knoepfe -- eine
+ * zweite Bedienung fuer dieselbe Sache waere genau die Art von Halbheit, bei
+ * der eine der beiden Stellen irgendwann etwas anderes behauptet als die andere.
+ */
+function buildBackupHinweis(self) {
+  const box = self.dom.backup;
+  clear(box);
+  box.appendChild(h('p', null, text(
+    'Den Wissensstand sichern und wiederherstellen hat einen eigenen Bereich: '
+    + '„Sicherung" in der Seitenleiste. Dort steht, wann zuletzt gesichert wurde, wohin, '
+    + 'wie groß und wie viele Sätze – und dort wird auch zurückgespielt.')));
+  box.appendChild(h('div.row', null,
+    h('button.btn.btn--small', {
+      type: 'button',
+      onClick: () => self.ctx.navigate('/backup'),
+    }, text('Zum Bereich „Sicherung“')),
+    h('span.hint', null, text('Tastatur: g, dann b.'))));
 }
 
 /* ------------------------------------------------------------------ */
@@ -427,7 +427,6 @@ function renderAll(self) {
   renderAppearance(self);
   renderVault(self);
   renderEncryption(self);
-  renderBackup(self);
   renderWatch(self);
   renderSharing(self);
   renderModels(self);
@@ -649,189 +648,6 @@ function renderEncryption(self) {
       onClick: () => lockVault(self),
     }, icon(ICONS.lock), text('Jetzt sperren')),
     h('span.hint', null, text('Nach dem Sperren wird der Schlüssel im Speicher überschrieben. Zum Weiterarbeiten ist die Passphrase wieder nötig.'))));
-}
-
-/**
- * The backup panel is built once and only updated afterwards: re-creating the
- * path field on every render would throw away what the user typed while an
- * export was still running.
- */
-function buildBackup(self) {
-  const box = self.dom.backup;
-  clear(box);
-
-  const format = h('select.select', { 'aria-label': 'Format' },
-    h('option', { value: 'both' }, text('JSON und Markdown')),
-    h('option', { value: 'json' }, text('Nur JSON (vollständig, wieder einlesbar)')),
-    h('option', { value: 'markdown' }, text('Nur Markdown (zum Lesen)')));
-  const withFiles = h('input', { type: 'checkbox', checked: true });
-  self.dom.exportFormat = format;
-  self.dom.exportFiles = withFiles;
-  self.dom.exportStatus = h('div.setv__progress', { role: 'status' });
-  self.dom.exportButton = h('button.btn.btn--primary.btn--small', {
-    type: 'button',
-    onClick: () => runExport(self),
-  }, icon(ICONS.download), text('Export starten'));
-
-  box.appendChild(h('div.setv__block', null,
-    h('h4.setv__block-title', null, text('Exportieren')),
-    h('div.setv__grid', null,
-      h('label.field', null, h('span.label', null, text('Format')), format),
-      h('label.setv__switch', null,
-        h('span.setv__switch-box', null, withFiles),
-        h('span.setv__switch-body', null,
-          h('span.setv__switch-label', null, text('Angehängte Dateien mitnehmen')),
-          h('span.setv__switch-hint', null, text('Ohne diese Option enthält der Export nur Texte und Verweise, keine Dateiinhalte.'))))),
-    h('div.row', null,
-      self.dom.exportButton,
-      h('span.hint', null, text('Der Export wird in den Ordner „exports“ im Neural-OS-Verzeichnis geschrieben.'))),
-    self.dom.exportStatus));
-
-  const source = h('input.input', {
-    type: 'text',
-    placeholder: '/home/ich/.neural-os/exports/2026-01-01T…',
-    'aria-label': 'Ordner oder Datei der Sicherung',
-  });
-  self.dom.importSource = source;
-
-  const modeBox = h('div.stack');
-  const modeInputs = [];
-  for (const mode of IMPORT_MODES) {
-    const input = h('input', {
-      type: 'radio',
-      name: 'setv-import-mode',
-      value: mode.value,
-      checked: mode.value === 'merge',
-      onChange: () => renderImportState(self),
-    });
-    modeInputs.push(input);
-    modeBox.appendChild(h('label.setv__switch', null,
-      h('span.setv__switch-box', null, input),
-      h('span.setv__switch-body', null,
-        h('span.setv__switch-label', null, text(mode.label)),
-        h('span.setv__switch-hint', null, text(mode.consequence)))));
-  }
-  self.dom.importModes = modeInputs;
-  self.dom.importPreviewBox = h('div.setv__preview', { role: 'status' });
-  self.dom.verifyButton = h('button.btn.btn--small', {
-    type: 'button',
-    onClick: () => verifyImport(self),
-  }, text('Sicherung prüfen'));
-  self.dom.importButton = h('button.btn.btn--primary.btn--small', {
-    type: 'button',
-    onClick: () => runImport(self),
-  }, text('Import starten'));
-
-  box.appendChild(h('div.setv__block', null,
-    h('h4.setv__block-title', null, text('Importieren')),
-    h('label.field', null, h('span.label', null, text('Ordner einer Sicherung (oder eine export.json)')), source),
-    modeBox,
-    h('div.row', null,
-      self.dom.verifyButton,
-      self.dom.importButton,
-      h('span.hint', null, text('„Prüfen“ liest nur das Manifest und die Prüfsummen – es ändert nichts.'))),
-    self.dom.importPreviewBox));
-}
-
-/** Only the parts that depend on state; the fields themselves stay put. */
-function renderBackup(self) {
-  const { dom } = self;
-  if (!dom.exportButton) return;
-
-  dom.exportButton.disabled = self.busy.export === true;
-  clear(dom.exportButton);
-  dom.exportButton.appendChild(icon(ICONS.download));
-  dom.exportButton.appendChild(text(self.busy.export ? 'Export läuft …' : 'Export starten'));
-
-  dom.verifyButton.disabled = self.busy.verify === true;
-  clear(dom.verifyButton);
-  dom.verifyButton.appendChild(text(self.busy.verify ? 'Wird geprüft …' : 'Sicherung prüfen'));
-
-  dom.importButton.disabled = self.busy.import === true;
-  clear(dom.importButton);
-  dom.importButton.appendChild(text(self.busy.import ? 'Import läuft …' : 'Import starten'));
-
-  renderExportStatus(self);
-  renderImportState(self);
-}
-
-function renderExportStatus(self) {
-  const box = self.dom.exportStatus;
-  if (!box) return;
-  clear(box);
-
-  if (self.busy.export) {
-    const seconds = Math.max(0, Math.round((Date.now() - self.exportStarted) / 1000));
-    box.appendChild(h('div.row', null,
-      h('span.spinner', { 'aria-hidden': 'true' }),
-      h('span', null, text(`Der Server schreibt den Export … ${formatNumber(seconds)} s`))));
-    box.appendChild(h('p.hint', null, text('Es gibt dafür keine Fortschrittsmeldungen vom Server; hier läuft nur die Zeit. Der Export ist fertig, wenn der Pfad erscheint.')));
-    return;
-  }
-  if (self.exportError) {
-    box.appendChild(h('p.is-danger', null, text(`Export fehlgeschlagen: ${self.exportError}`)));
-    return;
-  }
-  const result = self.exportResult;
-  if (!result) return;
-
-  box.appendChild(h('div.setv__result', null,
-    h('p', null, icon(ICONS.check), text(' Export geschrieben.')),
-    h('div.setv__pathrow', null,
-      h('code.code.setv__path', null, text(String(result.dir || ''))),
-      h('button.btn.btn--small', { type: 'button', onClick: () => copyText(self, String(result.dir || '')) },
-        icon(ICONS.copy), text('Pfad kopieren'))),
-    h('p.meta', null, text(
-      `${formatNumber(result.records || 0)} Einträge · ${formatNumber(result.files || 0)} Dateien · ${formatBytes(result.bytes || 0)}`,
-    ))));
-}
-
-function renderImportState(self) {
-  const box = self.dom.importPreviewBox;
-  if (!box) return;
-  clear(box);
-
-  if (self.importError) {
-    box.appendChild(h('p.is-danger', null, text(self.importError)));
-  }
-
-  const preview = self.importPreview;
-  if (preview) {
-    const mode = selectedImportMode(self);
-    const modeInfo = IMPORT_MODES.find((m) => m.value === mode);
-    const problems = Array.isArray(preview.problems) ? preview.problems : [];
-    box.appendChild(h('div.setv__result', null,
-      h('p', null,
-        icon(preview.ok ? ICONS.check : ICONS.alert),
-        text(preview.ok
-          ? ' Die Sicherung ist vollständig: Manifest und Prüfsummen stimmen.'
-          : ` Die Sicherung hat ${formatNumber(problems.length)} Beanstandung(en).`)),
-      problems.length
-        ? h('ul.setv__problems', null, ...problems.slice(0, 12).map((problem) => h('li', null,
-          text(`${problem.path || problem.kind || 'Eintrag'}: ${problem.message || problem.reason || 'ohne Angabe'}`))))
-        : null,
-      h('p.meta', null, text(modeInfo
-        ? `Beim Import im Modus „${modeInfo.label}“ gilt: ${modeInfo.consequence}`
-        : 'Wähle oben, wie mit vorhandenen Einträgen verfahren werden soll.'))));
-  }
-
-  const result = self.importResult;
-  if (result) {
-    const conflicts = Array.isArray(result.conflicts) ? result.conflicts : [];
-    const errors = Array.isArray(result.errors) ? result.errors : [];
-    box.appendChild(h('div.setv__result', null,
-      h('p', null, text(`Import abgeschlossen: ${formatNumber(result.imported || 0)} übernommen, `
-        + `${formatNumber(result.skipped || 0)} übersprungen, ${formatNumber(conflicts.length)} Konflikt(e).`)),
-      errors.length
-        ? h('p.is-danger', null, text(`${formatNumber(errors.length)} Eintrag/Einträge konnten nicht gelesen werden.`))
-        : null));
-  }
-}
-
-function selectedImportMode(self) {
-  const inputs = self.dom.importModes || [];
-  for (const input of inputs) if (input.checked) return input.value;
-  return 'merge';
 }
 
 function renderSharing(self) {
@@ -2045,107 +1861,6 @@ async function lockVault(self) {
   }
 }
 
-async function runExport(self) {
-  setBusy(self, 'export', true);
-  self.exportError = null;
-  self.exportResult = null;
-  self.exportStarted = Date.now();
-  renderBackup(self);
-
-  // No progress events exist for the export; the clock is the honest signal.
-  if (self.clockTimer) clearInterval(self.clockTimer);
-  self.clockTimer = setInterval(() => {
-    if (!self.alive || !self.busy.export) return;
-    renderExportStatus(self);
-  }, 1000);
-
-  try {
-    const body = {
-      format: self.dom.exportFormat ? self.dom.exportFormat.value : 'both',
-      includeFiles: self.dom.exportFiles ? self.dom.exportFiles.checked === true : true,
-    };
-    const result = await request(self, (signal) => self.api.post('/backup/export', body, { signal, timeoutMs: 600000 }));
-    if (!self.alive) return;
-    self.exportResult = result;
-    self.ctx.toast('Sicherung geschrieben.', 'success');
-  } catch (err) {
-    if (!self.alive || (err && err.isAborted)) return;
-    self.exportError = errorMessage(err);
-  } finally {
-    setBusy(self, 'export', false);
-    if (self.clockTimer) clearInterval(self.clockTimer);
-    self.clockTimer = null;
-    if (self.alive) renderBackup(self);
-  }
-}
-
-async function verifyImport(self) {
-  const dir = String(self.dom.importSource.value || '').trim();
-  if (!dir) {
-    self.importError = 'Trage den Ordner ein, in dem die Sicherung liegt.';
-    renderImportState(self);
-    self.dom.importSource.focus();
-    return;
-  }
-  setBusy(self, 'verify', true);
-  self.importError = null;
-  self.importPreview = null;
-  self.importResult = null;
-  renderBackup(self);
-  try {
-    const result = await request(self, (signal) => self.api.get('/backup/verify', { query: { dir }, signal, timeoutMs: 120000 }));
-    if (!self.alive) return;
-    self.importPreview = result;
-  } catch (err) {
-    if (!self.alive || (err && err.isAborted)) return;
-    self.importError = `Die Sicherung konnte nicht geprüft werden: ${errorMessage(err)}`;
-  } finally {
-    setBusy(self, 'verify', false);
-    if (self.alive) renderBackup(self);
-  }
-}
-
-async function runImport(self) {
-  const source = String(self.dom.importSource.value || '').trim();
-  if (!source) {
-    self.importError = 'Trage den Ordner oder die Datei der Sicherung ein.';
-    renderImportState(self);
-    self.dom.importSource.focus();
-    return;
-  }
-  const mode = selectedImportMode(self);
-  const info = IMPORT_MODES.find((m) => m.value === mode);
-  const ok = await self.ctx.confirm({
-    title: `Import im Modus „${info ? info.label : mode}“ starten?`,
-    message: `${info ? info.consequence : ''} Quelle: ${source}`,
-    confirmLabel: 'Import starten',
-    danger: mode === 'replace',
-  });
-  if (!ok || !self.alive) return;
-
-  setBusy(self, 'import', true);
-  self.importError = null;
-  self.importResult = null;
-  renderBackup(self);
-  try {
-    const body = source.toLowerCase().endsWith('.json') ? { file: source, mode } : { dir: source, mode };
-    const result = await request(self, (signal) => self.api.post('/backup/import', body, { signal, timeoutMs: 600000 }));
-    if (!self.alive) return;
-    self.importResult = result;
-    self.ctx.toast(`Import fertig: ${formatNumber((result && result.imported) || 0)} Einträge übernommen.`, 'success');
-    await loadStatus(self);
-  } catch (err) {
-    if (!self.alive || (err && err.isAborted)) return;
-    self.importError = `Der Import ist fehlgeschlagen: ${errorMessage(err)}`;
-  } finally {
-    setBusy(self, 'import', false);
-    if (self.alive) {
-      renderBackup(self);
-      renderVault(self);
-    }
-  }
-}
-
 async function toggleSharing(self, enabled, input) {
   if (enabled) {
     const ok = await self.ctx.confirm({
@@ -2391,13 +2106,6 @@ const CSS = `
 .setv__danger-title { display: flex; align-items: center; gap: 6px; font-weight: 600; }
 .setv__danger-title svg { width: 16px; height: 16px; }
 
-.setv__progress { min-height: 0; }
-.setv__result { padding: var(--sp-1); border: 1px solid var(--border); border-radius: var(--r-2); background: var(--surface-2); }
-.setv__result p { margin: 0 0 var(--sp-05); }
-.setv__result p:last-child { margin-bottom: 0; }
-.setv__result svg { width: 15px; height: 15px; vertical-align: -2px; }
-.setv__problems { margin: var(--sp-05) 0; padding-left: var(--sp-3); font-size: var(--fs-sm); color: var(--fg-muted); }
-.setv__preview { display: flex; flex-direction: column; gap: var(--sp-1); }
 
 .setv__token-new { padding: var(--sp-2); border: 2px solid var(--warn); border-radius: var(--r-2); background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .setv__token-new p { margin: 0 0 var(--sp-1); }
