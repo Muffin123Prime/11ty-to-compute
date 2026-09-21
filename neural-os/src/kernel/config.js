@@ -73,6 +73,19 @@ function defaults() {
       defaultMaxSteps: 12,
       defaultMaxSeconds: 300,
     },
+    /**
+     * Wie weit das Rueckgaengig zurueckreicht.
+     *
+     * Bewusst begrenzt und bewusst sichtbar: ein Journal ohne Grenze ist ein
+     * Datenleck auf der Platte, und eine Grenze, die man nirgends sieht, ist
+     * eine Ueberraschung an dem Tag, an dem man sie braucht. Wer laenger
+     * zurueckwill, nimmt eine Sicherung -- das ist etwas anderes und heisst
+     * auch so.
+     */
+    history: {
+      maxEntries: 2000,
+      maxDays: 30,
+    },
   };
 }
 
