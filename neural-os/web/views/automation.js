@@ -72,6 +72,12 @@ const EVENTS = [
 
 const EVENT_BY_VALUE = Object.fromEntries(EVENTS.map((entry) => [entry.value, entry]));
 
+/** The range src/agents/triggers.js clamps to; typing outside it is silently corrected. */
+const DEBOUNCE_MIN_MS = 1000;
+const DEBOUNCE_MAX_MS = 3600000;
+const PER_HOUR_MIN = 1;
+const PER_HOUR_MAX = 60;
+
 /**
  * Record types a trigger can watch, with the indefinite article the sentence
  * needs and the relative pronoun for the "Titel enthält" clause.
@@ -225,12 +231,29 @@ function describeSubsystem(value, label) {
   }
   if (typeof value === 'string') return { text: `${label}: ${value}`, level: 'unknown' };
   if (typeof value === 'object') {
-    const running = value.running ?? value.active ?? value.enabled ?? value.available;
+    const running = typeof value.running === 'boolean' ? value.running : (value.active ?? value.available);
     const parts = [];
     if (typeof running === 'boolean') parts.push(running ? 'läuft' : 'läuft nicht');
-    if (Number.isFinite(value.enabled)) parts.push(`${formatNumber(value.enabled)} eingeschaltet`);
-    if (Number.isFinite(value.count)) parts.push(`${formatNumber(value.count)} insgesamt`);
+    if (Number.isFinite(value.enabled)) {
+      parts.push(Number.isFinite(value.total)
+        ? `${formatNumber(value.enabled)} von ${formatNumber(value.total)} eingeschaltet`
+        : `${formatNumber(value.enabled)} eingeschaltet`);
+    } else if (Number.isFinite(value.total)) {
+      parts.push(`${formatNumber(value.total)} insgesamt`);
+    }
     if (Number.isFinite(value.intervalMs)) parts.push(`prüft alle ${formatDuration(value.intervalMs)}`);
+    if (value.nextDue) parts.push(`nächster Termin ${whenPhrase(new Date(value.nextDue))}`);
+    if (Number.isFinite(value.firedLastHour)) parts.push(`${formatNumber(value.firedLastHour)} Starts in der letzten Stunde`);
+    if (Number.isFinite(value.inflight) && value.inflight > 0) parts.push(`${formatNumber(value.inflight)} laufen gerade`);
+    // The brakes are as real as the starts; a status that hides them is half
+    // the truth (src/agents/triggers.js says so itself).
+    const held = [
+      [value.droppedByDebounce, 'wegen der Wartezeit'],
+      [value.droppedByCap, 'wegen der Stundengrenze'],
+      [value.droppedByLoop, 'als Schleife erkannt'],
+      [value.droppedByCeiling, 'wegen der Gesamtgrenze'],
+    ].filter(([n]) => Number.isFinite(n) && n > 0);
+    for (const [n, why] of held) parts.push(`${formatNumber(n)} ${why} zurückgehalten`);
     if (value.lastTickAt) parts.push(`zuletzt geprüft ${timeAgo(value.lastTickAt)}`);
     if (value.reason) parts.push(String(value.reason));
     if (!parts.length) return { text: `${label}: gemeldet, aber ohne verständliche Angaben.`, level: 'unknown' };
@@ -293,12 +316,12 @@ export default {
        */
       forceRebuild: new Set(),
 
-      newSchedule: { agentId: '', goal: '', every: 'daily', atHour: 8, onWeekday: 1, busy: false, error: null },
+      newSchedule: { name: '', agentId: '', goal: '', every: 'daily', atHour: 8, onWeekday: 1, busy: false, error: null },
       /** What the create forms were last built for; see renderScheduleForm. */
       scheduleFormKey: null,
       triggerFormKey: null,
       newTrigger: {
-        agentId: '', goal: '', on: 'record.created', recordType: '', tag: '', titleContains: '',
+        name: '', agentId: '', goal: '', on: 'record.created', recordType: '', tag: '', titleContains: '',
         debounceMs: 5000, maxPerHour: 12, busy: false, error: null,
       },
     };
@@ -423,9 +446,11 @@ function subscribe(self) {
     self.cleanups.push(ctx.bus.on(name, () => self.refreshSoon()));
   }
 
-  // Whatever the subsystem publishes in addition. If these names never arrive,
-  // nothing is lost -- the record events above already keep the list honest.
-  for (const name of ['automation.tick', 'automation.changed', 'schedule.fired', 'trigger.fired']) {
+  // What src/agents/schedule.js and src/agents/triggers.js publish. The record
+  // events above would catch most of it anyway; a skipped schedule and a capped
+  // trigger write nothing, so without these two the counters would go stale.
+  for (const name of ['schedule.fired', 'schedule.skipped', 'schedule.changed',
+    'trigger.fired', 'trigger.changed', 'trigger.capped']) {
     self.cleanups.push(ctx.bus.on(name, () => self.refreshSoon()));
   }
 }
@@ -580,11 +605,17 @@ async function createSchedule(self) {
     renderScheduleForm(self, true);
     return;
   }
+  if (!String(form.goal || '').trim()) {
+    form.error = new Error('Ein Zeitplan braucht einen Auftrag; ein Agent ohne Auftrag tut nichts.');
+    renderScheduleForm(self, true);
+    return;
+  }
   form.busy = true;
   form.error = null;
   renderScheduleForm(self, true);
   try {
     const body = {
+      name: String(form.name || '').trim(),
       agentId: form.agentId,
       goal: form.goal,
       every: form.every,
@@ -596,7 +627,10 @@ async function createSchedule(self) {
     const record = result && result.record;
     if (record) self.schedules = [...self.schedules, record];
     self.scheduleTotal += 1;
-    self.newSchedule = { agentId: form.agentId, goal: '', every: form.every, atHour: form.atHour, onWeekday: form.onWeekday, busy: false, error: null };
+    self.newSchedule = {
+      name: '', agentId: form.agentId, goal: '', every: form.every,
+      atHour: form.atHour, onWeekday: form.onWeekday, busy: false, error: null,
+    };
     self.ctx.toast('Zeitplan angelegt – ausgeschaltet.', 'success');
   } catch (err) {
     if (!self.alive || (err && err.isAborted)) return;
@@ -618,11 +652,17 @@ async function createTrigger(self) {
     renderTriggerForm(self, true);
     return;
   }
+  if (!String(form.goal || '').trim()) {
+    form.error = new Error('Ein Auslöser braucht einen Auftrag; ein Agent ohne Auftrag tut nichts.');
+    renderTriggerForm(self, true);
+    return;
+  }
   form.busy = true;
   form.error = null;
   renderTriggerForm(self, true);
   try {
     const body = {
+      name: String(form.name || '').trim(),
       agentId: form.agentId,
       goal: form.goal,
       on: form.on,
@@ -638,7 +678,7 @@ async function createTrigger(self) {
     if (record) self.triggers = [...self.triggers, record];
     self.triggerTotal += 1;
     self.newTrigger = {
-      agentId: form.agentId, goal: '', on: form.on, recordType: form.recordType, tag: '', titleContains: '',
+      name: '', agentId: form.agentId, goal: '', on: form.on, recordType: form.recordType, tag: '', titleContains: '',
       debounceMs: form.debounceMs, maxPerHour: form.maxPerHour, busy: false, error: null,
     };
     self.ctx.toast('Auslöser angelegt – ausgeschaltet.', 'success');
@@ -934,6 +974,9 @@ function renderScheduleCard(self, record) {
   const enabled = data.enabled === true;
   const busy = self.busy.has(record.id);
   const name = agentName(self, data.agentId);
+  // `name` on a schedule is not in the schema; the store keeps it anyway and
+  // the scheduler treats it as the label the user chose (src/agents/schedule.js).
+  const title = typeof data.name === 'string' ? data.name.trim() : '';
 
   const card = h('article.autov__card', { dataset: { on: enabled ? '1' : '0' } });
 
@@ -950,9 +993,10 @@ function renderScheduleCard(self, record) {
   card.appendChild(h('div.autov__card-head', null,
     renderSwitch(enabled, busy, () => toggleEnabled(self, 'schedule', record)),
     h('div.autov__card-ident', null,
-      h('h3.autov__card-title', null, text(name || `Agent ${data.agentId || '?'}`)),
+      h('h3.autov__card-title', null, text(title || name || `Agent ${data.agentId || '?'}`)),
+      title && name && title !== name ? h('p.meta', null, text(`Agent: ${name}`)) : null,
       name ? null : h('p.hint', null, text('Dieser Agent ist nicht (mehr) in der Agentenliste. Ein Zeitplan ohne Agenten kann nicht laufen.')),
-      h('p.autov__rhythm', null, icon(ICONS.clock), text(rhythmSentence(data.every, data.atHour, data.onWeekday))))));
+      h('p.autov__rhythm', null, icon(ICONS.clock), text(rhythmOf(record))))));
 
   card.appendChild(h('p.autov__goal', null,
     h('span.autov__goal-key', null, text('Auftrag: ')),
@@ -992,29 +1036,44 @@ function renderScheduleCard(self, record) {
   return card;
 }
 
-/** What the server says about the next run -- never this view's own guess. */
+/**
+ * What the server says about the next run -- never this view's own guess.
+ *
+ * `dueIn` and `nextRunLabel` are computed by `src/agents/schedule.js` and put
+ * on the record itself, not inside `data`. The label there is relative ("in 2
+ * Tagen"); the clock time comes from `nextRunAt`, so both are shown: the
+ * moment, and how far away it is.
+ */
 function nextRunSentence(self, record) {
   const data = dataOf(record);
   if (data.enabled !== true) {
     const preview = whenPhrase(nextOccurrence(data.every, data.atHour, data.onWeekday));
     return `Läuft nicht. Eingeschaltet wäre das nächste Mal ${preview}.`;
   }
-  if (typeof data.nextRunLabel === 'string' && data.nextRunLabel.trim()) {
-    return `Das nächste Mal: ${data.nextRunLabel.trim()}`;
-  }
+  const label = typeof record.nextRunLabel === 'string' ? record.nextRunLabel.trim() : '';
   if (data.nextRunAt) {
     const when = whenPhrase(new Date(data.nextRunAt));
-    const due = typeof data.dueIn === 'number' && Number.isFinite(data.dueIn) && data.dueIn > 0
-      ? ` (in ${formatDuration(data.dueIn)})`
-      : '';
-    return when ? `Das nächste Mal: ${when}${due}.` : `Das nächste Mal: ${formatDateTime(data.nextRunAt)}.`;
+    const relative = label && !/^(Ausgeschaltet|Unbekannt|Kein Termin)/.test(label) ? ` (${label})` : '';
+    return when
+      ? `Das nächste Mal: ${when}${relative}.`
+      : `Das nächste Mal: ${formatDateTime(data.nextRunAt)}${relative}.`;
   }
+  if (label) return `Das nächste Mal: ${label}${/[.!?]$/.test(label) ? '' : '.'}`;
   return 'Wann es das nächste Mal läuft, hat der Server nicht mitgeteilt.';
+}
+
+/** The server's own rhythm wording wins; ours only fills a gap. */
+function rhythmOf(record) {
+  const label = typeof record.rhythmLabel === 'string' ? record.rhythmLabel.trim() : '';
+  if (label) return `${label}${/[.!?]$/.test(label) ? '' : '.'}`;
+  const data = dataOf(record);
+  return rhythmSentence(data.every, data.atHour, data.onWeekday);
 }
 
 function renderScheduleEditor(self, record) {
   const data = dataOf(record);
   const draft = self.drafts.get(record.id) || {
+    name: String(data.name || ''),
     goal: String(data.goal || ''),
     every: String(data.every || 'daily'),
     atHour: Number.isFinite(data.atHour) ? data.atHour : 8,
@@ -1052,6 +1111,11 @@ function renderScheduleEditor(self, record) {
   },
   h('summary', null, text('Ändern')),
   h('div.autov__grid', null,
+    h('label.field', null, h('span.label', null, text('Name (frei)')),
+      h('input.input', {
+        type: 'text', value: draft.name,
+        onInput: (event) => update({ name: event.target.value }),
+      })),
     h('label.field.autov__field--wide', null, h('span.label', null, text('Auftrag')), goal),
       h('label.field', null, h('span.label', null, text('Rhythmus')),
         everySelect(draft.every, (value) => { update({ every: value }); })),
@@ -1066,6 +1130,7 @@ function renderScheduleEditor(self, record) {
         disabled: self.busy.has(record.id),
         onClick: async () => {
           const saved = await patchRecord(self, 'schedule', record, {
+            name: String(draft.name || '').trim(),
             goal: draft.goal,
             every: draft.every,
             atHour: Number(draft.atHour) || 0,
@@ -1166,9 +1231,14 @@ function renderScheduleForm(self, force = false) {
     onToggle: (event) => { form.open = event.target.open; },
   },
   h('summary', null, icon(ICONS.plus), text('Neuer Zeitplan')),
-    h('div.autov__grid', null,
-      h('label.field', null, h('span.label', null, text('Agent')), agentSelect(self, form.agentId, (value) => { form.agentId = value; })),
-      h('label.field', null, h('span.label', null, text('Rhythmus')), everySelect(form.every, (value) => { form.every = value; refreshPreview(); })),
+  h('div.autov__grid', null,
+    h('label.field', null, h('span.label', null, text('Name (frei)')),
+      h('input.input', {
+        type: 'text', value: form.name, placeholder: 'z. B. Wochenrückblick',
+        onInput: (event) => { form.name = event.target.value; },
+      })),
+    h('label.field', null, h('span.label', null, text('Agent')), agentSelect(self, form.agentId, (value) => { form.agentId = value; })),
+    h('label.field', null, h('span.label', null, text('Rhythmus')), everySelect(form.every, (value) => { form.every = value; refreshPreview(); })),
       h('label.field', null, h('span.label', null, text('Uhrzeit')), hourSelect(form.atHour, (value) => { form.atHour = value; refreshPreview(); })),
       h('label.field', null, h('span.label', null, text('Wochentag')), weekdaySelect(form.onWeekday, (value) => { form.onWeekday = value; refreshPreview(); })),
       h('label.field.autov__field--wide', null, h('span.label', null, text('Auftrag')), goal)),
@@ -1225,6 +1295,7 @@ function renderTriggerCard(self, record) {
   const enabled = data.enabled === true;
   const busy = self.busy.has(record.id);
   const name = agentName(self, data.agentId);
+  const title = typeof data.name === 'string' ? data.name.trim() : '';
   const described = triggerSentence(data);
 
   const card = h('article.autov__card', { dataset: { on: enabled ? '1' : '0' } });
@@ -1242,7 +1313,8 @@ function renderTriggerCard(self, record) {
   card.appendChild(h('div.autov__card-head', null,
     renderSwitch(enabled, busy, () => toggleEnabled(self, 'trigger', record)),
     h('div.autov__card-ident', null,
-      h('h3.autov__card-title', null, text(name || `Agent ${data.agentId || '?'}`)),
+      h('h3.autov__card-title', null, text(title || name || `Agent ${data.agentId || '?'}`)),
+      title && name && title !== name ? h('p.meta', null, text(`Agent: ${name}`)) : null,
       name ? null : h('p.hint', null, text('Dieser Agent ist nicht (mehr) in der Agentenliste. Ein Auslöser ohne Agenten kann nicht laufen.')),
       h('p.autov__rhythm', null, icon(ICONS.bolt), text(described.sentence)))));
 
@@ -1270,7 +1342,10 @@ function renderTriggerCard(self, record) {
       h('strong', null, text('Obergrenze: ')),
       text(Number(data.maxPerHour) > 0
         ? `Höchstens ${formatNumber(data.maxPerHour)} Starts pro Stunde. Ist die Grenze erreicht, lässt der Auslöser die Ereignisse liegen, statt weiterzulaufen.`
-        : 'Keine Obergrenze pro Stunde. Der Auslöser startet so oft, wie etwas passiert.'))));
+        : 'Keine Obergrenze pro Stunde. Der Auslöser startet so oft, wie etwas passiert.'),
+      Number.isFinite(record.firesLastHour)
+        ? text(` In der letzten Stunde ${record.firesLastHour === 1 ? 'wurde 1 Start' : `wurden ${formatNumber(record.firesLastHour)} Starts`} verbraucht.`)
+        : null)));
 
   const facts = h('div.autov__facts');
   facts.appendChild(h('span.meta', null, text(Number.isFinite(data.fires) ? `${formatNumber(data.fires)} Mal ausgelöst` : 'Auslösungen unbekannt')));
@@ -1293,6 +1368,7 @@ function renderTriggerCard(self, record) {
 function renderTriggerEditor(self, record) {
   const data = dataOf(record);
   const draft = self.drafts.get(record.id) || {
+    name: String(data.name || ''),
     goal: String(data.goal || ''),
     on: String(data.on || 'record.created'),
     recordType: data.recordType ? String(data.recordType) : '',
@@ -1329,12 +1405,17 @@ function renderTriggerEditor(self, record) {
   },
   h('summary', null, text('Ändern')),
   h('div.autov__grid', null,
+    h('label.field', null, h('span.label', null, text('Name (frei)')),
+      h('input.input', {
+        type: 'text', value: draft.name,
+        onInput: (event) => update({ name: event.target.value }),
+      })),
     h('label.field.autov__field--wide', null, h('span.label', null, text('Auftrag')),
-        h('textarea.textarea', {
-          rows: '2',
-          value: draft.goal,
-          onInput: (event) => update({ goal: event.target.value }),
-        })),
+      h('textarea.textarea', {
+        rows: '2',
+        value: draft.goal,
+        onInput: (event) => update({ goal: event.target.value }),
+      })),
       h('label.field', null, h('span.label', null, text('Ereignis')), eventSelect(draft.on, (value) => update({ on: value }))),
       h('label.field', null, h('span.label', null, text('Satzart')), typeSelect(draft.recordType, (value) => update({ recordType: value }))),
       h('label.field', null, h('span.label', null, text('Schlagwort')),
@@ -1349,12 +1430,14 @@ function renderTriggerEditor(self, record) {
         })),
       h('label.field', null, h('span.label', null, text('Wartezeit (ms)')),
         h('input.input', {
-          type: 'number', min: '0', step: '500', value: String(draft.debounceMs),
+          type: 'number', min: String(DEBOUNCE_MIN_MS), max: String(DEBOUNCE_MAX_MS), step: '500',
+          value: String(draft.debounceMs),
           onInput: (event) => update({ debounceMs: Number(event.target.value) }),
         })),
       h('label.field', null, h('span.label', null, text('Starts je Stunde')),
         h('input.input', {
-          type: 'number', min: '0', step: '1', value: String(draft.maxPerHour),
+          type: 'number', min: String(PER_HOUR_MIN), max: String(PER_HOUR_MAX), step: '1',
+          value: String(draft.maxPerHour),
           onInput: (event) => update({ maxPerHour: Number(event.target.value) }),
         }))),
     preview,
@@ -1364,6 +1447,7 @@ function renderTriggerEditor(self, record) {
         disabled: self.busy.has(record.id),
         onClick: async () => {
           const saved = await patchRecord(self, 'trigger', record, {
+            name: String(draft.name || '').trim(),
             goal: draft.goal,
             on: draft.on,
             recordType: draft.recordType || null,
@@ -1442,9 +1526,14 @@ function renderTriggerForm(self, force = false) {
     onToggle: (event) => { form.open = event.target.open; },
   },
   h('summary', null, icon(ICONS.plus), text('Neuer Auslöser')),
-    h('div.autov__grid', null,
-      h('label.field', null, h('span.label', null, text('Agent')), agentSelect(self, form.agentId, (value) => { form.agentId = value; })),
-      h('label.field', null, h('span.label', null, text('Ereignis')), eventSelect(form.on, (value) => { form.on = value; refreshPreview(); })),
+  h('div.autov__grid', null,
+    h('label.field', null, h('span.label', null, text('Name (frei)')),
+      h('input.input', {
+        type: 'text', value: form.name, placeholder: 'z. B. Neue Notizen einordnen',
+        onInput: (event) => { form.name = event.target.value; },
+      })),
+    h('label.field', null, h('span.label', null, text('Agent')), agentSelect(self, form.agentId, (value) => { form.agentId = value; })),
+    h('label.field', null, h('span.label', null, text('Ereignis')), eventSelect(form.on, (value) => { form.on = value; refreshPreview(); })),
       h('label.field', null, h('span.label', null, text('Satzart')), typeSelect(form.recordType, (value) => { form.recordType = value; refreshPreview(); })),
       h('label.field', null, h('span.label', null, text('Schlagwort')),
         h('input.input', {
@@ -1465,12 +1554,14 @@ function renderTriggerForm(self, force = false) {
         })),
       h('label.field', null, h('span.label', null, text('Wartezeit (ms)')),
         h('input.input', {
-          type: 'number', min: '0', step: '500', value: String(form.debounceMs),
+          type: 'number', min: String(DEBOUNCE_MIN_MS), max: String(DEBOUNCE_MAX_MS), step: '500',
+          value: String(form.debounceMs),
           onInput: (event) => { form.debounceMs = Number(event.target.value); renderRailHints(self, hints, form); },
         })),
       h('label.field', null, h('span.label', null, text('Starts je Stunde')),
         h('input.input', {
-          type: 'number', min: '0', step: '1', value: String(form.maxPerHour),
+          type: 'number', min: String(PER_HOUR_MIN), max: String(PER_HOUR_MAX), step: '1',
+          value: String(form.maxPerHour),
           onInput: (event) => { form.maxPerHour = Number(event.target.value); renderRailHints(self, hints, form); },
         }))),
     preview,
@@ -1506,6 +1597,10 @@ function renderRailHints(self, box, form) {
     text(Number(form.maxPerHour) > 0
       ? `Höchstens ${formatNumber(form.maxPerHour)} Starts pro Stunde; danach werden Ereignisse liegen gelassen.`
       : 'Ohne Obergrenze startet der Auslöser so oft, wie etwas passiert.')));
+  box.appendChild(h('li.hint', null,
+    text(`Der Server hält beide Werte in seinen Grenzen: Wartezeit ${formatDuration(DEBOUNCE_MIN_MS)} bis `
+      + `${formatDuration(DEBOUNCE_MAX_MS)}, ${PER_HOUR_MIN} bis ${PER_HOUR_MAX} Starts je Stunde. `
+      + 'Was darüber hinausgeht, wird beim Speichern auf diese Grenzen gesetzt.')));
 }
 
 /* --------------------------- pieces -------------------------------- */

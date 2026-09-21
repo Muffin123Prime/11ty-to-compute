@@ -77,12 +77,14 @@ const KINDS = [
 ];
 
 const KIND_LABEL = Object.fromEntries(KINDS.map((entry) => [entry.value, entry.label]));
+const KIND_BLURB = Object.fromEntries(KINDS.map((entry) => [entry.value, entry.blurb]));
 
 const STATUSES = [
   { value: 'open', label: 'Offen', empty: 'Es ist kein Vorschlag offen.' },
   { value: 'accepted', label: 'Übernommen', empty: 'Es wurde noch kein Vorschlag übernommen.' },
   { value: 'dismissed', label: 'Verworfen', empty: 'Es wurde noch kein Vorschlag verworfen.' },
   { value: 'stale', label: 'Veraltet', empty: 'Es ist kein Vorschlag veraltet.' },
+  { value: 'all', label: 'Alle', empty: 'Es gibt keinen einzigen Vorschlag.' },
 ];
 
 const STATUS_LABEL = Object.fromEntries(STATUSES.map((entry) => [entry.value, entry.label]));
@@ -94,11 +96,18 @@ const SINGULAR = {
   run: 'Lauf', memory: 'Erinnerung', edge: 'Verknüpfung', suggestion: 'Vorschlag',
 };
 
-/** "… fügt DER NOTIZ …" -- the dative the action sentences need. */
+/** "… fügt DER NOTIZ … hinzu" -- the dative most action sentences need. */
 const DATIVE = {
   note: 'der Notiz', chat: 'dem Chat', message: 'der Nachricht', project: 'dem Projekt',
   task: 'der Aufgabe', entity: 'dem Begriff', file: 'der Datei', agent: 'dem Agenten',
   run: 'dem Lauf', memory: 'der Erinnerung',
+};
+
+/** "verknüpft DIE NOTIZ … mit …" -- the accusative for a direct object. */
+const ACCUSATIVE = {
+  note: 'die Notiz', chat: 'den Chat', message: 'die Nachricht', project: 'das Projekt',
+  task: 'die Aufgabe', entity: 'den Begriff', file: 'die Datei', agent: 'den Agenten',
+  run: 'den Lauf', memory: 'die Erinnerung',
 };
 
 const LIMIT = 100;
@@ -200,7 +209,7 @@ export default {
 
     const params = (ctx.route && ctx.route.params) || {};
     const wantedStatus = typeof params.status === 'string' && STATUS_LABEL[params.status] ? params.status : 'open';
-    const wantedKind = typeof params.kind === 'string' && KIND_LABEL[params.kind] ? params.kind : '';
+    const wantedKind = typeof params.kind === 'string' && /^[a-z][a-z0-9-]{0,39}$/.test(params.kind) ? params.kind : '';
 
     const self = {
       alive: true,
@@ -389,7 +398,7 @@ function referencedIds(item) {
   }
   const action = data.action;
   if (action && typeof action === 'object') {
-    for (const key of ['recordId', 'targetId', 'sourceId', 'from', 'to', 'keep', 'drop', 'noteId', 'taskId', 'projectId']) {
+    for (const key of ['recordId', 'targetId', 'sourceId', 'linkFrom', 'from', 'to', 'noteId', 'taskId', 'projectId']) {
       const value = action[key];
       if (typeof value === 'string' && /^[a-z]+_/.test(value)) out.add(value);
     }
@@ -405,11 +414,18 @@ function titleOf(self, id) {
   return String(id);
 }
 
+/** "der Notiz «X»" -- the dative form, for "fügt … hinzu" and "mit …". */
 function subjectOf(self, id) {
   const record = self.records.get(id);
   const type = record ? record.type : typeOfId(id);
-  const dative = DATIVE[type] || 'dem Eintrag';
-  return `${dative} «${titleOf(self, id)}»`;
+  return `${DATIVE[type] || 'dem Eintrag'} «${titleOf(self, id)}»`;
+}
+
+/** "die Notiz «X»" -- the accusative form, for a direct object. */
+function objectOf(self, id) {
+  const record = self.records.get(id);
+  const type = record ? record.type : typeOfId(id);
+  return `${ACCUSATIVE[type] || 'den Eintrag'} «${titleOf(self, id)}»`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -736,13 +752,14 @@ function describeAction(self, action) {
       const title = String(action.title || action.goal || '').trim();
       if (!title) return null;
       const from = action.recordId || action.sourceId;
+      const project = action.projectId ? ` im Projekt ${subjectOf(self, action.projectId)}` : '';
       return from
-        ? `Legt die Aufgabe «${title}» an und verknüpft sie mit ${subjectOf(self, from)}.`
-        : `Legt die Aufgabe «${title}» an.`;
+        ? `Legt die Aufgabe «${title}»${project} an und verknüpft sie mit ${subjectOf(self, from)}.`
+        : `Legt die Aufgabe «${title}»${project} an.`;
     }
     case 'createNote': {
       const title = String(action.title || '').trim();
-      const from = action.recordId || action.sourceId;
+      const from = action.linkFrom || action.recordId || action.sourceId;
       if (!title) return null;
       return from
         ? `Legt die Notiz «${title}» an und verknüpft sie mit ${subjectOf(self, from)}.`
@@ -752,7 +769,8 @@ function describeAction(self, action) {
       const from = action.from || action.sourceId || action.recordId;
       const to = action.to || action.targetId;
       if (!from || !to) return null;
-      return `Verknüpft ${subjectOf(self, from)} mit ${subjectOf(self, to)}.`;
+      // Accusative for what is linked, dative for what it is linked to.
+      return `Verknüpft ${objectOf(self, from)} mit ${subjectOf(self, to)}.`;
     }
     case 'none':
       return action.note
@@ -936,10 +954,38 @@ function renderScanPanel(self) {
   self.dom.scanPanel.appendChild(panel);
 }
 
+/**
+ * The kinds to offer as filters.
+ *
+ * Taken from `/assist/detectors` rather than from the list above, because the
+ * server rejects a kind it has no detector for -- and because a filter for a
+ * check this instance cannot run would promise something that does not exist.
+ * The short chip labels stay ours; the descriptions are the detectors' own.
+ */
+function kindOptions(self) {
+  if (!self.detectors.length) return KINDS;
+  return self.detectors
+    .filter((entry) => entry && entry.kind)
+    .map((entry) => ({
+      value: String(entry.kind),
+      label: KIND_LABEL[entry.kind] || String(entry.label || entry.kind),
+      blurb: String(entry.description || KIND_BLURB[entry.kind] || ''),
+    }));
+}
+
 function detectorLabel(self, kind) {
   const found = self.detectors.find((entry) => entry && entry.kind === kind);
   if (found && found.label) return String(found.label);
   return KIND_LABEL[kind] || String(kind || 'unbekannte Prüfung');
+}
+
+/** `stats` has no "all" -- it is the sum of the four it does have. */
+function countForStatus(stats, value) {
+  if (value === 'all') {
+    return ['open', 'accepted', 'dismissed', 'stale']
+      .reduce((sum, key) => sum + (Number(stats[key]) || 0), 0);
+  }
+  return Number.isFinite(stats[value]) ? stats[value] : null;
 }
 
 function renderFilters(self) {
@@ -947,7 +993,7 @@ function renderFilters(self) {
   clear(statusBox);
   for (const entry of STATUSES) {
     const active = self.status === entry.value;
-    const count = self.stats && Number.isFinite(self.stats[entry.value]) ? self.stats[entry.value] : null;
+    const count = self.stats ? countForStatus(self.stats, entry.value) : null;
     const chip = h('button.asv__chip', {
       type: 'button',
       role: 'radio',
@@ -973,14 +1019,20 @@ function renderFilters(self) {
   all.classList.toggle('is-active', self.kind === '');
   kindBox.appendChild(all);
 
-  for (const entry of KINDS) {
+  for (const entry of kindOptions(self)) {
     const active = self.kind === entry.value;
-    const byKind = self.stats && self.stats.byKind && typeof self.stats.byKind === 'object' ? self.stats.byKind : null;
-    const count = byKind && Number.isFinite(byKind[entry.value]) ? byKind[entry.value] : null;
+    // `stats.byKind` counts what is still OPEN, so the badge would be a lie
+    // next to any other status filter.
+    const byKind = self.status === 'open' && self.stats && self.stats.byKind && typeof self.stats.byKind === 'object'
+      ? self.stats.byKind
+      : null;
+    // A loaded `byKind` that does not mention a kind means zero open, which is
+    // knowledge; leaving the badge off would look like "not counted".
+    const count = byKind ? (Number(byKind[entry.value]) || 0) : null;
     const chip = h('button.asv__chip', {
       type: 'button',
       role: 'radio',
-      title: entry.blurb,
+      title: entry.blurb ? `${entry.blurb}${count !== null ? ' · Die Zahl zählt die offenen.' : ''}` : undefined,
       'aria-checked': active ? 'true' : 'false',
       tabindex: active ? '0' : '-1',
       dataset: { value: entry.value },
