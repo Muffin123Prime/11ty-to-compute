@@ -6,6 +6,9 @@ const crypto = require('node:crypto');
 
 const { layout } = require('../kernel/paths');
 const schema = require('./schema');
+// Wer gerade schreibt -- getragen durch die asynchrone Aufrufkette, damit der
+// Speicher die Frage beantworten kann, ohne die Aufrufer zu kennen.
+const { currentActor } = require('../kernel/actor');
 const { createSearchIndex } = require('./search');
 const {
   ValidationError,
@@ -800,7 +803,7 @@ async function openStore(options = {}) {
     append({ v: LOG_VERSION, seq: nextSeq(), op: 'create', at, id, type, rev: 1, data: normalised });
     place(record);
     const out = expose(record);
-    publish('record.created', { id, type, record: out });
+    publish('record.created', { id, type, record: out, actor: currentActor() });
     if (type === 'edge') publish('edge.created', { id, edge: out });
     return out;
   }
@@ -853,7 +856,8 @@ async function openStore(options = {}) {
     place(record);
     const out = expose(record);
     publish('record.updated', {
-      id, type: record.type, record: out, patch: clone(normalised), before, fromRev: existing.rev,
+      id, type: record.type, record: out, patch: clone(normalised), before,
+      fromRev: existing.rev, actor: currentActor(),
     });
     return out;
   }
@@ -891,7 +895,7 @@ async function openStore(options = {}) {
     append({ v: LOG_VERSION, seq: nextSeq(), op: 'delete', at, id, type: record.type, rev: record.rev });
     place(record);
     const out = expose(record);
-    publish('record.deleted', { id, type: record.type, record: out, hard: false });
+    publish('record.deleted', { id, type: record.type, record: out, hard: false, actor: currentActor() });
     if (record.type === 'edge') publish('edge.deleted', { id, edge: out });
     return out;
   }
@@ -920,7 +924,7 @@ async function openStore(options = {}) {
     append({ v: LOG_VERSION, seq: nextSeq(), op: 'restore', at, id, type: record.type, rev: record.rev });
     place(record);
     const out = expose(record);
-    publish('record.updated', { id, type: record.type, record: out, restored: true });
+    publish('record.updated', { id, type: record.type, record: out, restored: true, actor: currentActor() });
     if (record.type === 'edge') publish('edge.created', { id, edge: out, restored: true });
     return out;
   }

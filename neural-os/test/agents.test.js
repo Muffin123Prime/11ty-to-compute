@@ -1196,6 +1196,58 @@ test('jeder Satz aus einem Lauf trägt, welcher Lauf ihn geschrieben hat', async
   }
 });
 
+/**
+ * Der Urheber-Kontext ueber einen ECHTEN Lauf, nicht nur ueber withActor().
+ *
+ * Der Stempel am Satz sagt nur, wer ihn angelegt hat. Was ein Lauf an
+ * BESTEHENDEN Saetzen aendert, traegt keinen Stempel -- und genau das ist der
+ * Fall, in dem jemand wissen will, was ueber Nacht passiert ist. Der Kontext
+ * wird beim Start des Laufs gesetzt und traegt durch die ganze Kette.
+ */
+test('was ein echter Lauf aendert, wird dem Lauf zugeschrieben', async () => {
+  const env = await makeEnv();
+  try {
+    const { currentActor } = require('../src/kernel/actor');
+    const agent = env.createAgent({
+      permissions: { readNotes: true, writeNotes: true, requireApproval: false },
+    });
+    // Eine Notiz, die dem Nutzer gehoert: kein Stempel, keine Herkunft.
+    const eigene = env.store.create('note', { title: 'Vom Nutzer' });
+    assert.equal(eigene.data.runId, undefined);
+
+    const gesehen = [];
+    env.bus.on('record.updated', (evt) => {
+      gesehen.push({ id: evt.payload.id, actor: evt.payload.actor });
+    });
+
+    // Ein Werkzeugaufruf im Kontext eines Laufs, wie die Laufschleife ihn macht.
+    const run = env.store.create('run', { agentId: agent.id, goal: 'Aufraeumen', status: 'running' });
+    const { withActor } = require('../src/kernel/actor');
+    let drinnen = null;
+    await withActor({ kind: 'agent', runId: run.id, agentId: agent.id }, async () => {
+      drinnen = currentActor();
+      await env.toolbox.call('notes.update', { id: eigene.id, body: 'ergänzt' }, { agent, run });
+    });
+
+    assert.equal(drinnen.kind, 'agent');
+    const treffer = gesehen.find((g) => g.id === eigene.id);
+    assert.ok(treffer, 'kein record.updated gesehen');
+    assert.equal(treffer.actor.kind, 'agent', 'die Aenderung wurde nicht dem Lauf zugeschrieben');
+    assert.equal(treffer.actor.runId, run.id);
+
+    // Und die Notiz selbst bleibt die des Nutzers -- der Kontext beantwortet
+    // "wer hat geaendert", er schreibt die Herkunft nicht um.
+    assert.equal(env.store.get(eigene.id).data.runId, undefined);
+
+    // Ausserhalb eines Laufs ist der Urheber unbekannt, nicht "Agent".
+    gesehen.length = 0;
+    env.store.update(eigene.id, { body: 'vom Nutzer nachgetragen' });
+    assert.equal(gesehen[0].actor, null, 'ohne Lauf darf kein Urheber behauptet werden');
+  } finally {
+    await env.close();
+  }
+});
+
 test('die Lese-Werkzeuge bleiben ohne readNotes verschlossen', async () => {
   const env = await makeEnv();
   try {

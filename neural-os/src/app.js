@@ -208,6 +208,29 @@ async function createApp(opts = {}) {
     ? optional(failures, 'assist', () => assistMod.createAssist({ store, graph, bus, config, logger }))
     : null;
 
+  // --- undo -----------------------------------------------------------------
+  //
+  // Its own journal, not the write log: `maybeSnapshot()` compacts every 2000
+  // operations and deletes every log segment, so a log-based history would
+  // vanish silently. An undo that works sometimes is worse than none.
+  //
+  // Built before the automation so that a scheduled run's writes are already
+  // being journalled the first time one fires.
+  const historyMod = tryRequire('./store/history');
+  const history = historyMod
+    ? optional(failures, 'history', () => historyMod.createHistory({
+      store, bus, paths, config, logger, vaultCrypto,
+    }))
+    : null;
+  if (history && typeof history.start === 'function') {
+    try {
+      history.start();
+    } catch (err) {
+      failures.push({ subsystem: 'history', reason: asNeuralError(err).message });
+      log.error(`Änderungsverlauf konnte nicht gestartet werden: ${err && err.message}`);
+    }
+  }
+
   // --- automation -----------------------------------------------------------
   //
   // Both are built even when `runtime` is absent, and both are inert until
@@ -349,6 +372,7 @@ async function createApp(opts = {}) {
     toolbox,
     runtime,
     assist,
+    history,
     scheduler,
     triggers,
     backup,
@@ -399,6 +423,7 @@ async function createApp(opts = {}) {
         agents: !!runtime,
         approvals: !!approvals,
         assist: !!assist,
+        history: !!history,
         scheduler: !!scheduler,
         triggers: !!triggers,
         backup: !!backup,
@@ -450,6 +475,7 @@ async function createApp(opts = {}) {
           triggers: triggers && typeof triggers.status === 'function' ? triggers.status() : null,
         },
         assistance: assist && typeof assist.stats === 'function' ? assist.stats() : null,
+        undo: history && typeof history.stats === 'function' ? history.stats() : null,
         extensions: modules && typeof modules.status === 'function' ? modules.status() : null,
         peers: sync && typeof sync.summary === 'function' ? sync.summary() : null,
         failures,
@@ -516,6 +542,7 @@ async function createApp(opts = {}) {
     async close() {
       const problems = [];
       for (const [name, fn] of [
+        ['history', () => history && history.stop && history.stop()],
         ['scheduler', () => scheduler && scheduler.stop && scheduler.stop()],
         ['triggers', () => triggers && triggers.stop && triggers.stop()],
         ['server', () => app.server && app.server.close()],

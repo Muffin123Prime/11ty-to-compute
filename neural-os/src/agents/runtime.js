@@ -11,6 +11,9 @@ const {
   asNeuralError,
 } = require('../kernel/errors');
 const permissionsMod = require('./permissions');
+// Ein Lauf setzt einmal, wer er ist; alles, was innerhalb geschrieben wird --
+// auch die Linkableitung, die ein Schreibvorgang nach sich zieht -- traegt es.
+const { withActor } = require('../kernel/actor');
 const { describeTools } = require('./tools');
 
 /**
@@ -710,7 +713,7 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
 
       // Fire and forget: `start` returns the record so the HTTP layer can
       // answer immediately with a run id the UI can subscribe to.
-      const task = execute(state)
+      const task = withActor({ kind: 'agent', runId: run.id, agentId }, () => execute(state))
         .then((outcome) => {
           const record = finish(run.id, {
             status: outcome.status,

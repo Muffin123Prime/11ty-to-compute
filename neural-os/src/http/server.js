@@ -333,6 +333,7 @@ async function createServer(ctx = {}) {
     require('./api/modules'),
     require('./api/assist'),
     require('./api/automation'),
+    require('./api/history'),
   ]) {
     mod.register(router);
   }
