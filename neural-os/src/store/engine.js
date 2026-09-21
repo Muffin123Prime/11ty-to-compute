@@ -836,10 +836,25 @@ async function openStore(options = {}) {
       rev: existing.rev + 1,
       data: { ...existing.data, ...normalised },
     };
+    // `before` reist mit dem Ereignis mit.
+    //
+    // Ohne es kann ein Zuhoerer nur sagen, WAS jetzt gilt, nie was vorher
+    // galt -- und damit ist "rueckgaengig" nicht baubar. Aus dem Log laesst
+    // es sich nicht nachtraeglich holen: ein automatischer Snapshot loescht
+    // alle Segmente (alle 2000 Schreibvorgaenge), und danach waere die
+    // Vorgeschichte still verschwunden. Nur die geaenderten Felder werden
+    // mitgegeben, nicht der ganze Satz: mehr braucht niemand, um die
+    // Aenderung zurueckzunehmen, und ein ganzer Satz pro Ereignis waere bei
+    // einem Massenimport ein Speicherproblem.
+    const before = {};
+    for (const key of Object.keys(normalised)) before[key] = clone(existing.data[key]);
+
     append({ v: LOG_VERSION, seq: nextSeq(), op: 'update', at, id, type: record.type, rev: record.rev, patch: normalised });
     place(record);
     const out = expose(record);
-    publish('record.updated', { id, type: record.type, record: out, patch: clone(normalised) });
+    publish('record.updated', {
+      id, type: record.type, record: out, patch: clone(normalised), before, fromRev: existing.rev,
+    });
     return out;
   }
 
