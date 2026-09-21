@@ -225,6 +225,41 @@ async function cmdDoctor(flags) {
       console.log(`  ${D}Einrichten: ollama pull nomic-embed-text${X}`);
     }
 
+    // Automatik zuletzt und ausdruecklich: die Frage "läuft hier gerade etwas
+    // ohne mich?" muss man beantwortet bekommen, ohne die Oberfläche zu
+    // öffnen -- gerade dann, wenn man auf der Kommandozeile nachsieht, weil
+    // einem etwas seltsam vorkam.
+    console.log(`\n${B}Automatik${X}`);
+    const auto = h.automation || {};
+    const sch = auto.scheduler;
+    const trg = auto.triggers;
+    if (!sch && !trg) {
+      console.log(`  ${Y}—${X} ${D}nicht geladen${X}`);
+    } else {
+      const an = (sch ? sch.enabled || 0 : 0) + (trg ? trg.enabled || 0 : 0);
+      if (an === 0) {
+        console.log(`  ${mark(true)} Nichts läuft von allein.`);
+      } else {
+        console.log(`  ${Y}!${X} ${an} eingeschaltet — hier läuft etwas, ohne dass du davorsitzt.`);
+      }
+      if (sch) {
+        console.log(`  ${D}Zeitpläne   ${sch.total || 0} angelegt, ${sch.enabled || 0} eingeschaltet`
+          + `${sch.nextDue ? `, nächster ${sch.nextDue}` : ''}${X}`);
+      }
+      if (trg) {
+        console.log(`  ${D}Auslöser    ${trg.total || 0} angelegt, ${trg.enabled || 0} eingeschaltet`
+          + `, ${trg.firedLastHour || 0} Start(s) in der letzten Stunde${X}`);
+      }
+    }
+
+    if (h.assistance) {
+      const a = h.assistance;
+      console.log(`\n${B}Vorschläge${X}`);
+      console.log(`  ${a.open || 0} offen, ${a.accepted || 0} übernommen, ${a.dismissed || 0} verworfen`
+        + `${a.stale ? `, ${a.stale} veraltet` : ''}`);
+      console.log(`  ${D}Neu prüfen in der Oberfläche unter „Vorschläge“, oder POST /api/assist/scan${X}`);
+    }
+
     if (h.failures.length) {
       console.log(`\n${B}${Y}Nicht geladene Subsysteme${X}`);
       for (const f of h.failures) console.log(`  ${R}✗${X} ${f.subsystem}: ${f.reason}`);

@@ -31,12 +31,21 @@
  *    chats, agents and rescans. A reload through `setData` keeps node
  *    positions and pinned nodes (the renderer matches on id), so a live update
  *    does not shuffle the map under the user's hands.
+ * 7. **Type is a shape, not a colour.** The renderer draws a different
+ *    silhouette per record type and keeps the whole picture neutral; the
+ *    legend and the filter chips therefore draw the *same* silhouette, using
+ *    the renderer's own `drawNodeShape`. A legend with its own idea of what a
+ *    project looks like would be a second source of truth, and the first one
+ *    to go stale.
+ * 8. **Focus dims, it never hides.** Selecting a node quiets everything more
+ *    than `depth` hops away instead of removing it, so the surroundings -- the
+ *    thing that makes a neighbourhood mean anything -- stay on screen.
  */
 
 import {
   h, text, clear, on, icon, timeAgo, formatNumber, debounce,
 } from '../lib/dom.js';
-import { createGraphCanvas, GRAPH_TYPES } from '../lib/graph-canvas.js';
+import { createGraphCanvas, drawNodeShape, GRAPH_TYPES } from '../lib/graph-canvas.js';
 
 /* ------------------------------------------------------------------ */
 /* Vocabulary (German UI copy)                                         */
@@ -161,12 +170,20 @@ const STYLE = `
   border-radius: var(--r-2); box-shadow: var(--shadow-1);
 }
 .graph-view__legend {
-  left: var(--sp-2); bottom: var(--sp-2); max-width: min(34rem, calc(100% - var(--sp-4)));
-  display: flex; flex-wrap: wrap; gap: var(--sp-05) var(--sp-2);
+  left: var(--sp-2); bottom: var(--sp-2); max-width: min(25rem, calc(100% - var(--sp-4)));
+  display: flex; flex-wrap: wrap; gap: 3px var(--sp-1);
+  padding: var(--sp-05) var(--sp-1);
   font-size: var(--fs-xs); color: var(--fg-muted);
 }
+.graph-view__legend hr {
+  width: 100%; height: 0; margin: 0; border: 0; border-top: 1px solid var(--border);
+}
 .graph-view__legend-item { display: inline-flex; align-items: center; gap: 5px; }
-.graph-view__swatch { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid; }
+.graph-view__glyph { display: block; flex: 0 0 auto; }
+.graph-view__live {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
 .graph-view__zoom { right: var(--sp-2); bottom: var(--sp-2); display: flex; flex-direction: column; gap: 4px; }
 .graph-view__stage-state {
   position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center;
@@ -434,6 +451,11 @@ export default {
       ),
       onlyMine: false,
       clusterMode: false,
+      // On by default: the whole reason to click a node is to see what hangs
+      // off it, and dimming the rest is the cheapest way to show that without
+      // throwing the surroundings away.
+      focusMode: true,
+      pendingFit: null,
       manualIds: new Set(),
 
       // search
@@ -496,15 +518,19 @@ function buildLayout(self) {
 
   dom.canvas = h('canvas.graph-view__canvas', {
     role: 'img',
-    'aria-label': 'Wissensgraph. Mit den Pfeiltasten verschieben, mit Plus und Minus zoomen, mit 0 einpassen.',
+    'aria-label': 'Wissensgraph wird geladen.',
   });
+  // The canvas itself can only ever be one label. Selection and hover changes
+  // are announced here instead, so a screen reader follows what is happening
+  // on the map rather than being told once that a map exists.
+  dom.live = h('p.graph-view__live', { role: 'status', 'aria-live': 'polite' });
   dom.legend = h('div.graph-view__float.graph-view__legend', { 'aria-label': 'Legende' });
   dom.zoom = h('div.graph-view__float.graph-view__zoom', null,
-    h('button.icon-button', { type: 'button', title: 'Vergrößern', 'aria-label': 'Vergrößern', onClick: () => self.graph && self.graph.zoomBy(1.3) }, icon(ICONS.plus)),
-    h('button.icon-button', { type: 'button', title: 'Verkleinern', 'aria-label': 'Verkleinern', onClick: () => self.graph && self.graph.zoomBy(0.77) }, icon(ICONS.minus)),
+    h('button.icon-button', { type: 'button', title: 'Vergrößern', 'aria-label': 'Vergrößern', onClick: () => self.graph && self.graph.zoomBy(1.3, undefined, undefined, true) }, icon(ICONS.plus)),
+    h('button.icon-button', { type: 'button', title: 'Verkleinern', 'aria-label': 'Verkleinern', onClick: () => self.graph && self.graph.zoomBy(0.77, undefined, undefined, true) }, icon(ICONS.minus)),
     h('button.icon-button', { type: 'button', title: 'Ansicht einpassen (F)', 'aria-label': 'Ansicht einpassen', onClick: () => self.graph && self.graph.fitToView() }, icon(ICONS.fit)));
   dom.stageState = h('div.graph-view__stage-state', { hidden: true });
-  dom.stage = h('div.graph-view__stage', null, dom.canvas, dom.legend, dom.zoom, dom.stageState);
+  dom.stage = h('div.graph-view__stage', null, dom.canvas, dom.legend, dom.zoom, dom.stageState, dom.live);
 
   dom.side = h('aside.graph-view__side', { 'aria-label': 'Inspektor' });
   dom.body = h('div.graph-view__body', null, dom.stage, dom.side);
@@ -595,19 +621,39 @@ function createRenderer(self) {
     onLink: ({ from, to }) => {
       createEdge(self, from, to);
     },
+    onHover: (node) => {
+      announce(self, node ? `${typeLabel(node.type)}: ${node.label}` : '');
+    },
     onTransform: () => {
       // Nothing to persist: the transform is view state, not user data.
     },
+    onSettle: () => {
+      // The first frame after a load frames the seed layout, not the graph.
+      // `prewarm` gets most of the way there; this is the correction once the
+      // simulation has actually come to rest -- animated, so the picture is
+      // never yanked out from under a user who is already looking at it.
+      if (!self.alive || !self.pendingFit) return;
+      const wanted = self.pendingFit;
+      self.pendingFit = null;
+      if (typeof wanted === 'string') self.graph.focus(wanted);
+      else self.graph.fitToView();
+    },
   });
-  self.cleanups.push(() => {
-    /* the renderer itself is destroyed in teardown() */
-  });
+  self.graph.setFocusDepth(self.focusMode ? Math.max(1, self.depth) : 0);
+
+  // Any deliberate move by the user outranks a fit we still owed them.
+  const cancelPendingFit = () => { self.pendingFit = null; };
+  self.cleanups.push(on(self.dom.canvas, 'pointerdown', cancelPendingFit));
+  self.cleanups.push(on(self.dom.canvas, 'wheel', cancelPendingFit, { passive: true }));
 
   // The legend mirrors the renderer's palette, which follows the theme.
   const refreshLegend = () => {
     if (!self.alive) return;
     self.graph.refreshTheme();
+    // The legend and the filter chips paint the node silhouettes themselves,
+    // so both have to be redrawn when the palette underneath them changes.
     renderLegend(self);
+    renderToolbar(self);
   };
   if (ctx.state && typeof ctx.state.on === 'function') {
     self.cleanups.push(ctx.state.on('theme', refreshLegend));
@@ -702,15 +748,53 @@ async function load(self, { fit = false } = {}) {
   if (self.selectedId && !self.nodeById.has(self.selectedId)) selectNode(self, null);
   else self.graph.setSelection(self.selectedId);
 
-  if (fit) self.graph.fitToView({ animate: false });
-  if (fit && self.focusId && self.nodeById.has(self.focusId)) {
-    self.graph.focus(self.focusId, { animate: false });
-    selectNode(self, self.focusId);
+  if (fit) {
+    // Settle the layout before framing it. Framing the seed spiral and then
+    // letting the graph grow out of the viewport for three seconds is how the
+    // view used to open, and it made the map look out of control.
+    self.graph.prewarm(self.nodes.length > 900 ? 90 : 160, 140);
+    self.graph.fitToView({ animate: false });
+    self.pendingFit = true;
+    if (self.focusId && self.nodeById.has(self.focusId)) {
+      self.graph.focus(self.focusId, { animate: false });
+      selectNode(self, self.focusId);
+      self.pendingFit = self.focusId;
+    }
   }
 
   renderStage(self);
   renderToolbar(self);
   renderSide(self);
+  describeGraph(self);
+}
+
+/**
+ * Keep the canvas's own accessible name truthful. It is the only thing a
+ * screen reader gets from the element itself, so it carries the real counts
+ * and the current selection rather than a fixed sentence about a graph.
+ */
+function describeGraph(self) {
+  const { dom } = self;
+  if (!dom.canvas) return;
+  const stats = self.graph ? self.graph.stats() : null;
+  const parts = [];
+  if (stats) {
+    parts.push(`Wissensgraph mit ${formatNumber(stats.visibleNodes)} sichtbaren Knoten und ${formatNumber(stats.visibleEdges)} Verknüpfungen`);
+  } else {
+    parts.push('Wissensgraph');
+  }
+  const selected = self.selectedId ? self.nodeById.get(self.selectedId) : null;
+  if (selected) parts.push(`ausgewählt: ${selected.label}`);
+  parts.push('Pfeiltasten verschieben, Plus und Minus zoomen, 0 passt ein, Eingabetaste wählt den Knoten in der Mitte, n und p gehen zu den Nachbarn');
+  dom.canvas.setAttribute('aria-label', `${parts.join('. ')}.`);
+}
+
+/** Say something once, for screen readers. Empty text clears the region. */
+function announce(self, message) {
+  const { dom } = self;
+  if (!dom.live) return;
+  clear(dom.live);
+  if (message) dom.live.appendChild(text(message));
 }
 
 /* ------------------------------------------------------------------ */
@@ -737,6 +821,7 @@ function applyFilter(self) {
   if (self.clusterMode) rebuildClusters(self);
   renderStage(self);
   renderToolbar(self);
+  describeGraph(self);
 }
 
 function visibleNodes(self) {
@@ -780,22 +865,28 @@ function renderToolbar(self) {
     applyFilter(self);
     renderSide(self);
   }, 'Blendet alles aus, was das System selbst abgeleitet oder ein Agent vorgeschlagen hat.'));
-  dom.toolbarRight.appendChild(toggleButton('Cluster', self.clusterMode, () => {
+  dom.toolbarRight.appendChild(toggleButton('Fokus', self.focusMode, () => {
+    self.focusMode = !self.focusMode;
+    self.graph.setFocusDepth(self.focusMode ? Math.max(1, self.depth) : 0);
+    renderToolbar(self);
+  }, 'Beim Ausgewählten: alles weiter weg als die eingestellte Tiefe wird gedämpft – nicht ausgeblendet.'));
+  dom.toolbarRight.appendChild(toggleButton('Gruppen', self.clusterMode, () => {
     self.clusterMode = !self.clusterMode;
     if (self.clusterMode) {
-      // Asking for the cluster list is a request to see the list, so the
+      // Asking for the group list is a request to see the list, so the
       // inspector steps aside; picking a node afterwards brings it back.
       selectNode(self, null);
       rebuildClusters(self);
     } else {
       self.clusters = [];
       self.activeCluster = null;
-      self.graph.setClusters(null);
+      self.graph.setHulls([]);
+      self.graph.setActiveHull(null);
       self.graph.highlight(self.query ? self.matches.map((n) => n.id) : null);
     }
     renderToolbar(self);
     renderSide(self);
-  }, 'Färbt zusammenhängende Gruppen ein und listet sie auf.'));
+  }, 'Zeichnet eine weiche Umrandung um jede zusammenhängende Gruppe und listet sie auf.'));
 
   dom.toolbarRight.appendChild(h('button.btn.btn--small', {
     type: 'button',
@@ -835,34 +926,38 @@ function renderToolbar(self) {
         renderSide(self);
       },
     },
-    h('span.graph-view__swatch', { style: swatchStyle(self, type) }),
+    typeGlyph(self, type, 13),
     h('span.chip__label', null, text(`${TYPE_PLURALS[type]} ${formatNumber(count)}`)));
     dom.filters.appendChild(chip);
   }
 
   const depthWrap = h('label.graph-view__depth', {
     title: self.focusId
-      ? 'Wie viele Schritte weit die Nachbarschaft des Fokus-Knotens geladen wird.'
-      : 'Die Tiefe wirkt erst, wenn ein Knoten im Fokus steht (Doppelklick auf einen Knoten).',
+      ? 'Wie viele Schritte weit die Nachbarschaft des Fokus-Knotens geladen wird – und wie weit der Fokus-Modus reicht.'
+      : 'Wie weit der Fokus-Modus um den ausgewählten Knoten herum hell bleibt. Mit einem Fokus-Knoten bestimmt sie zusätzlich, wie viel geladen wird.',
   },
   text('Tiefe'),
   h('input', {
     type: 'range',
-    min: '0',
+    min: '1',
     max: '4',
     step: '1',
-    value: String(self.depth),
-    disabled: !self.focusId,
-    'aria-label': 'Tiefe der geladenen Nachbarschaft',
+    value: String(Math.max(1, self.depth)),
+    'aria-label': 'Tiefe der Nachbarschaft',
     onChange: (event) => {
       const next = Number.parseInt(event.target.value, 10);
       if (!Number.isFinite(next) || next === self.depth) return;
       self.depth = next;
+      self.graph.setFocusDepth(self.focusMode ? Math.max(1, self.depth) : 0);
       syncRoute(self);
-      load(self, { fit: false });
+      renderToolbar(self);
+      // Only a server-side focus changes which records are loaded; without one
+      // the depth is purely about what stays bright, and a round trip would
+      // buy nothing.
+      if (self.focusId) load(self, { fit: false });
     },
   }),
-  h('span', null, text(self.focusId ? String(self.depth) : '–')));
+  h('span', null, text(String(Math.max(1, self.depth)))));
   dom.filters.appendChild(depthWrap);
 
   if (self.focusId) {
@@ -919,13 +1014,38 @@ function toggleButton(label, active, onClick, title) {
   }, text(label));
 }
 
-function swatchStyle(self, type) {
+function rgbOf(color) {
+  return `rgb(${Math.round(color.r)}, ${Math.round(color.g)}, ${Math.round(color.b)})`;
+}
+
+/**
+ * The silhouette the renderer would draw for this record type, painted into a
+ * small canvas. It uses `drawNodeShape` from the renderer itself, so legend,
+ * filter chip and map can never disagree about what a project looks like.
+ */
+function typeGlyph(self, type, size = 13) {
+  const node = document.createElement('canvas');
+  node.className = 'graph-view__glyph';
+  node.setAttribute('aria-hidden', 'true');
+  const ratio = Math.min(Math.max(window.devicePixelRatio || 1, 1), 3);
+  node.width = Math.round(size * ratio);
+  node.height = Math.round(size * ratio);
+  node.style.width = `${size}px`;
+  node.style.height = `${size}px`;
+
+  const c = node.getContext('2d');
   const palette = self.graph ? self.graph.getPalette() : null;
-  if (!palette) return { borderColor: 'currentColor' };
-  const color = palette.types[type] || palette.types.unknown;
-  const fill = palette.fillOf(color);
-  const css = (c) => `rgb(${Math.round(c.r)}, ${Math.round(c.g)}, ${Math.round(c.b)})`;
-  return { borderColor: css(color), background: css(fill) };
+  if (!c || !palette) return node;
+  c.setTransform(ratio, 0, 0, ratio, 0, 0);
+  c.lineJoin = 'round';
+  c.beginPath();
+  drawNodeShape(c, type, size / 2, size / 2, size * 0.3);
+  c.fillStyle = rgbOf(palette.plate);
+  c.fill();
+  c.lineWidth = 1.2;
+  c.strokeStyle = rgbOf(palette.inks[1]);
+  c.stroke();
+  return node;
 }
 
 function renderLegend(self) {
@@ -933,9 +1053,10 @@ function renderLegend(self) {
   clear(dom.legend);
   for (const type of GRAPH_TYPES) {
     dom.legend.appendChild(h('span.graph-view__legend-item', null,
-      h('span.graph-view__swatch', { style: swatchStyle(self, type) }),
+      typeGlyph(self, type, 13),
       text(TYPE_LABELS[type])));
   }
+  dom.legend.appendChild(h('hr'));
   const lineIcon = (dash, color) => h('svg', { width: '22', height: '10', viewBox: '0 0 22 10', 'aria-hidden': 'true' },
     h('line', {
       x1: '1', y1: '5', x2: '21', y2: '5',
@@ -944,6 +1065,7 @@ function renderLegend(self) {
   dom.legend.appendChild(h('span.graph-view__legend-item', null, lineIcon('', 'currentColor'), text('von dir verknüpft')));
   dom.legend.appendChild(h('span.graph-view__legend-item', null, lineIcon('3 3', 'currentColor'), text('abgeleitet')));
   dom.legend.appendChild(h('span.graph-view__legend-item', null, lineIcon('7 3 1.5 3', 'var(--warn)'), text('Agent-Vorschlag')));
+  dom.legend.appendChild(h('span.graph-view__legend-item', null, text('Größe = Anzahl Verknüpfungen')));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1148,6 +1270,10 @@ function selectNode(self, id) {
   self.selectedId = next;
   self.graph.setSelection(next);
   self.activeCluster = null;
+  self.graph.setActiveHull(null);
+  describeGraph(self);
+  const chosen = next ? self.nodeById.get(next) : null;
+  announce(self, chosen ? `Ausgewählt: ${chosen.label}, ${typeLabel(chosen.type)}, ${formatNumber(chosen.totalDegree || chosen.degree || 0)} Verknüpfungen.` : 'Auswahl aufgehoben.');
   if (!next) {
     self.inspector = null;
     renderSide(self);
@@ -1238,6 +1364,8 @@ function renderSideHelp(self) {
       h('li', null, text('Einen Knoten ziehen fixiert ihn an dieser Stelle.')),
       h('li', null, text('Doppelklick lädt die Nachbarschaft dieses Knotens.')),
       h('li', null, text('Alt gedrückt halten und von einem Knoten auf einen zweiten ziehen legt eine eigene Verknüpfung an.')),
+      h('li', null, text('Die Übersicht oben rechts zeigt den ganzen Graphen; ein Klick hinein springt dorthin.')),
+      h('li', null, text('Mit der Tastatur: Eingabetaste wählt den Knoten in der Mitte, n und p gehen die Nachbarn durch, Pfeiltasten verschieben, + und − zoomen.')),
       h('li', null, text('Taste F passt die Ansicht ein, Escape hebt die Auswahl auf.'))),
     stats
       ? h('p.graph-view__hint', null, text(`Geladen: ${formatNumber(self.nodes.length)} Knoten, ${formatNumber(self.edges.length)} Verknüpfungen.`))
@@ -1556,35 +1684,37 @@ function rebuildClusters(self) {
   const edges = visibleEdges(self, ids);
   self.clusters = computeClusters(nodes, edges);
 
-  const map = new Map();
-  for (const [i, cluster] of self.clusters.entries()) {
-    for (const id of cluster.nodeIds) map.set(id, i);
-  }
-  self.graph.setClusters(map);
+  // The renderer draws one soft outline per group with the group's own name
+  // and size on it. Single records are left out: an outline around one node
+  // says nothing that the node does not already say.
+  self.graph.setHulls(self.clusters
+    .filter((cluster) => cluster.size >= 3)
+    .map((cluster) => ({ id: cluster.id, label: cluster.label, ids: cluster.nodeIds })));
+  self.graph.setActiveHull(self.activeCluster);
 }
 
 function renderClusterPanel(self) {
   const palette = self.graph.getPalette();
-  const css = (c) => `rgb(${Math.round(c.r)}, ${Math.round(c.g)}, ${Math.round(c.b)})`;
 
   const wrap = h('div.stack', null,
     h('div.graph-view__side-head', null,
-      h('h2.graph-view__side-title', { style: { flex: '1 1 auto' } }, text(`Cluster (${formatNumber(self.clusters.length)})`)),
+      h('h2.graph-view__side-title', { style: { flex: '1 1 auto' } }, text(`Gruppen (${formatNumber(self.clusters.length)})`)),
       h('button.icon-button', {
         type: 'button',
-        title: 'Cluster-Ansicht schließen',
-        'aria-label': 'Cluster-Ansicht schließen',
+        title: 'Gruppen-Ansicht schließen',
+        'aria-label': 'Gruppen-Ansicht schließen',
         onClick: () => {
           self.clusterMode = false;
           self.clusters = [];
           self.activeCluster = null;
-          self.graph.setClusters(null);
+          self.graph.setHulls([]);
+          self.graph.setActiveHull(null);
           self.graph.highlight(self.query ? self.matches.map((node) => node.id) : null);
           renderToolbar(self);
           renderSide(self);
         },
       }, icon(ICONS.close))),
-    h('p.graph-view__hint', null, text('Zusammenhängende Gruppen im aktuellen Ausschnitt. Der Name kommt aus den Inhalten der Gruppe, er ist nicht erfunden.')));
+    h('p.graph-view__hint', null, text('Zusammenhängende Gruppen im aktuellen Ausschnitt. Ab drei Knoten wird eine Gruppe im Graphen umrandet. Der Name kommt aus den Inhalten der Gruppe, er ist nicht erfunden.')));
 
   if (!self.clusters.length) {
     wrap.appendChild(h('p.graph-view__hint', null, text('Nichts zu gruppieren – der Ausschnitt ist leer.')));
@@ -1598,12 +1728,13 @@ function renderClusterPanel(self) {
       class: self.activeCluster === cluster.id ? 'is-active' : '',
       onClick: () => {
         self.activeCluster = cluster.id;
+        self.graph.setActiveHull(cluster.id);
         self.graph.highlight(cluster.nodeIds);
         self.graph.fitToView({ ids: cluster.nodeIds });
         renderSide(self);
       },
     },
-    h('span.graph-view__cluster-dot', { style: { background: css(color) } }),
+    h('span.graph-view__cluster-dot', { style: { background: rgbOf(color) } }),
     h('span', { style: { flex: '1 1 auto', minWidth: '0' } },
       h('span', null, text(cluster.label)),
       h('small.meta', { style: { display: 'block' } }, text(
