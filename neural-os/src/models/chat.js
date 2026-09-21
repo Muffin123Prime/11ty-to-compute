@@ -1029,5 +1029,9 @@ module.exports = {
   DEFAULT_CONTEXT_TOKENS,
   HISTORY_SHARE,
   /** Exposed for tests only. */
+  // Exported, not internal: the agent toolbox reads chat histories too, and
+  // two places ordering the same messages by two comparators is exactly how a
+  // summary ends up quoting a conversation backwards.
+  sortMessages,
   __internals: { sortMessages, firstLine, clip, PROBE_PRIVATE, PROBE_PUBLIC },
 };

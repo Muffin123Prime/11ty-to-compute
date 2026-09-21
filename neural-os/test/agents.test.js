@@ -1116,9 +1116,12 @@ test('activity.recent und chats.read geben wieder, was wirklich passiert ist', a
 
     const frisch = env.store.create('note', { title: 'Heute geschrieben' });
     const chat = env.store.create('chat', { title: 'Über Kaffee' });
-    env.store.create('message', { chatId: chat.id, role: 'system', content: 'Du bist hilfreich.' });
-    env.store.create('message', { chatId: chat.id, role: 'user', content: 'Wie mahle ich?' });
-    env.store.create('message', { chatId: chat.id, role: 'assistant', content: 'Fein.', usedNetwork: true });
+    // ordinal, wie der Chat-Dienst es selbst setzt: drei Nachrichten in
+    // derselben Millisekunde sind normal, und IDs sind zufaellig, nicht
+    // monoton -- ohne ordinal waere die Reihenfolge schlicht offen.
+    env.store.create('message', { chatId: chat.id, role: 'system', content: 'Du bist hilfreich.', ordinal: 0 });
+    env.store.create('message', { chatId: chat.id, role: 'user', content: 'Wie mahle ich?', ordinal: 1 });
+    env.store.create('message', { chatId: chat.id, role: 'assistant', content: 'Fein.', usedNetwork: true, ordinal: 2 });
 
     const recent = await env.toolbox.call('activity.recent', { days: 7 }, ctx);
     assert.ok(recent.result.total >= 2, JSON.stringify(recent.result.byType));
@@ -1139,6 +1142,55 @@ test('activity.recent und chats.read geben wieder, was wirklich passiert ist', a
     assert.equal(verlauf.result.messages[1].usedNetwork, true,
       'die Herkunft reist mit: eine Zusammenfassung soll sagen können, dass die Antwort online entstand');
     await assert.rejects(env.toolbox.call('chats.read', { id: 'chat_qqqqqqqqqqqqqqqqqqqqqq' }, ctx), /NOT_FOUND|not found/);
+  } finally {
+    await env.close();
+  }
+});
+
+/**
+ * Provenance.
+ *
+ * Three different subsystems need to know "hat das ein Agent geschrieben?":
+ * the trigger subsystem (or an agent that writes in reaction to a write
+ * becomes a loop), the timeline, and a user who has stopped trusting one
+ * agent and wants to find what it left behind. Guessing that from heuristics
+ * is how a loop brake ends up either leaky or over-eager, so it is stamped
+ * once, at the moment of writing.
+ */
+test('jeder Satz aus einem Lauf trägt, welcher Lauf ihn geschrieben hat', async () => {
+  const env = await makeEnv();
+  try {
+    const agent = env.createAgent({
+      permissions: { readNotes: true, writeNotes: true, runTasks: true, createEdges: true, requireApproval: false },
+    });
+    const run = env.store.create('run', { agentId: agent.id, goal: 'Aufräumen', status: 'running' });
+    const ctx = { agent, run };
+
+    const note = await env.toolbox.call('notes.create', { title: 'Vom Agenten' }, ctx);
+    const task = await env.toolbox.call('tasks.create', { title: 'Auch vom Agenten' }, ctx);
+    const project = await env.toolbox.call('projects.create', { name: 'Ebenso' }, ctx);
+    const memory = await env.toolbox.call('memory.remember', { text: 'Gemerkt.' }, ctx);
+    const edge = await env.toolbox.call('graph.link', { from: note.result.id, to: task.result.id, reason: 'gehört zusammen' }, ctx);
+
+    for (const id of [note.result.id, task.result.id, project.result.id, memory.result.id, edge.result.id]) {
+      const record = env.store.get(id);
+      assert.equal(record.data.runId, run.id, `${record.type} ohne Lauf-Stempel`);
+      assert.equal(record.data.agentId, agent.id, `${record.type} ohne Agenten-Stempel`);
+      assert.equal(record.data.source, 'agent', `${record.type} gibt sich nicht als Agentenwerk zu erkennen`);
+    }
+
+    // Ein Aufruf ohne Lauf -- eine Erweiterung, ein Test -- wird nicht
+    // faelschlich als Agentenwerk markiert.
+    const ohneLauf = await env.toolbox.call('notes.create', { title: 'Direkt' }, { agent });
+    assert.equal(env.store.get(ohneLauf.result.id).data.runId, undefined);
+
+    // Eine Aenderung an einer fremden Notiz macht sie nicht zum Agentenwerk:
+    // sie bleibt die Notiz des Nutzers, auch wenn ein Agent sie angefasst hat.
+    const eigene = env.store.create('note', { title: 'Vom Nutzer' });
+    await env.toolbox.call('notes.update', { id: eigene.id, body: 'ergänzt' }, ctx);
+    const danach = env.store.get(eigene.id);
+    assert.equal(danach.data.runId, undefined, 'eine Änderung darf die Herkunft nicht umschreiben');
+    assert.match(danach.data.body, /ergänzt/);
   } finally {
     await env.close();
   }

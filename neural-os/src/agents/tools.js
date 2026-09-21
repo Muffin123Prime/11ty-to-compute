@@ -11,6 +11,9 @@ const {
   AbortedError,
 } = require('../kernel/errors');
 const permissionsMod = require('./permissions');
+// Only the comparator, nothing else: chat.js requires nothing but the error
+// types, so this cannot become a cycle.
+const { sortMessages: sortChatMessages } = require('../models/chat');
 
 /**
  * The agent tool layer -- where a capability grant becomes an enforced fact.
@@ -468,6 +471,36 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
     }
   }
 
+  /**
+   * Provenance, on every record a tool writes.
+   *
+   * Until this existed, a note an agent wrote carried `source: 'agent'` and a
+   * task it created carried nothing at all -- so a task the user typed and a
+   * task an agent produced were indistinguishable after the fact. That is a
+   * problem in three places at once:
+   *
+   * - the trigger subsystem has to know which writes are its own doing, or an
+   *   agent that writes a task in reaction to a task becomes a loop the user
+   *   discovers as a full disk;
+   * - "was war das nochmal?" is unanswerable for anything an agent made;
+   * - a user who stops trusting one agent cannot find what it wrote.
+   *
+   * `runId` is the exact answer to all three, so it is stamped once, here,
+   * rather than guessed later. The schema preserves unknown keys by design, so
+   * this needs no per-type field -- but it is deliberately NOT applied to
+   * updates: a record the user wrote and an agent later edited is still the
+   * user's record, and relabelling it would erase that.
+   */
+  function stamped(ctx, data) {
+    const run = ctx && ctx.run;
+    if (!run || typeof run.id !== 'string') return data;
+    return {
+      ...data,
+      runId: run.id,
+      agentId: permissionsMod.agentId(agentOf(ctx)) || null,
+    };
+  }
+
   /** Record ids an agent produced, so the run can link to them afterwards. */
   function noteProduced(ctx, id) {
     if (ctx && Array.isArray(ctx.produced) && id && !ctx.produced.includes(id)) ctx.produced.push(id);
@@ -592,12 +625,12 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
       },
       summary: (args) => `Neue Notiz anlegen: "${shorten(args.title, 80)}"`,
       run(args, ctx) {
-        const record = store.create('note', {
+        const record = store.create('note', stamped(ctx, {
           title: args.title,
           body: args.body || '',
           tags: args.tags || [],
           source: 'agent',
-        });
+        }));
         noteProduced(ctx, record.id);
         return { id: record.id, title: record.data.title, createdAt: record.createdAt };
       },
@@ -687,10 +720,10 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
         requireRecord(args.to);
         // Always source 'agent': the user must be able to review and bulk-undo
         // machine links, and an agent link must never masquerade as a manual one.
-        const edge = store.edges.add({
+        const edge = store.edges.add(stamped(ctx, {
           from: args.from, to: args.to, kind: args.kind || 'related',
           source: 'agent', reason: args.reason,
-        });
+        }));
         noteProduced(ctx, edge.id);
         return { id: edge.id, from: edge.data.from, to: edge.data.to, kind: edge.data.kind };
       },
@@ -714,13 +747,14 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
       summary: (args) => `Aufgabe anlegen: "${shorten(args.title, 80)}"`,
       run(args, ctx) {
         if (args.projectId) requireRecord(args.projectId, 'project');
-        const record = store.create('task', {
+        const record = store.create('task', stamped(ctx, {
           title: args.title,
           body: args.body || '',
           projectId: args.projectId || null,
           due: args.due || null,
           priority: args.priority,
-        });
+          source: 'agent',
+        }));
         noteProduced(ctx, record.id);
         return { id: record.id, title: record.data.title, status: record.data.status };
       },
@@ -872,10 +906,11 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
       },
       summary: (args) => `Projekt anlegen: "${shorten(args.name, 80)}"`,
       run(args, ctx) {
-        const record = store.create('project', {
+        const record = store.create('project', stamped(ctx, {
           name: args.name,
           description: args.description || '',
-        });
+          source: 'agent',
+        }));
         noteProduced(ctx, record.id);
         return { id: record.id, name: record.data.name };
       },
@@ -993,9 +1028,12 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
       summary: (args) => `Chat ${args.id} lesen`,
       run(args) {
         const chat = requireRecord(args.id, 'chat');
-        const messages = store.all('message')
-          .filter((m) => m.data.chatId === chat.id && m.data.role !== 'system')
-          .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+        // Ordered by the chat service's own comparator, not a second one of
+        // our own: two messages written in the same millisecond are common,
+        // record ids are random rather than monotonic, and a summary that
+        // quotes a conversation backwards is worse than no summary.
+        const messages = sortChatMessages(store.all('message')
+          .filter((m) => m.data.chatId === chat.id && m.data.role !== 'system'));
         const tail = messages.slice(-args.limit);
         return {
           id: chat.id,
@@ -1192,12 +1230,13 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
       summary: (args) => `Merken: "${shorten(args.text, 100)}"`,
       run(args, ctx) {
         const id = permissionsMod.agentId(agentOf(ctx));
-        const record = store.create('memory', {
+        const record = store.create('memory', stamped(ctx, {
           text: args.text,
           scope: args.scope === 'global' || !id ? 'global' : `agent:${id}`,
           importance: args.importance,
           sourceId: ctx && ctx.run ? ctx.run.id : null,
-        });
+          source: 'agent',
+        }));
         noteProduced(ctx, record.id);
         return { id: record.id, scope: record.data.scope };
       },

@@ -1024,7 +1024,16 @@ async function openStore(options = {}) {
   const edges = {
     add(spec = {}) {
       assertOpen();
-      const { from, to, kind = 'related', source = 'manual', reason = '', weight = 1 } = spec;
+      // Named fields only, never a spread: this is the one write path that
+      // creates a link, and a caller must not be able to smuggle arbitrary
+      // keys into an edge. `runId`/`agentId` are listed here on purpose --
+      // "warum haengen diese beiden zusammen?" is what an edge exists to
+      // answer, and for a machine-made link that answer includes which run
+      // made it.
+      const {
+        from, to, kind = 'related', source = 'manual', reason = '', weight = 1,
+        runId = null, agentId = null,
+      } = spec;
       if (typeof from !== 'string' || typeof to !== 'string') {
         throw new ValidationError('Kante benoetigt from und to als Strings.');
       }
@@ -1037,7 +1046,10 @@ async function openStore(options = {}) {
         const existing = byId.get(existingId);
         if (existing && !existing.deletedAt) return expose(existing);
       }
-      return create('edge', { from, to, kind, source, reason, weight });
+      const data = { from, to, kind, source, reason, weight };
+      if (runId) data.runId = runId;
+      if (agentId) data.agentId = agentId;
+      return create('edge', data);
     },
 
     remove(id) {
