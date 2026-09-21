@@ -147,9 +147,14 @@ betreibt. Dein Tablet sieht dieselbe Instanz, es synchronisiert nicht.
   ist für persönliches Wissen überraschend stark und sofort verfügbar.
 
 `docs/STATUS.md` führt taggenau, was getestet ist — und was nicht.
+`docs/EINGESTAENDNIS.md` sagt, wo ich mich geirrt habe und was ich nicht
+überprüfen konnte.
 
 ## Weiterlesen
 
+- **`docs/EINGESTAENDNIS.md`** — die Fehler, die Grenzen und die Stellen, an denen
+  ich etwas behauptet habe, das sich später als falsch herausstellte. Wenn du nur
+  ein Dokument liest, dann dieses.
 - `docs/ARCHITEKTUR.md` — Machbarkeitsanalyse und die Begründung jeder größeren
   Entscheidung (warum kein Electron, warum keine Datenbank, warum keine
   Abhängigkeiten)

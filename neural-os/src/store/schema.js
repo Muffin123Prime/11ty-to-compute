@@ -26,7 +26,7 @@ const { ValidationError } = require('../kernel/errors');
 const GRAPH_TYPES = ['note', 'chat', 'project', 'task', 'agent', 'file', 'entity', 'run'];
 
 /** All record types, including non-graph bookkeeping types. */
-const TYPES = [...GRAPH_TYPES, 'message', 'edge', 'memory', 'approval', 'grant', 'token'];
+const TYPES = [...GRAPH_TYPES, 'message', 'edge', 'memory', 'approval', 'grant', 'token', 'peer', 'conflict'];
 
 /**
  * Edge kinds. `source` distinguishes user intent from machine inference:
@@ -195,6 +195,43 @@ const FIELDS = {
     maxUses: { type: 'number', nullable: true, default: null },
     uses: { type: 'number', default: 0 },
     revoked: { type: 'boolean', default: false },
+  },
+  /**
+   * Another device running Neural OS that this one may synchronise with.
+   *
+   * The access token is stored here rather than hashed, because unlike an
+   * incoming token this one has to be REPLAYED to the peer. It therefore lives
+   * in the vault and is covered by vault encryption; config.json, which is
+   * never encrypted, must not hold it.
+   */
+  peer: {
+    name: { type: 'string', required: true, max: 200 },
+    url: { type: 'string', required: true }, // http://192.168.1.20:7777
+    token: { type: 'string', default: '' },
+    direction: { type: 'string', default: 'both', enum: ['pull', 'push', 'both'] },
+    lastSyncAt: { type: 'string', nullable: true, default: null },
+    lastError: { type: 'string', nullable: true, default: null },
+    // Highest peer sequence already merged. Sync resumes from here.
+    watermark: { type: 'number', default: 0 },
+    enabled: { type: 'boolean', default: true },
+    autoSync: { type: 'boolean', default: false },
+  },
+  /**
+   * Two devices changed the same record while apart.
+   *
+   * Both versions are kept verbatim and the user decides. Nothing is merged
+   * automatically and nothing is overwritten: a synchronisation that silently
+   * picks a winner is how people lose work without ever being told.
+   */
+  conflict: {
+    recordId: { type: 'string', required: true },
+    recordType: { type: 'string', required: true },
+    peerId: { type: 'string', nullable: true, default: null },
+    local: { type: 'object', required: true },
+    remote: { type: 'object', required: true },
+    status: { type: 'string', default: 'open', enum: ['open', 'resolved'] },
+    resolution: { type: 'string', nullable: true, default: null }, // local | remote | merged
+    resolvedAt: { type: 'string', nullable: true, default: null },
   },
   token: {
     label: { type: 'string', required: true },
