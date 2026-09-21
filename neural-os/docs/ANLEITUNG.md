@@ -344,8 +344,97 @@ erlaubten. Ein Protokoll, das nur Blockaden zeigt, würde nichts beweisen.
 
 ## Teil 6 · Was dir Arbeit abnimmt
 
-Zwei Bereiche, die beide **ohne jedes KI-Modell** funktionieren. Das ist Absicht:
-das Nützlichste soll nicht der Teil sein, für den du 5 GB herunterladen musst.
+Sieben Dinge, und **fünf davon funktionieren ohne jedes KI-Modell**. Das ist
+Absicht: das Nützlichste soll nicht der Teil sein, für den du 5 GB herunterladen
+musst.
+
+| | Braucht ein Modell? |
+|---|---|
+| **Heute** — was fällig ist, was ohne dich lief | nein |
+| **Lernen** — Kartenstapel mit wachsenden Abständen | nein |
+| **Vorschläge** — Dubletten, Waisen, Merker, fehlende Links | nein |
+| **Automatik** — Zeitpläne und Auslöser | nein (die Agenten darin schon) |
+| **Beobachtete Ordner** — Dateien automatisch aufnehmen | nein |
+| **Zweiter Blick** — Kern, offene Stellen, bekannte Begriffe | teilweise |
+| **Zwei Modelle** — dieselbe Frage an zwei Modelle | ja |
+
+Und: **Strg+Umschalt+N** hält von überall aus eine Zeile fest, ohne dass du den
+Bereich wechselst.
+
+### Heute (`g` dann `h`)
+
+Der Bildschirm, den du morgens einmal ansiehst. Der erste Satz ist eine Tatsache,
+keine Begrüßung: *„Zwei Aufgaben sind fällig, eine davon überfällig."*
+
+Darunter, in dieser Reihenfolge, weil sie nach Dringlichkeit sortiert ist:
+
+1. **Fällig** — überfälliges zuerst, direkt hier abhakbar
+2. **Ohne dich gelaufen** — was ein Agent gemacht hat, während du weg warst
+3. **Vorgeschlagen** — was die Prüfung gefunden hat
+4. **Seit gestern** — was sich geändert hat
+5. **Wiedervorlage** — eine Notiz, die du lange nicht angesehen hast
+
+Steht nichts an, steht das da. Das ist eine gute Nachricht und sieht auch so aus.
+
+### Lernen (`g` dann `l`)
+
+Ein Kartenstapel mit wachsenden Abständen. Braucht **kein** Modell — das
+Verfahren (SM-2) ist dreißig Jahre alt.
+
+| Taste | | Bedeutung |
+|---|---|---|
+| **Leertaste** | | Rückseite zeigen |
+| **1** | Nochmal | Nicht gewusst — die Karte kommt **heute** noch einmal |
+| **2** | Schwer | Gewusst, aber mühsam |
+| **3** | Gut | Der Normalfall |
+| **4** | Leicht | Sofort da — größerer Abstand |
+
+Jeder Knopf sagt, wann die Karte wiederkommt („heute", „morgen", „in 6 Tagen").
+
+Karten legst du von Hand an oder **aus einer Notiz**. Dabei wird nichts geraten:
+erkannt werden nur ausdrückliche Strukturen — eine `## Überschrift` mit
+folgendem Absatz, oder eine Zeile `Begriff :: Erklärung`. Aus gewöhnlichem Text
+entsteht keine Karte.
+
+### Zwei Modelle nebeneinander (im Chat)
+
+Ist ein Online-Anbieter eingerichtet, kannst du dieselbe Frage an beide schicken
+und die Antworten nebeneinander sehen. Das ist die ehrlichste Art, den
+Offline-Betrieb zu beurteilen: nicht meiner Behauptung glauben, sondern selbst
+sehen, wann sich das Internet lohnt.
+
+**Vorher** zeigt die App, was passieren wird — für jede Seite, wo das Modell
+liegt und was die Netzschleuse dazu sagt. Verlässt eine Seite das Gerät, steht
+das als Satz da, bevor du drückst, und Bestätigen ist ein eigener Klick.
+
+### Zweiter Blick (an einer langen Notiz)
+
+Drei Dinge zu einem längeren Text: die Kernaussage, die Stellen, an denen etwas
+offen bleibt, und die Begriffe, die schon anderswo im Tresor vorkommen.
+
+Der dritte Teil braucht **kein Modell** — er kommt aus dem Volltextindex und ist
+damit belegbar. Ohne Modell bekommst du ihn trotzdem, und die App sagt dir, dass
+die ersten beiden fehlen und warum. Die drei Teile sind sichtbar als verschieden
+gekennzeichnet, denn das ist der Punkt: einer ist nachprüfbar, zwei sind es nicht.
+
+### Beobachtete Ordner (Einstellungen)
+
+Du gibst einen Ordner frei, und was dort liegt, wird gelesen und in den Tresor
+aufgenommen. Der Ablauf ist absichtlich dreistufig:
+
+```
+anlegen  →  erst ansehen  →  einschalten
+```
+
+**„Erst ansehen"** zeigt, *was passieren würde*, und legt nichts an. Erst nach
+dem Einschalten nimmt der Ordner wirklich auf. Unter „Was wurde aufgenommen"
+steht danach die echte Liste — mitsamt den übersprungenen Dateien **und dem
+Grund**.
+
+Was dabei ausdrücklich nicht passiert: einem symbolischen Link wird nicht
+gefolgt, der Tresor selbst lässt sich nicht beobachten, zu große Dateien werden
+übersprungen statt halb gelesen, und im Quellordner wird **niemals** etwas
+geändert oder gelöscht. Nur gelesen.
 
 ### Vorschläge (`g` dann `v`)
 
@@ -472,6 +561,12 @@ Gegenteil voneinander.
 | Semantische Suche findet nichts | Einbettungsmodell fehlt (`ollama pull nomic-embed-text`) oder der Index ist noch leer — einmal neu indizieren. |
 | PDF liefert keinen Text | Ein gescanntes PDF ohne Textebene. Dafür bräuchte es eine Texterkennung, die Neural OS nicht hat. Die App sagt das, statt etwas zu erfinden. |
 | Ich will wissen, was wirklich passiert ist | `cat ~/.neural-os/audit.jsonl` — jede Netzentscheidung, chronologisch. |
+| „Heute" zeigt einen Block nicht | Steht dort ein Grund? Dann fehlt das Teilsystem. Steht kein Grund, ist der Block wirklich leer. |
+| „Aus einer Notiz" findet keine Karten | Normal: erkannt werden nur `## Überschrift` + Absatz und `Begriff :: Erklärung`. Aus Fließtext wird nichts geraten. |
+| Der beobachtete Ordner nimmt nichts auf | Ist er eingeschaltet? „Erst ansehen" legt absichtlich nichts an. Unter „Was wurde aufgenommen" steht, was übersprungen wurde und warum. |
+| Eine Datei wurde übersprungen | Der Grund steht daneben: zu groß, unlesbar, schon vorhanden, oder ein symbolischer Link (dem wird bewusst nicht gefolgt). |
+| „Zweiter Blick" liefert nur Begriffe | Kein Modell erreichbar. Der dritte Teil kommt aus dem Volltextindex und geht immer; die ersten beiden brauchen ein Modell. |
+| Der Knopf „Zweiter Blick" fehlt | Die Notiz ist kürzer als 500 Zeichen. Bei so wenig Text siehst du beim Lesen schon alles. |
 | „Prüfen" findet nie etwas | Normal bei wenigen Notizen: die meisten Verfahren brauchen Alter (14 bzw. 90 Tage) oder Verknüpfungen. Was übersprungen wurde, steht nach der Prüfung dabei. |
 | Ein Zeitplan läuft nicht | Erst: ist er eingeschaltet? Dann: steht ein Fehler am Plan? Ohne Modell scheitert der Lauf — gestartet wird er trotzdem, und der Grund steht dran. |
 | Ein Auslöser feuert nicht | Die Filter prüfen (der Satz unter dem Auslöser sagt, worauf er reagiert), und: Einträge aus einem Agentenlauf lösen absichtlich nichts aus. |
