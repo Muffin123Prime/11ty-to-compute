@@ -278,6 +278,7 @@ async function createApp(opts = {}) {
   const app = {
     version: VERSION,
     paths,
+    portable: pathsMod.portableInfo(paths.home),
     config,
     bus,
     audit,
@@ -415,11 +416,11 @@ async function createApp(opts = {}) {
       }
     },
 
-    async listen() {
+    async listen(opts = {}) {
       const serverMod = require('./http/server');
       const created = await serverMod.createServer(app);
       app.server = created;
-      await created.listen();
+      await created.listen(opts);
       audit.write('server.listen', { host: config.server.host, port: config.server.port });
       return created;
     },

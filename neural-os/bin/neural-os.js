@@ -13,6 +13,11 @@
  *
  * Global flags: --home DIR  --port N  --host H  --log LEVEL  --no-harden
  *               --safe   (startet ohne die selbst eingefügten Erweiterungen)
+ *               --open   (oeffnet die Oberflaeche im Browser)
+ *
+ *   neural-os stick prepare <pfad>   bereitet einen USB-Stick vor
+ *   neural-os stick update  <pfad>   erneuert nur den Programmcode
+ *   neural-os stick verify  <pfad>   prueft einen Stick
  *               --passphrase P   (prefer NEURAL_OS_PASSPHRASE)
  */
 
@@ -104,10 +109,21 @@ async function cmdStart(flags) {
     const health = await app.doctor();
     const { host, port } = app.config.server;
 
+    // Bind first, then print. On a stick the configured port may belong to
+    // something else on this machine, and announcing an address that turns out
+    // to be wrong is worse than a moment of silence.
+    await app.listen({ tryPorts: flags.port ? 1 : 12 });
+    const url = (app.server && app.server.url) || `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`;
+    const movedPort = !url.endsWith(`:${port}`);
+
     console.log('');
     console.log(`${B}Neural OS${X} ${D}v${VERSION} · Node ${process.version}${X}`);
     console.log(`${D}${'─'.repeat(58)}${X}`);
-    console.log(`  Oberfläche    ${B}http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}${X}`);
+    console.log(`  Oberfläche    ${B}${url}${X}${movedPort ? ` ${Y}(Port ${port} war belegt)${X}` : ''}`);
+    if (app.portable) {
+      // A mode that changes where somebody's notes live is never implicit.
+      console.log(`  ${B}Portabel${X}      ${G}Daten auf dem Datenträger${X} ${D}${app.portable.root}${X}`);
+    }
     console.log(`  Daten         ${app.paths.home}`);
     console.log(`  Netzmodus     ${netLabel(app.config.network.mode)}${health.network.hardened ? ` ${D}(prozessweit durchgesetzt)${X}` : ` ${Y}(NICHT durchgesetzt)${X}`}`);
     console.log(`  Vault         ${health.vault.counts ? Object.entries(health.vault.counts).map(([k, v]) => `${v} ${k}`).join(', ') : '0 Einträge'}${app.vaultCrypto && app.vaultCrypto.enabled ? ' · verschlüsselt' : ''}`);
@@ -136,7 +152,13 @@ async function cmdStart(flags) {
     console.log(`${D}${'─'.repeat(58)}${X}`);
     console.log(`${D}Beenden mit Strg+C${X}\n`);
 
-    await app.listen();
+    if (flags.open === true && url) {
+      const { openInBrowser } = require('../src/portable/open');
+      const result = await openInBrowser(url);
+      if (!result.opened) {
+        console.log(`  ${D}Browser konnte nicht geöffnet werden (${result.reason || 'unbekannt'}). Adresse oben von Hand aufrufen.${X}`);
+      }
+    }
 
     let closing = false;
     const shutdown = async (signal) => {

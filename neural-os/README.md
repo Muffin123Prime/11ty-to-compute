@@ -9,6 +9,9 @@ npm start
 # → http://127.0.0.1:7777
 ```
 
+Oder komplett von einem USB-Stick, ohne dass der PC irgendetwas installiert hat:
+siehe `docs/STICK.md`.
+
 Das ist der gesamte Installationsvorgang. Es gibt nichts zu installieren:
 **Neural OS hat null Abhängigkeiten** und benutzt ausschließlich die
 Node-Standardbibliothek. `npm install` braucht kein Internet, weil es nichts zu
@@ -154,6 +157,9 @@ betreibt. Dein Tablet sieht dieselbe Instanz, es synchronisiert nicht.
 
 ## Weiterlesen
 
+- **`docs/STICK.md`** — Neural OS vollständig auf einem USB-Stick: der fremde PC
+  braucht nichts, die Daten liegen auf dem Stick, und wenn alles dort liegt
+  brauchst du gar keine Synchronisation.
 - **`docs/ERWEITERN.md`** — wie du die App selbst veränderst: Code einfügen,
   prüfen, aktivieren, und zu jeder früheren Fassung zurück. Ohne von vorne
   anzufangen.

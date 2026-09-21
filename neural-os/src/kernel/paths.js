@@ -15,11 +15,76 @@ const fs = require('node:fs');
  * Resolution order for the home directory:
  *   1. explicit argument (CLI --home)
  *   2. NEURAL_OS_HOME environment variable
- *   3. ~/.neural-os
+ *   3. a portable marker next to the application (USB stick)
+ *   4. ~/.neural-os
  */
 function resolveHome(explicit) {
-  const raw = explicit || process.env.NEURAL_OS_HOME || path.join(os.homedir(), '.neural-os');
-  return path.resolve(raw);
+  if (explicit) return path.resolve(explicit);
+  if (process.env.NEURAL_OS_HOME) return path.resolve(process.env.NEURAL_OS_HOME);
+  const portable = detectPortable();
+  if (portable) return portable.dataDir;
+  return path.resolve(path.join(os.homedir(), '.neural-os'));
+}
+
+/** Filename of the marker that turns a directory into a portable installation. */
+const PORTABLE_MARKER = 'neural-os.portable';
+
+/**
+ * Is this copy running from a portable medium (a USB stick)?
+ *
+ * Detection walks up from the application directory looking for a marker file.
+ * Two deliberate constraints:
+ *
+ *  - The marker must be valid JSON containing `neuralOsPortable: true`. A stray
+ *    empty file with the right name cannot silently redirect where somebody's
+ *    notes are written; that would be a data-loss trap disguised as a feature.
+ *  - The search is bounded to a few levels. Walking to the filesystem root
+ *    would mean a forgotten marker in a home directory could capture every
+ *    installation below it.
+ *
+ * The result is always announced at startup. A mode that quietly changes where
+ * your data lives is exactly the kind of surprise this project exists to avoid.
+ *
+ * @param {string} [from] directory to start from (default: the app directory)
+ * @returns {{root:string, dataDir:string, marker:string, info:object}|null}
+ */
+function detectPortable(from) {
+  let dir = path.resolve(from || path.join(__dirname, '..', '..'));
+  for (let depth = 0; depth < 4; depth++) {
+    const marker = path.join(dir, PORTABLE_MARKER);
+    let raw = null;
+    try {
+      raw = fs.readFileSync(marker, 'utf8');
+    } catch {
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+      continue;
+    }
+    let info;
+    try {
+      info = JSON.parse(raw);
+    } catch {
+      // A corrupt marker is reported by refusing to act on it: falling back to
+      // the home directory is recoverable, writing to a guessed path is not.
+      return null;
+    }
+    if (!info || info.neuralOsPortable !== true) return null;
+    const dataDir = path.resolve(dir, typeof info.dataDir === 'string' && info.dataDir ? info.dataDir : 'data');
+    return { root: dir, dataDir, marker, info };
+  }
+  return null;
+}
+
+/**
+ * Is the home directory we ended up with the portable one?
+ * Used by the startup banner, which must state where the data actually is.
+ */
+function portableInfo(home) {
+  const detected = detectPortable();
+  if (!detected) return null;
+  if (path.resolve(home) !== detected.dataDir) return null;
+  return detected;
 }
 
 /**
@@ -81,4 +146,4 @@ function safeJoin(root, relative) {
   return target;
 }
 
-module.exports = { resolveHome, layout, ensureLayout, safeJoin };
+module.exports = { resolveHome, layout, ensureLayout, safeJoin, detectPortable, portableInfo, PORTABLE_MARKER };

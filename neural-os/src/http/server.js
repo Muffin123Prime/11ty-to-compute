@@ -932,7 +932,36 @@ async function createServer(ctx = {}) {
 
   /* -------------------------------------------------------------- listen */
 
-  function listen(opts = {}) {
+  /**
+   * Bind, and on a busy port try the next few.
+   *
+   * On the user's own machine a fixed port is right. On a stick plugged into
+   * someone else's computer it is a dead end: something else already owns
+   * 7777, and the person holding the stick has no way to know that, let alone
+   * to pick a replacement. `tryPorts` walks upward a little and reports which
+   * port it actually got, so the launcher can open the right address.
+   *
+   * It stays opt-in. A server started deliberately on a chosen port must fail
+   * loudly rather than quietly appear somewhere else.
+   */
+  async function listen(opts = {}) {
+    const basePort = opts.port !== undefined ? opts.port : (serverConfig.port !== undefined ? serverConfig.port : 7777);
+    const attempts = Math.max(1, Number(opts.tryPorts) || 1);
+    let lastError = null;
+    for (let i = 0; i < attempts; i++) {
+      const candidate = basePort === 0 ? 0 : basePort + i;
+      try {
+        return await listenOnce({ ...opts, port: candidate });
+      } catch (err) {
+        lastError = err;
+        if (!err || err.code !== 'PORT_IN_USE' || i === attempts - 1) throw err;
+        log.warn(`Port ${candidate} ist belegt, versuche ${candidate + 1}.`);
+      }
+    }
+    throw lastError;
+  }
+
+  function listenOnce(opts = {}) {
     const port = opts.port !== undefined ? opts.port : (serverConfig.port !== undefined ? serverConfig.port : 7777);
     const host = opts.host || serverConfig.host || '127.0.0.1';
     return new Promise((resolve, reject) => {
