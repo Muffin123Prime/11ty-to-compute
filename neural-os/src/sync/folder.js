@@ -1328,12 +1328,21 @@ function createFolderSync(deps = {}) {
       deferredEdges = [];
     } catch (err) {
       const neural = asNeuralError(err);
+      // The cause could be either side of the loop -- a damaged file, or the
+      // store refusing to write -- so the original code is kept rather than
+      // relabelling a storage failure as a bad mailbox. What is added is the
+      // one thing the user needs to hear: how much of the run already landed.
+      const code = neural.code === 'INTERNAL_ERROR' ? 'SYNC_MAILBOX_INVALID' : neural.code;
       throw new NeuralError(
-        'SYNC_MAILBOX_INVALID',
-        `Das Postfach von "${box.deviceName || remoteId}" liess sich nicht vollständig lesen: ${neural.message}. `
-        + `${totals.applied} Einträge waren zu diesem Zeitpunkt bereits übernommen; ein erneuter Abgleich `
-        + 'setzt dort fort, ohne etwas zu verdoppeln.',
-        { status: 409, cause: err, details: { deviceId: remoteId, applied: totals.applied } },
+        code,
+        `Der Abgleich mit dem Postfach von "${box.deviceName || remoteId}" wurde abgebrochen: ${neural.message} `
+        + `${totals.applied} Einträge waren zu diesem Zeitpunkt bereits übernommen; sie bleiben gültig, und ein `
+        + 'erneuter Abgleich setzt dort fort, ohne etwas zu verdoppeln.',
+        {
+          status: neural.status && neural.status !== 500 ? neural.status : 409,
+          cause: err,
+          details: { deviceId: remoteId, applied: totals.applied },
+        },
       );
     } finally {
       // Whatever was applied must be recorded as agreed, even after a failure:

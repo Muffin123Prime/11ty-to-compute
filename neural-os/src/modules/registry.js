@@ -94,7 +94,8 @@ function errorRecord(err, where) {
  * @param {object} deps.sandbox
  * @param {object} [deps.bus]
  * @param {Function|object} [deps.logger]
- * @param {object} [deps.config]
+ * @param {object} [deps.config] accepted for symmetry with the other factories;
+ *                                the module time limit lives in the sandbox
  * @param {object} [deps.audit]
  * @param {object} [deps.paths] needed for the crash guard; without it the guard
  *                              is off and says so instead of pretending
@@ -111,11 +112,20 @@ function createModuleRegistry(deps = {}) {
   const bus = deps.bus || null;
   const audit = deps.audit || null;
   const paths = deps.paths || null;
-  const config = deps.config || {};
   const log = makeLogger(deps.logger, 'modules');
 
   /** moduleId -> {registered, teardown, consecutive, loadedAt, notes} */
   const loaded = new Map();
+  /**
+   * Guards against a failure report feeding itself.
+   *
+   * Recording a failure writes to the module's record, which publishes
+   * `record.updated` -- and a module that listens for `record.updated` and
+   * throws would be told about its own error report, throw again, and recurse
+   * until the stack gives out. The streak still counts; only the write and the
+   * announcement are skipped while one is already in flight for that module.
+   */
+  const reporting = new Set();
   let safeMode = false;
   /** What the crash guard found at the last loadAll(), for the UI to explain. */
   let lastCrashRecovery = null;
@@ -679,17 +689,25 @@ function createModuleRegistry(deps = {}) {
     const entry = loaded.get(id);
     const e = asNeuralError(err);
     const lastError = errorRecord(e, where);
-    const record = moduleRecord(id, { optional: true });
-    if (record) {
-      patch(id, { lastError, failures: (record.data.failures || 0) + 1 });
+    if (entry) entry.consecutive += 1;
+
+    if (reporting.has(id)) return lastError;
+    reporting.add(id);
+    try {
+      const record = moduleRecord(id, { optional: true });
+      if (record) {
+        patch(id, { lastError, failures: (record.data.failures || 0) + 1 });
+      }
+      writeAudit('module.error', { moduleId: id, where, code: e.code, reason: e.message });
+      publish('module.failed', { id, where, error: lastError });
+      log.warn(`Modul ${record ? `„${record.data.name}"` : id} (${where}): ${e.message}`);
+    } finally {
+      reporting.delete(id);
     }
-    writeAudit('module.error', { moduleId: id, where, code: e.code, reason: e.message });
-    publish('module.failed', { id, where, error: lastError });
-    log.warn(`Modul ${record ? `„${record.data.name}"` : id} (${where}): ${e.message}`);
 
     if (!entry) return lastError;
-    entry.consecutive += 1;
-    if (entry.consecutive >= MAX_CONSECUTIVE_FAILURES) {
+    if (entry.consecutive >= MAX_CONSECUTIVE_FAILURES && !entry.stopping) {
+      entry.stopping = true;
       log.warn(`Modul ${id} wird nach ${entry.consecutive} Fehlern in Folge abgeschaltet.`);
       // Fire and forget: this is called from inside a failing callback, and
       // the caller has no way to await anything.

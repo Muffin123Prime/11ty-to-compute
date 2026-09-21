@@ -240,6 +240,37 @@ function statOrNull(file) {
  *   toolbox, approvals, auth, backup, bus, audit, logger, vaultCrypto, ...}
  * @returns {Promise<{server:import('node:http').Server, listen:Function, close:Function, url:string|null}>}
  */
+
+/**
+ * A route contributed by an installed module.
+ *
+ * Deliberately simple matching: exact path, exact method. Modules get a
+ * namespace, not a routing language -- every additional feature here is
+ * another way for pasted code to intercept a request it was not meant to see.
+ */
+function findModuleRoute(ctx, method, pathname) {
+  const registry = ctx && ctx.modules;
+  if (!registry || typeof registry.routes !== 'function') return null;
+  if (!pathname.startsWith('/api/x/')) return null;
+  let list;
+  try {
+    list = registry.routes() || [];
+  } catch {
+    return null;
+  }
+  const wanted = method === 'HEAD' ? 'GET' : String(method || '').toUpperCase();
+  for (const route of list) {
+    if (!route || typeof route.handler !== 'function') continue;
+    if (String(route.method || 'GET').toUpperCase() !== wanted) continue;
+    if (route.path !== pathname) continue;
+    return {
+      params: {},
+      invoke: (rc) => route.handler(rc),
+    };
+  }
+  return null;
+}
+
 async function createServer(ctx = {}) {
   const config = ctx.config || {};
   const serverConfig = config.server || {};
@@ -891,6 +922,22 @@ async function createServer(ctx = {}) {
       if (matched && matched.route) {
         rc.params = matched.params;
         const result = await matched.route.handler(rc);
+        if (rc.handled || res.writableEnded || res.headersSent) return;
+        sendJson(rc, 200, result === undefined || result === null ? { ok: true } : result);
+        return;
+      }
+
+      // Routes from user-installed modules, consulted only AFTER every
+      // built-in route has had its chance. A module may never shadow a route
+      // whose permission check protects something -- the registry already
+      // confines them to /api/x/, and this ordering is the second lock on the
+      // same door. Looked up live, because a module can be switched on while
+      // the server is running.
+      const moduleRoute = findModuleRoute(ctx, req.method, target.pathname);
+      if (moduleRoute) {
+        rc.requireCapability('read');
+        rc.params = moduleRoute.params || {};
+        const result = await moduleRoute.invoke(rc);
         if (rc.handled || res.writableEnded || res.headersSent) return;
         sendJson(rc, 200, result === undefined || result === null ? { ok: true } : result);
         return;

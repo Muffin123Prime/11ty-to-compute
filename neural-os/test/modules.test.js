@@ -371,6 +371,30 @@ test('three errors in a row switch a module off by itself', async () => {
   }
 });
 
+test('a module that throws on the very event its own error report causes does not recurse', async () => {
+  const e = await env('mod-recursion');
+  try {
+    // The nastiest shape of this bug: recording the failure writes to the
+    // module record, which publishes record.updated, which is exactly what
+    // this handler listens to. Without a guard the stack runs out.
+    const { record } = await e.registry.install({
+      source: serverModule('Schleife', ' api.on("record.updated", () => { throw new Error("und wieder"); }); ', ['bus.listen']),
+    });
+    await e.registry.enable(record.id);
+
+    e.store.create('note', { title: 'Auslöser' });
+    e.store.update(e.store.list('note').items[0].id, { title: 'Geändert' });
+
+    const off = await until(() => !e.registry.isLoaded(record.id));
+    assert.equal(off, true, 'it ends with the module switched off, not with a stack overflow');
+    const after = e.store.get(record.id);
+    assert.equal(after.data.enabled, false);
+    assert.match(after.data.lastError.message, /und wieder/);
+  } finally {
+    await e.cleanup();
+  }
+});
+
 /* ------------------------------------------------------------ reversibility */
 
 test('install -> update -> update -> rollback to 1 -> rollback to 3', async () => {
@@ -515,6 +539,79 @@ test('status tells the truth about what is loaded, failed and off', async () => 
     assert.equal(status.disabled, 1);
     assert.equal(status.failed, 0);
     assert.equal(status.safeMode, false);
+  } finally {
+    await e.cleanup();
+  }
+});
+
+/* ------------------------------------------------------ interface modules */
+
+test('an interface module is recognised, installed and its view registered', async () => {
+  const e = await env('mod-ui');
+  try {
+    const source = [
+      'export const manifest = { name: "Wortzähler", description: "zählt Wörter", kind: "ui", capabilities: ["ui.view"] };',
+      'export default {',
+      '  id: "wortzaehler",',
+      '  title: "Wortzähler",',
+      '  icon: "<circle cx=\'10\' cy=\'10\' r=\'7\'/>",',
+      '  async mount(container, ctx) { container.textContent = "hallo"; },',
+      '  async unmount() {},',
+      '};',
+    ].join('\n');
+
+    const report = await e.registry.validate(source);
+    assert.equal(report.ok, true, JSON.stringify(report.problems));
+    assert.equal(report.kind, 'ui', 'the kind is read from the source, not guessed by the user');
+    assert.deepEqual(report.capabilities, ['ui.view']);
+
+    const { record } = await e.registry.install({ source });
+    assert.equal(record.data.kind, 'ui');
+    const enabled = await e.registry.enable(record.id);
+    assert.deepEqual(enabled.registered.views, [{
+      id: 'wortzaehler', title: 'Wortzähler', icon: "<circle cx='10' cy='10' r='7'/>", hasMount: true,
+    }]);
+    assert.equal(e.registry.tools().length, 0, 'an interface module adds nothing on the server');
+  } finally {
+    await e.cleanup();
+  }
+});
+
+test('an interface module that reaches for the browser still installs, with an honest note', async () => {
+  const e = await env('mod-ui-doc');
+  try {
+    const source = [
+      'export const manifest = { name: "Browser-Sicht", kind: "ui", capabilities: ["ui.view"] };',
+      'const vorlage = document.createElement("div");',
+      'export default { id: "bs", title: "Browser-Sicht", mount(c) { c.appendChild(vorlage); } };',
+    ].join('\n');
+
+    const report = await e.registry.validate(source);
+    assert.equal(report.ok, true, JSON.stringify(report.problems));
+    assert.equal(report.manifest.name, 'Browser-Sicht', 'the manifest is read without running the code');
+    assert.ok(
+      report.warnings.some((w) => w.code === 'UI_TOPLEVEL'),
+      'and the user is told plainly that only the browser can judge this',
+    );
+
+    const { record } = await e.registry.install({ source });
+    const enabled = await e.registry.enable(record.id);
+    assert.equal(enabled.record.data.enabled, true);
+    assert.equal(enabled.registered.views.length, 1);
+  } finally {
+    await e.cleanup();
+  }
+});
+
+test('a server capability in an interface module is named as the mistake it is', async () => {
+  const e = await env('mod-ui-caps');
+  try {
+    const report = await e.registry.validate([
+      'export const manifest = { name: "Zu viel", kind: "ui", capabilities: ["files.write"] };',
+      'export default { id: "zv", title: "Zu viel", mount() {} };',
+    ].join('\n'));
+    assert.equal(report.ok, false);
+    assert.match(report.problems.map((p) => p.message).join(' '), /Oberflächen-Modul nicht anwendbar/);
   } finally {
     await e.cleanup();
   }

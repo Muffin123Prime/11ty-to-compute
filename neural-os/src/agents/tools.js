@@ -406,6 +406,32 @@ const extract = (() => {
   }
 })();
 
+
+/**
+ * Which agent capability a module capability corresponds to.
+ *
+ * A module tool must never give an agent more reach than the agent already
+ * has. The module's own capabilities bound what its code can do; this table
+ * bounds who may trigger it. Without it, a read-only agent could call a tool
+ * from a module holding write access and perform, by proxy, exactly what its
+ * own permissions forbid -- the same privilege ladder that `subsetOf` closes
+ * for spawned agents.
+ */
+const MODULE_TO_AGENT_CAPABILITY = {
+  'records.read': 'readNotes',
+  'records.write': 'writeNotes',
+  'files.read': 'readFiles',
+  'files.write': 'writeFiles',
+};
+
+/** Network level a module holds, in the agent's own vocabulary. */
+function moduleNetworkLevel(caps) {
+  const set = new Set(caps || []);
+  if (set.has('net.online')) return 'online';
+  if (set.has('net.lan')) return 'lan';
+  return 'offline';
+}
+
 function createToolbox({ store, registry, gate, graph, paths, approvals, config, logger, audit } = {}) {
   if (!store || typeof store.create !== 'function') {
     throw new ValidationError('createToolbox benötigt einen Store.');
@@ -1115,6 +1141,74 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
   ];
 
   const byName = new Map(definitions.map((d) => [d.name, d]));
+  let moduleRegistry = null;
+
+  /**
+   * Tools contributed by installed modules, read live -- a module can be
+   * switched on while an agent run is in flight.
+   */
+  function moduleTools() {
+    if (!moduleRegistry || typeof moduleRegistry.tools !== 'function') return [];
+    try {
+      return (moduleRegistry.tools() || []).filter((t) => t && typeof t.name === 'string');
+    } catch {
+      // A broken registry must not take the built-in tools with it.
+      return [];
+    }
+  }
+
+  function moduleToolByName(name) {
+    return moduleTools().find((t) => t.name === name) || null;
+  }
+
+  /**
+   * The capabilities of the module a tool came from.
+   *
+   * The tool object itself carries only `moduleId`: the registry hands out
+   * callable tools, not a copy of the permission state, and a copy would go
+   * stale the moment the module is updated. Reading it live through the
+   * registry keeps one source of truth -- and getting this wrong is not a
+   * cosmetic bug: an empty list here silently disables the rule that a module
+   * tool may never exceed the agent calling it.
+   */
+  function capabilitiesOfModule(tool) {
+    if (Array.isArray(tool && tool.moduleCapabilities)) return tool.moduleCapabilities;
+    const id = tool && tool.moduleId;
+    if (!id || !moduleRegistry || typeof moduleRegistry.list !== 'function') return null;
+    try {
+      const entry = (moduleRegistry.list() || []).find((m) => m && m.id === id);
+      const caps = entry && (entry.capabilities || (entry.data && entry.data.capabilities));
+      return Array.isArray(caps) ? caps : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * May this agent use a tool that a module with `caps` provides?
+   * Every capability the module holds must also be one the agent holds.
+   */
+  function agentMayUseModuleTool(agent, perms, caps) {
+    // A tool whose module capabilities cannot be determined is refused. The
+    // safe default for an unknown grant is no grant; the alternative would be
+    // to hand out whatever the module happens to hold.
+    if (!Array.isArray(caps)) return { allowed: false, missing: 'unbekannte Modulrechte' };
+    const needed = [];
+    for (const cap of caps || []) {
+      const mapped = MODULE_TO_AGENT_CAPABILITY[cap];
+      if (mapped) needed.push(mapped);
+    }
+    for (const capability of needed) {
+      const verdict = permissionsMod.check(agent, capability, { permissions: perms });
+      if (!verdict.allowed) return { allowed: false, missing: capability };
+    }
+    const level = moduleNetworkLevel(caps);
+    if (level !== 'offline') {
+      const verdict = permissionsMod.check(agent, 'network', { permissions: perms, level });
+      if (!verdict.allowed) return { allowed: false, missing: `network:${level}` };
+    }
+    return { allowed: true };
+  }
 
   /**
    * Which network level an agent needs for this destination.
@@ -1166,6 +1260,16 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
     },
 
     /**
+     * Injected by the composition root once the module registry exists.
+     * Late-bound on purpose: modules load last, after everything they could
+     * touch is already in a known-good state.
+     */
+    attachModules(value) {
+      moduleRegistry = value;
+      return toolbox;
+    },
+
+    /**
      * @param {object} agent
      * @returns {Array<{name:string, description:string, parameters:object}>}
      */
@@ -1185,17 +1289,44 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
         }
         out.push({ name: def.name, description: def.description, parameters: def.parameters });
       }
+
+      for (const tool of moduleTools()) {
+        if (allowlist && !allowlist.has(tool.name)) continue;
+        if (byName.has(tool.name)) continue; // a built-in always wins
+        const verdict = agentMayUseModuleTool(agent, perms, capabilitiesOfModule(tool));
+        if (!verdict.allowed) continue;
+        out.push({
+          name: tool.name,
+          description: tool.description || '',
+          parameters: tool.parameters || { type: 'object', properties: {} },
+          fromModule: tool.moduleName || tool.module || true,
+        });
+      }
       return out;
     },
 
     /** Definition of one tool, or null. Used by the HTTP layer and the UI. */
     definition(name) {
       const def = byName.get(name);
-      return def ? { name: def.name, description: def.description, parameters: def.parameters, capability: def.capability, mutating: def.mutating } : null;
+      if (def) {
+        return { name: def.name, description: def.description, parameters: def.parameters, capability: def.capability, mutating: def.mutating };
+      }
+      const tool = moduleToolByName(name);
+      if (!tool) return null;
+      return {
+        name: tool.name,
+        description: tool.description || '',
+        parameters: tool.parameters || { type: 'object', properties: {} },
+        capability: null,
+        // Conservative: a module tool whose module may write is treated as
+        // mutating, so the approval requirement applies to it as well.
+        mutating: (capabilitiesOfModule(tool) || []).some((c) => String(c).endsWith('.write')),
+        fromModule: tool.moduleName || tool.module || true,
+      };
     },
 
     has(name) {
-      return byName.has(name);
+      return byName.has(name) || !!moduleToolByName(name);
     },
 
     /**
@@ -1221,9 +1352,35 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
         throw err;
       };
 
-      const def = byName.get(name);
+      let def = byName.get(name);
       if (!def) {
-        return fail(new NotFoundError(`Werkzeug ${name}`));
+        // A tool contributed by an installed module. It is adapted into the
+        // same definition shape so it travels the identical path: permission,
+        // approval, execute, audit. Giving module tools their own shortcut
+        // would be a second code path around the checks that matter.
+        const tool = moduleToolByName(name);
+        if (!tool) {
+          return fail(new NotFoundError(`Werkzeug ${name}`));
+        }
+        const moduleCaps = capabilitiesOfModule(tool);
+        const permsNow = permsOf(ctx);
+        const verdict = agentMayUseModuleTool(agent, permsNow, moduleCaps);
+        if (!verdict.allowed) {
+          return fail(new PermissionError(
+            `Das Werkzeug "${name}" stammt aus einer Erweiterung, die mehr darf als dieser Agent `
+            + `(fehlend: ${verdict.missing}). Ein Werkzeug darf einem Agenten nicht mehr Reichweite `
+            + 'geben, als er selbst hat.',
+          ));
+        }
+        def = {
+          name: tool.name,
+          description: tool.description || '',
+          parameters: tool.parameters || { type: 'object', properties: {} },
+          capability: null,
+          mutating: (moduleCaps || []).some((c) => String(c).endsWith('.write')),
+          fromModule: tool.moduleName || tool.module || true,
+          run: (parsedArgs, runCtx) => tool.run(parsedArgs, runCtx),
+        };
       }
 
       const data = permissionsMod.agentData(agent);

@@ -275,6 +275,12 @@ async function createApp(opts = {}) {
 
   if (sync && typeof sync.setAuth === 'function' && auth) sync.setAuth(auth);
 
+  // The toolbox is built before the module registry exists (modules load last
+  // on purpose), so the link is made here rather than at construction.
+  if (toolbox && typeof toolbox.attachModules === 'function' && modules) {
+    toolbox.attachModules(modules);
+  }
+
   const app = {
     version: VERSION,
     paths,

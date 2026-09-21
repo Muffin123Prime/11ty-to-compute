@@ -139,6 +139,16 @@ function notFound(id) {
  * later instead of a sentence naming the real problem.
  */
 function dataOf(record, id) {
+  // The registry speaks two shapes on purpose: `get()` hands back the storage
+  // envelope ({id, data}), while `list()` hands back an already-summarised flat
+  // object. Insisting on one of them here produced a 500 on the very first
+  // listing after an install -- the feature looked broken while both halves
+  // were working exactly as written. Accept both, and keep the loud error for
+  // the case that is genuinely a bug: neither shape.
+  if (record && typeof record === 'object' && (!record.data || typeof record.data !== 'object')
+      && typeof record.id === 'string' && typeof record.kind === 'string') {
+    return record;
+  }
   if (!record || typeof record !== 'object' || !record.data || typeof record.data !== 'object') {
     throw new NeuralError(
       'MODULE_RECORD_BROKEN',
@@ -182,6 +192,21 @@ function describeModule(data) {
 function summarise(record, id) {
   const data = dataOf(record, id);
   const versions = Array.isArray(data.versions) ? data.versions : [];
+  // A flat entry from registry.list() is already summarised; re-wrapping it in
+  // an envelope it never had would invent a shape nothing else expects.
+  if (data === record) {
+    return {
+      ...record,
+      versions: versions.map((entry) => ({
+        version: entry && entry.version,
+        at: (entry && entry.at) || null,
+        note: (entry && entry.note) || '',
+        bytes: entry && typeof entry.source === 'string'
+          ? Buffer.byteLength(entry.source, 'utf8')
+          : (entry && entry.bytes) || 0,
+      })),
+    };
+  }
   return {
     ...record,
     data: {
@@ -276,7 +301,7 @@ function register(router) {
       items,
       total: items.length,
       status: typeof registry.status === 'function' ? registry.status() : null,
-      descriptions: Object.fromEntries(items.map((item) => [item.id, describeModule(item.data)])),
+      descriptions: Object.fromEntries(items.map((item) => [item.id, describeModule(dataOf(item, item.id))])),
     };
   });
 

@@ -50,7 +50,6 @@
  */
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const crypto = require('node:crypto');
@@ -319,9 +318,14 @@ function rmrf(target) {
   try { fs.rmSync(target, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
-function excludedBy(name, set) {
+/**
+ * `dropLogs` is off for a data backup on purpose: `*.log` is noise in a source
+ * tree but it is the user's own file in their home directory, and a backup
+ * that quietly leaves files behind is not a backup.
+ */
+function excludedBy(name, set, dropLogs) {
   if (set.has(name)) return true;
-  return name.endsWith('.log');
+  return dropLogs && name.endsWith('.log');
 }
 
 /**
@@ -335,7 +339,7 @@ function excludedBy(name, set) {
  * directory link is how a copy turns into an infinite loop, and a stick is not
  * the place to find that out.
  */
-function collectTree(root, { exclude = EXCLUDED_NAMES } = {}) {
+function collectTree(root, { exclude = EXCLUDED_NAMES, dropLogs = true } = {}) {
   const files = [];
   const warnings = [];
   let bytes = 0;
@@ -363,7 +367,7 @@ function collectTree(root, { exclude = EXCLUDED_NAMES } = {}) {
       return;
     }
     for (const entry of entries) {
-      if (excludedBy(entry.name, exclude)) continue;
+      if (excludedBy(entry.name, exclude, dropLogs)) continue;
       const abs = path.join(dir, entry.name);
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
 
@@ -926,7 +930,17 @@ function createStick(deps = {}) {
     if (typeof targetDir !== 'string' || !targetDir.trim()) {
       throw new ValidationError(`${what} braucht den Pfad zum Stick (z. B. /media/usb oder E:\\).`);
     }
-    return path.resolve(targetDir);
+    const root = path.resolve(targetDir);
+    // Without this, mkdir on a regular file raises a bare EEXIST later on.
+    try {
+      if (fs.existsSync(root) && !fs.statSync(root).isDirectory()) {
+        throw new ValidationError(`${root} ist eine Datei, kein Ordner. Gib den Ordner des Sticks an.`);
+      }
+    } catch (err) {
+      if (err instanceof ValidationError) throw err;
+      // An unreadable path is reported by the operation that needs it.
+    }
+    return root;
   }
 
   function requireStick(root, what) {
@@ -1017,6 +1031,15 @@ function createStick(deps = {}) {
     return spec ? path.join(runtimeDir(root, platform), spec.file) : null;
   }
 
+  /** Remnants of a download that was interrupted. Nothing ever read from them. */
+  function dropRuntimeScraps(dir) {
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        if (STALE_RE.test(name)) rmrf(path.join(dir, name));
+      }
+    } catch { /* the directory may not exist yet */ }
+  }
+
   /**
    * Copy the running interpreter onto the stick. No network, no download, no
    * conditions -- this is what makes the stick work on the next machine of the
@@ -1033,6 +1056,7 @@ function createStick(deps = {}) {
     }
     const dir = runtimeDir(root, LOCAL_PLATFORM);
     mkdirp(dir);
+    dropRuntimeScraps(dir);
     const target = runtimeBinary(root, LOCAL_PLATFORM);
     const tmp = path.join(dir, `.${path.basename(target)}.tmp-${randomSuffix()}`);
     try {
@@ -1212,6 +1236,7 @@ function createStick(deps = {}) {
 
     const dir = runtimeDir(root, platform);
     mkdirp(dir);
+    dropRuntimeScraps(dir);
     const target = runtimeBinary(root, platform);
     const tmp = path.join(dir, `.${spec.file}.tmp-${randomSuffix()}`);
     try {
@@ -1285,7 +1310,7 @@ function createStick(deps = {}) {
       if (isInside(homeDir, root) || isInside(root, homeDir)) {
         throw new ValidationError(`Der Datenordner ${homeDir} und der Stick-Ordner ${root} duerfen nicht ineinander liegen.`);
       }
-      home = collectTree(homeDir, { exclude: HOME_EXCLUDED_NAMES });
+      home = collectTree(homeDir, { exclude: HOME_EXCLUDED_NAMES, dropLogs: false });
       warnings.push(...home.warnings);
     }
 
