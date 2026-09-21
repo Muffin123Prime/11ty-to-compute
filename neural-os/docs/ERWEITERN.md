@@ -146,7 +146,8 @@ module.exports = {
       description: 'Listet alle Aufgaben, die noch nicht erledigt sind.',
       parameters: { type: 'object', properties: {} },
       run() {
-        const tasks = api.records.list('task').items
+        // api.records.list(typ) liefert direkt eine Liste, kein { items }.
+        const tasks = api.records.list('task')
           .filter((t) => t.data.status !== 'done')
           .map((t) => ({ id: t.id, titel: t.data.title, status: t.data.status }));
         return { anzahl: tasks.length, aufgaben: tasks };

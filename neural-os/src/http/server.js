@@ -265,7 +265,33 @@ function findModuleRoute(ctx, method, pathname) {
     if (route.path !== pathname) continue;
     return {
       params: {},
-      invoke: (rc) => route.handler(rc),
+      async invoke(rc) {
+        try {
+          return await route.handler(rc);
+        } catch (err) {
+          // A fault inside pasted code is the module's, not Neural OS's.
+          // Reporting it as INTERNAL_ERROR sends the user hunting for a bug in
+          // the application while the line they need to fix is in their own
+          // editor -- and the message says which module and which address.
+          const e = asNeuralError(err);
+          if (e.code === 'MODULE_ERROR') throw e;
+          throw new NeuralError(
+            'MODULE_ERROR',
+            `Die Erweiterung "${route.moduleName || route.moduleId || 'unbekannt'}" ist bei `
+            + `${route.method} ${route.path} gescheitert: ${e.message}`,
+            {
+              status: 500,
+              details: {
+                moduleId: route.moduleId || null,
+                moduleName: route.moduleName || null,
+                where: `${route.method} ${route.path}`,
+                line: (e.details && e.details.line) || null,
+                hinweis: 'In der Werkstatt lässt sich die Erweiterung abschalten oder auf eine frühere Fassung zurücksetzen.',
+              },
+            },
+          );
+        }
+      },
     };
   }
   return null;

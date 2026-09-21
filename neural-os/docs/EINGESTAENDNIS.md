@@ -80,6 +80,19 @@ grün" und „die Funktion ist erreichbar" sind zwei verschiedene Aussagen.** Di
 Tests der semantischen Suche waren die ganze Zeit grün. Sie testeten ein Modul,
 das kein Nutzer je hätte aufrufen können.
 
+## 2b. Warum es `npm run check` gibt
+
+Weil „alle Tests grün" in diesem Projekt mehr als einmal nicht bedeutet hat,
+dass die Sache funktioniert. Die Testsuite prüft, ob jedes Modul tut, was beim
+Schreiben gemeint war. Sie prüft nicht, ob die Teile zusammen ein Produkt
+ergeben.
+
+`npm run check` geht durch dieselben Türen wie du: laufender Server, echte
+Schnittstelle, echter Vault. Beim allerersten Lauf fand er sofort zwei echte
+Defekte — eine Modul-Route, die mit HTTP 500 antwortete, und einen Fehler in
+meiner eigenen Dokumentation. Was er nicht prüfen kann, meldet er als
+„unklar", niemals als bestanden.
+
 ## 3. Was ich nicht überprüfen konnte
 
 Ehrlich ist hier wichtiger als vollständig.
@@ -211,6 +224,8 @@ ich stehe:
 Solltest du auch nicht. Prüf es:
 
 ```bash
+npm run check                  # jede einzelne Funktion, über die echte
+                               # Schnittstelle, gegen einen echten Vault
 npm test                       # die gesamte Testsuite
 npm run proof                  # der Offline-Beweis auf deiner Maschine
 npm run doctor                 # was geladen ist und was fehlt

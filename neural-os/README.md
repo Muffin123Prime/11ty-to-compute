@@ -85,7 +85,9 @@ npm run doctor
 
 ```bash
 npm start                       # Server starten (Standard: 127.0.0.1:7777)
-npm run doctor                  # ehrlicher Statusbericht: was geht, was fehlt
+npm run check                   # jede Funktion durchprüfen und ehrlich berichten
+npm run doctor                  # Statusbericht: was geht, was fehlt
+npm run proof                   # Offline-Beweis
 npm test                        # Testsuite
 
 node bin/neural-os.js export --format both     # vollständige Sicherung

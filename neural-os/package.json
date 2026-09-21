@@ -18,7 +18,8 @@
     "test": "node test/run.js",
     "doctor": "node bin/neural-os.js doctor",
     "export": "node bin/neural-os.js export",
-    "proof": "node tools/offline-proof.js"
+    "proof": "node tools/offline-proof.js",
+    "check": "node tools/feature-check.js"
   },
   "dependencies": {},
   "devDependencies": {}
