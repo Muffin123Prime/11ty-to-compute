@@ -26,7 +26,7 @@ const { ValidationError } = require('../kernel/errors');
 const GRAPH_TYPES = ['note', 'chat', 'project', 'task', 'agent', 'file', 'entity', 'run'];
 
 /** All record types, including non-graph bookkeeping types. */
-const TYPES = [...GRAPH_TYPES, 'message', 'edge', 'memory', 'approval', 'grant', 'token', 'peer', 'conflict', 'module'];
+const TYPES = [...GRAPH_TYPES, 'message', 'edge', 'memory', 'approval', 'grant', 'token', 'peer', 'conflict', 'module', 'suggestion', 'schedule', 'trigger'];
 
 /**
  * Edge kinds. `source` distinguishes user intent from machine inference:
@@ -265,6 +265,71 @@ const FIELDS = {
     failures: { type: 'number', default: 0 },
     author: { type: 'string', default: '' },
     builtin: { type: 'boolean', default: false },
+  },
+  /**
+   * Something the system noticed and thinks you might want to do.
+   *
+   * Suggestions are never applied on their own. That is the whole point: an
+   * assistant that quietly edits your notes is one you have to audit, and
+   * auditing is more work than doing it yourself. Every suggestion carries
+   * what it would change and why, and waits.
+   */
+  suggestion: {
+    kind: { type: 'string', required: true }, // duplicate | orphan | tag | task | revisit | link | distill
+    title: { type: 'string', required: true },
+    detail: { type: 'string', default: '' },
+    /** Why the system thinks so, in the user's language. */
+    reason: { type: 'string', default: '' },
+    /** Records this is about. First one is the subject. */
+    recordIds: { type: 'string[]', default: [] },
+    /** What pressing "übernehmen" would do. Inspectable before accepting. */
+    action: { type: 'object', nullable: true, default: null },
+    confidence: { type: 'number', default: 0.5 },
+    status: { type: 'string', default: 'open', enum: ['open', 'accepted', 'dismissed', 'stale'] },
+    source: { type: 'string', default: 'assist' }, // assist | agent | module
+    decidedAt: { type: 'string', nullable: true, default: null },
+  },
+  /**
+   * An agent that runs on a clock.
+   *
+   * Deliberately coarse (daily/weekly/hourly rather than cron): a personal
+   * system does not need minute-level scheduling, and a cron field is a
+   * reliable way to make people run something 1 440 times a day by accident.
+   */
+  schedule: {
+    agentId: { type: 'string', required: true },
+    goal: { type: 'string', default: '' },
+    every: { type: 'string', default: 'daily', enum: ['hourly', 'daily', 'weekly'] },
+    /** Hour of day 0-23 for daily/weekly; weekday 0-6 for weekly. */
+    atHour: { type: 'number', default: 8 },
+    onWeekday: { type: 'number', default: 1 },
+    enabled: { type: 'boolean', default: false },
+    lastRunAt: { type: 'string', nullable: true, default: null },
+    lastRunId: { type: 'string', nullable: true, default: null },
+    nextRunAt: { type: 'string', nullable: true, default: null },
+    lastError: { type: 'string', nullable: true, default: null },
+    runs: { type: 'number', default: 0 },
+  },
+  /**
+   * An agent that runs when something happens.
+   *
+   * `debounceMs` is not a nicety: without it, an agent that writes a note in
+   * response to a note being written invites an infinite loop, and the user
+   * discovers it as a full disk.
+   */
+  trigger: {
+    agentId: { type: 'string', required: true },
+    goal: { type: 'string', default: '' },
+    on: { type: 'string', default: 'record.created', enum: ['record.created', 'record.updated', 'record.deleted'] },
+    recordType: { type: 'string', nullable: true, default: null },
+    tag: { type: 'string', nullable: true, default: null },
+    titleContains: { type: 'string', nullable: true, default: null },
+    enabled: { type: 'boolean', default: false },
+    debounceMs: { type: 'number', default: 5000 },
+    maxPerHour: { type: 'number', default: 12 },
+    firedAt: { type: 'string', nullable: true, default: null },
+    fires: { type: 'number', default: 0 },
+    lastError: { type: 'string', nullable: true, default: null },
   },
   token: {
     label: { type: 'string', required: true },
