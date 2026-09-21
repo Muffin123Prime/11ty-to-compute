@@ -179,8 +179,8 @@ function register(router) {
     // record -- slower than the import itself, and pointless: one reindex
     // afterwards produces exactly the same index.
     const run = () => backup.importAll({ dir: dir || undefined, file: file || undefined, mode });
-    const result = typeof rc.ctx.withoutIndexing === 'function'
-      ? await rc.ctx.withoutIndexing(run)
+    const result = typeof rc.ctx.bulkWrite === 'function'
+      ? await rc.ctx.bulkWrite(run)
       : await run();
     audit(rc, 'backup.import', { dir, file, mode, imported: result.imported });
     return result;

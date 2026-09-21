@@ -386,16 +386,32 @@ async function createApp(opts = {}) {
     server: null,
 
     /**
-     * Run `fn` without feeding every write to the embedding model.
-     * Bulk writers (import, restore) use this and then reindex once.
+     * Einen Massenschreibvorgang ausführen: Import, Wiederherstellung.
+     *
+     * Zwei Dinge werden dabei ausgesetzt, aus zwei verschiedenen Gründen:
+     *
+     * - **Die Einbettungen.** 50 000 Sätze wären 50 000 Modellaufrufe und
+     *   50 000 Indexschreibvorgänge -- langsamer als der Import selbst und
+     *   sinnlos, weil ein `reindexAll()` danach dasselbe Ergebnis liefert.
+     * - **Das Änderungsjournal.** Es ist begrenzt (2000 Einträge). Ein Import
+     *   würde es vollständig füllen und damit genau das verdrängen, wofür es
+     *   da ist: deine letzten echten Änderungen. Und „einen einzelnen Satz aus
+     *   einem Import zurücknehmen" bedeutet ohnehin nichts -- wer einen Import
+     *   rückgängig machen will, spielt die vorige Sicherung ein.
      */
-    async withoutIndexing(fn) {
+    async bulkWrite(fn) {
       indexingSuspended++;
       try {
+        if (history && typeof history.suspend === 'function') return await history.suspend(fn);
         return await fn();
       } finally {
         indexingSuspended = Math.max(0, indexingSuspended - 1);
       }
+    },
+
+    /** Früherer Name von `bulkWrite`. Bleibt, damit nichts still bricht. */
+    async withoutIndexing(fn) {
+      return app.bulkWrite(fn);
     },
 
     /** Persist a changed configuration and apply what can be applied live. */

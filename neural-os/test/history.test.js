@@ -222,6 +222,50 @@ test('ohne Kontext bleibt der Stempel am Satz die Rueckfallantwort', async () =>
   });
 });
 
+/**
+ * Ein Massenimport darf den Verlauf nicht leerfegen.
+ *
+ * Das Journal ist begrenzt. Eine zurueckgespielte Sicherung schreibt
+ * Zehntausende Saetze -- ohne Aussetzen waere danach genau das weg, wofuer der
+ * Verlauf da ist: die letzten echten Aenderungen, verdraengt von einem Import,
+ * bei dem "einen einzelnen Satz zuruecknehmen" ohnehin nichts bedeutet.
+ */
+test('ein Massenschreibvorgang faellt nicht ins Journal und verdraengt nichts', async () => {
+  await withHistory('nos-history-bulk', async ({ store, history }) => {
+    const wichtig = store.create('note', { title: 'Wichtige Notiz', body: 'Original' });
+    store.update(wichtig.id, { body: 'Von mir geändert' });
+    const vorher = history.list({}).total;
+    assert.equal(vorher, 2);
+
+    await history.suspend(async () => {
+      for (let i = 0; i < 200; i++) store.create('note', { title: `Import ${i}`, body: 'Aus einer Sicherung' });
+    });
+
+    const nachher = history.list({});
+    assert.equal(nachher.total, vorher, 'der Import steht im Journal');
+    assert.ok(nachher.items.some((e) => e.id === wichtig.id && e.op === 'update'),
+      'die echte Änderung wurde verdrängt');
+
+    // Und danach zeichnet es wieder auf.
+    store.update(wichtig.id, { body: 'Noch einmal geändert' });
+    assert.equal(history.list({}).total, vorher + 1, 'nach dem Import wird nichts mehr aufgezeichnet');
+  });
+});
+
+test('suspend stellt den vorherigen Zustand wieder her, auch bei einem Fehler', async () => {
+  await withHistory('nos-history-bulk-throw', async ({ store, history }) => {
+    await assert.rejects(history.suspend(async () => {
+      store.create('note', { title: 'Waehrend des Imports' });
+      throw new Error('Import abgebrochen');
+    }), /abgebrochen/);
+    // Der Abbruch darf das Journal nicht dauerhaft stumm schalten.
+    store.create('note', { title: 'Danach' });
+    const items = history.list({}).items;
+    assert.ok(items.some((e) => e.label.includes('Danach')), 'das Journal blieb stumm');
+    assert.ok(!items.some((e) => e.label.includes('Waehrend des Imports')), 'der Import kam doch hinein');
+  });
+});
+
 test('bookkeeping types are never journalled', async () => {
   await withHistory('history-skip', async ({ store, history }) => {
     const a = store.create('note', { title: 'A' });

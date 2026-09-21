@@ -778,6 +778,31 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
     }
   }
 
+  /**
+   * Einen Massenschreibvorgang am Journal vorbeiführen.
+   *
+   * Eine Sicherung zurückzuspielen erzeugt Zehntausende Schreibvorgänge. Ohne
+   * dies wären das Zehntausende Journaleinträge -- und weil das Journal
+   * begrenzt ist, wäre danach genau das weg, wofür es da ist: deine letzten
+   * echten Änderungen, verdrängt von einem Import, bei dem „einen einzelnen
+   * Satz zurücknehmen" ohnehin nichts bedeutet. Wer einen Import rückgängig
+   * machen will, spielt die vorige Sicherung ein; dafür ist sie da.
+   *
+   * Nimmt auch eine asynchrone Funktion, im Gegensatz zu
+   * `withoutJournalling()`: ein Import ist asynchron, und dass währenddessen
+   * eine fremde Änderung durchrutscht, ist hier hinnehmbar -- beim
+   * Rückgängigmachen wäre es das nicht.
+   */
+  async function suspend(fn) {
+    const zuvor = suppressed;
+    suppressed = true;
+    try {
+      return await fn();
+    } finally {
+      suppressed = zuvor;
+    }
+  }
+
   async function undo(entryId, opts = {}) {
     const entry = findEntry(entryId);
     const force = isPlainObject(opts) && opts.force === true;
@@ -909,6 +934,7 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
     list,
     stats,
     undo,
+    suspend,
 
     /** One entry with its undoability, for a UI that already knows the id. */
     get(entryId) {

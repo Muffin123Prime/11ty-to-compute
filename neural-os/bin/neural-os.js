@@ -293,7 +293,7 @@ async function cmdImport(flags, args) {
     if (!app.backup) throw new Error('Backup-Subsystem nicht verfügbar');
     const mode = typeof flags.mode === 'string' ? flags.mode : 'merge';
     const run = () => app.backup.importAll({ dir: source, mode });
-    const res = typeof app.withoutIndexing === 'function' ? await app.withoutIndexing(run) : await run();
+    const res = typeof app.bulkWrite === 'function' ? await app.bulkWrite(run) : await run();
     console.log(`${G}✓${X} ${res.imported} übernommen, ${res.skipped} übersprungen, ${res.conflicts ? res.conflicts.length || res.conflicts : 0} Konflikte`);
     return 0;
   } finally {
