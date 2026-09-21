@@ -117,12 +117,26 @@ ausschließlich `127.0.0.1`.
 - **Zeitachse** als zweite Perspektive aufs Gehirn: Spuren je Typ, Zoomstufen
   Tag/Woche/Monat/Jahr, Auswahl eines Zeitraums mit Sprung in den Graphen.
 
-### Nicht gebaut
-- **Sprachein- und -ausgabe, Bildverarbeitung, Plugin-System.**
-- **Texterkennung (OCR)** für gescannte PDFs.
+### Nicht gebaut — und warum
+
+- **Code ausführen.** Agenten können Quelltext lesen, schreiben und darüber
+  reden, aber nichts starten. Ein Sprachmodell, das Befehle auf deinem Rechner
+  ausführen darf, ist eine andere Klasse von Risiko als alles andere hier; das
+  gehört hinter eine echte Sandbox (Container, eigener Benutzer), nicht hinter
+  `node:vm`. Über die Werkstatt lässt sich ein Werkzeug dafür nachrüsten, wenn
+  du es bewusst willst.
+- **Sprachein- und -ausgabe.** Braucht Whisper und ein TTS-Modell — zwei
+  weitere Downloads und eine Audio-Pipeline.
+- **Bilder verstehen.** Braucht ein Vision-Modell (llava, qwen-vl). Die
+  Provider-Schnittstelle könnte es, die Oberfläche kann es nicht.
+- **Texterkennung (OCR)** für gescannte PDFs. Ein gescanntes PDF ohne
+  Textebene liefert deshalb eine ehrliche Warnung statt erfundenem Text.
 - **Mobil-App.** Die Oberfläche läuft im Browser eines Tablets, ist aber für
   den Laptop gebaut — und iPadOS kann den Server selbst nicht ausführen
   (siehe `docs/ANLEITUNG.md`).
+
+Ein **Plugin-System** stand hier früher als „nicht gebaut". Es existiert
+inzwischen: die Werkstatt (`docs/ERWEITERN.md`).
 
 ## Sicherheitsaudit
 
