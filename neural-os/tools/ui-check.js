@@ -33,7 +33,6 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
 
 const G = '\u001b[32m'; const R = '\u001b[31m'; const Y = '\u001b[33m';
 const D = '\u001b[2m'; const B = '\u001b[1m'; const X = '\u001b[0m';
@@ -61,39 +60,7 @@ function check(condition, what, detail) {
   if (condition) ok(what, detail); else bad(what, detail);
 }
 
-/**
- * Playwright wird dort gesucht, wo npm global installiert -- nicht per
- * `require` aus dem Projekt, denn dort gibt es bewusst kein node_modules.
- */
-function findPlaywright() {
-  const candidates = [];
-  try {
-    const root = execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim();
-    if (root) candidates.push(path.join(root, 'playwright', 'index.mjs'));
-  } catch { /* npm nicht erreichbar -- die festen Pfade unten bleiben */ }
-  candidates.push('/opt/node22/lib/node_modules/playwright/index.mjs');
-  candidates.push('/usr/lib/node_modules/playwright/index.mjs');
-  candidates.push('/usr/local/lib/node_modules/playwright/index.mjs');
-  return candidates.find((p) => fs.existsSync(p)) || null;
-}
-
-/** Den mitgelieferten Chromium finden, ohne etwas herunterzuladen. */
-function findChromium() {
-  const roots = [process.env.PLAYWRIGHT_BROWSERS_PATH, '/opt/pw-browsers',
-    path.join(os.homedir(), '.cache', 'ms-playwright')].filter(Boolean);
-  for (const root of roots) {
-    let entries = [];
-    try { entries = fs.readdirSync(root); } catch { continue; }
-    for (const entry of entries.filter((e) => e.startsWith('chromium')).sort().reverse()) {
-      for (const rel of [['chrome-linux', 'chrome'], ['chrome-linux', 'headless_shell'],
-        ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium']]) {
-        const full = path.join(root, entry, ...rel);
-        if (fs.existsSync(full)) return full;
-      }
-    }
-  }
-  return null;
-}
+const { findPlaywright, findChromium } = require('./lib/browser');
 
 async function main() {
   const args = process.argv.slice(2);

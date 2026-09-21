@@ -6,3 +6,6 @@ vault/
 exports/
 secrets.json
 audit.jsonl
+
+# Bildschirmfotos aus tools/screenshots.js -- jederzeit neu erzeugbar.
+screenshots/
