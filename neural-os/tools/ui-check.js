@@ -322,8 +322,59 @@ async function main() {
       }
     }
 
-    /* ------------------------ 6. Schnellerfassung von ueberall aus */
-    console.log(`\n${B}6 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
+    /* --------------------------- 6. Heute: abhaken wirkt im Tresor */
+    console.log(`\n${B}6 · „Heute" zeigt Tatsachen und lässt handeln${X}`);
+    const gestern = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    const faellig = store.create('task', { title: 'Mühle entkalken', due: gestern, priority: 1 });
+    const { withActor: alsAgent } = require('../src/kernel/actor');
+    const meine = store.create('note', { title: 'Meine Notiz', body: 'Von mir' });
+    await alsAgent({ kind: 'agent', runId: 'run_nacht', agentId: 'agent_nacht' }, async () => {
+      store.update(meine.id, { body: 'Vom Nachtlauf ergänzt' });
+    });
+    await store.flush();
+
+    await page.goto(`${base}/#/today`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(900);
+    await dismissWelcome(page);
+    await page.waitForTimeout(600);
+    const heuteText = await page.locator('main').innerText();
+    check(/überfällig/i.test(heuteText), 'Überfälliges wird als solches benannt');
+    check(/Ohne dich/i.test(heuteText) && /Meine Notiz/.test(heuteText),
+      'Was ohne dich lief, steht als eigener Block da');
+
+    // Ueber das aria-label, nicht ueber eine Klasse: so prueft der Test
+    // zugleich, dass der Knopf fuer einen Screenreader beschriftet ist.
+    const haken = page.getByRole('button', { name: /Mühle entkalken.*abhaken/ });
+    if (await haken.count()) await haken.first().click();
+    else bad('Der Abhak-Knopf trägt eine verständliche Beschriftung');
+    await page.waitForTimeout(1400);
+    check(store.get(faellig.id).data.status === 'done', 'Eine Aufgabe lässt sich von hier aus abhaken',
+      `im Tresor: ${store.get(faellig.id).data.status}`);
+
+    /* ------------------------------- 7. Lernen: bewerten wirkt im Tresor */
+    console.log(`\n${B}7 · „Lernen" rechnet den nächsten Termin wirklich aus${X}`);
+    const karte = store.create('card', { front: 'Was ist Crema?', back: 'Die Schaumschicht.' });
+    await store.flush();
+    await page.goto(`${base}/#/study`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(1000);
+    const vorne = await page.locator('main').innerText();
+    check(/Was ist Crema/.test(vorne), 'Die Karte wird gezeigt');
+    await page.keyboard.press('Space');
+    await page.waitForTimeout(600);
+    const hinten = await page.locator('main').innerText();
+    check(/Schaumschicht/.test(hinten), 'Die Leertaste zeigt die Rückseite');
+    // "heute", "morgen", "in 6 Tagen" -- der Server liefert den Text, damit
+    // Oberflaeche und Rechnung nicht auseinanderlaufen koennen.
+    check(/heute|morgen|Tag|Woche|Monat/i.test(hinten), 'Die Knöpfe sagen, wann die Karte wiederkommt',
+      hinten.replace(/\s+/g, ' ').slice(0, 120));
+    await page.keyboard.press('3');
+    await page.waitForTimeout(1300);
+    const danach = store.get(karte.id).data;
+    check(danach.reps === 1 && !!danach.due, 'Eine Bewertung landet wirklich im Tresor',
+      `reps=${danach.reps} due=${danach.due} ease=${danach.ease}`);
+
+    /* ------------------------ 8. Schnellerfassung von ueberall aus */
+    console.log(`\n${B}8 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
     // Absichtlich aus dem Gehirn heraus: der ganze Sinn ist, dass man nicht
     // erst irgendwohin navigieren muss.
     await page.goto(`${base}/#/graph`, { waitUntil: 'domcontentloaded' });
