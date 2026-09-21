@@ -626,6 +626,9 @@ test('Die Route hält den vereinbarten Vertrag -- auch ohne Modell', async () =>
     const nurNotizen = await request(base, 'POST', `/api/notes/${kaffee.id}/second-look`, { types: ['note'] });
     assert.equal(nurNotizen.status, 200, nurNotizen.text);
 
+    const leereListe = await request(base, 'POST', `/api/notes/${kaffee.id}/second-look`, { types: [] });
+    assert.equal(leereListe.status, 400, 'eine leere Liste ist keine Auswahl und wird auch nicht als eine gelesen');
+
     const ohneTeilsystem = await request(blindBase, 'POST', `/api/notes/${kaffee.id}/second-look`);
     assert.equal(ohneTeilsystem.status, 503, ohneTeilsystem.text);
     assert.match(ohneTeilsystem.json.error.message, /zweite Blick/);

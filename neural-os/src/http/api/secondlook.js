@@ -87,6 +87,9 @@ function register(router) {
       ? undefined
       : requireStringArray(body.types, 'types', { maxItems: 12, max: 40 });
     if (types) {
+      // Eine leere Liste stillschweigend als "dann eben alle" zu lesen wäre
+      // die kleine Sorte Unwahrheit, an der man später lange sucht.
+      if (!types.length) throw new ValidationError('"types" darf keine leere Liste sein.');
       for (const type of types) {
         if (!SEARCH_TYPES.includes(type)) {
           throw new ValidationError(
