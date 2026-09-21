@@ -135,7 +135,6 @@ export default {
       dom: {},
 
       mode: 'laden',        // laden | fehler | lernen | fertig | leer | anlegen | notiz
-      renderedMode: null,
       error: null,
       stats: null,
 
@@ -309,7 +308,6 @@ function render(self) {
   renderHead(self);
   const { dom } = self;
   clear(dom.body);
-  self.renderedMode = self.mode;
 
   switch (self.mode) {
     case 'laden':
@@ -405,7 +403,7 @@ function renderDone(self) {
     h('p', null, text(`${formatNumber(self.answered.size)} ${plural(self.answered.size, 'Karte', 'Karten')} beantwortet.`)));
 
   if (self.again > 0) {
-    box.appendChild(h('p', null, text(`${formatNumber(self.again)} davon ${plural(self.again, 'kam', 'kamen')} noch einmal — „Nochmal" heißt heute.`)));
+    box.appendChild(h('p', null, text(`${formatNumber(self.again)} davon ${plural(self.again, 'kam', 'kamen')} noch einmal — „Nochmal“ heißt heute.`)));
   }
   box.appendChild(h('p', null, text(self.naechste
     ? `Die nächste Karte ist ${dayLabel(self.naechste)} fällig.`
@@ -707,6 +705,10 @@ async function loadProposals(self, note, into) {
     }
     return;
   }
+
+  // Auch wenn es Vorschlaege gibt, kann der Server etwas zu sagen haben --
+  // etwa dass es zu jedem von ihnen schon eine Karte gibt.
+  if (proposal.hinweis) into.appendChild(h('p.meta', null, text(proposal.hinweis)));
 
   const checks = new Map();
   const listNode = h('ul.studyv__proposalList', { role: 'list' });

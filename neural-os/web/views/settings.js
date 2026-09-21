@@ -47,6 +47,8 @@ const ICONS = {
   copy: '<rect x="6.6" y="6.6" width="9" height="9" rx="2"/><path d="M13 4.4H6.2a1.8 1.8 0 0 0-1.8 1.8V13"/>',
   trash: '<path d="M4.6 5.8h10.8M8.2 5.8V4.2h3.6v1.6M6.2 5.8l.7 9.4a1.4 1.4 0 0 0 1.4 1.3h3.4a1.4 1.4 0 0 0 1.4-1.3l.7-9.4"/>',
   download: '<path d="M10 3.4v9.2M6.2 9l3.8 3.8L13.8 9M4 16.2h12"/>',
+  folder: '<path d="M3 6.4a1.6 1.6 0 0 1 1.6-1.6h2.9l1.6 2h6.3A1.6 1.6 0 0 1 17 8.4v6.2a1.6 1.6 0 0 1-1.6 1.6H4.6A1.6 1.6 0 0 1 3 14.6z"/>',
+  eye: '<path d="M1.8 10S4.8 4.8 10 4.8 18.2 10 18.2 10 15.2 15.2 10 15.2 1.8 10 1.8 10Z"/><circle cx="10" cy="10" r="2.1"/>',
 };
 
 const THEMES = [
@@ -170,6 +172,11 @@ export default {
       remoteTests: new Map(), // id -> the last real test result, never a guess
       tokens: [],
       tokensError: null,
+      watch: null,
+      watchError: null,
+      watchLogs: new Map(),  // id -> das echte Protokoll, oder der Fehler dabei
+      watchScans: new Map(), // id -> das letzte echte Ergebnis, nie geraten
+      watchOpen: new Set(),  // welche Protokolle aufgeklappt sind
 
       freshToken: null, // {token, record} -- shown exactly once
       busy: {},          // keyed flags for long-running buttons
@@ -184,7 +191,7 @@ export default {
 
     buildLayout(self);
     subscribe(self);
-    await Promise.all([loadStatus(self), loadConfig(self), loadModels(self), loadRemote(self), loadTokens(self)]);
+    await Promise.all([loadStatus(self), loadConfig(self), loadModels(self), loadRemote(self), loadTokens(self), loadWatch(self)]);
     if (!self.alive) return;
     renderAll(self);
   },
@@ -297,6 +304,28 @@ async function loadTokens(self) {
   }
 }
 
+/**
+ * Die beobachteten Ordner.
+ *
+ * Wie bei den Online-Anbietern ist ein 403 hier eine Antwort und kein
+ * Ausfall: nur die Eigentümerin darf einen Ordner anlegen oder einschalten,
+ * denn ein Gast, der einen Pfad auf diesem Rechner freigeben kann, hat die
+ * ganze Platte gelesen. Und ein 503 heißt, dass dieser Teil in dieser
+ * Installation gar nicht eingerichtet ist -- das steht dann genau so da.
+ */
+async function loadWatch(self) {
+  try {
+    const result = await request(self, (signal) => self.api.get('/watch', { signal }));
+    if (!self.alive) return;
+    self.watch = result;
+    self.watchError = null;
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.watch = null;
+    self.watchError = err;
+  }
+}
+
 function subscribe(self) {
   const { ctx } = self;
   if (!ctx.bus || typeof ctx.bus.on !== 'function') return;
@@ -349,6 +378,7 @@ function buildLayout(self) {
   dom.vault = h('div.stack');
   dom.encryption = h('div.stack');
   dom.backup = h('div.stack');
+  dom.watch = h('div.stack');
   dom.sharing = h('div.stack');
   dom.models = h('div.stack');
   dom.remote = h('div.stack');
@@ -357,7 +387,7 @@ function buildLayout(self) {
   dom.refreshButton = h('button.btn.btn--small', {
     type: 'button',
     onClick: async () => {
-      await Promise.all([loadStatus(self), loadConfig(self), loadModels(self), loadRemote(self), loadTokens(self)]);
+      await Promise.all([loadStatus(self), loadConfig(self), loadModels(self), loadRemote(self), loadTokens(self), loadWatch(self)]);
       if (self.alive) renderAll(self);
     },
   }, icon(ICONS.refresh), text('Neu laden'));
@@ -373,6 +403,11 @@ function buildLayout(self) {
       section('Tresor', 'Wo deine Daten liegen und wie viel Platz sie brauchen.', dom.vault),
       section('Verschlüsselung', null, dom.encryption),
       section('Sicherung', 'Export und Import deiner vollständigen Daten.', dom.backup),
+      section('Beobachtete Ordner',
+        'Ein freigegebener Ordner wird gelesen, und was darin auftaucht, landet als Datei im Tresor. '
+        + 'Gelesen wird nur \u2013 im Ordner selbst wird nichts gel\u00f6scht und nichts ge\u00e4ndert. '
+        + 'Jeder Ordner hat einen Schalter, und unter \u201eWas wurde aufgenommen\u201c steht jede einzelne Datei.',
+        dom.watch),
       section('Freigabe im lokalen Netz', null, dom.sharing),
       section('Modelle', 'Welche Modell-Backends gefunden wurden und welches als Vorgabe dient.', dom.models),
       section('Online-Modelle',
@@ -393,6 +428,7 @@ function renderAll(self) {
   renderVault(self);
   renderEncryption(self);
   renderBackup(self);
+  renderWatch(self);
   renderSharing(self);
   renderModels(self);
   renderRemote(self);
@@ -1316,6 +1352,397 @@ async function allowRemoteHost(self, item) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Beobachtete Ordner                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Ein Ordner, der still Dinge in den Tresor schiebt, wäre genau die
+ * unsichtbare Automatik, die dieses System sonst vermeidet. Deshalb zeigt
+ * jede Karte hier drei Dinge nebeneinander: den Schalter, die Zahlen, und
+ * — aufklappbar — die vollständige Liste dessen, was aufgenommen wurde,
+ * samt der übersprungenen Dateien mit Grund. Ohne diese Liste wäre die
+ * Funktion nicht zu verantworten.
+ */
+function renderWatch(self) {
+  const box = self.dom.watch;
+  clear(box);
+
+  if (self.watchError) {
+    const err = self.watchError;
+    if (err.status === 403) {
+      box.appendChild(h('p.meta', null, text(
+        'Nur die Eigentümerin oder der Eigentümer dieser Installation darf beobachtete Ordner sehen und ändern.')));
+    } else if (err.code === 'SUBSYSTEM_UNAVAILABLE' || err.status === 404) {
+      // 503: das Teilsystem fehlt. 404: die Route ist nicht registriert.
+      // Für die Nutzerin ist beides dasselbe -- dieser Teil ist nicht da --
+      // und das ist eine Auskunft, kein Defekt der Oberfläche.
+      box.appendChild(h('p.meta.is-warn', null, text(
+        'Die Ordnerbeobachtung ist in dieser Installation nicht eingerichtet. Es wird kein Ordner gelesen.')));
+    } else {
+      box.appendChild(h('p.meta.is-danger', null, text(
+        `Die Liste der beobachteten Ordner ist nicht lesbar: ${errorMessage(err)}`)));
+    }
+    return;
+  }
+
+  const data = self.watch || {};
+  const items = Array.isArray(data.items) ? data.items : [];
+  const status = data.status || null;
+
+  if (status) {
+    box.appendChild(h('div.setv__watchstate', { dataset: { running: status.running ? '1' : '0' } },
+      h('span.setv__watch-dot', { 'aria-hidden': 'true' }),
+      h('span', null, text(status.running
+        ? `Die Beobachtung läuft. ${formatNumber(status.enabled)} von ${formatNumber(status.total)} Ordner(n) eingeschaltet, `
+          + `nachgesehen wird spätestens alle ${intervalText(status.sweepIntervalMs)}.`
+        : 'Die Beobachtung läuft gerade nicht. Ordner werden nur gelesen, wenn du hier auf „Jetzt aufnehmen“ drückst.'))));
+  }
+
+  if (!items.length) {
+    box.appendChild(h('p.meta', null, text(
+      'Es wird kein Ordner beobachtet. Bis du einen hinzufügst und einschaltest, liest dieses Programm keine Datei von deiner Platte.')));
+  }
+
+  for (const item of items) box.appendChild(watchCard(self, item));
+  box.appendChild(watchForm(self, data));
+}
+
+/** „alle 300 s" ist keine Zeitangabe, die jemand im Kopf umrechnen möchte. */
+function intervalText(ms) {
+  const seconds = Math.round(Number(ms) / 1000);
+  if (!Number.isFinite(seconds) || seconds <= 0) return 'unbekannte Zeit';
+  if (seconds < 90) return `${formatNumber(seconds)} Sekunden`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `${formatNumber(minutes)} Minuten`;
+  return `${formatNumber(Math.round(minutes / 60))} Stunden`;
+}
+
+function watchStateText(item) {
+  const state = item.beobachtung || {};
+  if (!item.data.enabled) return 'Ausgeschaltet – dieser Ordner wird nicht gelesen.';
+  if (state.aktiv) return `Wird beobachtet (${state.art}).`;
+  return 'Eingeschaltet. Beobachtet wird erst, wenn Neural OS die Beobachtung gestartet hat.';
+}
+
+function watchCard(self, item) {
+  const id = item.id;
+  const data = item.data || {};
+  const state = item.beobachtung || {};
+  const busyKey = `watch:${id}`;
+  const busy = self.busy[busyKey] === true;
+
+  const toggle = h('input', {
+    type: 'checkbox',
+    checked: data.enabled === true,
+    onChange: (event) => toggleWatch(self, item, event.target),
+  });
+
+  const zahlen = h('p.meta', null, text(
+    `${formatNumber(data.imported || 0)} Datei(en) aufgenommen · ${formatNumber(data.skipped || 0)} übersprungen · `
+    + (data.lastScanAt ? `zuletzt nachgesehen ${timeAgo(data.lastScanAt)}` : 'noch nie nachgesehen')));
+
+  const actions = h('div.row.setv__watch-actions', null,
+    h('button.btn.btn--small', {
+      type: 'button',
+      disabled: busy,
+      onClick: () => scanWatch(self, item, true),
+    }, icon(ICONS.eye), text('Erst ansehen')),
+    h('button.btn.btn--small', {
+      type: 'button',
+      disabled: busy || !data.enabled,
+      title: data.enabled ? '' : 'Erst einschalten – ein ausgeschalteter Ordner wird nicht gelesen.',
+      onClick: () => scanWatch(self, item, false),
+    }, icon(ICONS.download), text(busy ? 'Wird gelesen …' : 'Jetzt aufnehmen')),
+    h('span.spacer'),
+    h('button.btn.btn--small.btn--danger', {
+      type: 'button',
+      onClick: () => removeWatch(self, item),
+    }, icon(ICONS.trash), text('Entfernen')));
+
+  return h('article.setv__watch', { dataset: { on: data.enabled ? '1' : '0' } },
+    h('div.row', null,
+      h('span.setv__watch-dot', { 'aria-hidden': 'true' }),
+      h('strong', null, text(String(data.label || data.path))),
+      h('span.spacer'),
+      h('span.badge', null, text(data.enabled ? 'eingeschaltet' : 'aus'))),
+    h('p.meta.setv__path', null, h('code', null, text(String(data.path)))),
+    h('p.meta', null, text(watchStateText(item))),
+    state.problem ? h('p.meta.is-warn', null, text(String(state.problem))) : null,
+    zahlen,
+    h('p.meta', null, text(
+      `${data.recursive ? 'Mit Unterordnern' : 'Nur die oberste Ebene'} · Dateien über `
+      + `${formatBytes(data.maxFileBytes)} werden übersprungen`
+      + (data.tags && data.tags.length ? ` · Schlagwörter: ${data.tags.join(', ')}` : ''))),
+    data.lastError ? h('p.meta.is-danger', null, text(`Zuletzt: ${String(data.lastError)}`)) : null,
+    h('div.setv__permrow', null, h('label.setv__perm', null, toggle, text('Ordner einschalten'))),
+    actions,
+    watchScanResult(self, id),
+    watchLogDetails(self, item));
+}
+
+/** Das letzte echte Ergebnis. Steht hier nichts, ist auch nichts gelaufen. */
+function watchScanResult(self, id) {
+  const result = self.watchScans.get(id);
+  if (!result) return null;
+  if (result.fehler) {
+    return h('div.setv__hintbox', { dataset: { level: 'fail' } }, text(String(result.fehler)));
+  }
+  const rows = [];
+  if (result.dryRun) {
+    rows.push(h('p', null, text(
+      `Nur angesehen: ${formatNumber(result.gefunden)} Datei(en) gefunden, `
+      + `${formatNumber(result.wuerdeAufnehmen)} würden aufgenommen. Es wurde nichts gespeichert.`)));
+  } else {
+    rows.push(h('p', null, text(
+      `${formatNumber(result.aufgenommen)} aufgenommen, ${formatNumber(result.uebersprungen.length)} übersprungen, `
+      + `in ${formatNumber(result.dauerMs)} ms.`)));
+  }
+  if (Array.isArray(result.neu) && result.neu.length) {
+    rows.push(h('ul.setv__watch-files', { role: 'list' },
+      result.neu.slice(0, 12).map((entry) => h('li', null,
+        text(`${entry.datei} (${formatBytes(entry.groesse)})`)))));
+    if (result.neu.length > 12) {
+      rows.push(h('p.meta', null, text(`… und ${formatNumber(result.neu.length - 12)} weitere.`)));
+    }
+  }
+  for (const warnung of Array.isArray(result.warnungen) ? result.warnungen.slice(0, 6) : []) {
+    rows.push(h('p.meta.is-warn', null, text(String(warnung))));
+  }
+  if (result.abgebrochen) rows.push(h('p.meta.is-warn', null, text(String(result.abgebrochen))));
+  if (result.hinweis) rows.push(h('p.meta', null, text(String(result.hinweis))));
+  return h('div.setv__hintbox', { dataset: { level: result.dryRun ? 'blocked' : 'ok' } }, rows);
+}
+
+/**
+ * „Was wurde aufgenommen" -- die eigentliche Zusage dieser Funktion.
+ *
+ * Wird erst beim Aufklappen geholt, weil die Liste lang sein kann; was noch
+ * nicht da ist, sagt „wird geladen", nicht „nichts da".
+ */
+function watchLogDetails(self, item) {
+  const id = item.id;
+  const entry = self.watchLogs.get(id);
+  const body = h('div.setv__watchlog-body.stack');
+
+  if (!entry) {
+    body.appendChild(h('p.meta', null, text('Noch nicht geladen.')));
+  } else if (entry.loading) {
+    body.appendChild(h('p.meta', null, text('Wird geladen …')));
+  } else if (entry.error) {
+    body.appendChild(h('p.meta.is-danger', null, text(`Nicht lesbar: ${errorMessage(entry.error)}`)));
+  } else {
+    const log = entry.log || {};
+    const taken = Array.isArray(log.aufgenommen) ? log.aufgenommen : [];
+    const skipped = Array.isArray(log.uebersprungen) ? log.uebersprungen : [];
+
+    body.appendChild(h('p.meta', null, text(taken.length
+      ? `${formatNumber(log.aufgenommenGesamt)} Datei(en) aufgenommen:`
+      : 'Aus diesem Ordner wurde noch keine Datei aufgenommen.')));
+    if (taken.length) {
+      body.appendChild(h('ul.setv__watch-files', { role: 'list' }, taken.map((file) => h('li', null,
+        text(`${file.datei} · ${formatBytes(file.groesse)} · ${timeAgo(file.at)}`),
+        file.leererText
+          ? h('span.meta.is-warn', null, text(' – kein Text gefunden'))
+          : null,
+        (file.warnungen || []).length
+          ? h('span.meta.is-warn', null, text(` – ${file.warnungen.join(' ')}`))
+          : null))));
+    }
+
+    body.appendChild(h('p.meta', null, text(skipped.length
+      ? `${formatNumber(log.uebersprungenGesamt)} übersprungen, mit Grund:`
+      : 'Nichts übersprungen.')));
+    if (skipped.length) {
+      // Mit Zeitstempel, weil dieselbe Datei bei jedem Durchlauf erneut
+      // übersprungen wird: ohne ihn sähe ein Protokoll zweier Durchläufe wie
+      // ein doppelter Eintrag aus.
+      body.appendChild(h('ul.setv__watch-files', { role: 'list' }, skipped.map((skip) => h('li', null,
+        text(`${skip.datei} – ${skip.grund}`),
+        skip.at ? h('span.meta', null, text(` (${timeAgo(skip.at)})`)) : null))));
+    }
+    if (log.hinweis) body.appendChild(h('p.hint', null, text(String(log.hinweis))));
+  }
+
+  const details = h('details.setv__watchlog', {
+    open: self.watchOpen.has(id),
+    onToggle: (event) => {
+      if (event.target.open) {
+        self.watchOpen.add(id);
+        if (!self.watchLogs.has(id)) loadWatchLog(self, id);
+      } else {
+        self.watchOpen.delete(id);
+      }
+    },
+  }, h('summary', null, text('Was wurde aufgenommen')), body);
+  return details;
+}
+
+function watchForm(self, data) {
+  const readable = Array.isArray(data.lesbareEndungen) ? data.lesbareEndungen : [];
+  const pathField = h('input.input', {
+    type: 'text', placeholder: '/home/du/Dokumente', autocomplete: 'off', spellcheck: 'false',
+  });
+  const labelField = h('input.input', { type: 'text', placeholder: 'Anzeigename', autocomplete: 'off' });
+  const tagsField = h('input.input', { type: 'text', placeholder: 'posteingang, scans', autocomplete: 'off' });
+  const recursiveBox = h('input', { type: 'checkbox', checked: true });
+
+  return h('details.setv__newtoken', null,
+    h('summary', null, text('Ordner hinzufügen')),
+    h('div.setv__newtoken-body.stack', null,
+      h('label.field', null, h('span.label', null, text('Vollständiger Pfad')), pathField,
+        h('span.hint', null, text('Der Ordner muss es schon geben und darf den Datenordner von Neural OS nicht enthalten.'))),
+      h('label.field', null, h('span.label', null, text('Bezeichnung')), labelField),
+      h('label.field', null, h('span.label', null, text('Schlagwörter für aufgenommene Dateien')), tagsField,
+        h('span.hint', null, text('Mit Komma trennen. Leer lassen ist auch in Ordnung.'))),
+      h('div.setv__permrow', null, h('label.setv__perm', null, recursiveBox, text('Unterordner einbeziehen'))),
+      readable.length
+        ? h('p.hint', null, text(`Gelesen werden Dateien mit diesen Endungen: ${readable.join(' ')}`))
+        : null,
+      h('div.row', null,
+        h('button.btn.btn--primary.btn--small', {
+          type: 'button',
+          disabled: self.busy.watchAdd === true,
+          onClick: () => addWatch(self, {
+            path: pathField.value.trim(),
+            label: labelField.value.trim(),
+            tags: tagsField.value.split(',').map((t) => t.trim()).filter(Boolean),
+            recursive: recursiveBox.checked,
+          }, pathField),
+        }, text(self.busy.watchAdd ? 'Wird angelegt …' : 'Ordner hinzufügen')),
+        h('span.hint', null, text('Hinzufügen liest noch nichts. Gelesen wird erst nach dem Einschalten.')))));
+}
+
+async function addWatch(self, input, pathField) {
+  if (!input.path) {
+    self.ctx.toast('Ohne Pfad gibt es nichts zu beobachten.', 'error');
+    pathField.focus();
+    return;
+  }
+  setBusy(self, 'watchAdd', true);
+  renderWatch(self);
+  try {
+    await request(self, (signal) => self.api.post('/watch', input, { signal }));
+    if (!self.alive) return;
+    pathField.value = '';
+    self.ctx.toast('Ordner angelegt – und noch ausgeschaltet. Er wird erst gelesen, wenn du ihn einschaltest.', 'success');
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.ctx.toast(`Nicht angelegt: ${errorMessage(err)}`, 'error');
+  } finally {
+    setBusy(self, 'watchAdd', false);
+    await loadWatch(self);
+    if (self.alive) renderWatch(self);
+  }
+}
+
+/**
+ * Der Schalter.
+ *
+ * Einschalten wird einmal nachgefragt, und die Rückfrage sagt in einem Satz,
+ * was ab dann von allein passiert. Ausschalten braucht keine Rückfrage:
+ * weniger Automatik ist nie die überraschende Richtung.
+ */
+async function toggleWatch(self, item, input) {
+  const enabled = input.checked === true;
+  if (enabled) {
+    const ok = await self.ctx.confirm({
+      title: `„${item.data.label || item.data.path}“ einschalten?`,
+      message: 'Ab dann sieht Neural OS von allein in diesem Ordner nach und nimmt neue und geänderte Dateien '
+        + 'als lesbaren Text in den Tresor auf. Im Ordner selbst wird nichts gelöscht und nichts geändert, und '
+        + 'unter „Was wurde aufgenommen“ steht jederzeit jede einzelne Datei.',
+      confirmLabel: 'Einschalten',
+    });
+    if (!ok || !self.alive) {
+      input.checked = false;
+      return;
+    }
+  }
+  try {
+    await request(self, (signal) => self.api.patch(`/watch/${encodeURIComponent(item.id)}`, { enabled }, { signal }));
+    if (!self.alive) return;
+    self.ctx.toast(enabled ? 'Ordner eingeschaltet.' : 'Ordner ausgeschaltet. Er wird nicht mehr gelesen.', 'success');
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.ctx.toast(`Nicht geändert: ${errorMessage(err)}`, 'error');
+  } finally {
+    await loadWatch(self);
+    if (self.alive) renderWatch(self);
+  }
+}
+
+/**
+ * „Erst ansehen" beantwortet, was passieren würde, ohne eine einzige Datei zu
+ * öffnen; „Jetzt aufnehmen" tut es dann wirklich. Beide zeigen das Ergebnis,
+ * das der Server geliefert hat -- auch wenn das Ergebnis eine Absage ist.
+ */
+async function scanWatch(self, item, dryRun) {
+  const busyKey = `watch:${item.id}`;
+  setBusy(self, busyKey, true);
+  renderWatch(self);
+  try {
+    const result = await request(self, (signal) => self.api.post(
+      `/watch/${encodeURIComponent(item.id)}/scan`, { dryRun }, { signal, timeoutMs: 120000 },
+    ));
+    if (!self.alive) return;
+    self.watchScans.set(item.id, result);
+    if (!dryRun) {
+      self.watchLogs.delete(item.id);
+      if (self.watchOpen.has(item.id)) loadWatchLog(self, item.id);
+      self.ctx.toast(result.aufgenommen
+        ? `${result.aufgenommen} Datei(en) aufgenommen.`
+        : 'Es gab nichts Neues aufzunehmen.', result.aufgenommen ? 'success' : 'info');
+    }
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    // Eine Absage ist ein Ergebnis und wird als solches gezeigt, nicht verschluckt.
+    self.watchScans.set(item.id, { fehler: errorMessage(err) });
+  } finally {
+    setBusy(self, busyKey, false);
+    await loadWatch(self);
+    if (self.alive) renderWatch(self);
+  }
+}
+
+async function loadWatchLog(self, id) {
+  self.watchLogs.set(id, { loading: true });
+  try {
+    const log = await request(self, (signal) => self.api.get(`/watch/${encodeURIComponent(id)}/log`, { signal }));
+    if (!self.alive) return;
+    self.watchLogs.set(id, { log });
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.watchLogs.set(id, { error: err });
+  } finally {
+    if (self.alive) renderWatch(self);
+  }
+}
+
+async function removeWatch(self, item) {
+  const ok = await self.ctx.confirm({
+    title: 'Ordner nicht mehr beobachten?',
+    message: `„${item.data.label || item.data.path}“ wird aus der Liste entfernt und nicht mehr gelesen. `
+      + 'Die bereits aufgenommenen Dateien bleiben im Tresor.',
+    confirmLabel: 'Entfernen',
+    danger: true,
+  });
+  if (!ok || !self.alive) return;
+  try {
+    await request(self, (signal) => self.api.del(`/watch/${encodeURIComponent(item.id)}`, { signal }));
+    if (!self.alive) return;
+    self.watchScans.delete(item.id);
+    self.watchLogs.delete(item.id);
+    self.watchOpen.delete(item.id);
+    self.ctx.toast('Ordner entfernt. Die aufgenommenen Dateien bleiben.', 'success');
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.ctx.toast(`Nicht entfernt: ${errorMessage(err)}`, 'error');
+  } finally {
+    await loadWatch(self);
+    if (self.alive) renderWatch(self);
+  }
+}
+
 function renderDiagnosis(self) {
   const box = self.dom.diagnosis;
   clear(box);
@@ -1971,6 +2398,19 @@ const CSS = `
 .setv__hintbox[data-level="fail"] { border-color: var(--danger); }
 .meta.is-warn { color: var(--warn); }
 .setv__hintbox { padding: var(--sp-2); border: 1px solid var(--border); border-radius: var(--r-2); background: var(--surface-2); white-space: pre-wrap; font-size: var(--fs-sm); }
+
+.setv__watch { display: flex; flex-direction: column; gap: var(--sp-05); padding: var(--sp-2); border: 1px solid var(--border); border-radius: var(--r-2); }
+.setv__watch p { margin: 0; }
+.setv__watchstate { display: flex; align-items: center; gap: var(--sp-1); padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--r-2); background: var(--surface-2); font-size: var(--fs-sm); }
+.setv__watchstate[data-running="1"] .setv__watch-dot { background: var(--ok); }
+.setv__watch-dot { width: 8px; height: 8px; border-radius: var(--r-full); background: var(--fg-subtle); flex: none; }
+.setv__watch[data-on="1"] .setv__watch-dot { background: var(--ok); }
+.setv__watch[data-on="0"] .setv__watch-dot { background: var(--fg-subtle); }
+.setv__watch-actions { flex-wrap: wrap; }
+.setv__watch-files { margin: 0; padding-left: var(--sp-3); font-size: var(--fs-sm); color: var(--fg-muted); word-break: break-word; }
+.setv__watchlog > summary { cursor: pointer; font-size: var(--fs-sm); color: var(--fg-muted); }
+.setv__watchlog-body { margin-top: var(--sp-1); }
+.setv__hintbox[data-level="ok"] { border-color: var(--ok); }
 
 .setv__checks { display: flex; flex-direction: column; gap: var(--sp-1); margin: 0; padding: 0; list-style: none; }
 .setv__check { display: flex; gap: var(--sp-1); padding: var(--sp-1); border-left: 3px solid var(--border-strong); border-radius: var(--r-1); background: var(--surface-2); }

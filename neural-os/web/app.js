@@ -50,6 +50,11 @@ const ICONS = {
   settings: '<path d="M2.8 6.4h5.4M13.2 6.4h4M2.8 13.6h3.4M11.2 13.6h6"/><circle cx="10.6" cy="6.4" r="2.2"/><circle cx="8.6" cy="13.6" r="2.2"/>',
   timeline: '<path d="M2.5 10h15"/><circle cx="6" cy="10" r="1.9"/><circle cx="11.4" cy="10" r="1.9"/><circle cx="16" cy="10" r="1.4"/><path d="M6 5.4v2.7M11.4 11.9v2.7"/>',
   workshop: '<path d="M7.6 3.4 4 7l2.6 2.6"/><path d="M12.4 3.4 16 7l-2.6 2.6"/><path d="M11.2 3.2 8.8 16.8"/><rect x="3.6" y="12.4" width="12.8" height="4.4" rx="1.4"/>',
+  // Eine aufgehende Sonne ueber dem Horizont. "Heute" ist eine Tageszeit,
+  // keine Taetigkeit -- und ein Kalenderblatt waere ein Termin, was es nicht ist.
+  today: '<path d="M2.6 14.6h14.8"/><path d="M5.4 14.6a4.6 4.6 0 0 1 9.2 0"/><path d="M10 3.4v2M4.2 5.8l1.4 1.4M15.8 5.8l-1.4 1.4"/>',
+  // Zwei gestapelte Karten. Das Bild fuer einen Stapel, den man durchgeht.
+  study: '<rect x="4.6" y="6.4" width="12" height="9.2" rx="2.2"/><path d="M3.4 12.8V5.6a2 2 0 0 1 2-2h7.2"/>',
   // Ein Posteingang, keine Gluehbirne: dieser Bereich ist eine Liste von
   // Vorschlaegen, ueber die jemand entscheidet -- nicht ein Geistesblitz.
   assist: '<path d="M4.4 3.4h11.2l2 7.6v3.6a2 2 0 0 1-2 2H4.4a2 2 0 0 1-2-2v-3.6z"/><path d="M2.4 11h4.2l1.2 2h4.4l1.2-2h4.2"/>',
@@ -98,12 +103,14 @@ const ICONS = {
  * schmalen Bildschirm in der unteren Leiste ueberlebt.
  */
 const VIEWS = [
+  { id: 'today', title: 'Heute', icon: ICONS.today, key: 'h', primary: true, group: 'arbeiten', keywords: 'start morgen fällig übersicht tagesbeginn was ist los' },
   { id: 'chat', title: 'Chat', icon: ICONS.chat, key: 'c', primary: true, group: 'arbeiten', keywords: 'unterhaltung modell fragen gespräch' },
   { id: 'notes', title: 'Notizen', icon: ICONS.notes, key: 'n', primary: true, group: 'arbeiten', keywords: 'note texte wissen schreiben' },
   { id: 'projects', title: 'Projekte', icon: ICONS.projects, key: 'p', primary: false, group: 'arbeiten', keywords: 'aufgaben tasks vorhaben' },
   { id: 'graph', title: 'Gehirn', icon: ICONS.graph, key: 'g', primary: true, group: 'arbeiten', keywords: 'graph netz verknüpfungen karte' },
   { id: 'agents', title: 'Agenten', icon: ICONS.agents, key: 'a', primary: true, group: 'helfer', keywords: 'automatik werkzeuge läufe runs' },
   { id: 'assist', title: 'Vorschläge', icon: ICONS.assist, key: 'v', primary: true, group: 'helfer', keywords: 'hinweise dubletten waisen aufgaben schlagwörter aufräumen posteingang' },
+  { id: 'study', title: 'Lernen', icon: ICONS.study, key: 'l', primary: false, group: 'helfer', keywords: 'karten wiederholen abstand merken auswendig spaced repetition' },
   { id: 'automation', title: 'Automatik', icon: ICONS.automation, key: 'u', primary: false, group: 'helfer', keywords: 'zeitplan auslöser trigger regelmäßig von allein wiederkehrend' },
   { id: 'network', title: 'Netzwerk', icon: ICONS.network, key: 'w', primary: false, group: 'system', keywords: 'internet schleuse gate freigaben audit' },
   { id: 'timeline', title: 'Zeitachse', icon: ICONS.timeline, key: 'z', primary: false, group: 'system', keywords: 'verlauf chronik historie wann zeit' },

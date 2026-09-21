@@ -152,16 +152,30 @@ function dueLabel(due, now = Date.now()) {
 /**
  * Der erste Satz. Er sagt, was fällig ist -- und wenn nichts fällig ist, sagt
  * er das, statt zu grüßen.
+ *
+ * Drei Fälle, weil ein einziger Satzbaukasten hier sofort schief klingt:
+ * alles überfällig, nichts überfällig, und gemischt. „Eine Aufgabe ist fällig,
+ * und überfällig" wäre grammatisch möglich und trotzdem kein Satz, den ein
+ * Mensch schreibt.
  */
 function leadSentence(data) {
   const a = (data.faellig && data.faellig.anzahl) || {};
-  const offen = (a.ueberfaellig || 0) + (a.heute || 0);
+  const ueber = a.ueberfaellig || 0;
+  const heute = a.heute || 0;
+  const offen = ueber + heute;
   if (!offen) return 'Nichts ist fällig.';
+  if (!heute) {
+    return ueber === 1
+      ? 'Eine Aufgabe ist überfällig.'
+      : `${gross(zahlwort(ueber))} Aufgaben sind überfällig.`;
+  }
+  if (!ueber) {
+    return heute === 1
+      ? 'Eine Aufgabe ist heute fällig.'
+      : `${gross(zahlwort(heute))} Aufgaben sind heute fällig.`;
+  }
   const kopf = offen === 1 ? 'Eine Aufgabe ist fällig' : `${gross(zahlwort(offen))} Aufgaben sind fällig`;
-  if (!a.ueberfaellig) return `${kopf}.`;
-  const nach = a.ueberfaellig === 1
-    ? (offen === 1 ? 'und überfällig' : 'eine davon überfällig')
-    : `${zahlwort(a.ueberfaellig)} davon überfällig`;
+  const nach = ueber === 1 ? 'eine davon überfällig' : `${zahlwort(ueber)} davon überfällig`;
   return `${kopf}, ${nach}.`;
 }
 
@@ -664,7 +678,7 @@ function renderAutomatik(self, data) {
   let satz;
   if (a.eingeschaltet === null || a.eingeschaltet === undefined) {
     satz = grund
-      ? `Ob die Automatik läuft, war nicht zu erfahren: ${grund}`
+      ? `Ob die Automatik läuft, war nicht zu erfahren. ${grund}`
       : 'Ob die Automatik läuft, war nicht zu erfahren.';
   } else if (a.eingeschaltet) {
     const teile = [];

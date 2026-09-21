@@ -31,6 +31,7 @@
  * non-negotiable -- without it there is no vault to report on at all.
  */
 
+const { NeuralError } = require('../../kernel/errors');
 const {
   need,
   unavailable,
@@ -172,6 +173,21 @@ function block(fehlend, teil, fallback, run) {
 /** The subsystem, or a throw carrying the same German sentence a 503 would. */
 function subsystem(value, method, label, hint) {
   if (!value || typeof value[method] !== 'function') throw unavailable(label, hint);
+  return value;
+}
+
+/**
+ * Same, but with the sentence written out.
+ *
+ * `unavailable()` builds "<Label> ist in dieser Instanz nicht verfügbar", which
+ * is wrong for a plural subject -- and "Die Auslöser ist nicht verfügbar" on a
+ * screen whose whole point is calm, plain German is exactly the kind of detail
+ * that makes a system feel machine-written.
+ */
+function subsystemSaying(value, method, satz) {
+  if (!value || typeof value[method] !== 'function') {
+    throw new NeuralError('SUBSYSTEM_UNAVAILABLE', satz, { status: 503 });
+  }
   return value;
 }
 
@@ -363,11 +379,12 @@ function automatikBlock(ctx, fehlend) {
   const out = { eingeschaltet: null, naechster: null, zeitplaene: null, ausloeser: null };
   let asked = 0;
 
-  const zeitplaene = block(fehlend, 'automatik', null, () => subsystem(
+  // Kein `hint` hier: die Gründe stehen auf diesem Bildschirm in einer Zeile
+  // nebeneinander, und zwei Aufbauhinweise machen daraus einen Absatz.
+  const zeitplaene = block(fehlend, 'automatik', null, () => subsystemSaying(
     ctx.scheduler,
     'status',
-    'Die Zeitplanung',
-    'Sie wird beim Start zusammen mit der Agenten-Laufzeit aufgebaut.',
+    'Die Zeitplanung ist in dieser Instanz nicht verfügbar.',
   ).status());
 
   if (zeitplaene) {
@@ -380,11 +397,10 @@ function automatikBlock(ctx, fehlend) {
     out.naechster = zeitplaene.nextDue || null;
   }
 
-  const ausloeser = block(fehlend, 'automatik', null, () => subsystem(
+  const ausloeser = block(fehlend, 'automatik', null, () => subsystemSaying(
     ctx.triggers,
     'status',
-    'Die Auslöser',
-    'Sie werden beim Start zusammen mit der Agenten-Laufzeit aufgebaut.',
+    'Die Auslöser sind in dieser Instanz nicht verfügbar.',
   ).status());
 
   if (ausloeser) {

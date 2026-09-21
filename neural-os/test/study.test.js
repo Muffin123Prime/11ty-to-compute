@@ -24,7 +24,7 @@ const { test, drain, tempHome } = require('./harness');
 
 const { openStore } = require('../src/store/engine');
 const {
-  createStudy, schedule, readNote, dayKey, addDays,
+  createStudy, schedule, addDays,
   MIN_EASE, MAX_INTERVAL_DAYS, DEFAULT_EASE, GRADE_LABELS,
 } = require('../src/study/cards');
 const studyApi = require('../src/http/api/study');
@@ -235,6 +235,19 @@ test('due: eine ausgesetzte Karte kommt nie', async () => {
 
     study.suspend(card.id, false);
     assert.equal(study.due().items.length, 2, 'wieder aufgenommen ist sie wieder dabei');
+  });
+});
+
+test('due: eine Karte ohne lesbaren Termin verschwindet nicht, sie wird eingeplant', async () => {
+  await withDeck(async ({ store, study }) => {
+    // So etwas entsteht nicht hier, aber es koennte importiert werden. Eine
+    // Karte, die zwischen die Faecher faellt, waere der schlimmste Ausgang.
+    store.create('card', { front: 'Krummer Termin', due: 'irgendwann', lastReviewedAt: '2026-01-01T10:00:00.000Z' });
+    const queue = study.due();
+    assert.deepEqual(fronts(queue), ['Krummer Termin']);
+    assert.equal(study.stats().neu, 1);
+    const { record } = study.review(queue.items[0].record.id, 2);
+    assert.equal(record.data.due, '2026-09-22', 'danach hat sie einen richtigen Termin');
   });
 });
 

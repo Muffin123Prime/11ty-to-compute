@@ -438,8 +438,19 @@ function createStudy({ store, bus, config, logger, now } = {}) {
     return record;
   }
 
+  /** Never answered. Used for "gelernt", not for the queue. */
   function isNew(card) {
     return !card.data.lastReviewedAt;
+  }
+
+  /**
+   * No schedule yet. That covers a fresh card and -- deliberately -- a card
+   * whose `due` is not a day this code can read (an import, an older version).
+   * Such a card would otherwise fall between the buckets and never be shown
+   * again, which is the worst outcome a deck can produce.
+   */
+  function needsSchedule(card) {
+    return dayOf(card.data.due) === null;
   }
 
   function isDue(card, todayKey) {
@@ -478,7 +489,7 @@ function createStudy({ store, bus, config, logger, now } = {}) {
         overdue.push(card);
         continue;
       }
-      if (isNew(card) && !dayOf(card.data.due)) {
+      if (needsSchedule(card)) {
         fresh.push(card);
         continue;
       }
@@ -534,7 +545,7 @@ function createStudy({ store, bus, config, logger, now } = {}) {
       entry.gesamt++;
       if (card.data.suspended) { entry.ausgesetzt++; continue; }
       if (isDue(card, todayKey)) entry.faellig++;
-      else if (isNew(card) && !dayOf(card.data.due)) entry.neu++;
+      else if (needsSchedule(card)) entry.neu++;
     }
     return Array.from(byName.values()).sort((a, b) => (a.name < b.name ? -1 : 1));
   }
@@ -556,7 +567,7 @@ function createStudy({ store, bus, config, logger, now } = {}) {
       if (card.data.suspended) { out.ausgesetzt++; continue; }
       if (!isNew(card)) out.gelernt++;
       if (isDue(card, todayKey)) out.faellig++;
-      else if (isNew(card) && !dayOf(card.data.due)) out.neu++;
+      else if (needsSchedule(card)) out.neu++;
       if (dayOf(card.data.due) === morgenKey) out.morgen++;
     }
     out.nachStapel = decks();

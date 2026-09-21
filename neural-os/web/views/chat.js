@@ -30,6 +30,27 @@
  * - **The draft survives everything.** It lives in a module map and in
  *   localStorage per chat, so switching views or reloading the tab does not
  *   eat a half-written question.
+ *
+ * Zwei Modelle, eine Antwort
+ * --------------------------
+ * The comparison (IDEEN.md #6) is an ADDITION, never a new default. The normal
+ * composer, the normal Senden button and the normal thread behave exactly as
+ * before; the comparison lives in a panel that is closed until somebody opens
+ * it, and it writes nothing into the conversation.
+ *
+ * The part that matters is the consent, and it is built so it cannot be
+ * skipped:
+ *
+ * - The plan comes from the server BEFORE anything is sent, and the sentence
+ *   that names the foreign host is the server's own -- the interface does not
+ *   compose its own reassuring version of it.
+ * - Confirming is a separate click on a separate button. The send button stays
+ *   disabled until it happens.
+ * - The consent belongs to one exact plan. Changing either side's model throws
+ *   it away, because "yes, send it to api.openai.com" is not consent to send
+ *   it somewhere else.
+ * - Every provenance badge under an answer is read from what the server
+ *   observed (`usedNetwork`, `networkTargets`), never from what was selected.
  */
 
 import {
@@ -61,6 +82,22 @@ const NETWORK_OPTIONS = [
 ];
 
 const ROLE_LABEL = { user: 'Du', assistant: 'Assistent', system: 'System', tool: 'Werkzeug' };
+
+/* --- Zwei Modelle, eine Antwort ------------------------------------- */
+
+/** How the server names a place, and how that reads in a sentence. */
+const PLACE_LABEL = {
+  lokal: 'auf diesem Gerät',
+  lan: 'im lokalen Netz',
+  online: 'im öffentlichen Internet',
+  unbekannt: 'auf einem noch nicht bestimmten Rechner',
+};
+
+/** Which colour the shared `--net-*` variables give a place. */
+const PLACE_NET = { lokal: 'offline', lan: 'lan', online: 'online', unbekannt: 'unknown' };
+
+/** Repaint the two streaming columns at most this often. */
+const COMPARE_PAINT_MS = 90;
 
 /** Set when a freshly created chat should receive the caret after remounting. */
 let focusOnMount = false;
@@ -277,6 +314,34 @@ function modelRefOf(record) {
   return { provider, model: name };
 }
 
+/**
+ * Which exact plan a consent belongs to.
+ *
+ * The key names every side that would leave the device, with its host and its
+ * model. Change either one and the key changes, which throws the consent away
+ * -- "ja, an api.openai.com" is not consent to send the same text to
+ * openrouter.ai, and it is not consent to send a different model's context
+ * either.
+ */
+function consentKey(plan) {
+  if (!plan) return '';
+  return ['a', 'b'].map((side) => {
+    const entry = plan[side];
+    if (!entry || !entry.modell) return `${side}:-`;
+    if (!entry.verlaesstGeraet) return `${side}:lokal`;
+    return `${side}:${entry.modell.host}/${entry.modell.model}`;
+  }).join('|');
+}
+
+/** The hosts a plan would send to. Used for the confirmation button's label. */
+function leavingHosts(plan) {
+  if (!plan) return [];
+  return ['a', 'b']
+    .map((side) => plan[side])
+    .filter((entry) => entry && entry.modell && entry.verlaesstGeraet)
+    .map((entry) => entry.modell.host);
+}
+
 /* ------------------------------------------------------------------ */
 /* View                                                                */
 /* ------------------------------------------------------------------ */
@@ -324,6 +389,24 @@ function createChatView(container, ctx) {
     pickerOpen: false,
     mobileList: false,
     stick: true,
+    /**
+     * Everything the comparison needs. `consentFor` holds the plan key the
+     * user agreed to, so a changed selection silently invalidates it.
+     */
+    compare: {
+      open: false,
+      a: '',
+      b: '',
+      plan: null,
+      planError: null,
+      planLoading: false,
+      consentFor: '',
+      running: false,
+      aborting: false,
+      sides: null,
+      prompt: '',
+      saved: null,
+    },
   };
 
   const dom = {};
@@ -332,6 +415,9 @@ function createChatView(container, ctx) {
   let streamUnsubscribe = null;
   let paintTimer = null;
   let pendingPaint = false;
+  /** The running comparison, if any. Bound to this mounted view. */
+  let compareController = null;
+  let comparePaintTimer = null;
 
   /* ---------------------------------------------------------------- */
   /* Skeleton                                                          */
@@ -433,17 +519,28 @@ function createChatView(container, ctx) {
 
     dom.composerHint = h('span.chatv__composer-hint.meta');
 
+    // The second send button. It appears only while the comparison panel is
+    // open, so the normal composer is exactly what it always was.
+    dom.compareSend = h('button.btn.chatv__send', {
+      type: 'button',
+      hidden: true,
+      onClick: () => runCompare(),
+    }, text('An beide senden'));
+
     dom.banner = h('div.chatv__banner', { hidden: true });
+    dom.compare = h('section.cmp', { hidden: true, 'aria-label': 'Zwei Modelle, eine Antwort' });
 
     dom.composer = h('footer.chatv__composer', null,
       dom.composerInput,
-      h('div.chatv__composer-row', null, dom.composerHint, h('span.spacer'), dom.abortButton, dom.sendButton));
+      h('div.chatv__composer-row', null,
+        dom.composerHint, h('span.spacer'), dom.compareSend, dom.abortButton, dom.sendButton));
 
     dom.main = h('section.chatv__main', null,
       dom.head,
       dom.contextBar,
       dom.picker,
       h('div.chatv__thread-wrap', null, dom.thread, dom.jump),
+      dom.compare,
       dom.banner,
       dom.composer);
 
@@ -513,6 +610,7 @@ function createChatView(container, ctx) {
     }
     renderControls();
     renderThread();
+    renderCompare();
     renderBanner();
   }
 
@@ -554,6 +652,9 @@ function createChatView(container, ctx) {
     if (dom.listToggle) dom.listToggle.setAttribute('aria-expanded', 'false');
     messageNodes.clear();
     detachStream();
+    // A comparison belongs to the conversation it was started in. Carrying it
+    // into another chat would attach a result to a question nobody asked there.
+    resetCompare();
     ctx.state.set('activeChatId', chatId);
 
     renderSidebar();
@@ -1190,6 +1291,7 @@ function createChatView(container, ctx) {
     renderControls();
     renderContext();
     renderThread();
+    renderCompare();
     renderBanner();
     renderComposer();
   }
@@ -1429,6 +1531,15 @@ function createChatView(container, ctx) {
       title: 'Einträge aus dem Wissensgraphen an diesen Chat anheften',
       onClick: () => togglePicker(),
     }, text('Kontext anheften')));
+
+    const compareOpen = state.compare.open;
+    dom.controls.appendChild(h('button.btn.btn--small', {
+      type: 'button',
+      'aria-pressed': compareOpen ? 'true' : 'false',
+      class: compareOpen ? 'is-active' : '',
+      title: 'Dieselbe Frage einmal an zwei Modelle schicken und beide Antworten nebeneinander sehen',
+      onClick: () => toggleCompare(),
+    }, text('Zwei Modelle')));
   }
 
   function renderContext() {
@@ -1803,6 +1914,532 @@ function createChatView(container, ctx) {
     }
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Zwei Modelle, eine Antwort                                          */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Forget the current comparison, stopping it first if it runs. Called when
+   * the conversation changes and when the view goes away -- two models
+   * generating for a screen nobody is looking at is wasted local CPU.
+   */
+  function resetCompare(keepOpen = true) {
+    if (compareController) {
+      try { compareController.abort(); } catch { /* already done */ }
+      compareController = null;
+    }
+    if (comparePaintTimer) {
+      clearTimeout(comparePaintTimer);
+      comparePaintTimer = null;
+    }
+    const cmp = state.compare;
+    cmp.open = keepOpen ? cmp.open : false;
+    cmp.plan = null;
+    cmp.planError = null;
+    cmp.consentFor = '';
+    cmp.running = false;
+    cmp.aborting = false;
+    cmp.sides = null;
+    cmp.saved = null;
+    cmp.prompt = '';
+    if (cmp.open) loadComparePlan();
+  }
+
+  function toggleCompare() {
+    const cmp = state.compare;
+    if (cmp.open && cmp.running) {
+      ctx.toast('Der Vergleich läuft noch. Brich ihn ab, bevor du das Feld schließt.', 'info');
+      return;
+    }
+    cmp.open = !cmp.open;
+    if (cmp.open && !cmp.plan && !cmp.planLoading) {
+      // Preselect the chat's own model for the left side; the right side stays
+      // on "Standard" until the user picks, because guessing a second model
+      // would be the interface choosing where the text goes.
+      const own = modelRefOf(state.chat);
+      if (own && own.provider) cmp.a = `${own.provider}/${own.model}`;
+      loadComparePlan();
+    }
+    renderControls();
+    renderCompare();
+    renderComposer();
+  }
+
+  /** Model options, shared by both side selects. Built from the last probe. */
+  function compareOptions(selectEl, value) {
+    selectEl.appendChild(h('option', { value: '' }, text('Standard (erstes erreichbares)')));
+    const providers = (state.models && Array.isArray(state.models.providers)) ? state.models.providers : [];
+    let known = !value;
+    for (const provider of providers) {
+      const models = Array.isArray(provider.models) ? provider.models : [];
+      if (!provider.available || !models.length) continue;
+      const group = h('optgroup', { label: provider.id || provider.kind });
+      for (const model of models) {
+        const optionValue = `${provider.id}/${model.id}`;
+        if (optionValue === value) known = true;
+        group.appendChild(h('option', { value: optionValue }, text(model.name || model.id)));
+      }
+      selectEl.appendChild(group);
+    }
+    if (value && !known) {
+      selectEl.appendChild(h('option', { value }, text(`${value} (zurzeit nicht erreichbar)`)));
+    }
+    selectEl.value = value;
+  }
+
+  const loadComparePlan = debounce(async () => {
+    const cmp = state.compare;
+    if (!cmp.open) return;
+    cmp.planLoading = true;
+    cmp.planError = null;
+    renderCompare();
+    try {
+      const response = await api.post('/compare/plan', {
+        chatId: state.chatId || null,
+        a: cmp.a || null,
+        b: cmp.b || null,
+      });
+      if (disposed) return;
+      cmp.plan = (response && response.plan) || null;
+      // A consent always belongs to exactly one plan. If the new plan sends to
+      // a different place, the old "yes" is worthless and is dropped here.
+      if (cmp.consentFor && cmp.consentFor !== consentKey(cmp.plan)) cmp.consentFor = '';
+    } catch (err) {
+      if (disposed) return;
+      cmp.plan = null;
+      cmp.consentFor = '';
+      cmp.planError = err;
+    } finally {
+      if (!disposed) {
+        cmp.planLoading = false;
+        renderCompare();
+        renderComposer();
+      }
+    }
+  }, 250);
+
+  function setCompareSide(side, value) {
+    state.compare[side] = value;
+    state.compare.consentFor = '';
+    state.compare.plan = null;
+    loadComparePlan();
+    renderCompare();
+    renderComposer();
+  }
+
+  /** True when the plan is known, needs no consent, or has it for this plan. */
+  function compareReady() {
+    const cmp = state.compare;
+    if (!cmp.plan || cmp.planLoading) return false;
+    if (!cmp.plan.a.modell && !cmp.plan.b.modell) return false;
+    if (!cmp.plan.zustimmungNoetig) return true;
+    return cmp.consentFor === consentKey(cmp.plan);
+  }
+
+  async function runCompare() {
+    const cmp = state.compare;
+    if (cmp.running) return;
+    const prompt = dom.composerInput.value.trim();
+    if (!prompt) {
+      ctx.toast('Schreibe zuerst eine Frage in das Feld unten.', 'info');
+      dom.composerInput.focus();
+      return;
+    }
+    if (!compareReady()) {
+      ctx.toast(cmp.plan && cmp.plan.zustimmungNoetig
+        ? 'Bestätige zuerst, dass die Frage dieses Gerät verlassen darf.'
+        : 'Der Plan liegt noch nicht vor.', 'info');
+      return;
+    }
+
+    cmp.prompt = prompt;
+    cmp.running = true;
+    cmp.aborting = false;
+    cmp.saved = null;
+    cmp.sides = {
+      a: { seite: 'a', text: '', status: 'running', modell: cmp.plan.a.modell, ort: cmp.plan.a.ort, ergebnis: null },
+      b: { seite: 'b', text: '', status: 'running', modell: cmp.plan.b.modell, ort: cmp.plan.b.ort, ergebnis: null },
+    };
+    compareController = new AbortController();
+    renderCompare();
+    renderComposer();
+
+    let paintQueued = false;
+    const paint = () => {
+      if (paintQueued) return;
+      paintQueued = true;
+      comparePaintTimer = setTimeout(() => {
+        paintQueued = false;
+        comparePaintTimer = null;
+        if (disposed) return;
+        // Only the two text bodies are touched while tokens arrive. Rebuilding
+        // the whole panel ten times a second would throw away its scroll
+        // position, and a panel that jumps back to the top while you read it
+        // is a panel you cannot read.
+        if (!paintCompareText()) renderCompare();
+      }, COMPARE_PAINT_MS);
+    };
+
+    try {
+      await api.stream('/compare', {
+        body: { chatId: state.chatId || null, prompt, a: cmp.a || null, b: cmp.b || null },
+        signal: compareController.signal,
+        onEvent: (event) => {
+          const payload = (event && event.payload) || {};
+          const type = (event && event.type) || payload.type;
+          if (type === 'plan' && payload.plan) {
+            // The server has the last word on where this went.
+            cmp.plan = payload.plan;
+            renderCompare();
+          } else if (type === 'delta' && payload.seite && typeof payload.text === 'string') {
+            const side = cmp.sides[payload.seite];
+            if (side) side.text += payload.text;
+            paint();
+          } else if (type === 'side' && payload.seite && payload.ergebnis) {
+            const side = cmp.sides[payload.seite];
+            if (side) {
+              side.ergebnis = payload.ergebnis;
+              side.text = payload.ergebnis.text || side.text;
+              side.ort = payload.ergebnis.ort || side.ort;
+              side.status = payload.ergebnis.fehler ? 'failed' : 'complete';
+            }
+            renderCompare();
+          } else if (type === 'error' && payload.error) {
+            cmp.planError = new ApiError(payload.error.code, payload.error.message, { status: 0 });
+          }
+        },
+      });
+    } catch (err) {
+      if (!disposed) {
+        const apiError = err instanceof ApiError
+          ? err
+          : new ApiError('STREAM_INTERRUPTED', 'Die Verbindung zum lokalen Server ist während des Vergleichs abgerissen.', { status: 0, cause: err });
+        if (!apiError.isAborted) cmp.planError = apiError;
+      }
+    } finally {
+      if (comparePaintTimer) {
+        clearTimeout(comparePaintTimer);
+        comparePaintTimer = null;
+      }
+      compareController = null;
+      if (!disposed) {
+        cmp.running = false;
+        cmp.aborting = false;
+        for (const side of ['a', 'b']) {
+          const entry = cmp.sides && cmp.sides[side];
+          if (entry && entry.status === 'running') entry.status = 'unterbrochen';
+        }
+        renderCompare();
+        renderComposer();
+      }
+    }
+  }
+
+  function abortCompare() {
+    if (!compareController || state.compare.aborting) return;
+    state.compare.aborting = true;
+    // Dropping the connection is what stops both sides: the server aborts the
+    // run when the stream closes (`stream.onClose`).
+    compareController.abort();
+    renderCompare();
+    renderComposer();
+  }
+
+  async function saveCompare() {
+    const cmp = state.compare;
+    if (!cmp.sides || !cmp.sides.a.ergebnis || !cmp.sides.b.ergebnis) {
+      ctx.toast('Es gibt noch keinen vollständigen Vergleich zum Speichern.', 'info');
+      return;
+    }
+    try {
+      const response = await api.post('/compare/save', {
+        chatId: state.chatId || null,
+        prompt: cmp.prompt,
+        a: cmp.sides.a.ergebnis,
+        b: cmp.sides.b.ergebnis,
+      });
+      const note = recordOf(response);
+      cmp.saved = note ? note.id : null;
+      renderCompare();
+      ctx.toast(response && response.verknuepft
+        ? 'Vergleich als Notiz gespeichert und mit diesem Chat verknüpft.'
+        : 'Vergleich als Notiz gespeichert.', 'success', {
+        action: note ? { label: 'Notiz öffnen', run: () => ctx.navigate(`#/notes?id=${encodeURIComponent(note.id)}`) } : undefined,
+        timeout: 9000,
+      });
+    } catch (err) {
+      ctx.toast(`Vergleich konnte nicht gespeichert werden: ${errorMessage(err)}`, 'error');
+    }
+  }
+
+  /* ------------------------------ rendering ------------------------- */
+
+  /**
+   * Repaint only the streaming text of the two columns.
+   *
+   * @returns {boolean} false when there is nothing to paint into yet, which
+   *          means the caller has to build the panel properly first.
+   */
+  function paintCompareText() {
+    const cmp = state.compare;
+    if (!cmp.sides || !dom.cmpBody || !dom.cmpBody.a || !dom.cmpBody.b) return false;
+    for (const side of ['a', 'b']) {
+      const entry = cmp.sides[side];
+      const node = dom.cmpBody[side];
+      if (!entry || !node || entry.status !== 'running') continue;
+      clear(node);
+      node.classList.add('cmp__body--plain');
+      node.appendChild(entry.text ? text(entry.text) : h('p.meta', null, text('denkt nach …')));
+    }
+    return true;
+  }
+
+  function renderCompare() {
+    const cmp = state.compare;
+    dom.compare.hidden = !cmp.open;
+    if (!cmp.open) {
+      dom.cmpBody = null;
+      return;
+    }
+    // Rebuilding drops the scroll position; while two answers stream that
+    // would yank the panel back to the top under the reader's eyes.
+    const scrollTop = dom.compare.scrollTop;
+    dom.cmpBody = null;
+    clear(dom.compare);
+
+    const head = h('div.cmp__head', null,
+      h('h3.cmp__title', null, text('Zwei Modelle, eine Antwort')),
+      h('span.spacer'),
+      h('button.btn.btn--ghost.btn--small', {
+        type: 'button',
+        onClick: () => toggleCompare(),
+        disabled: cmp.running,
+      }, text('Schließen')));
+    dom.compare.appendChild(head);
+
+    dom.compare.appendChild(h('p.cmp__lead.meta', null, text(
+      'Dieselbe Frage geht an beide Seiten. Was du unten in das Feld schreibst, wird gesendet – '
+      + 'der Vergleich landet nicht im Verlauf dieses Chats, bis du ihn speicherst.',
+    )));
+
+    /* --- Auswahl ---------------------------------------------------- */
+    const selectFor = (side, label) => {
+      const select = h('select.select.cmp__select', {
+        'aria-label': label,
+        disabled: cmp.running,
+        onChange: (event) => setCompareSide(side, event.target.value),
+      });
+      compareOptions(select, cmp[side]);
+      return h('label.cmp__field', null, h('span.meta', null, text(label)), select);
+    };
+    dom.compare.appendChild(h('div.cmp__picks', null, selectFor('a', 'Seite A'), selectFor('b', 'Seite B')));
+
+    /* --- Plan ------------------------------------------------------- */
+    dom.compare.appendChild(renderComparePlan());
+
+    /* --- Antworten -------------------------------------------------- */
+    if (cmp.sides) {
+      dom.cmpBody = {};
+      dom.compare.appendChild(h('div.cmp__grid', null,
+        renderCompareSide('a', cmp.sides.a),
+        renderCompareSide('b', cmp.sides.b)));
+
+      const actions = h('div.cmp__actions');
+      if (cmp.running) {
+        actions.appendChild(h('button.btn.btn--danger.btn--small', {
+          type: 'button',
+          disabled: cmp.aborting,
+          onClick: () => abortCompare(),
+        }, text(cmp.aborting ? 'Wird abgebrochen …' : 'Beide abbrechen')));
+      } else {
+        actions.appendChild(h('button.btn.btn--small', {
+          type: 'button',
+          disabled: !!cmp.saved,
+          title: 'Legt eine Notiz mit beiden Antworten, beiden Modellnamen und der Herkunft an',
+          onClick: () => saveCompare(),
+        }, text(cmp.saved ? 'Gespeichert' : 'Als Notiz speichern')));
+        if (cmp.saved) {
+          actions.appendChild(h('button.btn.btn--ghost.btn--small', {
+            type: 'button',
+            onClick: () => ctx.navigate(`#/notes?id=${encodeURIComponent(cmp.saved)}`),
+          }, text('Notiz öffnen')));
+        }
+      }
+      dom.compare.appendChild(actions);
+    }
+
+    dom.compare.scrollTop = scrollTop;
+  }
+
+  /**
+   * The plan block: what would happen, in the server's own words, plus the
+   * separate act of agreeing to it.
+   */
+  function renderComparePlan() {
+    const cmp = state.compare;
+    const box = h('div.cmp__plan');
+
+    if (cmp.planError) {
+      const unavailable = cmp.planError instanceof ApiError && cmp.planError.code === 'SUBSYSTEM_UNAVAILABLE';
+      box.classList.add('cmp__plan--bad');
+      box.appendChild(h('p.cmp__plan-line', null, text(unavailable
+        ? 'Der Modellvergleich ist in dieser Installation nicht eingerichtet. Hier lässt sich zurzeit nichts vergleichen.'
+        : `Der Plan konnte nicht geholt werden: ${errorMessage(cmp.planError)}`)));
+      if (!unavailable) {
+        box.appendChild(h('button.btn.btn--small', {
+          type: 'button',
+          onClick: () => loadComparePlan(),
+        }, text('Erneut versuchen')));
+      }
+      return box;
+    }
+
+    if (cmp.planLoading && !cmp.plan) {
+      box.appendChild(h('p.cmp__plan-line.meta', null, text('Der Plan wird geholt …')));
+      return box;
+    }
+    if (!cmp.plan) {
+      box.appendChild(h('p.cmp__plan-line.meta', null, text('Noch kein Plan. Wähle zwei Seiten.')));
+      return box;
+    }
+
+    for (const side of ['a', 'b']) {
+      const entry = cmp.plan[side];
+      const line = h('p.cmp__plan-line');
+      line.appendChild(h('span.badge.cmp__place', {
+        'data-net': PLACE_NET[entry.ort] || 'unknown',
+        title: `Seite ${side.toUpperCase()} läuft ${PLACE_LABEL[entry.ort] || entry.ort}`,
+      }, text(`Seite ${side.toUpperCase()}`)));
+      // The sentence is the server's, verbatim: it knows what the gate decided.
+      line.appendChild(text(` ${entry.hinweis}`));
+      box.appendChild(line);
+    }
+
+    if (cmp.plan.hinweis) {
+      box.appendChild(h('p.cmp__plan-sum', {
+        class: cmp.plan.verlaesstGeraet ? 'is-leaving' : '',
+      }, text(cmp.plan.hinweis)));
+    }
+
+    if (cmp.plan.zustimmungNoetig) {
+      const agreed = cmp.consentFor === consentKey(cmp.plan);
+      const hosts = leavingHosts(cmp.plan);
+      box.appendChild(h('div.cmp__consent', null,
+        h('button.btn.btn--small.cmp__consent-btn', {
+          type: 'button',
+          'aria-pressed': agreed ? 'true' : 'false',
+          class: agreed ? 'is-active' : '',
+          disabled: cmp.running,
+          onClick: () => {
+            cmp.consentFor = agreed ? '' : consentKey(cmp.plan);
+            renderCompare();
+            renderComposer();
+          },
+        }, text(agreed
+          ? `Erlaubt: an ${hosts.join(' und ')}`
+          : `Ja, an ${hosts.join(' und ')} senden`)),
+        h('span.meta', null, text(agreed
+          ? 'Gilt nur für genau diese Auswahl. Änderst du ein Modell, wird erneut gefragt.'
+          : 'Ohne diese Bestätigung wird nichts gesendet.'))));
+    }
+
+    return box;
+  }
+
+  /** One column. Every badge under it comes from the server's own record. */
+  function renderCompareSide(side, entry) {
+    const column = h('article.cmp__side', { 'data-seite': side });
+    const result = entry.ergebnis;
+    const model = entry.modell;
+
+    column.appendChild(h('header.cmp__side-head', null,
+      h('span.cmp__side-name', null, text(model ? model.model : `Seite ${side.toUpperCase()}`)),
+      h('span.badge.cmp__place', {
+        'data-net': PLACE_NET[entry.ort] || 'unknown',
+      }, text(PLACE_LABEL[entry.ort] || 'Herkunft unbekannt'))));
+
+    if (model) {
+      column.appendChild(h('p.cmp__side-sub.meta', null,
+        text(`${model.provider} · ${model.host}`)));
+    }
+
+    const body = h('div.cmp__body');
+    if (entry.status === 'running' && !entry.text) {
+      body.appendChild(h('p.meta', null, text('denkt nach …')));
+    } else if (entry.status === 'running') {
+      // While it streams the text stays plain: re-parsing Markdown per token
+      // would fight the throttle for no gain, and half-written syntax renders
+      // as nonsense anyway.
+      body.classList.add('cmp__body--plain');
+      body.appendChild(text(entry.text));
+    } else if (entry.text) {
+      body.appendChild(renderMarkdown(entry.text));
+    } else if (!result || !result.fehler) {
+      body.appendChild(h('p.meta', null, text('Diese Seite hat keinen Text geliefert.')));
+    }
+    if (dom.cmpBody) dom.cmpBody[side] = body;
+    column.appendChild(body);
+
+    if (result && result.fehler) {
+      column.appendChild(h('div.cmp__error', { role: 'alert' },
+        h('p.cmp__error-title', null, text(result.abgebrochen
+          ? 'Diese Seite wurde abgebrochen.'
+          : 'Diese Seite ist fehlgeschlagen.')),
+        h('p.cmp__error-text', null, text(result.fehler.message)),
+        h('p.meta', null, text(`Fehlercode: ${result.fehler.code}`))));
+    } else if (entry.status === 'unterbrochen') {
+      column.appendChild(h('p.cmp__error-text.is-danger', null,
+        text('Die Verbindung endete, bevor diese Seite fertig war. Was oben steht, ist alles, was ankam.')));
+    }
+
+    if (result) column.appendChild(renderCompareMeta(result));
+    return column;
+  }
+
+  /**
+   * The honesty row of one column. Duration and tokens are whatever the
+   * backend reported; where it reported nothing, that is what is written.
+   * `usedNetwork` is the server's observation of the gate, not our guess.
+   */
+  function renderCompareMeta(result) {
+    const row = h('div.cmp__meta');
+    const duration = formatDuration(result.ms);
+    row.appendChild(h('span.badge', { title: 'Gemessen von der Frage bis zur letzten Zeile' },
+      text(duration ? `Dauer ${duration}` : 'Dauer nicht gemeldet')));
+
+    const tokens = result.tokens || {};
+    const prompt = Number(tokens.prompt);
+    const completion = Number(tokens.completion);
+    if (Number.isFinite(prompt) || Number.isFinite(completion)) {
+      const total = (Number.isFinite(prompt) ? prompt : 0) + (Number.isFinite(completion) ? completion : 0);
+      row.appendChild(h('span.badge', {
+        title: `Eingabe: ${Number.isFinite(prompt) ? formatNumber(prompt) : '?'} · Ausgabe: ${Number.isFinite(completion) ? formatNumber(completion) : '?'}`,
+      }, text(`${formatNumber(total)} Token`)));
+    } else {
+      row.appendChild(h('span.badge.is-muted', { title: 'Dieses Backend meldet keine Tokenzahlen.' },
+        text('Token nicht gemeldet')));
+    }
+
+    const targets = Array.isArray(result.networkTargets) ? result.networkTargets : [];
+    if (result.netzBeobachtet === false) {
+      row.appendChild(h('span.badge.cmp__net', {
+        'data-net': 'unknown',
+        title: 'Auf diesem Server konnte der Netzverkehr nicht beobachtet werden.',
+      }, text('Netznutzung nicht beobachtbar')));
+    } else if (result.usedNetwork === true) {
+      row.appendChild(h('span.badge.cmp__net', {
+        'data-net': 'online',
+        title: `Diese Antwort hat das Gerät verlassen. Ziele: ${targets.join(', ') || 'unbekannt'}`,
+      }, text(`Netz genutzt${targets.length ? `: ${targets.join(', ')}` : ''}`)));
+    } else {
+      row.appendChild(h('span.badge.cmp__net', {
+        'data-net': 'offline',
+        title: 'Es ging nichts an einen anderen Rechner. Verbindungen zu 127.0.0.1 sind dieses Gerät selbst.',
+      }, text(`Kein Netzverkehr${targets.length ? ` · Modell auf ${targets.join(', ')}` : ''}`)));
+    }
+    return row;
+  }
+
   /* ----------------------------- composer --------------------------- */
 
   function renderComposer() {
@@ -1818,10 +2455,23 @@ function createChatView(container, ctx) {
     clear(dom.abortButton);
     dom.abortButton.appendChild(text(entry && entry.aborting ? 'Wird abgebrochen …' : 'Abbrechen'));
 
+    const cmp = state.compare;
+    dom.compareSend.hidden = !cmp.open || streaming;
+    dom.compareSend.disabled = empty || !state.chatId || cmp.running || !compareReady();
+    clear(dom.compareSend);
+    dom.compareSend.appendChild(text(cmp.running ? 'Beide antworten …' : 'An beide senden'));
+    dom.compareSend.title = cmp.running
+      ? 'Der Vergleich läuft.'
+      : (compareReady()
+        ? 'Schickt genau diesen Text an beide Seiten'
+        : 'Erst muss der Plan da sein – und, wenn etwas das Gerät verlässt, deine Bestätigung.');
+
     clear(dom.composerHint);
     const length = dom.composerInput.value.length;
     if (!state.chatId) {
       dom.composerHint.appendChild(text('Wähle links einen Chat oder beginne einen neuen.'));
+    } else if (cmp.running) {
+      dom.composerHint.appendChild(text('Beide Seiten antworten. „Beide abbrechen“ stoppt sie; der Text bis dahin bleibt stehen.'));
     } else if (streaming) {
       dom.composerHint.appendChild(text('Das Modell antwortet. Esc oder „Abbrechen“ stoppt es; der Text bis dahin bleibt erhalten.'));
     } else if (length > MAX_CONTENT_CHARS * 0.9) {
@@ -1853,6 +2503,10 @@ function createChatView(container, ctx) {
     disposed = true;
     detachStream();
     if (paintTimer) clearTimeout(paintTimer);
+    // Unlike a chat answer, a comparison does NOT outlive the view: nothing
+    // stores it, so a result nobody can see is only two models burning CPU.
+    resetCompare(false);
+    loadComparePlan.cancel();
     reloadMessagesSoon.cancel();
     reloadChatsSoon.cancel();
     searchMessages.cancel();
@@ -2057,6 +2711,90 @@ const CHAT_CSS = `
 /* The confirmation dialog for network changes is written in paragraphs; the
    shell renders it as one text node, so the line breaks need to survive. */
 .dialog__text { white-space: pre-line; }
+
+/* --- Zwei Modelle, eine Antwort ------------------------------------- */
+.chatv__controls .btn.is-active { color: var(--accent); border-color: var(--accent); }
+.cmp {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  /* Der Verlauf darüber bleibt sichtbar und scrollt weiter; dieses Feld hat
+     seinen eigenen Rollbalken, damit zwei lange Antworten den Chat nicht
+     verdrängen. */
+  max-height: 62vh;
+  overflow-y: auto;
+  padding: var(--sp-1) var(--sp-2);
+  border-top: 1px solid var(--border-strong);
+  background: var(--surface-2);
+}
+.cmp__head { display: flex; align-items: center; gap: var(--sp-1); }
+.cmp__title { margin: 0; font-size: var(--fs-md); }
+.cmp__lead { margin: 0; }
+.cmp__picks { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.cmp__field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cmp__select { max-width: 260px; padding: 4px var(--sp-1); font-size: var(--fs-sm); }
+.cmp__plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-05);
+  padding: var(--sp-1);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+}
+.cmp__plan--bad { border-color: var(--danger); }
+.cmp__plan-line { margin: 0; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.cmp__plan-sum { margin: 0; font-size: var(--fs-sm); font-weight: 500; overflow-wrap: anywhere; }
+.cmp__plan-sum.is-leaving {
+  padding: var(--sp-05) var(--sp-1);
+  color: var(--warn);
+  border-left: 3px solid var(--warn);
+  background: var(--surface-2);
+  border-radius: var(--r-1);
+}
+.cmp__consent { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1); margin-top: var(--sp-05); }
+.cmp__consent-btn.is-active { color: var(--ok); border-color: var(--ok); }
+/* auto-fit, not a media query: the columns stack when this panel is narrow,
+   whatever the window is doing around it. */
+.cmp__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--sp-1); }
+.cmp__side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-05);
+  min-width: 0;
+  padding: var(--sp-1);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+}
+.cmp__side-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-05); }
+.cmp__side-name { font-weight: 600; overflow-wrap: anywhere; }
+.cmp__side-sub { margin: 0; overflow-wrap: anywhere; }
+.cmp__body { min-width: 0; overflow-wrap: anywhere; }
+.cmp__body--plain { white-space: pre-wrap; }
+.cmp__meta { display: flex; flex-wrap: wrap; gap: var(--sp-05); margin-top: auto; padding-top: var(--sp-05); }
+.cmp__error {
+  padding: var(--sp-05) var(--sp-1);
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
+  border-radius: var(--r-1);
+}
+.cmp__error-title { margin: 0; font-weight: 600; font-size: var(--fs-sm); }
+.cmp__error-text { margin: 2px 0; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.cmp__actions { display: flex; flex-wrap: wrap; gap: var(--sp-05); }
+.cmp__place[data-net="offline"], .cmp__net[data-net="offline"] {
+  color: var(--net-offline); background: transparent; border: 1px solid var(--net-offline);
+}
+.cmp__place[data-net="lan"], .cmp__net[data-net="lan"] {
+  color: var(--net-lan); background: transparent; border: 1px solid var(--net-lan);
+}
+.cmp__place[data-net="online"], .cmp__net[data-net="online"] {
+  color: var(--net-online); background: transparent; border: 1px solid var(--net-online); font-weight: 600;
+}
+.cmp__place[data-net="unknown"], .cmp__net[data-net="unknown"] {
+  color: var(--net-unknown); background: transparent; border: 1px solid var(--net-unknown);
+}
 @media (max-width: 820px) {
   .chatv { grid-template-columns: minmax(0, 1fr); position: relative; }
   .chatv__side { display: none; }

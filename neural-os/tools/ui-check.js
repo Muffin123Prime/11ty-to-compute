@@ -39,8 +39,8 @@ const G = '\u001b[32m'; const R = '\u001b[31m'; const Y = '\u001b[33m';
 const D = '\u001b[2m'; const B = '\u001b[1m'; const X = '\u001b[0m';
 
 const ALL_VIEWS = [
-  'chat', 'notes', 'projects', 'graph', 'agents', 'assist', 'automation',
-  'network', 'timeline', 'sync', 'workshop', 'search', 'settings',
+  'today', 'chat', 'notes', 'projects', 'graph', 'agents', 'assist', 'study',
+  'automation', 'network', 'timeline', 'sync', 'workshop', 'search', 'settings',
 ];
 
 let failed = 0;
@@ -194,7 +194,7 @@ async function main() {
       await page.close();
     }
     check(!narrowProblems.length, 'Keine Ansicht erzwingt waagerechtes Scrollen',
-      narrowProblems.length ? `betroffen: ${narrowProblems.join(', ')}` : '13 Ansichten');
+      narrowProblems.length ? `betroffen: ${narrowProblems.join(', ')}` : `${ALL_VIEWS.length} Ansichten`);
     await narrow.close();
 
     if (onlyViews) return;

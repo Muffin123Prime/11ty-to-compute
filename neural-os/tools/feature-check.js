@@ -146,6 +146,9 @@ const SUBSYSTEM_ROUTES = {
   agents: '/api/agents',
   approvals: '/api/approvals',
   assist: '/api/assist/detectors',
+  study: '/api/study/stats',
+  compare: '/api/models',   // eigene Routen sind POST; /api/models zeigt, dass die Registry steht
+  watcher: '/api/watch',
   history: '/api/history',
   scheduler: '/api/automation/schedules',
   triggers: '/api/automation/triggers',

@@ -357,6 +357,11 @@ test('fehlende Teilsysteme landen in fehlend, statt die Route zu kippen', async 
       assert.match(eintrag.grund, /nicht verfügbar/,
         'der Grund ist ein deutscher Satz, kein Stapelabzug');
     }
+    // Und zwar ein grammatisch richtiger: „Die Auslöser ist …" stünde sonst
+    // wörtlich auf dem Bildschirm.
+    const gruende = res.json.fehlend.map((f) => f.grund).join(' ');
+    assert.match(gruende, /Die Auslöser sind in dieser Instanz nicht verfügbar\./);
+    assert.match(gruende, /Die Zeitplanung ist in dieser Instanz nicht verfügbar\./);
 
     // Was da ist, kommt trotzdem an.
     assert.equal(res.json.faellig.anzahl.ueberfaellig, 1);

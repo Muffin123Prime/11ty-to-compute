@@ -181,6 +181,16 @@ async function createApp(opts = {}) {
     ? optional(failures, 'chat', () => chatMod.createChatService({ store, registry, gate, bus, graph, config, logger }))
     : null;
 
+  // --- Modellvergleich -------------------------------------------------------
+  //
+  // Dieselbe Frage an zwei Modelle. Braucht die Registry und die Schleuse:
+  // die zweite Seite ist haeufig ein Online-Anbieter, und dass eine Frage das
+  // Geraet verlaesst, darf keine Nebenwirkung sein, sondern eine Entscheidung.
+  const compareMod = tryRequire('./models/compare');
+  const compare = compareMod && registry
+    ? optional(failures, 'compare', () => compareMod.createCompare({ registry, gate, store, bus, config, logger }))
+    : null;
+
   // --- agents --------------------------------------------------------------
   const approvalsMod = tryRequire('./agents/approvals');
   const approvals = approvalsMod
@@ -206,6 +216,16 @@ async function createApp(opts = {}) {
   const assistMod = tryRequire('./assist/engine');
   const assist = assistMod
     ? optional(failures, 'assist', () => assistMod.createAssist({ store, graph, bus, config, logger }))
+    : null;
+
+  // --- Lernkarten -----------------------------------------------------------
+  //
+  // Wie die Vorschlaege: braucht kein Modell. SM-2 ist dreissig Jahre alt und
+  // funktioniert, und das Nuetzlichste soll nicht der Teil sein, fuer den man
+  // erst 5 GB herunterlaedt.
+  const studyMod = tryRequire('./study/cards');
+  const study = studyMod
+    ? optional(failures, 'study', () => studyMod.createStudy({ store, bus, config, logger }))
     : null;
 
   // --- undo -----------------------------------------------------------------
@@ -302,6 +322,24 @@ async function createApp(opts = {}) {
   // --- file text extraction -------------------------------------------------
   const extract = tryRequire('./store/extract');
 
+  // --- beobachtete Ordner ----------------------------------------------------
+  //
+  // Nach `extract`, weil der Beobachter den Text aus den Dateien braucht.
+  // `bulkWrite` wird erst nach dem Bau des app-Objekts nachgereicht (es haengt
+  // daran) -- bis dahin laeuft ein Durchlauf ohne den Schutzraum, und genau
+  // deshalb wird der Beobachter auch erst in `listen()` gestartet.
+  const watchMod = tryRequire('./store/watch');
+  const watcher = watchMod
+    ? optional(failures, 'watcher', () => watchMod.createWatcher({
+      store, bus, paths, config, logger, extract,
+      // Ein grosser Durchlauf nimmt viele Saetze auf einmal auf und wuerde
+      // sonst den Rueckgaengig-Verlauf leerfegen. `app` gibt es an dieser
+      // Stelle noch nicht -- der Abschluss greift erst beim Durchlauf darauf
+      // zu, und der findet lange nach dem Bau statt.
+      bulkWrite: (fn) => app.bulkWrite(fn),
+    }))
+    : null;
+
   // --- device synchronisation -----------------------------------------------
   const syncMod = tryRequire('./sync/peer');
   const sync = syncMod
@@ -372,6 +410,9 @@ async function createApp(opts = {}) {
     toolbox,
     runtime,
     assist,
+    study,
+    compare,
+    watcher,
     history,
     scheduler,
     triggers,
@@ -439,6 +480,9 @@ async function createApp(opts = {}) {
         agents: !!runtime,
         approvals: !!approvals,
         assist: !!assist,
+        study: !!study,
+        compare: !!compare,
+        watcher: !!watcher,
         history: !!history,
         scheduler: !!scheduler,
         triggers: !!triggers,
@@ -492,6 +536,8 @@ async function createApp(opts = {}) {
         },
         assistance: assist && typeof assist.stats === 'function' ? assist.stats() : null,
         undo: history && typeof history.stats === 'function' ? history.stats() : null,
+        lernen: study && typeof study.stats === 'function' ? study.stats() : null,
+        ordner: watcher && typeof watcher.status === 'function' ? watcher.status() : null,
         extensions: modules && typeof modules.status === 'function' ? modules.status() : null,
         peers: sync && typeof sync.summary === 'function' ? sync.summary() : null,
         failures,
@@ -552,12 +598,21 @@ async function createApp(opts = {}) {
           log.error(`Auslöser konnten nicht gestartet werden: ${err && err.message}`);
         }
       }
+      if (watcher && typeof watcher.start === 'function') {
+        try {
+          watcher.start();
+        } catch (err) {
+          failures.push({ subsystem: 'watcher', reason: asNeuralError(err).message });
+          log.error(`Ordnerbeobachtung konnte nicht gestartet werden: ${err && err.message}`);
+        }
+      }
       return created;
     },
 
     async close() {
       const problems = [];
       for (const [name, fn] of [
+        ['watcher', () => watcher && watcher.stop && watcher.stop()],
         ['history', () => history && history.stop && history.stop()],
         ['scheduler', () => scheduler && scheduler.stop && scheduler.stop()],
         ['triggers', () => triggers && triggers.stop && triggers.stop()],
