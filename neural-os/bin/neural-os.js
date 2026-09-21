@@ -277,6 +277,107 @@ async function cmdCompact(flags) {
   }
 }
 
+
+/* ------------------------------------------------------------------ stick */
+
+async function cmdStick(flags, args) {
+  const action = args._[1] || 'verify';
+  const target = args._[2];
+  if (!target) {
+    throw new Error(`Bitte den Pfad zum Stick angeben: neural-os stick ${action} /pfad/zum/stick`);
+  }
+
+  const app = await boot(flags);
+  try {
+    const { createStick } = require('../src/portable/stick');
+    const stick = createStick({ gate: app.gate, logger: require('../src/kernel/log').logger, paths: app.paths, config: app.config });
+
+    // A long copy with no sign of life looks like a hang, and the natural
+    // reaction to a hang is pulling the stick out.
+    let lastPhase = null;
+    const onProgress = (p) => {
+      if (!p) return;
+      if (p.phase && p.phase !== lastPhase) {
+        lastPhase = p.phase;
+        process.stdout.write(`\n  ${D}${p.message || p.phase}${X}`);
+      } else if (p.message) {
+        readline.clearLine(process.stdout, 0);
+        readline.cursorTo(process.stdout, 0);
+        process.stdout.write(`  ${D}${String(p.message).slice(0, 70)}${X}`);
+      }
+    };
+
+    if (action === 'prepare') {
+      const runtimes = typeof flags.runtimes === 'string'
+        ? flags.runtimes.split(',').map((r) => r.trim()).filter(Boolean)
+        : [];
+      const res = await stick.prepare(target, {
+        includeRuntimes: runtimes.length ? runtimes : true,
+        includeVault: flags['include-vault'] === true,
+        onProgress,
+      });
+      console.log('');
+      console.log(`${G}✓${X} Stick vorbereitet: ${B}${res.root}${X}`);
+      const names = (res.runtimes || []).map((r) => (typeof r === 'string' ? r : (r && (r.platform || r.id || r.name)) || '?'));
+      console.log(`  ${res.files} Dateien · ${Math.round(res.bytes / 1048576)} MB · Laufzeiten: ${names.join(', ') || 'keine'}`);
+      printProblems(res.warnings, 'Hinweise');
+      return 0;
+    }
+
+    if (action === 'update') {
+      const res = await stick.update(target, { onProgress });
+      console.log('');
+      console.log(`${G}✓${X} Programmcode auf dem Stick erneuert. ${D}Der Datenordner wurde nicht angefasst.${X}`);
+      if (res && res.files) console.log(`  ${res.files} Dateien · ${Math.round((res.bytes || 0) / 1048576)} MB`);
+      printProblems(res && res.warnings, 'Hinweise');
+      return 0;
+    }
+
+    if (action === 'runtime') {
+      const platform = args._[3] || flags.platform;
+      if (!platform) throw new Error('Bitte die Plattform angeben, z. B. win-x64, darwin-arm64, linux-x64.');
+      const res = await stick.addRuntime(target, platform);
+      console.log(`${G}✓${X} Laufzeit ${platform} auf den Stick gelegt.${res && res.bytes ? ` ${Math.round(res.bytes / 1048576)} MB` : ''}`);
+      return 0;
+    }
+
+    if (action === 'verify') {
+      const res = await stick.verify(target);
+      console.log('');
+      console.log(`${B}Stick${X} ${res.root || target}`);
+      if (res.layout) {
+        for (const [key, value] of Object.entries(res.layout)) {
+          console.log(`  ${mark(!!value)} ${key}`);
+        }
+      }
+      if (typeof res.freeBytes === 'number') {
+        console.log(`  ${D}frei: ${Math.round(res.freeBytes / 1048576)} MB${X}`);
+      }
+      printProblems(res.problems, 'Probleme');
+      console.log('');
+      console.log(res.ok ? `${G}✓ Der Stick ist in Ordnung.${X}` : `${R}✗ Der Stick ist so nicht startklar.${X}`);
+      return res.ok ? 0 : 1;
+    }
+
+    console.error(`Unbekannte Stick-Aktion "${action}". Verfügbar: prepare, update, verify, runtime`);
+    return 1;
+  } finally {
+    await app.close();
+  }
+}
+
+/** Print whatever the stick tool reported, in whichever shape it used. */
+function printProblems(list, heading) {
+  if (!Array.isArray(list) || !list.length) return;
+  console.log(`\n${B}${heading}${X}`);
+  for (const entry of list) {
+    if (typeof entry === 'string') { console.log(`  ${Y}·${X} ${entry}`); continue; }
+    const level = entry.level === 'error' ? `${R}✗${X}` : `${Y}·${X}`;
+    console.log(`  ${level} ${entry.message || entry.code || JSON.stringify(entry)}`);
+    if (entry.fix) console.log(`      ${D}${entry.fix}${X}`);
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cmd = args._[0] || 'start';
@@ -297,8 +398,9 @@ async function main() {
     case 'export': return cmdExport(flags);
     case 'import': return cmdImport(flags, args);
     case 'compact': return cmdCompact(flags);
+    case 'stick': return cmdStick(flags, args);
     default:
-      console.error(`Unbekannter Befehl: ${cmd}\nVerfügbar: start, doctor, export, import, compact, version`);
+      console.error(`Unbekannter Befehl: ${cmd}\nVerfügbar: start, doctor, export, import, compact, stick, version`);
       return 1;
   }
 }

@@ -255,6 +255,12 @@ async function createApp(opts = {}) {
     const sandbox = optional(failures, 'module-sandbox', () => sandboxMod.createSandbox({
       store, gate, bus, config, logger, paths, audit,
     }));
+    // The model registry is handed over after construction: without it the
+    // `model.use` capability would exist and then throw NoModelError, which
+    // looks to the user like a missing model rather than a missing wire.
+    if (sandbox && registry && typeof sandbox.attachModels === 'function') {
+      sandbox.attachModels(registry);
+    }
     if (sandbox) {
       modules = optional(failures, 'modules', () => registryModulesMod.createModuleRegistry({
         store, sandbox, bus, logger, config, audit, paths,
