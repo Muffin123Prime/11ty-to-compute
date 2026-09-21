@@ -186,6 +186,55 @@ async function createApp(opts = {}) {
     ? optional(failures, 'runtime', () => runtimeMod.createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, config, logger, paths }))
     : null;
 
+  // --- semantic search ------------------------------------------------------
+  // Optional in the strongest sense: it needs a second model (an embedding
+  // model) that most people will not have installed. Everything else keeps
+  // working without it, and the search falls back to BM25 -- but the UI is told
+  // which one it got, because silently answering a different question than the
+  // one asked is the kind of dishonesty this system exists to avoid.
+  const vectorsMod = tryRequire('./store/vectors');
+  const vectors = vectorsMod
+    ? optional(failures, 'vectors', () => vectorsMod.createVectorStore({ paths, vaultCrypto, logger }))
+    : null;
+
+  const embeddingsMod = tryRequire('./models/embeddings');
+  const embeddings = embeddingsMod && registry && vectors
+    ? optional(failures, 'embeddings', () => embeddingsMod.createEmbeddings({
+      registry, gate, config, store, bus, logger, vectors,
+    }))
+    : null;
+
+  // Keep the semantic index in step with the data, the same way derived links
+  // are kept in step: as a consequence of the write, never as a separate thing
+  // the user has to remember to run.
+  if (embeddings && typeof embeddings.indexRecord === 'function') {
+    const reindex = (evt) => {
+      const record = evt && evt.payload && evt.payload.record;
+      if (!record || record.type === 'edge' || record.type === 'message') return;
+      Promise.resolve(embeddings.indexRecord(record)).catch((err) => {
+        // An unreachable embedding model must not turn every save into an error.
+        log.debug(`Einbettung für ${record.id} nicht aktualisiert: ${err && err.message}`);
+      });
+    };
+    bus.on('record.created', reindex);
+    bus.on('record.updated', reindex);
+    bus.on('record.deleted', (evt) => {
+      const id = evt && evt.payload && evt.payload.id;
+      if (id && typeof embeddings.removeRecord === 'function') {
+        Promise.resolve(embeddings.removeRecord(id)).catch(() => {});
+      }
+    });
+  }
+
+  // --- file text extraction -------------------------------------------------
+  const extract = tryRequire('./store/extract');
+
+  // --- device synchronisation -----------------------------------------------
+  const syncMod = tryRequire('./sync/peer');
+  const sync = syncMod
+    ? optional(failures, 'sync', () => syncMod.createSync({ store, gate, config, bus, logger, auth: null, paths }))
+    : null;
+
   // --- support services ----------------------------------------------------
   const backupMod = tryRequire('./store/backup');
   const backup = backupMod
@@ -196,6 +245,8 @@ async function createApp(opts = {}) {
   const auth = authMod
     ? optional(failures, 'auth', () => authMod.createAuth({ store, config, logger, audit }))
     : null;
+
+  if (sync && typeof sync.setAuth === 'function' && auth) sync.setAuth(auth);
 
   const app = {
     version: VERSION,
@@ -216,6 +267,10 @@ async function createApp(opts = {}) {
     runtime,
     backup,
     auth,
+    vectors,
+    embeddings,
+    extract,
+    sync,
     failures,
     server: null,
 
@@ -245,7 +300,20 @@ async function createApp(opts = {}) {
         approvals: !!approvals,
         backup: !!backup,
         auth: !!auth,
+        extraction: !!extract,
+        sync: !!sync,
       };
+      let semantic = { available: false, reason: 'Semantische Suche nicht geladen' };
+      if (embeddings && typeof embeddings.available === 'function') {
+        try {
+          const state = await embeddings.available();
+          semantic = state && state.ok
+            ? { available: true, model: state.model, dim: state.dim, indexed: vectors ? vectors.size() : 0 }
+            : { available: false, reason: (state && state.reason) || 'Kein Einbettungsmodell erreichbar' };
+        } catch (err) {
+          semantic = { available: false, reason: asNeuralError(err).message };
+        }
+      }
       let models = { available: false, providers: [], reason: 'model registry unavailable' };
       if (registry) {
         try {
@@ -270,6 +338,8 @@ async function createApp(opts = {}) {
         vault: { ...(store.stats ? store.stats() : {}), encryption: vaultCrypto ? vaultCrypto.state : 'unavailable' },
         subsystems,
         models,
+        semantic,
+        peers: sync && typeof sync.summary === 'function' ? sync.summary() : null,
         failures,
       };
     },
