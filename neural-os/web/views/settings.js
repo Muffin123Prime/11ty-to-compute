@@ -165,6 +165,9 @@ export default {
       configError: null,
       models: null,
       modelsError: null,
+      remote: null,
+      remoteError: null,
+      remoteTests: new Map(), // id -> the last real test result, never a guess
       tokens: [],
       tokensError: null,
 
@@ -181,7 +184,7 @@ export default {
 
     buildLayout(self);
     subscribe(self);
-    await Promise.all([loadStatus(self), loadConfig(self), loadModels(self), loadTokens(self)]);
+    await Promise.all([loadStatus(self), loadConfig(self), loadModels(self), loadRemote(self), loadTokens(self)]);
     if (!self.alive) return;
     renderAll(self);
   },
@@ -260,6 +263,26 @@ async function loadModels(self) {
   }
 }
 
+/**
+ * The configured online backends.
+ *
+ * A 403 here is a real answer, not a failure: only the owner may see which
+ * online providers exist, because the list is itself a statement about where
+ * this installation is allowed to talk to.
+ */
+async function loadRemote(self) {
+  try {
+    const result = await request(self, (signal) => self.api.get('/models/remote', { signal }));
+    if (!self.alive) return;
+    self.remote = result;
+    self.remoteError = null;
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.remote = null;
+    self.remoteError = err;
+  }
+}
+
 async function loadTokens(self) {
   try {
     const result = await request(self, (signal) => self.api.get('/tokens', { signal }));
@@ -328,12 +351,13 @@ function buildLayout(self) {
   dom.backup = h('div.stack');
   dom.sharing = h('div.stack');
   dom.models = h('div.stack');
+  dom.remote = h('div.stack');
   dom.diagnosis = h('div.stack');
 
   dom.refreshButton = h('button.btn.btn--small', {
     type: 'button',
     onClick: async () => {
-      await Promise.all([loadStatus(self), loadConfig(self), loadModels(self), loadTokens(self)]);
+      await Promise.all([loadStatus(self), loadConfig(self), loadModels(self), loadRemote(self), loadTokens(self)]);
       if (self.alive) renderAll(self);
     },
   }, icon(ICONS.refresh), text('Neu laden'));
@@ -351,6 +375,9 @@ function buildLayout(self) {
       section('Sicherung', 'Export und Import deiner vollständigen Daten.', dom.backup),
       section('Freigabe im lokalen Netz', null, dom.sharing),
       section('Modelle', 'Welche Modell-Backends gefunden wurden und welches als Vorgabe dient.', dom.models),
+      section('Online-Modelle',
+        'Ein Anbieter im Internet. Alles, was du an ihn schickst, verl\u00e4sst dieses Ger\u00e4t \u2013 deshalb bleibt er gesperrt, bis du den Host ausdr\u00fccklich freigibst.',
+        dom.remote),
       section('Diagnose', 'Was dieses System über sich selbst weiß. Nichts hier ist geraten.', dom.diagnosis)));
 
   container.appendChild(dom.root);
@@ -368,6 +395,7 @@ function renderAll(self) {
   renderBackup(self);
   renderSharing(self);
   renderModels(self);
+  renderRemote(self);
   renderDiagnosis(self);
 }
 
@@ -994,6 +1022,298 @@ function renderModels(self) {
     h('span.label', null, text('Standardmodell für neue Chats')),
     select,
     h('span.hint', null, text('Ein Agent oder ein Chat kann davon abweichen. Ist das gewählte Modell nicht erreichbar, meldet das System das – es weicht nicht stillschweigend aus.'))));
+}
+
+/* ------------------------------------------------------------------ */
+/* Online-Modelle                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The one screen in this app where a person deliberately opens a door.
+ *
+ * Three things are therefore never softened:
+ *
+ * 1. **A provider that exists is not a provider that may be reached.** Every
+ *    entry shows the gate's current verdict for its host, so "angelegt" and
+ *    "erlaubt" can never be confused. The server computes that verdict from
+ *    policy alone -- looking at this list does not touch the network.
+ * 2. **Where the key lives is stated, not implied.** `keySource` comes from
+ *    the server: `env` (nowhere on disk), `config` (plain text in config.json),
+ *    `env-missing` (a variable was named and is empty -- the case that
+ *    otherwise looks like a mysterious 401).
+ * 3. **"Testen" really connects.** It is the only honest answer to "geht das?",
+ *    and its result distinguishes a gate refusal (a decision the user made)
+ *    from an unreachable server (something broken).
+ */
+function renderRemote(self) {
+  const box = self.dom.remote;
+  clear(box);
+
+  if (self.remoteError) {
+    const denied = self.remoteError && self.remoteError.status === 403;
+    box.appendChild(h('p.meta', { class: denied ? 'meta' : 'is-danger' }, text(denied
+      ? 'Nur die Eigentümerin oder der Eigentümer dieser Installation darf Online-Anbieter sehen und ändern.'
+      : `Die Liste der Online-Anbieter ist nicht lesbar: ${errorMessage(self.remoteError)}`)));
+    return;
+  }
+
+  const data = self.remote || {};
+  const items = Array.isArray(data.items) ? data.items : [];
+  const mode = typeof data.mode === 'string' ? data.mode : 'offline';
+
+  box.appendChild(h('div.setv__netmode', { dataset: { mode } },
+    h('span.setv__provider-dot', { 'aria-hidden': 'true' }),
+    h('span', null, text(mode === 'offline'
+      ? 'Netzmodus: offline. Kein Online-Anbieter ist erreichbar, egal was hier steht.'
+      : `Netzmodus: ${mode}. Freigegebene Hosts sind erreichbar.`))));
+
+  if (!items.length) {
+    box.appendChild(h('p.meta', null, text(
+      'Es ist kein Online-Anbieter eingetragen. Ohne einen läuft alles ausschließlich auf diesem Gerät.')));
+  }
+
+  for (const item of items) {
+    box.appendChild(remoteCard(self, item));
+  }
+
+  box.appendChild(remoteForm(self, data));
+
+  box.appendChild(h('p.hint', null, text(String(data.advice
+    || 'Ein Schlüssel in einer Umgebungsvariable steht in keiner Datei.'))));
+}
+
+function keySourceLabel(item) {
+  if (item.keySource === 'env') return `Schlüssel aus der Umgebungsvariable ${item.apiKeyEnv}`;
+  if (item.keySource === 'env-missing') return `Die Umgebungsvariable ${item.apiKeyEnv} ist in diesem Prozess leer`;
+  if (item.keySource === 'config') return 'Schlüssel liegt im Klartext in config.json';
+  return 'Kein Schlüssel hinterlegt';
+}
+
+function remoteCard(self, item) {
+  const allowed = item.gate && item.gate.allowed === true;
+  const testResult = self.remoteTests.get(item.id) || null;
+  const busyKey = `remote:${item.id}`;
+
+  const gateLine = h('p.meta', {
+    class: allowed ? 'meta' : 'meta is-warn',
+  }, text(allowed
+    ? `Der Host ${item.host} ist freigegeben.`
+    : `Der Host ${item.host} ist gesperrt. ${(item.gate && item.gate.reason) || ''}`.trim()));
+
+  const actions = h('div.row', null,
+    h('button.btn.btn--small', {
+      type: 'button',
+      disabled: self.busy[busyKey] === true,
+      onClick: () => testRemote(self, item),
+    }, icon(ICONS.refresh), text(self.busy[busyKey] ? 'Wird geprüft …' : 'Verbindung testen')),
+    allowed ? null : h('button.btn.btn--small', {
+      type: 'button',
+      onClick: () => allowRemoteHost(self, item),
+    }, text('Host freigeben')),
+    h('span.spacer'),
+    h('button.btn.btn--small.btn--danger', {
+      type: 'button',
+      onClick: () => removeRemote(self, item),
+    }, icon(ICONS.trash), text('Entfernen')));
+
+  let resultLine = null;
+  if (testResult) {
+    if (testResult.ok) {
+      const names = Array.isArray(testResult.models) ? testResult.models : [];
+      resultLine = h('div.setv__hintbox', null, text(
+        `Erreichbar${Number.isFinite(testResult.latencyMs) ? ` in ${formatNumber(testResult.latencyMs)} ms` : ''}. `
+        + (names.length ? `Gefundene Modelle: ${names.slice(0, 12).join(', ')}` : 'Der Anbieter hat keine Modellliste geliefert.')));
+    } else {
+      resultLine = h('div.setv__hintbox', { dataset: { level: testResult.blocked ? 'blocked' : 'fail' } },
+        h('p', null, text(testResult.blocked
+          ? 'Die Netz-Schleuse hat den Versuch verhindert – das ist deine eigene Einstellung, kein Fehler.'
+          : 'Der Anbieter war nicht erreichbar.')),
+        testResult.error ? h('p.meta', null, text(String(testResult.error))) : null,
+        testResult.hint ? h('p.meta', null, text(String(testResult.hint))) : null);
+    }
+  }
+
+  return h('article.setv__provider', { dataset: { available: allowed ? '1' : '0' } },
+    h('div.row', null,
+      h('span.setv__provider-dot', { 'aria-hidden': 'true' }),
+      h('strong', null, text(String(item.label || item.id))),
+      h('code.meta', null, text(String(item.baseUrl || ''))),
+      h('span.spacer'),
+      h('span.badge', null, text(item.enabled ? 'aktiv' : 'deaktiviert'))),
+    gateLine,
+    h('p.meta', null, text(keySourceLabel(item))),
+    resultLine,
+    actions);
+}
+
+/**
+ * The add form.
+ *
+ * Presets exist so nobody has to know that Groq's base URL ends in
+ * `/openai/v1`. They are constants shipped with the app -- fetching a provider
+ * directory would itself be an unannounced online access.
+ */
+function remoteForm(self, data) {
+  const presets = Array.isArray(data.presets) ? data.presets : [];
+
+  const idField = h('input.input', { type: 'text', placeholder: 'z. B. openai', autocomplete: 'off', spellcheck: 'false' });
+  const labelField = h('input.input', { type: 'text', placeholder: 'Anzeigename', autocomplete: 'off' });
+  const urlField = h('input.input', { type: 'text', placeholder: 'https://…/v1', autocomplete: 'off', spellcheck: 'false' });
+  const envField = h('input.input', { type: 'text', placeholder: 'OPENAI_API_KEY', autocomplete: 'off', spellcheck: 'false' });
+  const keyField = h('input.input', { type: 'password', placeholder: 'nur wenn keine Umgebungsvariable', autocomplete: 'new-password' });
+  const allowBox = h('input', { type: 'checkbox' });
+  const noteLine = h('p.hint', null, text('Wähle eine Vorlage oder trage die Adresse selbst ein.'));
+
+  const presetSelect = h('select.select', {
+    'aria-label': 'Vorlage',
+    onChange: (event) => {
+      const preset = presets.find((p) => p.id === event.target.value);
+      if (!preset) return;
+      idField.value = preset.id;
+      labelField.value = preset.label;
+      urlField.value = preset.baseUrl;
+      envField.value = preset.apiKeyEnv || '';
+      clear(noteLine);
+      noteLine.appendChild(text(String(preset.note || '')));
+    },
+  }, h('option', { value: '' }, text('Eigener Anbieter …')));
+  for (const preset of presets) {
+    presetSelect.appendChild(h('option', { value: preset.id }, text(preset.label)));
+  }
+
+  return h('details.setv__newtoken', null,
+    h('summary', null, text('Online-Anbieter hinzufügen')),
+    h('div.setv__newtoken-body.stack', null,
+      h('label.field', null, h('span.label', null, text('Vorlage')), presetSelect),
+      noteLine,
+      h('label.field', null, h('span.label', null, text('Kennung')), idField,
+        h('span.hint', null, text('Kurz und eindeutig. Erscheint später vor dem Modellnamen.'))),
+      h('label.field', null, h('span.label', null, text('Anzeigename')), labelField),
+      h('label.field', null, h('span.label', null, text('Adresse')), urlField),
+      h('label.field', null, h('span.label', null, text('Umgebungsvariable mit dem Schlüssel')), envField,
+        h('span.hint', null, text('Empfohlen: der Schlüssel steht dann in keiner Datei dieses Programms.'))),
+      h('label.field', null, h('span.label', null, text('… oder Schlüssel direkt eintragen')), keyField,
+        h('span.hint', null, text('Er liegt dann im Klartext in config.json. Nur eins von beidem ausfüllen.'))),
+      h('label.setv__perm', null, allowBox,
+        text('Den Host sofort in der Netz-Schleuse freigeben')),
+      h('div.row', null,
+        h('button.btn.btn--primary.btn--small', {
+          type: 'button',
+          disabled: self.busy.remoteAdd === true,
+          onClick: () => addRemote(self, {
+            id: idField.value.trim(),
+            label: labelField.value.trim(),
+            baseUrl: urlField.value.trim(),
+            apiKeyEnv: envField.value.trim(),
+            apiKey: keyField.value,
+            allowHost: allowBox.checked,
+          }),
+        }, text(self.busy.remoteAdd ? 'Wird angelegt …' : 'Anbieter anlegen')),
+        h('span.hint', null, text('Anlegen allein schickt noch nichts los.')))));
+}
+
+async function addRemote(self, input) {
+  if (!input.id || !input.baseUrl) {
+    self.ctx.toast('Kennung und Adresse werden gebraucht.', 'error');
+    return;
+  }
+  const body = { id: input.id, baseUrl: input.baseUrl, allowHost: input.allowHost === true };
+  if (input.label) body.label = input.label;
+  if (input.apiKeyEnv) body.apiKeyEnv = input.apiKeyEnv;
+  else if (input.apiKey) body.apiKey = input.apiKey;
+
+  setBusy(self, 'remoteAdd', true);
+  renderRemote(self);
+  try {
+    const result = await request(self, (signal) => self.api.post('/models/remote', body, { signal }));
+    if (!self.alive) return;
+    self.ctx.toast(result && result.grant
+      ? 'Anbieter angelegt und Host freigegeben.'
+      : 'Anbieter angelegt. Der Host ist noch gesperrt.', 'success');
+    if (result && result.keyWarning) self.ctx.toast(String(result.keyWarning), 'info');
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.ctx.toast(`Nicht angelegt: ${errorMessage(err)}`, 'error');
+  } finally {
+    setBusy(self, 'remoteAdd', false);
+    await loadRemote(self);
+    if (self.alive) renderRemote(self);
+  }
+}
+
+async function removeRemote(self, item) {
+  const ok = await self.ctx.confirm({
+    title: 'Anbieter entfernen?',
+    message: `„${item.label || item.id}“ wird aus der Konfiguration gelöscht. Chats, die ihn benutzt haben, bleiben erhalten.`,
+    confirmLabel: 'Entfernen',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const result = await request(self, (signal) => self.api.del(`/models/remote/${encodeURIComponent(item.id)}`, { signal }));
+    if (!self.alive) return;
+    self.remoteTests.delete(item.id);
+    self.ctx.toast('Anbieter entfernt.', 'success');
+    if (result && result.note) self.ctx.toast(String(result.note), 'info');
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.ctx.toast(`Nicht entfernt: ${errorMessage(err)}`, 'error');
+  } finally {
+    await loadRemote(self);
+    if (self.alive) renderRemote(self);
+  }
+}
+
+async function testRemote(self, item) {
+  const busyKey = `remote:${item.id}`;
+  setBusy(self, busyKey, true);
+  renderRemote(self);
+  try {
+    const result = await request(self, (signal) => self.api.post(`/models/remote/${encodeURIComponent(item.id)}/test`, {}, { signal }));
+    if (!self.alive) return;
+    self.remoteTests.set(item.id, result);
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    // A failed request is itself a result -- shown as one, not swallowed.
+    self.remoteTests.set(item.id, { ok: false, blocked: false, error: errorMessage(err), hint: null });
+  } finally {
+    setBusy(self, busyKey, false);
+    if (self.alive) renderRemote(self);
+  }
+}
+
+/**
+ * Open the gate for one host, permanently, at global scope.
+ *
+ * Deliberately a separate button rather than part of "anlegen": the two are
+ * different decisions, and the audit log should show them as two entries.
+ */
+async function allowRemoteHost(self, item) {
+  if (!item.host) return;
+  const ok = await self.ctx.confirm({
+    title: `${item.host} freigeben?`,
+    message: 'Ab dann darf dieses Programm diesen Host erreichen – für Modellanfragen und für alles andere, '
+      + 'was denselben Geltungsbereich nutzt. Unter „Netzwerk“ kannst du die Freigabe jederzeit zurücknehmen '
+      + 'und dort siehst du auch jeden einzelnen Zugriff.',
+    confirmLabel: 'Freigeben',
+  });
+  if (!ok) return;
+  try {
+    await request(self, (signal) => self.api.post('/network/grants', {
+      scope: 'global',
+      level: item.gate && item.gate.classification === 'private' ? 'lan' : 'online',
+      hosts: [item.host],
+      reason: `Modellanbieter „${item.label || item.id}“`,
+    }, { signal }));
+    if (!self.alive) return;
+    self.ctx.toast(`${item.host} ist freigegeben.`, 'success');
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.ctx.toast(`Nicht freigegeben: ${errorMessage(err)}`, 'error');
+  } finally {
+    await loadRemote(self);
+    if (self.alive) renderRemote(self);
+  }
 }
 
 function renderDiagnosis(self) {
@@ -1643,6 +1963,13 @@ const CSS = `
 .setv__provider[data-available="1"] .setv__provider-dot { background: var(--ok); }
 .setv__provider[data-available="0"] .setv__provider-dot { background: var(--danger); }
 .setv__modellist { gap: 4px; }
+.setv__netmode { display: flex; align-items: center; gap: var(--sp-1); padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--r-2); background: var(--surface-2); font-size: var(--fs-sm); }
+.setv__netmode[data-mode="offline"] .setv__provider-dot { background: var(--net-offline); }
+.setv__netmode[data-mode="lan"] .setv__provider-dot { background: var(--net-lan); }
+.setv__netmode[data-mode="online"] .setv__provider-dot { background: var(--net-online); }
+.setv__hintbox[data-level="blocked"] { border-color: var(--warn); }
+.setv__hintbox[data-level="fail"] { border-color: var(--danger); }
+.meta.is-warn { color: var(--warn); }
 .setv__hintbox { padding: var(--sp-2); border: 1px solid var(--border); border-radius: var(--r-2); background: var(--surface-2); white-space: pre-wrap; font-size: var(--fs-sm); }
 
 .setv__checks { display: flex; flex-direction: column; gap: var(--sp-1); margin: 0; padding: 0; list-style: none; }
