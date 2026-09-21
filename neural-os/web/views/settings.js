@@ -1438,9 +1438,16 @@ function watchCard(self, item) {
     onChange: (event) => toggleWatch(self, item, event.target),
   });
 
+  // Beide Zahlen sind gemessen, und beide sagen, wozu sie gehören: „aufgenommen"
+  // ist die Summe über alle Durchläufe, „übersprungen" gehört zu dem einen
+  // Durchlauf, der daneben steht -- als Summe zählte es dieselbe unveränderte
+  // Datei bei jedem Rundlauf erneut mit und wüchse ohne Zutun weiter. Wo noch
+  // nie ein Durchlauf war, steht deshalb keine Null, sondern genau das.
   const zahlen = h('p.meta', null, text(
-    `${formatNumber(data.imported || 0)} Datei(en) aufgenommen · ${formatNumber(data.skipped || 0)} übersprungen · `
-    + (data.lastScanAt ? `zuletzt nachgesehen ${timeAgo(data.lastScanAt)}` : 'noch nie nachgesehen')));
+    `${formatNumber(data.imported || 0)} Datei(en) aufgenommen · `
+    + (data.lastScanAt
+      ? `zuletzt durchgesehen ${timeAgo(data.lastScanAt)}, dabei ${formatNumber(data.skipped || 0)} übersprungen`
+      : 'noch nie durchgesehen')));
 
   const actions = h('div.row.setv__watch-actions', null,
     h('button.btn.btn--small', {
@@ -1489,13 +1496,17 @@ function watchScanResult(self, id) {
     return h('div.setv__hintbox', { dataset: { level: 'fail' } }, text(String(result.fehler)));
   }
   const rows = [];
+  const uebersprungen = Array.isArray(result.uebersprungen) ? result.uebersprungen : [];
   if (result.dryRun) {
+    // Nicht „gefunden": das wäre die Zahl NACH dem Filtern und klänge wie
+    // „so viel liegt in dem Ordner". Genannt werden die beiden Zahlen, die
+    // wirklich gemessen wurden -- und darunter steht jede abgelehnte Datei.
     rows.push(h('p', null, text(
-      `Nur angesehen: ${formatNumber(result.gefunden)} Datei(en) gefunden, `
-      + `${formatNumber(result.wuerdeAufnehmen)} würden aufgenommen. Es wurde nichts gespeichert.`)));
+      `Nur angesehen: ${formatNumber(result.wuerdeAufnehmen)} Datei(en) würden aufgenommen, `
+      + `${formatNumber(uebersprungen.length)} übersprungen. Es wurde nichts gespeichert.`)));
   } else {
     rows.push(h('p', null, text(
-      `${formatNumber(result.aufgenommen)} aufgenommen, ${formatNumber(result.uebersprungen.length)} übersprungen, `
+      `${formatNumber(result.aufgenommen)} aufgenommen, ${formatNumber(uebersprungen.length)} übersprungen, `
       + `in ${formatNumber(result.dauerMs)} ms.`)));
   }
   if (Array.isArray(result.neu) && result.neu.length) {
@@ -1504,6 +1515,20 @@ function watchScanResult(self, id) {
         text(`${entry.datei} (${formatBytes(entry.groesse)})`)))));
     if (result.neu.length > 12) {
       rows.push(h('p.meta', null, text(`… und ${formatNumber(result.neu.length - 12)} weitere.`)));
+    }
+  }
+  // Die übersprungenen Dateien MIT Grund -- der Server liefert ihn mit. Ohne
+  // diese Liste bliebe ausgerechnet die Auskunft unsichtbar, für die es das
+  // Ansehen vor dem Einschalten gibt: dass hier ein symbolischer Link liegt,
+  // der nicht verfolgt wird, dass dort ein Ordner mit Erzeugtem steht, dass
+  // eine Datei zu groß ist.
+  if (uebersprungen.length) {
+    rows.push(h('p.meta', null, text('Übersprungen, mit Grund:')));
+    rows.push(h('ul.setv__watch-files', { role: 'list' },
+      uebersprungen.slice(0, 12).map((entry) => h('li', null,
+        text(`${entry.datei} – ${entry.grund}`)))));
+    if (uebersprungen.length > 12) {
+      rows.push(h('p.meta', null, text(`… und ${formatNumber(uebersprungen.length - 12)} weitere.`)));
     }
   }
   for (const warnung of Array.isArray(result.warnungen) ? result.warnungen.slice(0, 6) : []) {
@@ -1550,9 +1575,12 @@ function watchLogDetails(self, item) {
           : null))));
     }
 
+    // Vorgänge, nicht Dateien: dieselbe Datei wird bei jedem Durchlauf erneut
+    // übersprungen, und eine Zahl, die wie eine Dateizahl klingt, wäre hier
+    // schlicht falsch.
     body.appendChild(h('p.meta', null, text(skipped.length
-      ? `${formatNumber(log.uebersprungenGesamt)} übersprungen, mit Grund:`
-      : 'Nichts übersprungen.')));
+      ? `${formatNumber(log.uebersprungenGesamt)} Mal übersprungen, seit das Programm läuft – mit Grund:`
+      : 'Seit dem Start wurde nichts übersprungen.')));
     if (skipped.length) {
       // Mit Zeitstempel, weil dieselbe Datei bei jedem Durchlauf erneut
       // übersprungen wird: ohne ihn sähe ein Protokoll zweier Durchläufe wie

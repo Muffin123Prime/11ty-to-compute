@@ -343,6 +343,108 @@ function leavingHosts(plan) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Shared by the thread and the comparison                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A count a backend really reported -- or `null` for "never measured".
+ *
+ * The providers write `null` where a backend counted nothing (llama.cpp and
+ * LM Studio often stream without `usage`), and JSON carries that `null` right
+ * through to here. `Number(null)` is 0 and `Number.isFinite(0)` is true, so a
+ * plain `Number()` turned "not measured" into a 0 that sat next to the
+ * duration and the network target and borrowed their credibility. Only a
+ * value that already is a finite number counts.
+ */
+function reportedCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The token badge under an answer, as a plain description.
+ *
+ * One function for both ways into it: the thread and the comparison made the
+ * same check separately and therefore made the same mistake twice.
+ *
+ * Three cases that are not the same thing:
+ *   - both halves reported -> the sum, with both halves in the title;
+ *   - one half reported    -> that half, named. A half sum presented as a
+ *                             total would again be a number nobody measured;
+ *   - nothing reported     -> that is what it says, and no digit anywhere.
+ * A reported 0 is a measurement and stays.
+ *
+ * Exported because web/** has no build step: test/compare.test.js loads this
+ * very file, so the decision is checked and not merely intended.
+ */
+export function tokenSummary(rawPrompt, rawCompletion) {
+  const prompt = reportedCount(rawPrompt);
+  const completion = reportedCount(rawCompletion);
+  const half = (value) => (value === null ? 'nicht gemeldet' : formatNumber(value));
+  const title = `Eingabe: ${half(prompt)} · Ausgabe: ${half(completion)}`;
+
+  if (prompt === null && completion === null) {
+    return {
+      reported: false,
+      label: 'Token nicht gemeldet',
+      title: 'Dieses Backend meldet keine Tokenzahlen.',
+    };
+  }
+  if (prompt === null || completion === null) {
+    const name = prompt === null ? 'Ausgabe' : 'Eingabe';
+    const value = prompt === null ? completion : prompt;
+    return { reported: true, label: `${name} ${formatNumber(value)} Token`, title };
+  }
+  return { reported: true, label: `${formatNumber(prompt + completion)} Token`, title };
+}
+
+/** The badge itself. Both ways build it the same, so one of them builds it. */
+function renderTokenBadge(rawPrompt, rawCompletion) {
+  const summary = tokenSummary(rawPrompt, rawCompletion);
+  const badge = h('span.badge', { title: summary.title }, text(summary.label));
+  if (!summary.reported) badge.classList.add('is-muted');
+  return badge;
+}
+
+/**
+ * What may appear in a model select, as a description, without any DOM.
+ *
+ * `state.models` has three states and two of them are easily confused: a list
+ * that was read, a list that was read and is empty, and no reading at all
+ * (`{unavailable:true}`, see loadModels). Asking only for `providers` turns
+ * the third case silently into the second -- the select then shrinks to
+ * "Standard" and thereby claims there is no second model, which nobody ever
+ * looked up. `read` keeps the two apart; the caller says so on screen.
+ *
+ * Exported for the same reason as tokenSummary.
+ */
+export function modelChoices(models, value) {
+  const read = !!models && !models.unavailable;
+  const reason = models && models.unavailable ? (models.error || null) : null;
+  const providers = read && Array.isArray(models.providers) ? models.providers : [];
+  const groups = [];
+  let known = !value;
+  for (const provider of providers) {
+    const list = Array.isArray(provider.models) ? provider.models : [];
+    if (!provider.available || !list.length) continue;
+    const options = list.map((model) => ({
+      value: `${provider.id}/${model.id}`,
+      label: model.name || model.id,
+    }));
+    if (options.some((option) => option.value === value)) known = true;
+    groups.push({ label: provider.id || provider.kind, options });
+  }
+  return {
+    read,
+    reason,
+    groups,
+    // A selected model that the list does not contain. WHY it is missing is
+    // not the same question: with a list in hand it is unreachable right now,
+    // without one its state is simply unknown.
+    stray: known ? null : { value, note: read ? 'zurzeit nicht erreichbar' : 'Status unbekannt' },
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /* View                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -1475,23 +1577,21 @@ function createChatView(container, ctx) {
     const currentValue = currentModel && currentModel.provider ? `${currentModel.provider}/${currentModel.model}` : '';
     modelSelect.appendChild(h('option', { value: '' }, text('Modell: Standard')));
 
-    const providers = (state.models && Array.isArray(state.models.providers)) ? state.models.providers : [];
-    let known = false;
-    for (const provider of providers) {
-      const models = Array.isArray(provider.models) ? provider.models : [];
-      if (!provider.available || !models.length) continue;
-      const group = h('optgroup', { label: `${provider.id || provider.kind}` });
-      for (const model of models) {
-        const value = `${provider.id}/${model.id}`;
-        if (value === currentValue) known = true;
-        group.appendChild(h('option', { value }, text(model.name || model.id)));
+    const choices = modelChoices(state.models, currentValue);
+    for (const group of choices.groups) {
+      const optgroup = h('optgroup', { label: group.label });
+      for (const option of group.options) {
+        optgroup.appendChild(h('option', { value: option.value }, text(option.label)));
       }
-      modelSelect.appendChild(group);
+      modelSelect.appendChild(optgroup);
     }
-    if (currentValue && !known) {
+    if (choices.stray) {
       // A chat may point at a model that is not loaded right now. Saying so is
-      // better than silently resetting the selection to "Standard".
-      modelSelect.appendChild(h('option', { value: currentValue }, text(`${currentModel.model} (zurzeit nicht erreichbar)`)));
+      // better than silently resetting the selection to "Standard" -- and if the
+      // list could not be read at all, the honest word is "unbekannt", because
+      // nobody looked.
+      modelSelect.appendChild(h('option', { value: currentValue },
+        text(`${currentModel.model} (${choices.stray.note})`)));
     }
     modelSelect.value = currentValue;
     dom.controls.appendChild(modelSelect);
@@ -1767,16 +1867,7 @@ function createChatView(container, ctx) {
     row.appendChild(h('span.badge', { title: 'Dauer laut Modell-Backend' },
       text(duration ? `Dauer ${duration}` : 'Dauer nicht gemeldet')));
 
-    const prompt = Number(stats.promptTokens);
-    const completion = Number(stats.completionTokens);
-    if (Number.isFinite(prompt) || Number.isFinite(completion)) {
-      const total = (Number.isFinite(prompt) ? prompt : 0) + (Number.isFinite(completion) ? completion : 0);
-      row.appendChild(h('span.badge', {
-        title: `Eingabe: ${Number.isFinite(prompt) ? formatNumber(prompt) : '?'} · Ausgabe: ${Number.isFinite(completion) ? formatNumber(completion) : '?'}`,
-      }, text(`${formatNumber(total)} Token`)));
-    } else {
-      row.appendChild(h('span.badge.is-muted', { title: 'Dieses Backend meldet keine Tokenzahlen.' }, text('Token nicht gemeldet')));
-    }
+    row.appendChild(renderTokenBadge(stats.promptTokens, stats.completionTokens));
 
     row.appendChild(renderNetworkBadge(data));
     return row;
@@ -1908,6 +1999,7 @@ function createChatView(container, ctx) {
       ctx.toast(count ? `${formatNumber(count)} Modell(e) gefunden.` : 'Weiterhin kein Modell erreichbar.', count ? 'success' : 'error');
       renderControls();
       renderThread();
+      renderCompare(); // the comparison holds two selects built from the same probe
       renderBanner();
     } catch (err) {
       ctx.toast(`Suche fehlgeschlagen: ${errorMessage(err)}`, 'error');
@@ -1965,26 +2057,51 @@ function createChatView(container, ctx) {
     renderComposer();
   }
 
-  /** Model options, shared by both side selects. Built from the last probe. */
+  /**
+   * Model options, shared by both side selects. Built from the last probe --
+   * and, where there was no probe, saying so is left to renderCompareListHint()
+   * right below the two fields.
+   */
   function compareOptions(selectEl, value) {
     selectEl.appendChild(h('option', { value: '' }, text('Standard (erstes erreichbares)')));
-    const providers = (state.models && Array.isArray(state.models.providers)) ? state.models.providers : [];
-    let known = !value;
-    for (const provider of providers) {
-      const models = Array.isArray(provider.models) ? provider.models : [];
-      if (!provider.available || !models.length) continue;
-      const group = h('optgroup', { label: provider.id || provider.kind });
-      for (const model of models) {
-        const optionValue = `${provider.id}/${model.id}`;
-        if (optionValue === value) known = true;
-        group.appendChild(h('option', { value: optionValue }, text(model.name || model.id)));
+    const choices = modelChoices(state.models, value);
+    for (const group of choices.groups) {
+      const optgroup = h('optgroup', { label: group.label });
+      for (const option of group.options) {
+        optgroup.appendChild(h('option', { value: option.value }, text(option.label)));
       }
-      selectEl.appendChild(group);
+      selectEl.appendChild(optgroup);
     }
-    if (value && !known) {
-      selectEl.appendChild(h('option', { value }, text(`${value} (zurzeit nicht erreichbar)`)));
+    if (choices.stray) {
+      selectEl.appendChild(h('option', { value }, text(`${value} (${choices.stray.note})`)));
     }
     selectEl.value = value;
+  }
+
+  /**
+   * If the model list could not be read, the select above is incomplete --
+   * and that has to be on screen. Otherwise a select with a single entry
+   * reads as the statement that there is no second model, while the plan
+   * right below it comes from the server and says the opposite in the same
+   * picture.
+   */
+  function renderCompareListHint() {
+    const choices = modelChoices(state.models, null);
+    if (choices.read) return null;
+    if (!choices.reason) {
+      return h('p.cmp__lead.meta', null, text('Die Modellliste wird noch geholt.'));
+    }
+    return h('div.cmp__note', null,
+      h('p.cmp__lead.meta', null, text(
+        `Die Modellliste konnte nicht gelesen werden: ${choices.reason} `
+        + 'Die Auswahl oben ist deshalb unvollständig – sie ist kein Beleg dafür, '
+        + 'dass es kein zweites Modell gibt.',
+      )),
+      h('div.cmp__actions', null,
+        h('button.btn.btn--small', {
+          type: 'button',
+          onClick: () => refreshModels(),
+        }, text('Modelle neu suchen'))));
   }
 
   const loadComparePlan = debounce(async () => {
@@ -2233,6 +2350,8 @@ function createChatView(container, ctx) {
       return h('label.cmp__field', null, h('span.meta', null, text(label)), select);
     };
     dom.compare.appendChild(h('div.cmp__picks', null, selectFor('a', 'Seite A'), selectFor('b', 'Seite B')));
+    const listHint = renderCompareListHint();
+    if (listHint) dom.compare.appendChild(listHint);
 
     /* --- Plan ------------------------------------------------------- */
     dom.compare.appendChild(renderComparePlan());
@@ -2408,17 +2527,7 @@ function createChatView(container, ctx) {
       text(duration ? `Dauer ${duration}` : 'Dauer nicht gemeldet')));
 
     const tokens = result.tokens || {};
-    const prompt = Number(tokens.prompt);
-    const completion = Number(tokens.completion);
-    if (Number.isFinite(prompt) || Number.isFinite(completion)) {
-      const total = (Number.isFinite(prompt) ? prompt : 0) + (Number.isFinite(completion) ? completion : 0);
-      row.appendChild(h('span.badge', {
-        title: `Eingabe: ${Number.isFinite(prompt) ? formatNumber(prompt) : '?'} · Ausgabe: ${Number.isFinite(completion) ? formatNumber(completion) : '?'}`,
-      }, text(`${formatNumber(total)} Token`)));
-    } else {
-      row.appendChild(h('span.badge.is-muted', { title: 'Dieses Backend meldet keine Tokenzahlen.' },
-        text('Token nicht gemeldet')));
-    }
+    row.appendChild(renderTokenBadge(tokens.prompt, tokens.completion));
 
     const targets = Array.isArray(result.networkTargets) ? result.networkTargets : [];
     if (result.netzBeobachtet === false) {
@@ -2756,6 +2865,7 @@ const CHAT_CSS = `
 .cmp__consent-btn.is-active { color: var(--ok); border-color: var(--ok); }
 /* auto-fit, not a media query: the columns stack when this panel is narrow,
    whatever the window is doing around it. */
+.cmp__note { display: flex; flex-direction: column; gap: var(--sp-05); }
 .cmp__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--sp-1); }
 .cmp__side {
   display: flex;

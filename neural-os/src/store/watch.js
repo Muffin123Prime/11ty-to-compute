@@ -63,8 +63,12 @@ const {
  * containers, and its `recursive` option is not available everywhere. So it is
  * an accelerator, not the mechanism: a slow sweep walks every enabled folder
  * on a timer regardless, and the sweep is what actually guarantees that a file
- * eventually arrives. Both paths run through the same `scan()`, so there is
- * one behaviour to reason about and one behaviour to test.
+ * eventually arrives. The fast path reads the one file it was told about
+ * instead of walking the folder -- but it decides with the same functions the
+ * sweep uses (`screenPath`, `inspect`, `take`), so there is one set of rules
+ * to reason about and one set to test. The moment the fast path decides for
+ * itself, it decides more leniently, and what it lets in is exactly what
+ * nobody was shown.
  *
  * Why a dryRun never opens a file
  * -------------------------------
@@ -183,6 +187,61 @@ function clampInt(value, min, max, fallback) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+/**
+ * The one check on where a path lies and what it is called -- decided before
+ * anything is opened, and decided in exactly one place.
+ *
+ * It is one function because it used to be one and a half: `walk` applied
+ * these rules, the fast path (`fs.watch` -> `takeOne`) applied none of them.
+ * So the preview said "0 würden aufgenommen, .geheim.md ist eine versteckte
+ * Datei" and the running watcher then took in dot files, everything under
+ * .config, and every .md an `npm install` unpacks into node_modules -- files
+ * both visible paths had refused with a reason, in the vault and from there in
+ * every export and every device sync. A preview that predicts something other
+ * than what happens on its own is not a preview. Two paths that decide the
+ * same thing therefore ask the same function.
+ *
+ * `fromDirectory` says whose story the reason is: „Versteckte Datei" is about
+ * this one file, „liegt in node_modules" is about a whole directory. The sweep
+ * names the directory once, when it reaches it. The fast path stays quiet
+ * about those, because it sees one event per file: one `npm install` would
+ * otherwise push everything else out of the skip log.
+ *
+ * @param {string} rel relative to the watched folder
+ * @param {{recursive:boolean, directory?:boolean}} opts
+ * @returns {{skip:string, fromDirectory:boolean}|null} null: nothing speaks against it
+ */
+function screenPath(rel, { recursive, directory = false }) {
+  const parts = String(rel || '').split(/[\\/]+/).filter((part) => part && part !== '.');
+  if (!parts.length) return null;
+  const dirs = directory ? parts : parts.slice(0, -1);
+
+  for (const dir of dirs) {
+    if (dir.startsWith('.')) {
+      return {
+        skip: `„${dir}“ ist ein versteckter Ordner – dort stehen Einstellungen, keine Dokumente.`,
+        fromDirectory: true,
+      };
+    }
+    if (IGNORED_DIRS.has(dir)) {
+      return { skip: `„${dir}“ enthält Erzeugtes, keine Dokumente.`, fromDirectory: true };
+    }
+  }
+  if (dirs.length && !recursive) {
+    return {
+      skip: 'Liegt in einem Unterordner – für diesen Ordner ist nur die oberste Ebene eingestellt.',
+      fromDirectory: true,
+    };
+  }
+  if (dirs.length > MAX_DEPTH) {
+    return { skip: `Tiefer als ${MAX_DEPTH} Ebenen – nicht weiter verfolgt.`, fromDirectory: true };
+  }
+  if (!directory && parts[parts.length - 1].startsWith('.')) {
+    return { skip: 'Versteckte Datei.', fromDirectory: false };
+  }
+  return null;
 }
 
 /**
@@ -452,11 +511,11 @@ function createWatcher(deps = {}) {
    */
   function walk(root, { recursive, skipped }) {
     const files = [];
-    const stack = [{ dir: root, depth: 0 }];
+    const stack = [root];
     let truncated = null;
 
     while (stack.length) {
-      const { dir, depth } = stack.shift();
+      const dir = stack.shift();
       let entries;
       try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -485,19 +544,18 @@ function createWatcher(deps = {}) {
           skipped.push({ datei: rel, grund: 'Symbolischer Link – wird nicht verfolgt.' });
           continue;
         }
-        if (entry.name.startsWith('.')) {
-          if (entry.isDirectory()) continue; // .git, .config: not documents
-          skipped.push({ datei: rel, grund: 'Versteckte Datei.' });
+        // The shared check -- the same one the fast path makes. Here every
+        // verdict is about the entry itself, because a refused directory is
+        // never descended into, so each is worth one line in the list: a
+        // preview that silently drops .config and node_modules answers „was
+        // liegt hier?" with a number nobody can check against the folder.
+        const verdict = screenPath(rel, { recursive, directory: entry.isDirectory() });
+        if (verdict) {
+          skipped.push({ datei: rel, grund: verdict.skip });
           continue;
         }
         if (entry.isDirectory()) {
-          if (IGNORED_DIRS.has(entry.name)) continue;
-          if (!recursive) continue;
-          if (depth + 1 > MAX_DEPTH) {
-            skipped.push({ datei: rel, grund: `Tiefer als ${MAX_DEPTH} Ebenen – nicht weiter verfolgt.` });
-            continue;
-          }
-          stack.push({ dir: full, depth: depth + 1 });
+          stack.push(full);
           continue;
         }
         if (!entry.isFile()) {
@@ -661,6 +719,9 @@ function createWatcher(deps = {}) {
       id,
       ordner: record.data.path,
       dryRun,
+      // Nach dem Filtern: die Einträge, die überhaupt in Frage kommen. NICHT
+      // die Zahl dessen, was im Ordner liegt -- was vorher aussortiert wurde,
+      // steht einzeln und mit Grund in `uebersprungen`.
       gefunden: 0,
       aufgenommen: 0,
       wuerdeAufnehmen: 0,
@@ -688,7 +749,10 @@ function createWatcher(deps = {}) {
     }
 
     const index = buildIndex();
-    const { files, truncated } = walk(root, { recursive: record.data.recursive, skipped: result.uebersprungen });
+    const { files, truncated } = walk(root, {
+      recursive: record.data.recursive !== false,
+      skipped: result.uebersprungen,
+    });
     result.gefunden = files.length;
     result.abgebrochen = truncated;
 
@@ -762,8 +826,18 @@ function createWatcher(deps = {}) {
     store.update(id, {
       lastScanAt: new Date(now()).toISOString(),
       lastError: failed || null,
+      // Aufgenommen wird summiert: jede Aufnahme ist ein Ereignis, das einen
+      // Datensatz hinterlassen hat, und die Summe lässt sich am Protokoll
+      // nachzählen.
       imported: Number(record.data.imported || 0) + result.aufgenommen,
-      skipped: Number(record.data.skipped || 0) + result.uebersprungen.length,
+      // Übersprungen wird NICHT summiert. Eine Summe zählt dieselbe
+      // unveränderte Datei bei jedem Rundlauf erneut mit („Schon aufgenommen
+      // und seitdem unverändert."): bei 288 Rundläufen am Tag stünden für
+      // einen Ordner mit 100 Dateien nach einem Tag 28.800 übersprungen da,
+      // ohne dass irgendjemand etwas getan hätte. Diese Zahl gehört zu diesem
+      // einen Durchlauf – genau wie lastScanAt daneben – und ist damit an der
+      // Liste unter „Was wurde aufgenommen" nachzählbar.
+      skipped: result.uebersprungen.length,
     });
 
     result.dauerMs = Math.max(0, now() - started);
@@ -783,8 +857,11 @@ function createWatcher(deps = {}) {
   /**
    * One file, because `fs.watch` said it changed.
    *
-   * Goes through exactly the same checks as a full run -- the fast path must
-   * not be the lenient path.
+   * Goes through `screenPath` and `inspect`, the two checks a full run makes
+   * -- from the same functions, not from a second copy of the rules. The fast
+   * path must not be the lenient path: whatever it lets through arrives in the
+   * vault without anybody having agreed to it, and the preview's „so sieht es
+   * aus, wenn du einschaltest" becomes a false promise.
    */
   function takeOne(record, relName) {
     const id = record.id;
@@ -799,6 +876,19 @@ function createWatcher(deps = {}) {
     if (!isInside(abs, root)) return; // a name from outside the folder is not ours
 
     const file = { abs, rel: path.relative(root, abs), name: path.basename(abs) };
+
+    // Name and position, decided by the same function as in the sweep. A
+    // reason that belongs to a whole directory is not repeated for every file
+    // in it -- one `npm install` fires thousands of events, and each of them
+    // in the log would push out what actually happened.
+    const verdict = screenPath(file.rel, { recursive: record.data.recursive !== false });
+    if (verdict) {
+      if (!verdict.fromDirectory) {
+        remember(id, { datei: file.rel, was: 'übersprungen', grund: verdict.skip });
+      }
+      return;
+    }
+
     let entryStat;
     try {
       entryStat = fs.lstatSync(abs);
@@ -814,19 +904,20 @@ function createWatcher(deps = {}) {
     busy.add(id);
     try {
       const index = buildIndex();
-      const verdict = inspect(record, file, index);
-      if (verdict.skip) {
-        remember(id, { datei: file.rel, was: 'übersprungen', grund: verdict.skip });
-        const before = store.get(id);
-        if (before) store.update(id, { skipped: Number(before.data.skipped || 0) + 1 });
+      const decision = inspect(record, file, index);
+      if (decision.skip) {
+        // Nur ins Protokoll, mit Grund und Uhrzeit. `skipped` und lastScanAt
+        // auf der Karte beschreiben einen Durchlauf über den ganzen Ordner;
+        // eine einzelne Datei ist kein Durchlauf, und sie hier zu überschreiben
+        // hieße, eine gemessene Zahl durch eine andere Frage zu ersetzen.
+        remember(id, { datei: file.rel, was: 'übersprungen', grund: decision.skip });
         return;
       }
-      const outcome = take(record, file, verdict.stat, index);
+      const outcome = take(record, file, decision.stat, index);
       const current = store.get(id);
       if (!current) return;
       if (outcome.skip) {
         remember(id, { datei: file.rel, was: 'übersprungen', grund: outcome.skip });
-        store.update(id, { skipped: Number(current.data.skipped || 0) + 1 });
         return;
       }
       remember(id, {
@@ -837,7 +928,6 @@ function createWatcher(deps = {}) {
       });
       store.update(id, {
         imported: Number(current.data.imported || 0) + 1,
-        lastScanAt: new Date(now()).toISOString(),
         lastError: null,
       });
       emit('watch.scanned', { id, aufgenommen: 1, uebersprungen: 0, dryRun: false });

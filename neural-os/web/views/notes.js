@@ -954,6 +954,57 @@ function createNotesView(container, ctx) {
   }
 
   /**
+   * Hat diese Notiz das Gerät verlassen?
+   *
+   * Der Server beobachtet das an der Schleuse und schickt es mit; hier stand
+   * es bisher nirgends, obwohl dieser Aufruf mehr Text weggibt als der Chat.
+   * Drei Zustände, nicht zwei -- "niemand hat hingesehen" ist kein "nein",
+   * und deshalb steht `netzBeobachtet` vor den anderen beiden Fällen. Wortlaut
+   * und Farben wie im Chat und im Modellvergleich: eine Marke, die je Ansicht
+   * anders klingt, ist eine, der man nicht glaubt.
+   *
+   * Wurde gar kein Modell gefragt, gibt es nichts zu berichten: dann hat
+   * dieser Aufruf nur den Volltextindex gelesen, und der liegt auf dieser
+   * Platte. Eine Marke wäre dort keine Auskunft, sondern Beruhigung.
+   */
+  function renderSecondNet(result) {
+    if (!result || !result.model) return null;
+    const ziele = Array.isArray(result.netzZiele) ? result.netzZiele : [];
+    if (result.netzBeobachtet === false) {
+      return h('span.badge.notesv__second-net', {
+        'data-net': 'unknown',
+        title: 'Auf diesem Server konnte nicht beobachtet werden, ob etwas hinausgegangen ist.',
+      }, text('Netznutzung nicht beobachtbar'));
+    }
+    if (result.usedNetwork === true) {
+      return h('span.badge.notesv__second-net', {
+        'data-net': 'online',
+        title: `Der Text dieser Notiz ist an einen anderen Rechner gegangen. Ziele: ${ziele.join(', ') || 'unbekannt'}`,
+      }, text(`Netz genutzt${ziele.length ? `: ${ziele.join(', ')}` : ''}`));
+    }
+    return h('span.badge.notesv__second-net', {
+      'data-net': 'offline',
+      title: 'Es ging nichts an einen anderen Rechner. Verbindungen zu 127.0.0.1 sind dieses Gerät selbst.',
+    }, text(`Kein Netzverkehr${ziele.length ? ` · Modell auf ${ziele.join(', ')}` : ''}`));
+  }
+
+  /**
+   * Der Satz zur Marke, wenn wirklich etwas hinausgegangen ist: wie viel von
+   * dieser Notiz, und wohin. Eine Farbe allein beantwortet die Frage nicht,
+   * die ein Mensch hier hat.
+   */
+  function renderSecondNetSentence(result) {
+    if (!result || result.usedNetwork !== true) return null;
+    const ziele = Array.isArray(result.netzZiele) ? result.netzZiele : [];
+    const wohin = ziele.length ? ziele.join(', ') : 'einen anderen Rechner';
+    const menge = Number.isFinite(result.gesendeteZeichen)
+      ? `${formatNumber(result.gesendeteZeichen)} Zeichen dieser Notiz`
+      : 'der Text dieser Notiz';
+    return h('p.hint.notesv__second-net-line', null,
+      text(`Dafür sind ${menge} an ${wohin} gegangen.`));
+  }
+
+  /**
    * Die ersten beiden Teile. Sie tragen ein anderes Zeichen als der dritte,
    * und das ist der eigentliche Punkt dieser Ansicht: was ein Modell gesagt
    * hat, ist nicht belegt, und das steht dabei -- nicht im Kleingedruckten,
@@ -990,6 +1041,15 @@ function createNotesView(container, ctx) {
       // Kein „rechts": unter 900 px steht der dritte Teil darunter, nicht daneben.
       block.appendChild(h('p.hint', null,
         text('Der dritte Teil braucht kein Modell und steht deshalb trotzdem da.')));
+      // Es gibt einen Weg hierher, auf dem das Modell erst beim Aufruf
+      // verschwunden ist -- dann kann davor sehr wohl etwas hinausgegangen
+      // sein. Die Marke gehört deshalb auch in diesen Zweig.
+      const weg = renderSecondNet(result);
+      if (weg) {
+        block.appendChild(h('div.notesv__second-foot', null, weg));
+        const satz = renderSecondNetSentence(result);
+        if (satz) block.appendChild(satz);
+      }
       return block;
     }
 
@@ -1015,8 +1075,12 @@ function createNotesView(container, ctx) {
     const wer = result.model && result.model.model
       ? `${result.model.provider ? `${result.model.provider} · ` : ''}${result.model.model}`
       : 'einem Sprachmodell';
-    block.appendChild(h('p.hint', null,
-      text(`Diese beiden Teile stammen von ${wer}. Sie sind nicht belegt – lies sie gegen den Text.`)));
+    block.appendChild(h('div.notesv__second-foot', null,
+      renderSecondNet(result),
+      h('p.hint', null,
+        text(`Diese beiden Teile stammen von ${wer}. Sie sind nicht belegt – lies sie gegen den Text.`))));
+    const satz = renderSecondNetSentence(result);
+    if (satz) block.appendChild(satz);
     return block;
   }
 
@@ -1027,20 +1091,32 @@ function createNotesView(container, ctx) {
   function renderSecondTerms(result) {
     const block = h('div.notesv__second-block.notesv__second-block--index');
     const begriffe = Array.isArray(result.bekannteBegriffe) ? result.bekannteBegriffe : [];
+    // Begriffe, an denen sich der Index verschluckt hat. Ohne diese Zahl wäre
+    // eine leere Liste nicht von "niemand hat nachgesehen" zu unterscheiden --
+    // ausgerechnet in dem Teil, der sich belegbar nennt.
+    const stumm = Number.isFinite(result.nichtNachschlagbar) ? result.nichtNachschlagbar : 0;
 
     block.appendChild(h('h4.notesv__second-title', null,
       text('Bekannte Begriffe'),
       h('span.badge.notesv__second-mark--index', null, text('aus dem Volltextindex'))));
 
     if (!begriffe.length) {
-      block.appendChild(h('p.meta', null,
-        text('Kein Begriff aus dieser Notiz kommt bisher anderswo im Tresor vor.')));
+      block.appendChild(h('p.meta', null, text(stumm
+        ? `Ob Begriffe aus dieser Notiz anderswo im Tresor stehen, wurde nicht beantwortet: bei ${formatNumber(stumm)} Begriffen hat der Volltextindex einen Fehler gemeldet.`
+        : 'Kein Begriff aus dieser Notiz kommt bisher anderswo im Tresor vor.')));
       return block;
     }
 
     const rows = h('ul.notesv__second-terms', { role: 'list' });
     for (const eintrag of begriffe) {
       const treffer = Array.isArray(eintrag.treffer) ? eintrag.treffer : [];
+      // Die Zahl ist gezählt, die Liste darunter ist gekürzt. Hier stand
+      // früher die Länge der Liste -- „in 4 Einträgen" für einen Begriff, der
+      // in 25 steht. Sagt der Server nicht, wie weit er gekommen ist, wird
+      // daraus ein „mindestens", nie wieder eine Behauptung.
+      const gezaehlt = Number.isFinite(eintrag.anzahl) ? eintrag.anzahl : treffer.length;
+      const genau = eintrag.genau === true && Number.isFinite(eintrag.anzahl);
+      const zahlwort = gezaehlt === 1 ? '1 Eintrag' : `${formatNumber(gezaehlt)} Einträgen`;
       const row = h('li.notesv__second-term');
       row.appendChild(h('div.notesv__second-term-head', null,
         h('button.notesv__second-word', {
@@ -1048,7 +1124,11 @@ function createNotesView(container, ctx) {
           title: treffer.length ? `Zu „${treffer[0].titel}“ springen` : '',
           onClick: () => openHit(treffer[0]),
         }, text(eintrag.begriff)),
-        h('span.meta', null, text(treffer.length === 1 ? 'in 1 Eintrag' : `in ${formatNumber(treffer.length)} Einträgen`))));
+        h('span.meta', {
+          title: genau
+            ? 'Jeder dieser Einträge wurde im Text nachgeprüft.'
+            : 'So weit wurde nachgezählt; es können mehr sein.',
+        }, text(`${genau ? 'in' : 'in mindestens'} ${zahlwort}`))));
 
       const hits = h('ul.notesv__second-hits', { role: 'list' });
       for (const hit of treffer) {
@@ -1064,9 +1144,17 @@ function createNotesView(container, ctx) {
         hit.stelle ? h('span.notesv__second-hit-snippet.meta', null, snippet(hit.stelle)) : null)));
       }
       row.appendChild(hits);
+      if (gezaehlt > treffer.length) {
+        row.appendChild(h('p.meta.notesv__second-term-more', null,
+          text(`Aufgeführt sind die ersten ${formatNumber(treffer.length)}.`)));
+      }
       rows.appendChild(row);
     }
     block.appendChild(rows);
+    if (stumm) {
+      block.appendChild(h('p.hint', null,
+        text(`Bei ${formatNumber(stumm)} weiteren Begriffen hat der Volltextindex einen Fehler gemeldet; die fehlen in dieser Liste.`)));
+    }
     block.appendChild(h('p.hint', null,
       text('Jeder Begriff hier steht wirklich in dem Eintrag, auf den er zeigt – nachgeschlagen, nicht geraten. Umlaute und ihre Umschrift zählen dabei als dasselbe Wort.')));
     return block;
@@ -1811,6 +1899,25 @@ const NOTES_CSS = `
 }
 .notesv__second-list { margin: 0; padding-left: var(--sp-3); }
 .notesv__second-block p.hint { margin-top: var(--sp-1); }
+/* Die Marke steht vor dem Satz, nicht darunter: sie ist die Antwort auf die
+   Frage, mit der ein Mensch hierher kommt. Farbe UND Wort tragen sie. */
+.notesv__second-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+}
+.notesv__second-foot p.hint { flex: 1 1 12rem; margin-top: 0; }
+.notesv__second-net { font-weight: 600; background: transparent; }
+.notesv__second-net[data-net="offline"] { color: var(--net-offline); border: 1px solid var(--net-offline); }
+.notesv__second-net[data-net="online"] { color: var(--net-online); border: 1px solid var(--net-online); }
+.notesv__second-net[data-net="unknown"] {
+  color: var(--net-unknown);
+  border: 1px dashed var(--net-unknown);
+}
+.notesv__second-net-line { margin-top: var(--sp-05); }
+.notesv__second-term-more { margin: 2px 0 0 var(--sp-1); }
 .notesv__second-terms { display: flex; flex-direction: column; gap: var(--sp-1); margin: 0; padding: 0; list-style: none; }
 .notesv__second-term-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-1); }
 .notesv__second-word {

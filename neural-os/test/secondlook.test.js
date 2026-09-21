@@ -40,7 +40,9 @@ const pathsMod = require('../src/kernel/paths');
 const { Bus } = require('../src/kernel/bus');
 const { Audit } = require('../src/kernel/log');
 const { createGate } = require('../src/net/gate');
-const { createSecondLook, MIN_TEXT_CHARS, __internals } = require('../src/agents/secondlook');
+const {
+  createSecondLook, MIN_TEXT_CHARS, MAX_MODEL_CHARS, MAX_COUNT_PROBE, __internals,
+} = require('../src/agents/secondlook');
 const secondLookApi = require('../src/http/api/secondlook');
 const { NoModelError } = require('../src/kernel/errors');
 
@@ -410,7 +412,92 @@ test('ein lokales Modell ist keine Netznutzung', async () => {
     const result = await secondLook.look(kaffee.id);
     assert.equal(result.usedNetwork, false, 'Loopback wurde als Netznutzung gezählt');
     assert.deepEqual(result.netzZiele, ['127.0.0.1:11434'], 'das Ziel gehört trotzdem ins Protokoll');
+    assert.equal(result.netzBeobachtet, true, 'mit Bus ist die Aussage gedeckt');
   }, { registry });
+});
+
+/**
+ * Der Fall, für den es dieses Feld gibt.
+ *
+ * Ein fernes Modell, eine Freigabe für genau diesen Geltungsbereich, und die
+ * echte Schleuse lässt die Verbindung durch. Was dabei herauskommt, muss die
+ * Antwort tragen -- sonst hat der Mensch davor keine Möglichkeit zu erfahren,
+ * dass bis zu 12000 Zeichen seiner Notiz an einen fremden Rechner gegangen
+ * sind. 203.0.113.5 ist reserviert: hier wird nie wirklich verbunden.
+ */
+test('was das Gerät verlassen hat, steht in der Antwort -- mit Ziel', async () => {
+  let gate = null;
+  const registry = fakeRegistry(FERN, async (options) => {
+    gate.enforce({ host: '203.0.113.5', port: 443, scope: options.scope, purpose: 'test.zweiter-blick' });
+    return { content: '{"kern": "Espresso.", "offeneStellen": []}', stats: {} };
+  });
+
+  await withVault('nos-sl-fern', async ({ store, secondLook, gate: realGate }) => {
+    gate = realGate;
+    const { kaffee } = seed(store);
+    gate.addGrant({ scope: `secondlook:${kaffee.id}`, level: 'lan', hosts: ['203.0.113.5'], reason: 'Test' });
+
+    const result = await secondLook.look(kaffee.id);
+
+    assert.equal(result.usedNetwork, true, 'die Notiz ist an einen anderen Rechner gegangen');
+    assert.deepEqual(result.netzZiele, ['203.0.113.5:443']);
+    assert.equal(result.netzBeobachtet, true);
+    // Und wie viel von der Notiz das war -- "etwas ging raus" ohne Menge ist
+    // die halbe Auskunft.
+    assert.equal(result.gesendeteZeichen, result.zeichen,
+      'die ganze Notiz passte ins Fenster, also ging sie ganz hinaus');
+  }, { registry });
+});
+
+test('bei einer gekürzten Notiz zählt, was wirklich hinausgegangen ist', async () => {
+  const registry = fakeRegistry(LOKAL, async () => ({ content: '{"kern": "Lang.", "offeneStellen": []}', stats: {} }));
+  await withVault('nos-sl-menge', async ({ store, secondLook }) => {
+    const lang = store.create('note', {
+      title: 'Sehr lange Notiz',
+      body: `${KAFFEE} `.repeat(40),
+    });
+    const result = await secondLook.look(lang.id);
+    assert.ok(result.zeichen > MAX_MODEL_CHARS, 'der Test braucht eine Notiz über dem Fenster');
+    assert.equal(result.gekuerzt, true);
+    assert.equal(result.gesendeteZeichen, MAX_MODEL_CHARS,
+      'gegangen ist genau das Fenster, nicht die ganze Notiz');
+  }, { registry });
+});
+
+test('ohne Modell ist die gesendete Menge null und keine Null', async () => {
+  await withVault('nos-sl-menge-null', async ({ store, secondLook }) => {
+    const { kaffee } = seed(store);
+    const result = await secondLook.look(kaffee.id);
+    assert.equal(result.gesendeteZeichen, null, '"nichts gefragt" ist keine gemessene Null');
+  });
+});
+
+/**
+ * "Nicht beobachtet" ist nicht "nicht passiert".
+ *
+ * Ohne Bus kann diese Einheit nichts von der Schleuse mitbekommen. Dann darf
+ * die Antwort kein schlichtes `usedNetwork: false` tragen, ohne daneben zu
+ * sagen, dass niemand hingesehen hat -- genau wie in src/models/compare.js.
+ */
+test('ohne Bus wird "kein Netzverkehr" nicht behauptet, sondern zugegeben', async () => {
+  const { home, cleanup } = tempHome('nos-sl-blind');
+  const registry = fakeRegistry(LOKAL, async () => ({ content: '{"kern": "Espresso.", "offeneStellen": []}', stats: {} }));
+  try {
+    const store = await openStore({ paths: home, lock: false, logger: silentLogger });
+    const secondLook = createSecondLook({
+      store, registry, graph: GRAPH, gate: null, bus: null, config: configMod.defaults(), logger: silentLogger,
+    });
+    const { kaffee } = seed(store);
+
+    const result = await secondLook.look(kaffee.id);
+
+    assert.equal(result.netzBeobachtet, false, 'ohne Bus ist nichts beobachtbar');
+    assert.equal(result.usedNetwork, false);
+    assert.deepEqual(result.netzZiele, []);
+    await store.close().catch(() => {});
+  } finally {
+    cleanup();
+  }
 });
 
 test('ein eigener Geltungsbereich des Aufrufers wird durchgereicht', async () => {
@@ -460,8 +547,9 @@ test('terms() liefert denselben dritten Teil, ganz ohne Modell im Spiel', async 
     const { kaffee } = seed(store);
     const nur = secondLook.terms(kaffee.id);
     const ganz = await secondLook.look(kaffee.id);
-    assert.deepEqual(nur.map((b) => b.form), ganz.bekannteBegriffe.map((b) => b.form));
-    assert.ok(nur.length > 0);
+    assert.deepEqual(nur.begriffe.map((b) => b.form), ganz.bekannteBegriffe.map((b) => b.form));
+    assert.ok(nur.begriffe.length > 0);
+    assert.equal(nur.nichtNachschlagbar, ganz.nichtNachschlagbar);
   });
 });
 
@@ -494,6 +582,107 @@ test('eine Registry ohne erreichbares Modell liefert den dritten Teil und sagt, 
     assert.match(result.modell.anleitung, /Anleitung/);
     assert.ok(result.bekannteBegriffe.length > 0);
   }, { registry: fakeRegistry(null, async () => ({ content: '{}' })) });
+});
+
+/* ------------------------------------------------- 7. die Zahl der Fundorte */
+
+/**
+ * Material für die Zählung: derselbe Begriff in vielen Einträgen.
+ * Jeder Text ist lang genug, dass der Index ihn ernst nimmt.
+ */
+function vieleMit(store, wort, anzahl, praefix) {
+  for (let i = 0; i < anzahl; i++) {
+    store.create('note', {
+      title: `${praefix} ${i}`,
+      body: `${wort} wurde hier am ${i}. Tag notiert, zusammen mit der Uhrzeit und dem Wetter.`,
+    });
+  }
+}
+
+/**
+ * Der Befund in seiner schärfsten Form: "in 4 Einträgen" war nie eine Zahl,
+ * sondern die Länge der gekürzten Liste. Gezählt werden muss, was da ist.
+ */
+test('die Zahl der Fundorte ist gezählt, nicht die Länge der angezeigten Liste', async () => {
+  await withVault('nos-sl-zaehlen', async ({ store, secondLook }) => {
+    const { kaffee } = seed(store);
+    // "Brühtemperatur" steht danach in 12 weiteren Einträgen (+1 aus seed()).
+    vieleMit(store, 'Die Brühtemperatur', 12, 'Temperaturprotokoll');
+
+    const b = begriff(await secondLook.look(kaffee.id), 'bruehtemperatur');
+    assert.ok(b, 'der Begriff fehlt ganz');
+    assert.equal(b.anzahl, 13, `gezählt wurden ${b.anzahl} Einträge, es sind 13`);
+    assert.equal(b.genau, true, 'so wenige Fundorte sind vollständig nachgesehen');
+    assert.equal(b.treffer.length, 4, 'angezeigt werden weiterhin nur die ersten vier');
+    assert.ok(b.anzahl > b.treffer.length, 'sonst prüft dieser Test nichts');
+  });
+});
+
+/**
+ * Über der Sonde hört das Wissen auf. Dann wird die Zahl zur Untergrenze --
+ * und sagt das auch, statt eine zweite Obergrenze als Tatsache auszugeben.
+ */
+test('über die Sonde hinaus wird die Zahl ehrlich zur Untergrenze', async () => {
+  await withVault('nos-sl-untergrenze', async ({ store, secondLook }) => {
+    const { kaffee } = seed(store);
+    vieleMit(store, 'Der Mahlgrad', MAX_COUNT_PROBE + 20, 'Mahlprotokoll');
+
+    const b = begriff(await secondLook.look(kaffee.id), 'mahlgrad');
+    assert.ok(b);
+    assert.equal(b.genau, false, 'so viele Fundorte kann diese Sonde nicht vollständig sehen');
+    assert.ok(b.anzahl >= MAX_COUNT_PROBE - 1,
+      `die Untergrenze soll so hoch sein, wie wirklich nachgesehen wurde (war ${b.anzahl})`);
+    assert.ok(b.anzahl <= MAX_COUNT_PROBE, 'mehr als nachgesehen wurde, darf nicht behauptet werden');
+  });
+});
+
+/**
+ * Die Reihenfolge lief über dieselbe gedeckelte Zahl: bei jedem gut
+ * verbundenen Begriff standen lauter Vieren nebeneinander, und entschieden
+ * hat am Ende das Alphabet. Der stärker verbundene Begriff gehört nach oben.
+ */
+test('sortiert wird nach der gezählten Zahl, nicht nach der gekappten Liste', async () => {
+  await withVault('nos-sl-reihenfolge', async ({ store, secondLook }) => {
+    const { kaffee } = seed(store);
+    // "Mahlgrad" steht zweimal in der Notiz, "Brühtemperatur" einmal -- die
+    // gedeckelte Sortierung hat deshalb den schwächer verbundenen Begriff
+    // nach oben gestellt.
+    vieleMit(store, 'Die Brühtemperatur', 25, 'Temperaturprotokoll');
+    vieleMit(store, 'Der Mahlgrad', 6, 'Mahlprotokoll');
+
+    const liste = (await secondLook.look(kaffee.id)).bekannteBegriffe;
+    const mahl = liste.findIndex((b) => b.form === 'mahlgrad');
+    const bruehe = liste.findIndex((b) => b.form === 'bruehtemperatur');
+    assert.ok(mahl >= 0 && bruehe >= 0, 'beide Begriffe müssen in der Liste stehen');
+    assert.ok(bruehe < mahl,
+      `"Brühtemperatur" (26 Fundorte) steht hinter "Mahlgrad" (7): ${liste.map((b) => `${b.form}=${b.anzahl}`).join(', ')}`);
+  });
+});
+
+/* ------------------------------- 8. nicht gefunden ist nicht nachgesehen */
+
+/**
+ * Wirft der Index, wurde der Begriff still übersprungen -- und der Satz
+ * darunter behauptete danach trotzdem, im Tresor komme keiner dieser Begriffe
+ * vor. Das ist eine Aussage über den Tresor, für die niemand nachgesehen hat.
+ */
+test('ein Begriff, der nicht nachgeschlagen werden konnte, wird gemeldet statt verschwiegen', async () => {
+  await withVault('nos-sl-blindstelle', async ({ store, secondLook }) => {
+    const { kaffee } = seed(store);
+    store.search = () => { throw new Error('Der Volltextindex ist beschädigt (Attrappe).'); };
+
+    const result = await secondLook.look(kaffee.id);
+
+    assert.deepEqual(result.bekannteBegriffe, [], 'ohne Index kann nichts gefunden werden');
+    assert.ok(result.nichtNachschlagbar > 0,
+      'die übersprungenen Begriffe müssen gezählt in der Antwort stehen');
+    assert.doesNotMatch(result.hinweis, /kommt bisher\s+anderswo im Tresor vor/,
+      'ohne Index darf nicht behauptet werden, im Tresor stehe nichts davon');
+    assert.match(result.hinweis, /konnte nicht nachgesehen werden/,
+      'der Satz muss sagen, dass niemand nachgesehen hat');
+    assert.match(result.hinweis, new RegExp(`${result.nichtNachschlagbar} Begriffen`),
+      'und wie viele Begriffe das betrifft');
+  });
 });
 
 /* --------------------------------------------------------------- Umfang */

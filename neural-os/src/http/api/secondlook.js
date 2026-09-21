@@ -26,6 +26,13 @@
  * Oberfläche zeigt das -- ein Ergebnis ohne diese Felder auszuwerten wäre ein
  * Fehler im Aufrufer, kein unklares Versprechen dieser Route.
  *
+ * Aus demselben Grund trägt jede Antwort drei Felder, die kein Ergebnis sind,
+ * sondern die Grenze des Ergebnisses: `netzBeobachtet` (konnte überhaupt
+ * gesehen werden, ob etwas das Gerät verlassen hat?), `genau` an jedem
+ * Begriff (ist die Zahl der Fundorte gezählt oder eine Untergrenze?) und
+ * `nichtNachschlagbar` (wie viele Begriffe der Volltextindex nicht beantwortet
+ * hat). Wer sie wegwirft, macht aus Nichtwissen eine Aussage.
+ *
  * Ein 503 bleibt für den Fall, für den er gedacht ist: das Teilsystem ist in
  * dieser Instanz gar nicht eingebaut, dann liegt auch der Indexteil nicht vor.
  * Ein Modell, das geantwortet hat und dessen Antwort nicht lesbar war, ist ein

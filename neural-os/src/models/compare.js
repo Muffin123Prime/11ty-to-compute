@@ -496,6 +496,11 @@ function createCompare(deps = {}) {
         networkTargets: [...watcher.state.targets.keys()],
         netzBeobachtet: watcher.state.beobachtet,
         ms: Date.now() - started,
+        // `null` means this backend counted nothing -- llama.cpp and LM Studio
+        // often stream without `usage`. It has to stay `null` all the way into
+        // the interface: a 0 would stand next to the duration and the network
+        // target and read as a measurement. So no `|| 0` here, and no
+        // `Number()` over there, which would turn the `null` into one.
         tokens: {
           prompt: Number.isFinite(stats.promptTokens) ? stats.promptTokens : null,
           completion: Number.isFinite(stats.completionTokens) ? stats.completionTokens : null,

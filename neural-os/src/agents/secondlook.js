@@ -27,6 +27,11 @@
  *    die im anderen Eintrag wirklich steht. Nur so darf die Oberfläche diesen
  *    Teil als belegt kennzeichnen und die anderen beiden nicht.
  *
+ *    Dasselbe gilt für die Zahl daneben: sie wird gezählt und nicht von der
+ *    gekürzten Liste abgelesen. Wo die Sonde nicht bis ans Ende reicht, heißt
+ *    sie ausdrücklich "mindestens" (`genau: false`) -- eine Obergrenze als
+ *    Zählung auszugeben wäre eine falsche Aussage über den Tresor.
+ *
  * 3. **Dieselbe deutsche Faltung wie die Suche** (`fold` aus store/search.js).
  *    "Brühtemperatur" und "Bruehtemperatur" sind ein Begriff, sonst findet
  *    dieser Teil genau bei den Wörtern nichts, bei denen er gebraucht wird.
@@ -49,6 +54,8 @@
  *    Voreinstellungsmodus 'offline' antwortet damit nur ein Modell auf dieser
  *    Maschine. Ob wirklich etwas das Gerät verlassen hat, wird nicht geraten,
  *    sondern an den `network.attempt`-Ereignissen der Schleuse abgelesen.
+ *    Fehlt der Bus, ist nichts abzulesen; dann sagt die Antwort genau das
+ *    (`netzBeobachtet: false`), statt aus Nichtwissen ein "nein" zu machen.
  *
  * 6. **Geschrieben wird nichts.** Ein zweiter Blick hinterlässt keinen Satz im
  *    Tresor. Wer ihn behalten will, kopiert ihn in die Notiz -- von Hand.
@@ -90,8 +97,30 @@ const MIN_TERM_LENGTH = 4;
 const MAX_CANDIDATES = 60;
 /** So viele Begriffe stehen am Ende in der Antwort. */
 const MAX_TERMS = 12;
-/** So viele Fundstellen je Begriff. */
+/** So viele Fundstellen je Begriff stehen am Ende in der Liste. */
 const MAX_HITS_PER_TERM = 4;
+/**
+ * So weit wird je Begriff wirklich nachgezählt.
+ *
+ * Die Liste zeigt vier Fundstellen; die Zahl daneben ist eine Aussage über den
+ * Tresor und darf deshalb nicht die Länge dieser Liste sein. Gezählt wird, was
+ * die Sonde sieht: bis hierhin ist die Zahl genau (`genau: true`), darüber
+ * hinaus ist sie eine Untergrenze und sagt das auch.
+ *
+ * Warum 50 und nicht alles: die Zahl kostet je Fundstelle eine Nachprüfung im
+ * Zieltext, und jenseits von "in mehr als fünfzig Einträgen" ändert eine
+ * genauere Zahl nichts mehr an dem, was ein Mensch daraus liest.
+ */
+const MAX_COUNT_PROBE = 50;
+/**
+ * So viele zerlegte Einträge behält die Nachprüfung im Gedächtnis.
+ *
+ * Bei 60 Begriffen und 50 Fundstellen je Begriff käme derselbe Eintrag sonst
+ * dutzendfach neu unter das Messer. Das Gedächtnis wird verworfen statt zu
+ * wachsen: ein zweiter Blick darf keinen Speicher binden, der mit dem Tresor
+ * mitwächst.
+ */
+const MAX_VERIFY_MEMORY = 300;
 /** So viele offene Stellen werden übernommen, egal wie viele das Modell nennt. */
 const MAX_OFFENE = 6;
 /** Längenbegrenzungen für das, was aus einer Modellantwort übernommen wird. */
@@ -423,48 +452,92 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
   }
 
   /**
-   * Steht dieser Begriff wirklich in diesem Eintrag?
+   * Die Nachprüfung: steht dieser Begriff wirklich in diesem Eintrag?
    *
    * Der Index expandiert Wortanfänge, also kann ein Treffer auch ein Kompositum
    * sein. Beides ist ein ehrlicher Fund, aber nur, wenn wir sagen können,
    * welches Wort es war -- deshalb wird der Zieltext noch einmal zerlegt.
-   * @returns {string|null} die gefundene Wortform, oder null
+   *
+   * Die Zerlegung eines Eintrags hält für den ganzen Aufruf: seit die Zahl
+   * neben einem Begriff gezählt und nicht geschätzt wird, sieht dieselbe Notiz
+   * bei vielen Begriffen als Fundstelle vorbei.
+   *
+   * @returns {(record:object, term:string) => string|null} die gefundene
+   *          Wortform, oder null
    */
-  function wordFormIn(record, term) {
-    const text = textOf(record);
-    let compound = null;
-    for (const span of tokenSpans(text, MIN_TERM_LENGTH)) {
-      if (span.term === term) return text.slice(span.start, span.end);
-      if (!compound && span.term.startsWith(term)) compound = text.slice(span.start, span.end);
+  function createVerifier() {
+    const zerlegt = new Map();
+
+    function formsOf(record) {
+      const cached = zerlegt.get(record.id);
+      if (cached) return cached;
+      const text = textOf(record);
+      const forms = new Map();
+      for (const span of tokenSpans(text, MIN_TERM_LENGTH)) {
+        if (!forms.has(span.term)) forms.set(span.term, text.slice(span.start, span.end));
+      }
+      if (zerlegt.size >= MAX_VERIFY_MEMORY) zerlegt.clear();
+      zerlegt.set(record.id, forms);
+      return forms;
     }
-    return compound;
+
+    return function wordFormIn(record, term) {
+      const forms = formsOf(record);
+      const exact = forms.get(term);
+      if (exact) return exact;
+      // Kein eigenes Wort, aber vielleicht der Anfang eines zusammengesetzten
+      // -- in dieser Sprache ist das der Normalfall, nicht die Ausnahme.
+      for (const [wort, form] of forms) {
+        if (wort.startsWith(term)) return form;
+      }
+      return null;
+    };
   }
 
   /**
    * Der dritte Teil: welche Begriffe dieser Notiz anderswo im Tresor stehen.
    * Braucht kein Modell, kein Netz und keine Einbettungen -- nur den Index.
+   *
+   * Zwei Zahlen, die nicht zu verwechseln sind:
+   *
+   *   `treffer`  die Fundstellen, die die Ansicht auflistet -- gekürzt
+   *   `anzahl`   wie viele Einträge den Begriff wirklich tragen; nachgezählt
+   *              und einzeln im Zieltext nachgeprüft, nicht die Länge von
+   *              `treffer`. `genau` sagt, ob die Sonde dabei bis ans Ende
+   *              gekommen ist; sonst ist `anzahl` eine Untergrenze.
+   *
+   * Dazu `nichtNachschlagbar`: Begriffe, bei denen der Index geworfen hat.
+   * Ohne diese Zahl wäre eine leere Liste nicht von "niemand hat nachgesehen"
+   * zu unterscheiden -- ausgerechnet in dem Teil, der sich belegbar nennt.
+   *
+   * @returns {{begriffe:object[], nichtNachschlagbar:number}}
    */
   function knownTerms(record, parts, opts = {}) {
     const types = Array.isArray(opts.types) && opts.types.length ? opts.types : SEARCH_TYPES;
     const found = [];
+    const wordFormIn = createVerifier();
+    let nichtNachschlagbar = 0;
 
     for (const candidate of candidates(parts.text, record, parts.titleEnd)) {
       if (found.length >= MAX_TERMS * 2) break;
       let result;
       try {
-        result = store.search(candidate.term, { types, limit: MAX_HITS_PER_TERM + 2 });
+        result = store.search(candidate.term, { types, limit: MAX_COUNT_PROBE });
       } catch (err) {
         // Ein einzelner Begriff, an dem sich der Index verschluckt, darf die
-        // übrigen nicht mitnehmen.
+        // übrigen nicht mitnehmen -- aber verschwinden darf er auch nicht.
+        nichtNachschlagbar++;
         log.warn(`Begriff "${candidate.term}" konnte nicht nachgeschlagen werden: ${err && err.message}`);
         continue;
       }
       const treffer = [];
+      let fundorte = 0;
       for (const hit of result.items) {
-        if (treffer.length >= MAX_HITS_PER_TERM) break;
         if (!hit.record || hit.record.id === record.id) continue;
         const wortform = wordFormIn(hit.record, candidate.term);
         if (!wortform) continue; // Der Index hat weiter gegriffen, als der Text hergibt.
+        fundorte++;
+        if (treffer.length >= MAX_HITS_PER_TERM) continue;
         treffer.push({
           id: hit.record.id,
           type: hit.record.type,
@@ -473,22 +546,51 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
           stelle: hit.snippet || '',
         });
       }
-      if (!treffer.length) continue;
+      if (!fundorte) continue;
       found.push({
         begriff: candidate.form,
         form: candidate.term,
         imText: candidate.count,
-        anzahl: treffer.length,
+        anzahl: fundorte,
+        // Hat die Sonde alles gesehen, was der Index zu diesem Begriff hat?
+        // `total` zählt auch diese Notiz selbst mit; das macht die Schranke
+        // vorsichtiger, nie kühner.
+        genau: result.total <= MAX_COUNT_PROBE,
         treffer,
       });
     }
 
     found.sort((a, b) => {
       if (b.anzahl !== a.anzahl) return b.anzahl - a.anzahl;
+      // Gleiche Zahl, aber eine davon ist eine Untergrenze: die ist die
+      // größere von beiden.
+      if (a.genau !== b.genau) return a.genau ? 1 : -1;
       if (b.imText !== a.imText) return b.imText - a.imText;
       return a.form < b.form ? -1 : 1;
     });
-    return found.slice(0, MAX_TERMS);
+    return { begriffe: found.slice(0, MAX_TERMS), nichtNachschlagbar };
+  }
+
+  /**
+   * Der Satz über den dritten Teil -- an jeder Stelle derselbe.
+   *
+   * Vorher stand an einer davon, keiner der Begriffe komme anderswo im Tresor
+   * vor. Das ist eine Aussage über den Tresor, und sie darf nicht fallen, wenn
+   * der Index gar nicht antworten konnte.
+   */
+  function indexSatz(begriffe, nichtNachschlagbar) {
+    if (begriffe.length) {
+      return 'Die bekannten Begriffe unten stammen aus dem Volltextindex und sind davon unabhängig.'
+        + (nichtNachschlagbar
+          ? ` Bei ${nichtNachschlagbar} weiteren Begriffen hat der Index einen Fehler gemeldet; die fehlen in der Liste.`
+          : '');
+    }
+    if (nichtNachschlagbar) {
+      return 'Ob Begriffe aus dieser Notiz anderswo im Tresor vorkommen, konnte nicht nachgesehen werden: '
+        + `der Volltextindex hat bei ${nichtNachschlagbar} Begriffen einen Fehler gemeldet.`;
+    }
+    return 'Bekannte Begriffe wurden im Volltextindex gesucht, aber keiner aus dieser Notiz kommt bisher '
+      + 'anderswo im Tresor vor.';
   }
 
   /* --------------------------------------------------------- Netzherkunft */
@@ -500,11 +602,20 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
    * verlassen", und die darf nicht aus der Konfiguration abgelesen werden.
    * Loopback ist diese Maschine, die mit sich selbst spricht: ein Ziel, aber
    * keine Netznutzung.
+   *
+   * Ohne Bus ist nichts zu sehen. Das steht dann als `beobachtet: false` in
+   * der Antwort, denn "es ist nichts weggegangen" und "es hat niemand
+   * hingesehen" sind zwei verschiedene Sätze, und nur der erste ist ein
+   * Ergebnis. Vorher wurde das hier ausgerechnet und wortlos verworfen.
    */
+  function egressObservable() {
+    return !!(bus && typeof bus.on === 'function');
+  }
+
   function watchEgress(scope) {
     const targets = new Map();
-    const state = { usedNetwork: false, targets, blind: !bus || typeof bus.on !== 'function' };
-    if (state.blind) return { state, stop() {} };
+    const state = { usedNetwork: false, targets, beobachtet: egressObservable() };
+    if (!state.beobachtet) return { state, stop() {} };
     const handler = (evt) => {
       const p = evt && evt.payload;
       if (!p || p.allowed !== true || p.scope !== scope) return;
@@ -523,6 +634,19 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
         try { bus.off('network.attempt', handler); } catch { /* schon abgehängt */ }
       },
     };
+  }
+
+  /**
+   * Was beobachtet wurde, in die Antwort übernehmen -- an jedem Rückweg
+   * dieselben drei Zeilen, damit keiner davon eine vergisst. Genau das war
+   * passiert: `netzBeobachtet` gab es nirgends, und aus dem Nichtwissen wurde
+   * unterwegs ein "nein".
+   */
+  function applyEgress(basis, egress) {
+    basis.usedNetwork = egress.state.usedNetwork;
+    basis.netzZiele = [...egress.state.targets.keys()];
+    basis.netzBeobachtet = egress.state.beobachtet;
+    return basis;
   }
 
   /* ------------------------------------------------------------- Modell */
@@ -585,7 +709,7 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
 
     // Zuerst der Teil, der immer geht. Auch wenn gleich alles andere
     // fehlschlägt, ist dieser hier schon berechnet und wird geliefert.
-    const bekannteBegriffe = knownTerms(record, parts, { types: opts.types });
+    const { begriffe: bekannteBegriffe, nichtNachschlagbar } = knownTerms(record, parts, { types: opts.types });
 
     const basis = {
       noteId: record.id,
@@ -594,10 +718,18 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
       kern: null,
       offeneStellen: [],
       bekannteBegriffe,
+      nichtNachschlagbar,
       model: null,
       usedNetwork: false,
       netzZiele: [],
+      // Solange kein Modell gefragt wurde, gibt es nichts zu beobachten; was
+      // hier steht, ist die Auskunft, ob diese Einheit es überhaupt könnte.
+      netzBeobachtet: egressObservable(),
       gekuerzt: false,
+      // Wie viele Zeichen der Notiz an das Modell gegangen sind. Nicht die
+      // Größe der Anfrage -- die Frage, die zählt, ist "wie viel von MEINEM
+      // Text". Solange kein Modell gefragt wurde: null, nicht 0.
+      gesendeteZeichen: null,
       modell: { verfuegbar: false, grund: null, anleitung: null },
       hinweis: null,
       ms: 0,
@@ -606,12 +738,8 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
     const stance = modelStance(opts.model);
     if (!stance.target) {
       basis.modell = { verfuegbar: false, grund: stance.grund, anleitung: stance.anleitung };
-      basis.hinweis = bekannteBegriffe.length
-        ? 'Kernaussage und offene Stellen brauchen ein Sprachmodell; hier ist gerade keines erreichbar. '
-          + 'Die bekannten Begriffe unten stammen aus dem Volltextindex und sind davon unabhängig.'
-        : 'Kernaussage und offene Stellen brauchen ein Sprachmodell; hier ist gerade keines erreichbar. '
-          + 'Bekannte Begriffe wurden im Volltextindex gesucht, aber keiner aus dieser Notiz kommt bisher '
-          + 'anderswo im Tresor vor.';
+      basis.hinweis = 'Kernaussage und offene Stellen brauchen ein Sprachmodell; hier ist gerade keines '
+        + `erreichbar. ${indexSatz(bekannteBegriffe, nichtNachschlagbar)}`;
       basis.ms = Date.now() - started;
       return basis;
     }
@@ -626,6 +754,7 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
 
     const payload = text.length > MAX_MODEL_CHARS ? text.slice(0, MAX_MODEL_CHARS) : text;
     basis.gekuerzt = payload.length < text.length;
+    basis.gesendeteZeichen = payload.length;
 
     const messages = [
       { role: 'system', content: SYSTEM_PROMPT },
@@ -663,10 +792,8 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
         // Das ist kein Fehlschlag des Versuchs, sondern derselbe bekannte
         // Zustand wie oben -- also dasselbe ehrliche Teilergebnis.
         basis.modell = { verfuegbar: false, grund: neural.message, anleitung: null };
-        basis.hinweis = 'Das Modell war beim Aufruf nicht mehr erreichbar. Die bekannten Begriffe unten '
-          + 'stammen aus dem Volltextindex und sind davon unabhängig.';
-        basis.usedNetwork = egress.state.usedNetwork;
-        basis.netzZiele = [...egress.state.targets.keys()];
+        basis.hinweis = `Das Modell war beim Aufruf nicht mehr erreichbar. ${indexSatz(bekannteBegriffe, nichtNachschlagbar)}`;
+        applyEgress(basis, egress);
         basis.ms = Date.now() - started;
         return basis;
       }
@@ -674,8 +801,7 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
     }
 
     egress.stop();
-    basis.usedNetwork = egress.state.usedNetwork;
-    basis.netzZiele = [...egress.state.targets.keys()];
+    applyEgress(basis, egress);
 
     // Wirft, wenn die Antwort nicht lesbar ist. Das ist Absicht: hier wird
     // nichts zusammengereimt.
@@ -689,6 +815,9 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
   /**
    * Nur der Teil ohne Modell. Für Aufrufer, die ausdrücklich nichts anderes
    * wollen (und für die Prüfung, dass dieser Teil wirklich allein steht).
+   * Liefert dasselbe Paar wie `knownTerms` -- auch hier gehört die Zahl der
+   * übersprungenen Begriffe dazu, sonst geht sie auf diesem Weg verloren.
+   * @returns {{begriffe:object[], nichtNachschlagbar:number}}
    */
   function terms(noteId, opts = {}) {
     const record = getNote(noteId);
@@ -735,6 +864,8 @@ module.exports = {
   createSecondLook,
   MIN_TEXT_CHARS,
   MAX_MODEL_CHARS,
+  MAX_HITS_PER_TERM,
+  MAX_COUNT_PROBE,
   SYSTEM_PROMPT,
   SEARCH_TYPES,
   /** Nur für Tests. */

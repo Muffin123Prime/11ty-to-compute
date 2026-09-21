@@ -329,7 +329,8 @@ test('Eine unlesbare Datei landet mit Grund im Protokoll und stoppt den Durchlau
 
     const nachher = store.get(record.id);
     assert.equal(nachher.data.imported, 1);
-    assert.ok(nachher.data.skipped >= 2);
+    assert.equal(nachher.data.skipped, 2,
+      'die Karte nennt die übersprungenen Einträge dieses einen Durchlaufs: die kaputte und die leere');
     assert.equal(nachher.data.lastError, null, 'übersprungene Dateien sind kein Fehler des Ordners');
   });
 });
@@ -440,6 +441,76 @@ test('Eine neue Datei wird von selbst aufgenommen, und mehrfaches Speichern nur 
     await sleep(250);
     assert.equal(store.count('file'), 1, 'mehrfaches Speichern ergibt einen Eintrag, nicht drei');
     assert.equal(filesIn(store)[0].data.text, 'Fassung drei', 'und zwar die letzte Fassung');
+  });
+});
+
+test('Der schnelle Weg nimmt nichts auf, was die Vorschau abgelehnt hat', async () => {
+  await withWatcher(async ({ store, watcher, quelle }) => {
+    const record = armed(watcher, quelle);
+    watcher.start({ sweepIntervalMs: 60 * 60 * 1000 }); // der Rundlauf darf hier nicht mithelfen
+
+    if (!watcher.status().watching) {
+      assert.ok(true, 'fs.watch ist hier nicht verfügbar – dann gibt es den schnellen Weg gar nicht');
+      return;
+    }
+
+    // Was beide sichtbaren Wege mit Grund ablehnen: Punktdateien, versteckte
+    // Ordner, Erzeugtes, zu tief Liegendes.
+    const tief = Array.from({ length: 14 }, (_, i) => `e${i}`).join('/');
+    write(quelle, '.geheim.md', '# geheim');
+    write(quelle, '.config/zugang.md', '# zugang');
+    write(quelle, 'node_modules/readme.md', '# paket');
+    write(quelle, `${tief}/tief.md`, '# zu tief');
+
+    const vorschau = await watcher.scan(record.id, { dryRun: true });
+    assert.equal(vorschau.wuerdeAufnehmen, 0, 'die Vorschau nimmt nichts davon an');
+    assert.equal((await watcher.scan(record.id, {})).aufgenommen, 0, 'und der Durchlauf auch nicht');
+
+    // Genau dieselben Dateien noch einmal, diesmal über fs.watch. Der
+    // schnelle Weg darf nicht der nachsichtige sein.
+    write(quelle, '.geheim2.md', '# geheim zwei');
+    write(quelle, '.config/zugang2.md', '# zugang zwei');
+    write(quelle, 'node_modules/paket.md', '# paket zwei');
+    write(quelle, `${tief}/tief2.md`, '# auch zu tief');
+    // Der Beweis, dass lange genug gewartet wurde: diese eine gehört hinein.
+    write(quelle, 'sichtbar.md', '# sichtbar');
+
+    await waitFor(() => filesIn(store).some((f) => f.data.name === 'sichtbar.md'),
+      { what: 'die Aufnahme der sichtbaren Datei' });
+    await sleep(300); // großzügig länger als die Entprellung von 60 ms
+    assert.deepEqual(filesIn(store).map((f) => f.data.name).sort(), ['sichtbar.md'],
+      'über fs.watch kommt nichts herein, was die Vorschau eben noch abgelehnt hat');
+
+    // Gemeldet wird, was diese eine Datei betrifft. Ein ganzer Ordner wird
+    // einmal genannt, wo der Durchlauf ihn antrifft – und nicht Datei für
+    // Datei, sonst drängt ein einziges npm install das Protokoll voll.
+    const protokoll = watcher.log(record.id);
+    const versteckt = protokoll.uebersprungen.find((e) => e.datei === '.geheim2.md');
+    assert.match(String(versteckt && versteckt.grund), /Versteckte Datei/,
+      'die abgelehnte Punktdatei steht mit Grund im Protokoll');
+    assert.equal(protokoll.uebersprungen.filter((e) => e.datei === 'node_modules').length, 1,
+      'der Durchlauf nennt den Ordner einmal mit Grund');
+    assert.deepEqual(protokoll.uebersprungen.filter((e) => e.datei.startsWith(`node_modules${path.sep}`)), [],
+      'aber keine einzige Datei daraus');
+  });
+});
+
+test('Die Zahl „übersprungen“ auf der Karte gehört zu EINEM Durchlauf', async () => {
+  await withWatcher(async ({ store, watcher, quelle }) => {
+    write(quelle, 'gut.txt', 'Diese wird aufgenommen.');
+    write(quelle, 'film.mp4', Buffer.alloc(64)); // bleibt dauerhaft übersprungen
+    const record = armed(watcher, quelle);
+
+    const zahlen = [];
+    for (let i = 0; i < 4; i++) {
+      await watcher.scan(record.id, {});
+      zahlen.push(store.get(record.id).data.skipped);
+    }
+    // Lauf 1: film.mp4. Ab Lauf 2 zusätzlich gut.txt („schon aufgenommen").
+    // Danach ändert sich nichts mehr: im Ordner passiert ja auch nichts.
+    assert.deepEqual(zahlen, [1, 2, 2, 2],
+      'die Zahl beschreibt den letzten Durchlauf und wächst nicht von allein weiter');
+    assert.equal(store.get(record.id).data.imported, 1, 'und aufgenommen wurde genau eine Datei');
   });
 });
 
