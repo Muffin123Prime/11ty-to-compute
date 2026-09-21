@@ -93,6 +93,58 @@ Defekte — eine Modul-Route, die mit HTTP 500 antwortete, und einen Fehler in
 meiner eigenen Dokumentation. Was er nicht prüfen kann, meldet er als
 „unklar", niemals als bestanden.
 
+## 2c. Die Fehler aus dieser Runde
+
+Dieselbe Geschichte noch einmal, mit neuen Bausteinen. Alle vier fanden nicht
+ich beim Nachdenken, sondern ein Werkzeug beim Ausführen:
+
+- **Ich habe am deutschen Fehlertext geraten.** Der Verbindungstest für einen
+  Online-Anbieter sollte unterscheiden, ob die Netzschleuse abgelehnt hat (deine
+  eigene Einstellung) oder der Server nicht erreichbar war (eine Störung). Ich
+  erkannte das an Stichwörtern wie „Schleuse" und „gesperrt". Der echte Satz der
+  Schleuse lautet *„Netzmodus ist 'offline'. Für … wird Modus 'online' …
+  benötigt"* und enthält keines davon. Deine bewusste Einstellung wäre dir als
+  Störung gemeldet worden. `npm run check` fand es im ersten Lauf. Behoben an
+  der Wurzel: die Provider reichen jetzt den Fehlercode mit, und geurteilt wird
+  nach dem Code, nie nach Prosa.
+- **Ein Gespräch kam rückwärts zurück.** Das neue Werkzeug `chats.read`
+  sortierte nur nach Zeitstempel. Drei Nachrichten in derselben Millisekunde
+  sind aber normal, und die Kennungen sind zufällig statt aufsteigend — die
+  Reihenfolge war schlicht offen. Der Chat-Dienst hatte das Problem längst
+  gelöst; ich hatte einen zweiten, schlechteren Vergleicher geschrieben, statt
+  seinen zu benutzen. Zwei Stellen haben es unabhängig gefunden.
+- **Der Dubletten-Erkenner übersah den häufigsten Fall.** Gleicher Text,
+  Titel um ein Wort verschieden. Weil Titel und Text zusammen verglichen wurden,
+  drückten die drei verschobenen Ketten den Wert unter die Schwelle — und zwar
+  ausgerechnet bei kurzen, schnell getippten Notizen, wo man sich am ehesten
+  verdoppelt.
+- **`port: 0` fiel still unter den Tisch.** „Such dir einen freien Port" ist ein
+  gültiger Wunsch, aber `0` ist falsy, und `if (opts.port)` machte stillschweigend
+  7777 daraus. Ein Werkzeug, das absichtlich neben einer laufenden Instanz
+  starten wollte, scheiterte dann an einem Port, den es nie angefordert hatte.
+
+Und einer, der keiner war: mein Oberflächentest meldete, der Schalter in der
+Automatik schreibe nichts in den Tresor. Richtig war — er fragt vorher nach, und
+mein Test hatte nicht bestätigt. Auch das gehört hierher: nicht jeder rote
+Befund ist ein Fehler im Programm.
+
+## 2d. Warum es `npm run ui` gibt
+
+Aus demselben Grund wie `npm run check`, eine Ebene höher. `npm test` prüft den
+Code, `npm run check` die Schnittstelle — eine *Ansicht* kann keines von beiden
+sehen. Genau dort sind in diesem Projekt zwei Fehler entstanden, die kein
+Unit-Test je gefunden hätte: die erfundenen CSS-Namen oben, und ein Knopf, der
+da ist, aber nichts bewirkt.
+
+`npm run ui` startet einen echten Browser und klickt. Es prüft nicht, ob etwas
+erscheint, sondern ob ein Klick **bis in den Tresor durchschlägt**: nach
+„Übernehmen" muss die Aufgabe wirklich im Speicher stehen. Alles andere wäre
+eine Oberfläche, die beim Zusehen funktioniert.
+
+Dafür braucht es ein global installiertes Playwright. Neural OS selbst hat
+weiterhin null Abhängigkeiten; fehlt Playwright, läuft das Werkzeug gar nicht
+und sagt, dass es nichts geprüft hat — statt Entwarnung zu geben.
+
 ## 3. Was ich nicht überprüfen konnte
 
 Ehrlich ist hier wichtiger als vollständig.
@@ -199,6 +251,27 @@ nicht vertrauenswürdig. Der Markdown-Renderer baut DOM-Knoten statt HTML zu
 interpretieren und blockiert `javascript:`- und `data:`-Ziele. Trotzdem: ein Agent,
 der eine Webseite liest, liest auch, was dort an Anweisungen für ihn stehen könnte.
 Deshalb ist Bestätigungspflicht der Standard.
+
+**Beim Einschalten eines Auslösers.** Ab dann startet ein Agent, ohne dass du
+davorsitzt. Vier Bremsen verhindern, dass er sich selbst hochschaukelt, aber eine
+davon hat eine Lücke, die du kennen solltest: das System weiß exakt, wer einen
+Satz *angelegt* hat — der Stempel steht am Satz. Es weiß nicht, wer ein
+bestehendes Ereignis *ausgelöst* hat. Ändert ein Agent also eine Notiz, die du
+geschrieben hast, sieht das für einen Auslöser aus wie eine Änderung von dir.
+Dagegen helfen dann nur noch Entprellung, Stundengrenze und die Obergrenze von
+drei gleichzeitigen Läufen — das begrenzt die Menge, beantwortet die Frage aber
+nicht. Fang mit engen Filtern an, nicht mit „jede Notiz".
+
+**Beim direkt eingetragenen API-Schlüssel.** Er liegt dann im Klartext in
+`config.json` (Dateirechte 0600). Über die Schnittstelle kommt er nicht wieder
+heraus — dafür gibt es Tests —, aber jeder, der die Datei lesen kann, hat ihn.
+Die Umgebungsvariable ist der Weg, bei dem er in keiner Datei steht.
+
+**Beim Übernehmen eines Vorschlags.** Die Verfahren raten nicht, aber sie
+bewerten. Eine „Dublette" bei 72 % Übereinstimmung sind manchmal zwei Notizen,
+die sich zu Recht ähneln. Deshalb schlägt das System dort nur eine *Verknüpfung*
+vor und führt nie zusammen: beim Zusammenführen verschwindet Text unwiderruflich,
+und rückgängig machen kannst du das im Moment nicht.
 
 ## 7. Was ich für richtig halte
 
