@@ -422,7 +422,12 @@ function wiedervorlageBlock(store, now, labelOf) {
       const ap = a.data.pinned === true ? 0 : 1;
       const bp = b.data.pinned === true ? 0 : 1;
       if (ap !== bp) return ap - bp;
-      return Date.parse(a.updatedAt) - Date.parse(b.updatedAt);
+      const at = Date.parse(a.updatedAt);
+      const bt = Date.parse(b.updatedAt);
+      if (at !== bt) return at - bt;
+      // Two notes written in the same millisecond still have to come out in
+      // the same order every morning, or the block would quietly reshuffle.
+      return a.id < b.id ? -1 : 1;
     });
 
   return candidates.slice(0, REVISIT_MAX).map((note) => {

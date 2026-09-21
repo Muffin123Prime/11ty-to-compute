@@ -2317,6 +2317,12 @@ async function undoEntry(self, item, { force = false } = {}) {
         message: err.message,
         force: !!(err.details && err.details.force === true),
       });
+    } else if (err && err.status === 404) {
+      // The server's own 404 text is half English ("Verlaufseintrag 12 not
+      // found", from NotFoundError), and this interface speaks German. The
+      // fact it carries is kept, the wording is not.
+      state.failures.set(seq, 'Diesen Eintrag gibt es im Journal nicht mehr. '
+        + 'Vermutlich ist er inzwischen aus den Grenzen des Journals gefallen.');
     } else {
       state.failures.set(seq, (err && err.message) || 'Die Änderung konnte nicht zurückgenommen werden.');
     }
