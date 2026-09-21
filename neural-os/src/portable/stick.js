@@ -31,10 +31,14 @@
  *     `update()` clean them up, and restore `app/` if the crash happened in
  *     the one instant between the two renames.
  *
- *  4. `update()` NEVER TOUCHES THE DATA DIRECTORY. This is the single most
- *     important guarantee here, because the data directory is the user's
- *     thinking and the source tree is replaceable. It is enforced in code
- *     (`assertOutsideData`), not by convention, and proven by a test.
+ *  4. `update()` NEVER TOUCHES THE DATA DIRECTORY -- NOR THE MODEL DIRECTORY.
+ *     This is the single most important guarantee here, because the data
+ *     directory is the user's thinking and the source tree is replaceable.
+ *     `models/` joins it for a different reason with the same consequence: it
+ *     holds gigabytes that were copied once, over minutes, and that no update
+ *     of a few megabytes of source code may put at risk. Both are enforced in
+ *     code (`geschuetzterOrdner` / `assertNichtGeschuetzt`), not by
+ *     convention, and proven by a test.
  *
  *  5. THE FILESYSTEM IS PROBED, NOT ASSUMED. Most sticks are exFAT or FAT32.
  *     `chmod 0600` silently does nothing there, so `0700` on the vault
@@ -105,13 +109,25 @@ const PLATFORMS = {
   'linux-armv7l': { archive: 'tar.gz', member: 'bin/node', file: 'node', executable: true },
 };
 
-/** Directory and file names of the stick layout. Single source of truth. */
+/**
+ * Directory and file names of the stick layout. Single source of truth.
+ *
+ * `models` kam dazu, weil bis dahin das WISSEN mitreiste und das MODELL nicht:
+ * auf einem fremden Rechner standen die Notizen da, eine Antwort gab es nicht.
+ * Der Ordner ist bewusst ein Geschwister von `runtime` und nicht ein Teil
+ * davon: `runtime/` ist die Node-Laufzeit, die dieses Modul selbst kopiert,
+ * `models/` enthaelt fremde Programme (Ollama, llama-server) und ihre Gewichte.
+ * Was dort liegt, steht in `models/modelle.json` -- siehe src/portable/model.js.
+ */
 const LAYOUT = {
   marker: PORTABLE_MARKER,
   app: 'app',
   runtime: 'runtime',
   data: 'data',
   sync: 'sync',
+  models: 'models',
+  /** Beschreibungsdatei IN models/. Ein spaeterer Leser soll nicht raten muessen. */
+  modelsIndex: 'modelle.json',
   readme: 'LIESMICH.txt',
 };
 
@@ -900,6 +916,60 @@ function dataDirOf(root) {
   return path.resolve(root, rel);
 }
 
+/** Der Modellordner dieses Sticks. Absolut, damit isInside() damit rechnen kann. */
+function modelsDirOf(root) {
+  return path.resolve(root, LAYOUT.models);
+}
+
+/**
+ * Wie viel liegt in models/, und ist es beschrieben?
+ *
+ * Bewusst nur Bytes, Dateizahl und "gibt es die Beschreibung": WAS dort liegt
+ * und ob es zu diesem Rechner passt, beantwortet src/portable/model.js
+ * (`aufDemStick`). Zwei Leser desselben Formats waeren einer zu viel -- der
+ * zweite wuerde irgendwann etwas anderes behaupten als der erste.
+ *
+ * WARUM prepare() und preview() das trotzdem brauchen: hier liegt auf einem
+ * fertigen Stick der groesste Posten. In `spaceNeeded()` geht er NICHT ein --
+ * belegter Platz ist kein gebrauchter Platz, und statfs() hat ihn laengst
+ * abgezogen --, aber in jede Vorschau gehoert er, sonst sucht jemand
+ * vergeblich, wo seine Gigabyte geblieben sind.
+ */
+function modelsUebersicht(root) {
+  const dir = modelsDirOf(root);
+  const out = { path: dir, exists: fs.existsSync(dir), bytes: 0, files: 0, index: false };
+  if (!out.exists) return out;
+  out.index = fs.existsSync(path.join(dir, LAYOUT.modelsIndex));
+  try {
+    const tree = collectTree(dir, { exclude: new Set(), dropLogs: false });
+    out.bytes = tree.bytes;
+    out.files = tree.files.length;
+  } catch { /* unlesbar: die Zahlen bleiben 0, `exists` sagt weiter die Wahrheit */ }
+  return out;
+}
+
+/**
+ * Liegt `target` in einem Ordner, den kein Vorgang dieses Moduls ueberschreibt?
+ *
+ * WARUM das eine Funktion ist und keine zwei if-Zeilen an vier Stellen: die
+ * Liste der unantastbaren Ordner ist gewachsen (erst `data/`, jetzt auch
+ * `models/`) und wird wieder wachsen. Steht sie an einer Stelle, gilt jede
+ * Erweiterung sofort an allen vier Schreibstellen von update(); steht sie
+ * verteilt, gilt sie irgendwann an dreien.
+ *
+ * Reine Funktion, deshalb auf Modulebene und exportiert: so laesst sich die
+ * Zusage direkt pruefen, ohne einen Stick anzulegen.
+ *
+ * @returns {{dir:string, was:string}|null} null heisst "darf geschrieben werden"
+ */
+function geschuetzterOrdner(root, target) {
+  const data = dataDirOf(root);
+  if (isInside(data, target)) return { dir: data, was: 'Datenordner' };
+  const models = modelsDirOf(root);
+  if (isInside(models, target)) return { dir: models, was: 'Modellordner' };
+  return null;
+}
+
 function writeMarker(root, extra = {}) {
   const existing = readMarker(root) || {};
   const now = new Date().toISOString();
@@ -989,6 +1059,17 @@ Wo liegen meine Daten?
 ----------------------
 Alles in "${LAYOUT.data}" auf diesem Stick. Nichts ausserhalb. Ein Backup ist
 eine Kopie dieses Ordners - mehr braucht es nicht.
+
+Und das Sprachmodell?
+---------------------
+Im Ordner "${LAYOUT.models}" kann ein Sprachmodell samt Laufzeitkern (z. B.
+Ollama oder llama-server) liegen. Ist der Ordner leer, zeigt dieser Stick auf
+einem fremden Rechner zwar deine Notizen, kann aber KEINE Antwort geben - dafuer
+braucht es dann ein Modell, das auf jenem Rechner schon installiert ist. Was
+mitreist, steht in "${LAYOUT.models}/${LAYOUT.modelsIndex}": Modellname,
+Groesse, Pruefsummen und fuer welches Betriebssystem der Laufzeitkern gebaut
+ist. Ein Laufzeitkern fuer Windows startet auf einem Mac nicht - die
+Modelldateien selbst passen dagegen auf jeden Rechner.
 
 ${modeNote}
 Mitgelieferte Laufzeiten
@@ -1310,15 +1391,16 @@ function createStick(deps = {}) {
 
   /**
    * The guard behind update()'s central promise. Every write during an update
-   * goes through here, so "data is never touched" is a property of the code
-   * and not of the author's attention.
+   * goes through here, so "data and models are never touched" is a property of
+   * the code and not of the author's attention.
    */
-  function assertOutsideData(root, target) {
-    const data = dataDirOf(root);
-    if (isInside(data, target)) {
+  function assertNichtGeschuetzt(root, target) {
+    const treffer = geschuetzterOrdner(root, target);
+    if (treffer) {
       throw new StorageError(
-        `Abgebrochen: "${target}" liegt im Datenordner. Eine Aktualisierung darf den Datenbestand nie verändern.`,
-        { target, dataDir: data },
+        `Abgebrochen: "${target}" liegt im ${treffer.was}. Eine Aktualisierung erneuert nur das Programm - `
+        + 'sie darf weder deinen Datenbestand noch ein mitgenommenes Modell verändern.',
+        { target, ordner: treffer.dir, was: treffer.was },
       );
     }
   }
@@ -1799,6 +1881,11 @@ function createStick(deps = {}) {
     const dataDir = dataDirOf(root);
     mkdirp(dataDir, 0o700);
     mkdirp(path.join(root, LAYOUT.sync), 0o700);
+    // models/ wird angelegt, aber NIE geleert: hier kann ein Modell von einem
+    // frueheren Mal liegen, das Minuten gekostet hat. Kein Modus 0700 - die
+    // Gewichte sind kein Geheimnis, und ein fremder Laufzeitkern muss sie
+    // lesen duerfen.
+    mkdirp(path.join(root, LAYOUT.models));
 
     if (home) {
       const existing = fs.readdirSync(dataDir).filter((n) => !n.startsWith('.'));
@@ -1932,7 +2019,7 @@ function createStick(deps = {}) {
     }
 
     const appDir = path.join(root, LAYOUT.app);
-    assertOutsideData(root, appDir);
+    assertNichtGeschuetzt(root, appDir);
 
     progress({ phase: 'check', message: 'Quelltext wird vermessen …' });
     const source = collectTree(sourceRoot);
@@ -1960,7 +2047,7 @@ function createStick(deps = {}) {
 
     progress({ phase: 'source', message: 'Quelltext wird erneuert …', total: source.files.length });
     const tmpApp = path.join(root, `.${LAYOUT.app}.tmp-${randomSuffix()}`);
-    assertOutsideData(root, tmpApp);
+    assertNichtGeschuetzt(root, tmpApp);
     rmrf(tmpApp);
     mkdirp(tmpApp);
     let written;
@@ -1983,12 +2070,12 @@ function createStick(deps = {}) {
 
     throwIfAborted(signal, what);
     progress({ phase: 'finish', message: 'Starter und Hinweise werden erneuert …', percent: 99 });
-    for (const launcher of LAUNCHERS) assertOutsideData(root, path.join(root, launcher.target));
+    for (const launcher of LAUNCHERS) assertNichtGeschuetzt(root, path.join(root, launcher.target));
     const launchers = deployLaunchers(root, sourceRoot);
     warnings.push(...launchers.warnings);
 
     const readme = path.join(root, LAYOUT.readme);
-    assertOutsideData(root, readme);
+    assertNichtGeschuetzt(root, readme);
     writeFileAtomic(readme, renderReadme({
       platforms: detectPlatforms(root).map((p) => p.platform),
       version: appVersion(sourceRoot),
@@ -2184,6 +2271,9 @@ function createStick(deps = {}) {
       },
       home: home ? { root: homeDir, files: home.files.length, bytes: home.bytes } : null,
       data: { path: dataDir, exists: fs.existsSync(dataDir), entries: dataEntries.length },
+      // Belegt, nicht gebraucht: siehe modelsUebersicht(). Ohne diese Zahl
+      // erklaert keine Vorschau, warum auf einem 64-GB-Stick 6 GB frei sind.
+      models: modelsUebersicht(root),
       runtimes: {
         local: LOCAL_PLATFORM,
         copyLocal: plan.local,
@@ -2230,6 +2320,7 @@ function createStick(deps = {}) {
       data: { path: path.join(root, LAYOUT.data), exists: false },
       runtime: { path: path.join(root, LAYOUT.runtime), exists: false },
       sync: { path: path.join(root, LAYOUT.sync), exists: false },
+      models: { path: modelsDirOf(root), exists: false, bytes: 0, files: 0, index: false },
       readme: { path: path.join(root, LAYOUT.readme), exists: false },
       launchers: {},
       runtimes: [],
@@ -2252,7 +2343,18 @@ function createStick(deps = {}) {
     layout.app.exists = fs.existsSync(layout.app.path);
     layout.runtime.exists = fs.existsSync(layout.runtime.path);
     layout.sync.exists = fs.existsSync(path.join(root, LAYOUT.sync));
+    layout.models = modelsUebersicht(root);
     layout.readme.exists = fs.existsSync(path.join(root, LAYOUT.readme));
+
+    // Dateien ohne Beschreibung sind auf einem fremden Rechner wertlos: niemand
+    // sieht einer 4-GB-Datei an, zu welchem Modell sie gehoert und welcher
+    // Laufzeitkern sie oeffnen kann. Kein Fehler -- der Stick startet trotzdem.
+    if (layout.models.exists && layout.models.files > 0 && !layout.models.index) {
+      add('info', 'MODELS_UNDOCUMENTED',
+        `Im Ordner "${LAYOUT.models}" liegen ${layout.models.files} Datei(en) (${humanBytes(layout.models.bytes)}), `
+        + `aber keine Beschreibung "${LAYOUT.modelsIndex}". Was dort liegt, laesst sich nur raten.`,
+        'Lege das Modell noch einmal über "Modell mitnehmen" ab - dabei wird die Beschreibung geschrieben.');
+    }
 
     // An interrupted copy is the one failure mode a stick really has.
     const stale = [];
@@ -2500,6 +2602,35 @@ module.exports = {
   cleanStale,
   nodeDistPlatform,
   humanBytes,
+  /**
+   * Fuer src/portable/model.js, das dieselbe Stick-Wurzel beschreibt.
+   *
+   * WARUM exportiert und nicht dort nachgebaut: jede dieser Funktionen traegt
+   * eine Zusage, die oben im Kopf begruendet ist -- die Sperre je Wurzel
+   * (sonst raeumen sich zwei Tabs die halbfertigen Ordner weg), das Kopieren
+   * ueber den Thread-Pool (sonst steht der Server minutenlang), das
+   * zweistufige Umbenennen (sonst gibt es halbe Ordner) und die Reparatur der
+   * Reste. Ein zweites Kopierwerk daneben haette dieselben Zusagen ein
+   * zweites Mal einhalten muessen -- und haette sie irgendwann nicht mehr.
+   */
+  lockRoot,
+  runningOn,
+  busyError,
+  copyFiles,
+  makeProgress,
+  swapIntoPlace,
+  mkdirp,
+  writeFileAtomic,
+  rmrfAsync,
+  randomSuffix,
+  throwIfAborted,
+  abortedDuring,
+  StickFullError,
+  /** Die unantastbaren Ordner, als reine Funktion pruefbar. */
+  geschuetzterOrdner,
+  modelsDirOf,
+  modelsUebersicht,
+  MIN_HEADROOM_BYTES,
   // Exported for tests and for anything that needs to read an archive without
   // touching the network: both take a complete buffer and return one member.
   pickFromZip,
