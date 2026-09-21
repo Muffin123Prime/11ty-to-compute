@@ -331,7 +331,10 @@ test('models/remote: der Test unterscheidet "gesperrt" von "nicht erreichbar"', 
     assert.equal(res.json.ok, false);
     assert.equal(res.json.blocked, true, 'die Schleuse hat abgelehnt – das ist keine Störung');
     assert.match(res.json.hint, /Netzwerk/, 'und der Hinweis sagt, wo man das ändert');
-  }, { probeResult: { available: false, error: 'NETWORK_BLOCKED: Der Netzmodus ist offline.' } });
+    // The code is what decides, not the wording: the gate's German sentence
+    // says neither "blockiert" nor "Schleuse", which is how the first version
+    // of this check got it wrong.
+  }, { probeResult: { available: false, code: 'NETWORK_BLOCKED', error: "Netzmodus ist 'offline'. Für api.example.test wird Modus 'online' benötigt." } });
 });
 
 test('models/remote: ein geglückter Test meldet echte Modellnamen', async () => {

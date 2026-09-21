@@ -652,7 +652,10 @@ async function probe({ baseUrl, gate, scope = 'global', signal, timeoutMs = DEFA
     return { available: true, models, latencyMs: Date.now() - started };
   } catch (err) {
     const mapped = transportError(err, watchdog, { url: url || String(baseUrl), phase: 'connect' });
-    return { available: false, models: [], error: mapped.message, latencyMs: Date.now() - started };
+    // The code travels with the message. Without it a caller can only guess
+    // from German prose whether the gate refused (a decision the user made)
+    // or the server was unreachable (a fault) -- two opposite answers.
+    return { available: false, models: [], error: mapped.message, code: mapped.code || null, latencyMs: Date.now() - started };
   } finally {
     watchdog.dispose();
   }

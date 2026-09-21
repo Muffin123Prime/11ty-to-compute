@@ -272,6 +272,7 @@ function createRegistry({ config, gate, bus, logger } = {}) {
         available: !!(result && result.available),
         models: Array.isArray(result && result.models) ? result.models : [],
         error: (result && result.error) || null,
+        code: (result && result.code) || null,
         latencyMs: Number.isFinite(result && result.latencyMs) ? result.latencyMs : null,
       };
     } catch (err) {
@@ -279,7 +280,7 @@ function createRegistry({ config, gate, bus, logger } = {}) {
       // backend must still not take down the whole refresh.
       const e = asNeuralError(err);
       log.warn(`Probe von "${def.id}" ist fehlgeschlagen: ${e.message}`);
-      return { ...base, available: false, models: [], error: e.message, latencyMs: null };
+      return { ...base, available: false, models: [], error: e.message, code: e.code || null, latencyMs: null };
     }
   }
 

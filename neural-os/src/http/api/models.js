@@ -468,9 +468,12 @@ function register(router) {
 
     // "Blocked" and "unreachable" look the same in a bare error string, and
     // they are opposites: one is a policy the user chose, the other is a fault.
-    const text = String(probed.error || '');
-    const blocked = /NETWORK_BLOCKED/.test(text)
-      || /schleuse|blockiert|nicht erlaubt|gesperrt/i.test(text);
+    // So this reads the error CODE the provider now carries, and falls back to
+    // asking the gate what it thinks of the host -- never to pattern-matching
+    // German prose, which is how this check was wrong the first time.
+    const verdict = gateVerdict(rc.ctx.gate, hostOf(entry.baseUrl));
+    const blocked = probed.code === 'NETWORK_BLOCKED'
+      || (!probed.available && verdict.known && verdict.allowed === false);
 
     const { hasApiKey, keySource } = keyState(entry);
     let hint = null;

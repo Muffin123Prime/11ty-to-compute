@@ -352,6 +352,63 @@ async function checkModels() {
     assert(r.status === 200, `HTTP ${r.status}`);
     return 'geprobt';
   });
+
+  // --- Online-Anbieter ---------------------------------------------------
+  //
+  // Geprüft wird hier nicht, ob ein Anbieter antwortet (das hinge an einem
+  // fremden Dienst und an einem Schlüssel), sondern die Zusage, die dieses
+  // System gibt: einen anzulegen öffnet die Schleuse nicht, und der
+  // Schlüssel kommt nicht wieder heraus.
+  await check('Vorlagen für Online-Anbieter sind vorhanden', async () => {
+    const r = ok(await api.get('/api/models/remote'), 'models/remote');
+    assert(Array.isArray(r.presets) && r.presets.length >= 5, `nur ${(r.presets || []).length} Vorlagen`);
+    for (const preset of r.presets) {
+      assert(preset.id && preset.baseUrl && preset.host, `unvollständige Vorlage ${preset.id}`);
+    }
+    return `${r.presets.length} Vorlagen, Netzmodus ${r.mode}`;
+  });
+
+  await check('Anlegen eines Online-Anbieters öffnet die Schleuse nicht', async () => {
+    const created = ok(await api.post('/api/models/remote', {
+      id: 'pruefanbieter',
+      label: 'Prüfanbieter',
+      baseUrl: 'https://api.pruefung.invalid/v1',
+      apiKey: 'sk-pruef-geheim-0815',
+    }), 'anlegen');
+    assert(created.record.gate.allowed === false,
+      `die Schleuse hält den Host für erlaubt, obwohl niemand ihn freigegeben hat: ${JSON.stringify(created.record.gate)}`);
+    assert(created.grant === null, 'es wurde ungefragt eine Freigabe angelegt');
+    assert(/Klartext/.test(String(created.keyWarning || '')), 'der Hinweis auf den Klartext-Schlüssel fehlt');
+    return 'angelegt, Host bleibt gesperrt';
+  });
+
+  await check('Der Schlüssel kommt über keine Route wieder heraus', async () => {
+    const secret = 'sk-pruef-geheim-0815';
+    const routes = ['/api/models/remote', '/api/config', '/api/status'];
+    for (const route of routes) {
+      const res = await api.get(route);
+      assert(!String(res.text).includes(secret), `${route} hat den Schlüssel ausgeliefert`);
+    }
+    const tested = await api.post('/api/models/remote/pruefanbieter/test');
+    assert(!String(tested.text).includes(secret), 'der Verbindungstest hat den Schlüssel ausgeliefert');
+    return `${routes.length + 1} Routen geprüft, kein Schlüssel`;
+  });
+
+  await check('Der Verbindungstest nennt die Schleuse als Grund', async () => {
+    const r = ok(await api.post('/api/models/remote/pruefanbieter/test'), 'test');
+    assert(r.ok === false, 'der Anbieter existiert nicht – "erreichbar" wäre erfunden');
+    assert(r.blocked === true, `nicht als Schleusen-Ablehnung erkannt: ${JSON.stringify(r.error)}`);
+    assert(/Netzwerk/.test(String(r.hint || '')), 'kein Hinweis, wo man das ändert');
+    return 'gesperrt statt "nicht erreichbar"';
+  });
+
+  await check('Entfernen räumt auf und verschweigt die Freigabe nicht', async () => {
+    const r = ok(await api.del('/api/models/remote/pruefanbieter'), 'entfernen');
+    assert(r.ok === true, 'nicht entfernt');
+    const after = ok(await api.get('/api/models/remote'), 'liste');
+    assert(!after.items.some((i) => i.id === 'pruefanbieter'), 'der Anbieter steht noch in der Liste');
+    return 'entfernt';
+  });
 }
 
 async function checkNetwork(app) {
