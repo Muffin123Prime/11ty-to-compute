@@ -76,6 +76,7 @@ const MODES = [
 const TYPE_LABEL = {
   note: 'Notiz', project: 'Projekt', task: 'Aufgabe', entity: 'Begriff',
   chat: 'Chat', message: 'Nachricht', file: 'Datei', agent: 'Agent', run: 'Lauf',
+  memory: 'Erinnerung',
 };
 
 const KIND_LABEL = {
