@@ -755,6 +755,264 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
         return { id: updated.id, status: updated.data.status, rev: updated.rev };
       },
     },
+    /**
+     * The read side of the vault.
+     *
+     * Until now an agent could create a task but never list one, which made
+     * "Was ist noch offen?" -- the single most useful thing a personal
+     * assistant can answer -- impossible. These seven tools are all
+     * non-mutating and all sit under `readNotes`, the capability that already
+     * means "darf den Wissensspeicher lesen". None of them can reach a file or
+     * the network, so granting them adds no new exposure beyond what
+     * `notes.search` already implies.
+     *
+     * Every one of them answers with counts and ids, not prose: a model that
+     * is handed "3 offene Aufgaben" invents a fourth far less readily than one
+     * handed a paragraph.
+     */
+    {
+      name: 'tasks.list',
+      capability: 'readNotes',
+      mutating: false,
+      description: 'Listet Aufgaben, optional gefiltert nach Status, Projekt oder Fälligkeit.',
+      parameters: {
+        type: 'object',
+        properties: {
+          status: { type: 'string', enum: ['todo', 'doing', 'blocked', 'done', 'offen'], description: '"offen" fasst todo, doing und blocked zusammen' },
+          projectId: { type: 'string', description: 'Nur Aufgaben dieses Projekts' },
+          dueBefore: { type: 'string', description: 'Nur Aufgaben mit Fälligkeit vor diesem ISO-Datum' },
+          limit: { type: 'integer', default: 25, minimum: 1, maximum: 100 },
+        },
+      },
+      summary: (args) => `Aufgaben lesen${args.status ? ` (${args.status})` : ''}`,
+      run(args) {
+        const openStates = new Set(['todo', 'doing', 'blocked']);
+        const dueCut = args.dueBefore ? Date.parse(args.dueBefore) : null;
+        if (args.dueBefore && !Number.isFinite(dueCut)) {
+          throw new ValidationError(`"dueBefore" ist kein Datum: ${args.dueBefore}`);
+        }
+        const all = store.all('task');
+        const matched = all.filter((r) => {
+          const d = r.data;
+          if (args.status === 'offen' ? !openStates.has(d.status) : (args.status && d.status !== args.status)) return false;
+          if (args.projectId && d.projectId !== args.projectId) return false;
+          if (dueCut !== null) {
+            const due = d.due ? Date.parse(d.due) : NaN;
+            if (!Number.isFinite(due) || due >= dueCut) return false;
+          }
+          return true;
+        });
+        // Soonest and most important first -- the order a person would want.
+        matched.sort((a, b) => {
+          const ad = a.data.due ? Date.parse(a.data.due) : Infinity;
+          const bd = b.data.due ? Date.parse(b.data.due) : Infinity;
+          if (ad !== bd) return ad - bd;
+          return (a.data.priority || 2) - (b.data.priority || 2);
+        });
+        return {
+          total: matched.length,
+          shown: Math.min(matched.length, args.limit),
+          tasks: matched.slice(0, args.limit).map((r) => ({
+            id: r.id,
+            title: r.data.title,
+            status: r.data.status,
+            due: r.data.due,
+            priority: r.data.priority,
+            projectId: r.data.projectId,
+          })),
+        };
+      },
+    },
+    {
+      name: 'projects.list',
+      capability: 'readNotes',
+      mutating: false,
+      description: 'Listet Projekte mit der Zahl ihrer offenen Aufgaben.',
+      parameters: {
+        type: 'object',
+        properties: {
+          status: { type: 'string', enum: ['active', 'paused', 'done', 'archived'] },
+          limit: { type: 'integer', default: 25, minimum: 1, maximum: 100 },
+        },
+      },
+      summary: () => 'Projekte lesen',
+      run(args) {
+        const openStates = new Set(['todo', 'doing', 'blocked']);
+        const openByProject = new Map();
+        for (const task of store.all('task')) {
+          const pid = task.data.projectId;
+          if (!pid || !openStates.has(task.data.status)) continue;
+          openByProject.set(pid, (openByProject.get(pid) || 0) + 1);
+        }
+        const matched = store.all('project').filter((r) => !args.status || r.data.status === args.status);
+        return {
+          total: matched.length,
+          projects: matched.slice(0, args.limit).map((r) => ({
+            id: r.id,
+            name: r.data.name,
+            status: r.data.status,
+            openTasks: openByProject.get(r.id) || 0,
+            description: shorten(r.data.description, 200),
+          })),
+        };
+      },
+    },
+    {
+      name: 'projects.create',
+      capability: 'runTasks',
+      mutating: true,
+      description: 'Legt ein Projekt an, um Notizen und Aufgaben zu bündeln.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', maxLength: 500 },
+          description: { type: 'string', default: '' },
+        },
+        required: ['name'],
+      },
+      summary: (args) => `Projekt anlegen: "${shorten(args.name, 80)}"`,
+      run(args, ctx) {
+        const record = store.create('project', {
+          name: args.name,
+          description: args.description || '',
+        });
+        noteProduced(ctx, record.id);
+        return { id: record.id, name: record.data.name };
+      },
+    },
+    {
+      name: 'tags.list',
+      capability: 'readNotes',
+      mutating: false,
+      description: 'Zeigt alle vergebenen Schlagwörter mit ihrer Häufigkeit. Nützlich, um bestehende Begriffe wiederzuverwenden statt neue zu erfinden.',
+      parameters: {
+        type: 'object',
+        properties: { limit: { type: 'integer', default: 40, minimum: 1, maximum: 200 } },
+      },
+      summary: () => 'Schlagwörter lesen',
+      run(args) {
+        const counts = new Map();
+        for (const record of store.list(['note', 'project', 'task', 'entity'], { limit: undefined }).items) {
+          for (const tag of (record.data && record.data.tags) || []) {
+            const name = String(tag);
+            counts.set(name, (counts.get(name) || 0) + 1);
+          }
+        }
+        const sorted = [...counts.entries()].sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0], 'de'));
+        return {
+          total: sorted.length,
+          tags: sorted.slice(0, args.limit).map(([name, count]) => ({ name, count })),
+        };
+      },
+    },
+    {
+      name: 'activity.recent',
+      capability: 'readNotes',
+      mutating: false,
+      description: 'Was sich in den letzten Tagen geändert hat. Grundlage für Tages- und Wochenrückblicke.',
+      parameters: {
+        type: 'object',
+        properties: {
+          days: { type: 'integer', default: 7, minimum: 1, maximum: 365 },
+          types: { type: 'string', description: 'Komma-getrennt, z. B. "note,task". Leer = alle sinnvollen Arten.' },
+          limit: { type: 'integer', default: 30, minimum: 1, maximum: 200 },
+        },
+      },
+      summary: (args) => `Was ist in ${args.days || 7} Tagen passiert`,
+      run(args) {
+        const allowed = ['note', 'task', 'project', 'chat', 'file', 'entity', 'run'];
+        const wanted = typeof args.types === 'string' && args.types.trim()
+          ? args.types.split(',').map((t) => t.trim()).filter(Boolean)
+          : allowed;
+        for (const type of wanted) {
+          if (!allowed.includes(type)) {
+            throw new ValidationError(`"${type}" ist hier keine gültige Art. Möglich: ${allowed.join(', ')}.`);
+          }
+        }
+        const since = Date.now() - (args.days || 7) * 86400000;
+        const items = store.list(wanted, { limit: undefined }).items
+          .filter((r) => Date.parse(r.updatedAt) >= since)
+          .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+        const byType = {};
+        for (const r of items) byType[r.type] = (byType[r.type] || 0) + 1;
+        return {
+          days: args.days || 7,
+          total: items.length,
+          byType,
+          items: items.slice(0, args.limit).map((r) => ({
+            id: r.id,
+            type: r.type,
+            label: labelOf(r),
+            updatedAt: r.updatedAt,
+            isNew: Date.parse(r.createdAt) >= since,
+          })),
+        };
+      },
+    },
+    {
+      name: 'chats.list',
+      capability: 'readNotes',
+      mutating: false,
+      description: 'Listet Chats mit Titel und Zeitpunkt.',
+      parameters: {
+        type: 'object',
+        properties: { limit: { type: 'integer', default: 15, minimum: 1, maximum: 60 } },
+      },
+      summary: () => 'Chats lesen',
+      run(args) {
+        const chats = store.list('chat', { limit: args.limit, sort: 'updatedAt', order: 'desc' });
+        const counts = new Map();
+        for (const message of store.all('message')) {
+          const id = message.data.chatId;
+          counts.set(id, (counts.get(id) || 0) + 1);
+        }
+        return {
+          total: chats.total,
+          chats: chats.items.map((r) => ({
+            id: r.id,
+            title: r.data.title,
+            updatedAt: r.updatedAt,
+            messages: counts.get(r.id) || 0,
+          })),
+        };
+      },
+    },
+    {
+      name: 'chats.read',
+      capability: 'readNotes',
+      mutating: false,
+      description: 'Liest den Verlauf eines Chats, um ihn zusammenzufassen oder daraus eine Notiz zu machen.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'ID des Chats' },
+          limit: { type: 'integer', default: 40, minimum: 1, maximum: 200, description: 'Die letzten N Nachrichten' },
+        },
+        required: ['id'],
+      },
+      summary: (args) => `Chat ${args.id} lesen`,
+      run(args) {
+        const chat = requireRecord(args.id, 'chat');
+        const messages = store.all('message')
+          .filter((m) => m.data.chatId === chat.id && m.data.role !== 'system')
+          .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+        const tail = messages.slice(-args.limit);
+        return {
+          id: chat.id,
+          title: chat.data.title,
+          total: messages.length,
+          shown: tail.length,
+          messages: tail.map((m) => ({
+            role: m.data.role,
+            content: shorten(m.data.content, 4000),
+            // Provenance travels with the text: a summary of a message that
+            // came from an online model should be able to say so.
+            usedNetwork: m.data.usedNetwork === true,
+            at: m.createdAt,
+          })),
+        };
+      },
+    },
     {
       name: 'files.list',
       capability: 'readFiles',

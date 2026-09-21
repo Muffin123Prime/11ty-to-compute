@@ -1037,6 +1037,130 @@ test('notes, tasks und memory arbeiten auf echten Datensätzen', async () => {
   }
 });
 
+/**
+ * The read side of the vault.
+ *
+ * These seven tools exist because an agent that can create a task but not list
+ * one cannot answer "Was ist noch offen?" -- the single most useful question a
+ * personal assistant gets. What is asserted here is that they read the REAL
+ * store and return real counts, and that the filters actually filter: an
+ * assistant that quietly drops a due task is worse than one that has no list.
+ */
+test('tasks.list, projects.list und tags.list lesen echte Daten', async () => {
+  const env = await makeEnv();
+  try {
+    const agent = env.createAgent({ permissions: { readNotes: true, runTasks: true, requireApproval: false } });
+    const ctx = { agent };
+
+    const kueche = env.store.create('project', { name: 'Küche', tags: ['haushalt'] });
+    const buero = env.store.create('project', { name: 'Büro', status: 'paused' });
+    const gestern = new Date(Date.now() - 86400000).toISOString();
+    const naechsteWoche = new Date(Date.now() + 7 * 86400000).toISOString();
+
+    env.store.create('task', { title: 'Mühle entkalken', projectId: kueche.id, due: gestern, priority: 1 });
+    env.store.create('task', { title: 'Regal bauen', projectId: kueche.id, due: naechsteWoche, priority: 3 });
+    env.store.create('task', { title: 'Abgehakt', projectId: kueche.id, status: 'done' });
+    env.store.create('task', { title: 'Ohne Projekt', status: 'blocked' });
+    env.store.create('note', { title: 'Espresso', tags: ['kaffee', 'haushalt'] });
+    env.store.create('note', { title: 'Mahlgrad', tags: ['kaffee'] });
+
+    const alle = await env.toolbox.call('tasks.list', {}, ctx);
+    assert.equal(alle.result.total, 4);
+    assert.equal(alle.result.tasks[0].title, 'Mühle entkalken', 'das Fälligste steht oben');
+
+    const offen = await env.toolbox.call('tasks.list', { status: 'offen' }, ctx);
+    assert.equal(offen.result.total, 3, '"offen" fasst todo, doing und blocked zusammen');
+    assert.ok(!offen.result.tasks.some((t) => t.status === 'done'));
+
+    const imProjekt = await env.toolbox.call('tasks.list', { projectId: kueche.id }, ctx);
+    assert.equal(imProjekt.result.total, 3);
+
+    const faellig = await env.toolbox.call('tasks.list', { dueBefore: new Date().toISOString() }, ctx);
+    assert.equal(faellig.result.total, 1, 'nur die überfällige');
+    assert.equal(faellig.result.tasks[0].title, 'Mühle entkalken');
+    await assert.rejects(env.toolbox.call('tasks.list', { dueBefore: 'irgendwann' }, ctx), /kein Datum/);
+
+    const projekte = await env.toolbox.call('projects.list', {}, ctx);
+    assert.equal(projekte.result.total, 2);
+    const kuecheOut = projekte.result.projects.find((p) => p.id === kueche.id);
+    assert.equal(kuecheOut.openTasks, 2, 'erledigte Aufgaben zählen nicht als offen');
+    const nurAktiv = await env.toolbox.call('projects.list', { status: 'paused' }, ctx);
+    assert.equal(nurAktiv.result.total, 1);
+    assert.equal(nurAktiv.result.projects[0].id, buero.id);
+
+    // "haushalt" steht an einem Projekt und an einer Notiz, "kaffee" an zwei
+    // Notizen: beide kommen zweimal vor, der Gleichstand wird alphabetisch
+    // aufgeloest -- damit dieselben Daten immer dieselbe Reihenfolge ergeben.
+    const tags = await env.toolbox.call('tags.list', {}, ctx);
+    assert.deepEqual(tags.result.tags.slice(0, 2), [
+      { name: 'haushalt', count: 2 },
+      { name: 'kaffee', count: 2 },
+    ]);
+    env.store.create('note', { title: 'Noch mehr Kaffee', tags: ['kaffee'] });
+    const danach = await env.toolbox.call('tags.list', {}, ctx);
+    assert.deepEqual(danach.result.tags[0], { name: 'kaffee', count: 3 }, 'Haeufigkeit schlaegt Alphabet');
+
+    const neu = await env.toolbox.call('projects.create', { name: 'Balkon' }, ctx);
+    assert.equal(env.store.get(neu.result.id).data.name, 'Balkon');
+    assert.ok(neu.result.id, 'die ID kommt zurück, damit der Agent Aufgaben einhängen kann');
+  } finally {
+    await env.close();
+  }
+});
+
+test('activity.recent und chats.read geben wieder, was wirklich passiert ist', async () => {
+  const env = await makeEnv();
+  try {
+    const agent = env.createAgent({ permissions: { readNotes: true } });
+    const ctx = { agent };
+
+    const frisch = env.store.create('note', { title: 'Heute geschrieben' });
+    const chat = env.store.create('chat', { title: 'Über Kaffee' });
+    env.store.create('message', { chatId: chat.id, role: 'system', content: 'Du bist hilfreich.' });
+    env.store.create('message', { chatId: chat.id, role: 'user', content: 'Wie mahle ich?' });
+    env.store.create('message', { chatId: chat.id, role: 'assistant', content: 'Fein.', usedNetwork: true });
+
+    const recent = await env.toolbox.call('activity.recent', { days: 7 }, ctx);
+    assert.ok(recent.result.total >= 2, JSON.stringify(recent.result.byType));
+    assert.ok(recent.result.items.some((i) => i.id === frisch.id && i.isNew === true));
+    assert.equal(recent.result.byType.message, undefined, 'einzelne Nachrichten sind kein Tagesereignis');
+
+    const gefiltert = await env.toolbox.call('activity.recent', { days: 7, types: 'note' }, ctx);
+    assert.ok(gefiltert.result.items.every((i) => i.type === 'note'));
+    await assert.rejects(env.toolbox.call('activity.recent', { types: 'grant' }, ctx), /keine gültige Art/);
+
+    const liste = await env.toolbox.call('chats.list', {}, ctx);
+    assert.equal(liste.result.chats[0].id, chat.id);
+    assert.equal(liste.result.chats[0].messages, 3, 'gezählt wird, was wirklich im Tresor liegt');
+
+    const verlauf = await env.toolbox.call('chats.read', { id: chat.id }, ctx);
+    assert.equal(verlauf.result.total, 2, 'der System-Prompt gehört nicht zum Gespräch');
+    assert.equal(verlauf.result.messages[0].role, 'user');
+    assert.equal(verlauf.result.messages[1].usedNetwork, true,
+      'die Herkunft reist mit: eine Zusammenfassung soll sagen können, dass die Antwort online entstand');
+    await assert.rejects(env.toolbox.call('chats.read', { id: 'chat_qqqqqqqqqqqqqqqqqqqqqq' }, ctx), /NOT_FOUND|not found/);
+  } finally {
+    await env.close();
+  }
+});
+
+test('die Lese-Werkzeuge bleiben ohne readNotes verschlossen', async () => {
+  const env = await makeEnv();
+  try {
+    const blind = env.createAgent({ name: 'Blind', permissions: { readNotes: false } });
+    const ctx = { agent: blind };
+    for (const tool of ['tasks.list', 'projects.list', 'tags.list', 'activity.recent', 'chats.list']) {
+      await assert.rejects(
+        env.toolbox.call(tool, {}, ctx),
+        /PERMISSION|nicht erlaubt|darf/i,
+        `${tool} war ohne readNotes erreichbar`,
+      );
+    }
+  } finally {
+    await env.close();
+  }
+});
+
 test('graph.neighbours zeigt Nachbarn mit lesbaren Beschriftungen', async () => {
   const env = await makeEnv();
   try {
