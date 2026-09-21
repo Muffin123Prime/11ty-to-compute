@@ -9,11 +9,11 @@ teilweise oder gar nicht funktioniert, steht weiter unten — ungeschönt.
 ## Messwerte
 
 ```
-npm test          705 Tests, 705 bestanden, 0 fehlgeschlagen   (~35 s)
-npm run check      95 Funktionen geprüft, 1 unklar, 0 defekt
-npm run proof      18 Prüfpunkte bestanden
+npm test          740 Tests, 740 bestanden, 0 fehlgeschlagen   (~35 s)
+npm run check     108 Funktionen geprüft, 1 unklar, 0 defekt
+npm run proof      19 Prüfpunkte bestanden
 npm run ui         13 Ansichten geklickt, hell und dunkel, 0 Fehler
-npm run doctor     19 von 19 Subsystemen geladen
+npm run doctor     20 von 20 Subsystemen geladen
 ```
 
 Die vier Werkzeuge prüfen absichtlich Verschiedenes: `test` den Code,
@@ -21,6 +21,12 @@ Die vier Werkzeuge prüfen absichtlich Verschiedenes: `test` den Code,
 Offline-Versprechen auf einer Maschine **mit** Internet, und `ui` ob ein Klick
 in der Oberfläche wirklich bis in den Tresor durchschlägt. Ein Fehler, den
 alle vier übersehen, ist noch möglich — aber er muss sich schon Mühe geben.
+
+`npm run check` beginnt mit einem Bereich 0, der gegen den Fehler prüft, der in
+diesem Projekt dreimal passiert ist: **gebaut, Tests grün, nicht erreichbar**.
+Die Liste der zu prüfenden Teilsysteme leitet er aus `doctor()` ab, nicht aus
+einer Aufzählung — ein neues Teilsystem, das jemand zu verdrahten vergisst,
+fällt von selbst auf.
 
 ### Geschwindigkeit (gemessen, nicht geschätzt)
 
@@ -143,6 +149,14 @@ Speicher, und ein Zeitplan wird erst nach der Rückfrage eingeschaltet.
 - **Herkunft** — jeder Satz aus einem Agentenlauf trägt `runId`, `agentId` und
   `source: 'agent'`. Eine *Änderung* stempelt nicht um: eine Notiz des Nutzers
   bleibt seine, auch wenn ein Agent sie angefasst hat
+- **Rückgängig** — eigenes Journal (`vault/history.jsonl`), unabhängig vom
+  Verdichten des Schreib-Logs, bei verschlüsseltem Tresor mitverschlüsselt.
+  Höchstens 2000 Einträge oder 30 Tage. Jede Änderung trägt, **wer** sie
+  gemacht hat: ein Agentenlauf setzt beim Start seinen Namen, und alles, was
+  innerhalb geschrieben wird, trägt ihn — auch das, was der Schreibvorgang
+  seinerseits auslöst (`src/kernel/actor.js`, AsyncLocalStorage). Ein Konflikt
+  wird nie still überschrieben: wurde der Satz seitdem wieder geändert, wird
+  abgelehnt und beide Revisionen benannt
 
 ### Eingeschränkt
 - **Agenten sind nur so gut wie das Modell.** Mit einem 3B-Modell sind
@@ -266,11 +280,16 @@ Textextraktion, Zeitachse — sind erledigt und stehen oben unter „fertiggeste
 Was ich als Nächstes bauen würde, mit Begründung und mit der Liste dessen, was
 ich **nicht** bauen würde, steht in `docs/IDEEN.md`. Die Kurzfassung:
 
-1. **Rückgängig für alles** — nicht nur im Editor, sondern für jede Änderung,
-   auch die eines Agenten, der nachts lief. Das ist die Voraussetzung dafür,
-   dass jemand die Automatik überhaupt einschaltet.
-2. **Ein Tagesbeginn** — ein Bildschirm mit dem, was heute fällig ist, was sich
+„Rückgängig für alles" stand hier als Nummer 1 und ist inzwischen gebaut —
+es war die Voraussetzung dafür, dass jemand die Automatik überhaupt einschaltet.
+Bleiben:
+
+1. **Ein Tagesbeginn** — ein Bildschirm mit dem, was heute fällig ist, was sich
    seit gestern geändert hat und was die Automatik vorschlägt. Die Daten dafür
-   liegen alle schon vor.
-3. **Kartenstapel zum Wiederholen** — macht aus dem Wissensspeicher etwas, das
+   liegen alle schon vor; es fehlt nur die Seite, die sie zusammenzieht.
+2. **Kartenstapel zum Wiederholen** — macht aus dem Wissensspeicher etwas, das
    einem tatsächlich etwas beibringt. Braucht kein Modell.
+3. **Dateien beobachten statt importieren** — ein freigegebener Ordner, dessen
+   Inhalt automatisch gelesen und verknüpft wird. Die Textextraktion ist fertig;
+   es fehlt die Beobachtung und, wichtiger, die sichtbare Liste „das habe ich
+   aufgenommen".

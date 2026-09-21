@@ -389,6 +389,41 @@ gescheitert ist, wäre genau die Unehrlichkeit, die dieses Programm vermeiden so
 
 ---
 
+### Rückgängig — auch für das, was ohne dich passiert ist
+
+Unter **Zeitachse** steht neben dem Inspektor eine zweite Liste: **Letzte
+Änderungen**. Dort steht jede Änderung an einer Notiz, Aufgabe, einem Projekt,
+Chat, Agenten, einer Datei, Erinnerung, einem Zeitplan oder Auslöser — mit dem
+Zustand davor und mit der Antwort auf die Frage, die man zuerst stellt:
+
+> **Wer war das — ich oder ein Agent?**
+
+Ein Filter zeigt dir nur das, was **ohne dich** passiert ist. Das ist der
+eigentliche Zweck: du kommst zurück an den Rechner und willst wissen, was
+gelaufen ist, während du weg warst.
+
+Zwei Dinge, auf die es ankommt:
+
+- **Ein Konflikt wird nie still überschrieben.** Wurde der Satz seit der
+  aufgezeichneten Änderung wieder geändert, wird das Zurücknehmen abgelehnt —
+  sonst würde Rückgängig genau das anrichten, wogegen es da ist. Es gibt ein
+  ausdrückliches „Trotzdem zurücknehmen", mit Warnung, als zweiten Klick.
+- **Was nicht geht, steht dabei**, statt als grauer Knopf ohne Erklärung.
+
+Was es **nicht** kann:
+
+| | |
+|---|---|
+| Reichweite | höchstens 2000 Einträge oder 30 Tage. Danach ist es weg — wer länger zurückwill, nimmt eine Sicherung. |
+| Verknüpfungen | werden nicht aufgezeichnet. Abgeleitete Links entstehen bei jedem Schreibvorgang neu; ein Knopf dafür würde sichtbar nichts tun. |
+| Freigaben und Token | nicht. Eine zurückgenommene Netz-Freigabe wiederzubeleben wäre ein Sicherheitsloch, kein Komfort. |
+| Endgültig Gelöschtes | kommt unter **neuer Kennung** zurück, und seine früheren Verknüpfungen sind weg. Die App sagt das, statt so zu tun, als wäre nichts gewesen. |
+
+Einstellen lässt sich die Reichweite in `config.json` unter
+`history.maxEntries` und `history.maxDays`.
+
+---
+
 ## Teil 7 · Ein Online-Modell einrichten (optional)
 
 Du brauchst das nicht. Der ganze Rest funktioniert ohne. Aber wenn du für schwere
