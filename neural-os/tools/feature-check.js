@@ -1410,6 +1410,257 @@ async function checkHistory(app) {
   });
 }
 
+async function checkToday(app) {
+  area('17 · Heute');
+
+  const gestern = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const morgen = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const ueberfaellig = ok(await api.post('/api/records', {
+    type: 'task', data: { title: 'Mühle entkalken', due: gestern, priority: 1 },
+  }), 'überfällig').record;
+  ok(await api.post('/api/records', { type: 'task', data: { title: 'Regal bauen', due: morgen } }), 'demnächst');
+
+  await check('Überfällig und demnächst werden getrennt', async () => {
+    const t = ok(await api.get('/api/today'), 'today');
+    assert(t.faellig, `kein Block "faellig": ${Object.keys(t).join(', ')}`);
+    const ids = (arr) => (arr || []).map((x) => x.id || (x.record && x.record.id));
+    assert(ids(t.faellig.ueberfaellig).includes(ueberfaellig.id),
+      `die überfällige Aufgabe steht nicht unter "ueberfaellig": ${JSON.stringify(t.faellig)}`);
+    assert(!ids(t.faellig.ueberfaellig).includes('Regal bauen'), 'die künftige wurde als überfällig gezählt');
+    return `${(t.faellig.ueberfaellig || []).length} überfällig, ${(t.faellig.demnaechst || []).length} demnächst`;
+  });
+
+  await check('Was ohne dich lief, steht als eigener Block da', async () => {
+    const { withActor } = require('../src/kernel/actor');
+    const meine = app.store.create('note', { title: 'Vom Nutzer' });
+    await withActor({ kind: 'agent', runId: 'run_heute', agentId: 'agent_heute' }, async () => {
+      app.store.update(meine.id, { body: 'Vom Agenten' });
+    });
+    const t = ok(await api.get('/api/today'), 'today');
+    assert(t.ohneDich, 'kein Block "ohneDich"');
+    const drin = JSON.stringify(t.ohneDich).includes('run_heute')
+      || JSON.stringify(t.ohneDich).includes(meine.id);
+    assert(drin, `die Änderung des Agenten fehlt: ${JSON.stringify(t.ohneDich).slice(0, 200)}`);
+    return 'die Agentenänderung ist drin';
+  });
+
+  await check('Die Übersicht ändert nichts', async () => {
+    const vorher = app.store.stats().counts;
+    ok(await api.get('/api/today'), 'today');
+    ok(await api.get('/api/today'), 'today');
+    const nachher = app.store.stats().counts;
+    assert(JSON.stringify(vorher) === JSON.stringify(nachher),
+      `ein Blick auf "Heute" hat etwas verändert: ${JSON.stringify(vorher)} -> ${JSON.stringify(nachher)}`);
+    return 'zweimal angesehen, nichts verändert';
+  });
+
+  await check('Ein fehlendes Teilsystem wird benannt, nicht verschwiegen', async () => {
+    const merk = app.assist;
+    app.assist = null;
+    try {
+      const t = ok(await api.get('/api/today'), 'today');
+      assert(Array.isArray(t.fehlend), 'kein Feld "fehlend"');
+      assert(t.fehlend.some((f) => /assist|vorschl/i.test(JSON.stringify(f))),
+        `das fehlende Teilsystem wird nicht genannt: ${JSON.stringify(t.fehlend)}`);
+      return t.fehlend.map((f) => f.teil || f).join(', ');
+    } finally {
+      app.assist = merk;
+    }
+  });
+}
+
+async function checkStudy(app) {
+  area('18 · Lernen');
+
+  let karte = null;
+  await check('Eine Karte lässt sich anlegen und ist sofort fällig', async () => {
+    const r = ok(await api.post('/api/study/cards', {
+      front: 'Was ist Crema?', back: 'Die Schaumschicht auf dem Espresso.',
+    }), 'karte');
+    karte = r.record;
+    const due = ok(await api.get('/api/study/due'), 'due');
+    const ids = (due.items || []).map((i) => i.record && i.record.id);
+    assert(ids.includes(karte.id), `neue Karte nicht fällig: ${JSON.stringify(ids)}`);
+    return `${(due.items || []).length} fällig`;
+  });
+
+  await check('Jeder Knopf sagt vorher, wann die Karte wiederkommt', async () => {
+    const due = ok(await api.get('/api/study/due'), 'due');
+    const item = (due.items || []).find((i) => i.record.id === karte.id);
+    assert(item && Array.isArray(item.vorschau) && item.vorschau.length === 4,
+      `keine vier Vorschauen: ${JSON.stringify(item && item.vorschau)}`);
+    for (const v of item.vorschau) {
+      assert(typeof v.wann === 'string' && v.wann, `Note ${v.grade} ohne "wann": ${JSON.stringify(v)}`);
+    }
+    // "Nochmal" muss HEUTE heissen, sonst ist es kein Nochmal.
+    const nochmal = item.vorschau.find((v) => v.grade === 0);
+    assert(/heute/i.test(nochmal.wann), `"Nochmal" sagt "${nochmal.wann}" statt heute`);
+    return item.vorschau.map((v) => `${v.label}: ${v.wann}`).join(' · ');
+  });
+
+  await check('Eine Bewertung ändert den Satz wirklich', async () => {
+    const r = ok(await api.post(`/api/study/cards/${karte.id}/review`, { grade: 2 }), 'review');
+    const satz = body(ok(await api.get(`/api/records/${karte.id}`), 'karte').record);
+    assert(satz.reps === 1, `reps ist ${satz.reps}`);
+    assert(satz.due, 'kein Termin gesetzt');
+    assert(satz.lastReviewedAt, 'kein Zeitpunkt der Bewertung');
+    return `reps=${satz.reps} due=${satz.due} ease=${satz.ease}`;
+  });
+
+  await check('Eine unmögliche Note wird abgewiesen', async () => {
+    const r = await api.post(`/api/study/cards/${karte.id}/review`, { grade: 9 });
+    assert(r.status === 400, `HTTP ${r.status} statt 400`);
+    return 'abgelehnt';
+  });
+
+  await check('Aus Fließtext wird keine Karte geraten', async () => {
+    const note = ok(await api.post('/api/records', {
+      type: 'note',
+      data: {
+        title: 'Espresso',
+        body: 'Der Mahlgrad entscheidet über den Widerstand. Neun bar sind die Norm.\n\n'
+          + '## Was ist Crema?\n\nDie Schaumschicht auf dem Espresso.\n',
+      },
+    }), 'notiz').record;
+    const v = ok(await api.get(`/api/study/from-note/${note.id}`), 'vorschläge');
+    const items = v.items || v.vorschlaege || [];
+    assert(items.length >= 1, `keine Vorschläge aus der Überschrift: ${JSON.stringify(v).slice(0, 200)}`);
+    const ausProsa = items.filter((i) => /Der Mahlgrad entscheidet/.test(i.front || ''));
+    assert(!ausProsa.length, 'aus einem gewöhnlichen Satz wurde eine Karte geraten');
+    return `${items.length} aus ausdrücklichen Strukturen, 0 geraten`;
+  });
+}
+
+async function checkWatch(app) {
+  area('19 · Beobachtete Ordner');
+
+  const fsMod = require('node:fs');
+  const osMod = require('node:os');
+  const eingang = fsMod.mkdtempSync(path.join(osMod.tmpdir(), 'nos-eingang-'));
+  fsMod.writeFileSync(path.join(eingang, 'notiz.md'), '# Espresso\n\nNeun bar, 93 Grad.\n');
+  fsMod.writeFileSync(path.join(eingang, 'liste.txt'), 'Bohnen\nFilter\n');
+  let ordner = null;
+
+  try {
+    await check('Ein neuer Ordner ist AUS', async () => {
+      const r = ok(await api.post('/api/watch', { path: eingang, label: 'Eingang' }), 'anlegen');
+      ordner = r.record;
+      assert(body(ordner).enabled === false,
+        'ein Ordner, der ab dem Anlegen liest, ist genau die unsichtbare Automatik, die dieses System vermeidet');
+      return 'angelegt, ausgeschaltet';
+    });
+
+    await check('"Erst ansehen" findet etwas und legt nichts an', async () => {
+      const vorher = app.store.count('file');
+      const r = ok(await api.post(`/api/watch/${ordner.id}/scan`, { dryRun: true }), 'dryRun');
+      assert(r.gefunden >= 2, `nur ${r.gefunden} gefunden`);
+      assert(app.store.count('file') === vorher, `es wurden ${app.store.count('file') - vorher} Dateien angelegt`);
+      return `${r.gefunden} gefunden, 0 angelegt`;
+    });
+
+    await check('Eingeschaltet nimmt er die Dateien wirklich auf', async () => {
+      const vorher = app.store.count('file');
+      ok(await api.patch(`/api/watch/${ordner.id}`, { enabled: true }), 'einschalten');
+      const r = ok(await api.post(`/api/watch/${ordner.id}/scan`, {}), 'scan');
+      assert(app.store.count('file') > vorher, `keine Datei aufgenommen: ${JSON.stringify(r)}`);
+      return `${vorher} -> ${app.store.count('file')} Dateien`;
+    });
+
+    await check('Dieselbe Datei wird nicht zweimal aufgenommen', async () => {
+      const vorher = app.store.count('file');
+      ok(await api.post(`/api/watch/${ordner.id}/scan`, {}), 'scan');
+      assert(app.store.count('file') === vorher, `noch einmal ${app.store.count('file') - vorher} angelegt`);
+      return 'unverändert';
+    });
+
+    await check('Das Protokoll sagt, was aufgenommen und was übersprungen wurde', async () => {
+      // Getrennt, und das ist der Punkt: "zwei aufgenommen" allein waere die
+      // halbe Wahrheit, wenn drei Dateien dalagen.
+      const r = ok(await api.get(`/api/watch/${ordner.id}/log`), 'log');
+      assert(Array.isArray(r.aufgenommen), `kein Feld "aufgenommen": ${Object.keys(r).join(', ')}`);
+      assert(Array.isArray(r.uebersprungen), 'kein Feld "uebersprungen"');
+      assert(r.aufgenommen.length >= 2, `nur ${r.aufgenommen.length} aufgenommen`);
+      for (const eintrag of r.aufgenommen) {
+        assert(eintrag.datei || eintrag.name, `Eintrag ohne Dateinamen: ${JSON.stringify(eintrag)}`);
+      }
+      // Und es sagt ehrlich, was es sich NICHT merkt.
+      assert(/nur, solange es läuft|solange es laeuft/i.test(String(r.hinweis || '')),
+        'kein Hinweis darauf, dass übersprungene Dateien nur zur Laufzeit bekannt sind');
+      return `${r.aufgenommen.length} aufgenommen, ${r.uebersprungen.length} übersprungen`;
+    });
+
+    await check('Der Tresor selbst lässt sich nicht beobachten', async () => {
+      const r = await api.post('/api/watch', { path: app.paths.home });
+      assert(r.status === 400 || r.status === 403,
+        `HTTP ${r.status} — das System würde seine eigenen Dateien aufnehmen, bis die Platte voll ist`);
+      return `HTTP ${r.status}`;
+    });
+
+    await check('Entfernen geht', async () => {
+      ok(await api.del(`/api/watch/${ordner.id}`), 'löschen');
+      const r = ok(await api.get('/api/watch'), 'liste');
+      assert(!(r.items || []).some((x) => x.id === ordner.id), 'steht noch da');
+      return 'entfernt';
+    });
+  } finally {
+    fsMod.rmSync(eingang, { recursive: true, force: true });
+  }
+}
+
+async function checkSecondLook(app) {
+  area('20 · Zweiter Blick');
+
+  const lang = 'Der Mahlgrad entscheidet über den Widerstand im Sieb. Ist er zu fein, steigt der Druck '
+    + 'und der Espresso läuft nur tropfenweise; ist er zu grob, rauscht das Wasser durch und die Crema '
+    + 'bleibt dünn. Die Brühtemperatur liegt bei rund 93 Grad, bei dunklen Röstungen eher darunter. '
+    + 'Neun bar sind die Norm, aber viele Maschinen schwanken. Der Wassertank sollte weiches Wasser '
+    + 'enthalten, sonst verkalkt die Maschine schnell. Entkalker gehört alle zwei Monate hinein. '
+    + 'Offen bleibt, wie stark sich die Bohnenfrische auf den Druck auswirkt.';
+  const note = ok(await api.post('/api/records', {
+    type: 'note', data: { title: 'Espresso in der Praxis', body: lang },
+  }), 'lange notiz').record;
+  ok(await api.post('/api/records', { type: 'note', data: { title: 'Mahlgrad', body: 'Feiner Mahlgrad erhöht den Druck.' } }), 'n2');
+  ok(await api.post('/api/records', { type: 'note', data: { title: 'Brühtemperatur', body: '93 Grad ist üblich.' } }), 'n3');
+
+  await check('Die bekannten Begriffe kommen auch OHNE Modell', async () => {
+    const r = ok(await api.post(`/api/notes/${note.id}/second-look`, {}), 'second-look');
+    const begriffe = r.bekannteBegriffe || [];
+    assert(begriffe.length > 0, `keine Begriffe: ${JSON.stringify(r).slice(0, 250)}`);
+    return begriffe.slice(0, 4).map((b) => b.begriff || b.term || b).join(', ');
+  });
+
+  await check('Ohne Modell wird nichts erfunden, sondern gesagt was fehlt', async () => {
+    const r = ok(await api.post(`/api/notes/${note.id}/second-look`, {}), 'second-look');
+    if (r.kern) return unklar(`ein Modell ist erreichbar — Kernaussage: ${String(r.kern).slice(0, 60)}`);
+    assert(r.kern === null, `kern ist weder null noch gefüllt: ${JSON.stringify(r.kern)}`);
+    const hinweis = r.hinweis || r.note || '';
+    assert(/Modell/i.test(hinweis), `kein Hinweis auf das fehlende Modell: ${JSON.stringify(hinweis)}`);
+    return 'kern=null, mit Begründung';
+  });
+
+  await check('Eine zu kurze Notiz wird mit Begründung abgewiesen', async () => {
+    const kurz = ok(await api.post('/api/records', {
+      type: 'note', data: { title: 'Kurz', body: 'Zwei Sätze. Mehr nicht.' },
+    }), 'kurze notiz').record;
+    const r = await api.post(`/api/notes/${kurz.id}/second-look`, {});
+    assert(r.status === 400 || r.status === 422, `HTTP ${r.status}`);
+    const msg = JSON.stringify(r.json);
+    assert(/kurz|Zeichen/i.test(msg), `ohne Begründung abgewiesen: ${msg.slice(0, 160)}`);
+    return `HTTP ${r.status}, mit Begründung`;
+  });
+
+  await check('Der Aufruf geht von sich aus nicht ins Netz', async () => {
+    const vorher = app.gate.stats();
+    ok(await api.post(`/api/notes/${note.id}/second-look`, {}), 'second-look');
+    const nachher = app.gate.stats();
+    const neu = (nachher.byHost && Object.keys(nachher.byHost).length) || 0;
+    const alt = (vorher.byHost && Object.keys(vorher.byHost).length) || 0;
+    assert(neu === alt || nachher.blocked >= vorher.blocked,
+      'es wurde ein neuer Host kontaktiert, ohne dass jemand das erlaubt hat');
+    return 'kein neuer Host';
+  });
+}
+
 const AREAS = {
   verdrahtung: checkWiring,
   status: checkStatus,
@@ -1428,6 +1679,10 @@ const AREAS = {
   vorschlaege: checkAssist,
   automatik: checkAutomation,
   rueckgaengig: checkHistory,
+  heute: checkToday,
+  lernen: checkStudy,
+  ordner: checkWatch,
+  zweiterblick: checkSecondLook,
 };
 
 async function main() {
