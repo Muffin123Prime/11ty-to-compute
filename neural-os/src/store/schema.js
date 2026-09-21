@@ -26,7 +26,7 @@ const { ValidationError } = require('../kernel/errors');
 const GRAPH_TYPES = ['note', 'chat', 'project', 'task', 'agent', 'file', 'entity', 'run'];
 
 /** All record types, including non-graph bookkeeping types. */
-const TYPES = [...GRAPH_TYPES, 'message', 'edge', 'memory', 'approval', 'grant', 'token', 'peer', 'conflict', 'module', 'suggestion', 'schedule', 'trigger'];
+const TYPES = [...GRAPH_TYPES, 'message', 'edge', 'memory', 'approval', 'grant', 'token', 'peer', 'conflict', 'module', 'suggestion', 'schedule', 'trigger', 'card', 'watch'];
 
 /**
  * Edge kinds. `source` distinguishes user intent from machine inference:
@@ -330,6 +330,61 @@ const FIELDS = {
     firedAt: { type: 'string', nullable: true, default: null },
     fires: { type: 'number', default: 0 },
     lastError: { type: 'string', nullable: true, default: null },
+  },
+  /**
+   * Eine Lernkarte.
+   *
+   * Das Verfahren ist SM-2 und dreissig Jahre alt: `ease` (wie leicht faellt
+   * dir die Karte), `intervalDays` (wann kommt sie wieder) und `due`. Bewusst
+   * kein Modell -- Abstandswiederholung braucht keines, und das Nuetzlichste
+   * soll nicht der Teil sein, fuer den man 5 GB herunterladen muss.
+   *
+   * `noteId` haelt die Verbindung zur Quelle, damit man beim Wiederholen
+   * nachlesen kann, woher die Frage kommt -- und damit eine geloeschte Notiz
+   * ihre Karten nicht zu Waisen macht.
+   */
+  card: {
+    front: { type: 'string', required: true, max: 2000 },
+    back: { type: 'string', default: '', max: 8000 },
+    noteId: { type: 'string', nullable: true, default: null },
+    deck: { type: 'string', default: 'Standard', max: 120 },
+    /** SM-2: 1.3 (sehr schwer) bis ~3.0. Startet bei 2.5. */
+    ease: { type: 'number', default: 2.5 },
+    intervalDays: { type: 'number', default: 0 },
+    due: { type: 'string', nullable: true, default: null },
+    reps: { type: 'number', default: 0 },
+    lapses: { type: 'number', default: 0 },
+    lastReviewedAt: { type: 'string', nullable: true, default: null },
+    lastGrade: { type: 'number', nullable: true, default: null },
+    suspended: { type: 'boolean', default: false },
+    source: { type: 'string', default: 'manual' }, // manual | note | agent
+  },
+  /**
+   * Ein beobachteter Ordner.
+   *
+   * `enabled` ist absichtlich false: ein Ordner, der ab dem Anlegen still
+   * Dinge in den Tresor schiebt, ist genau die unsichtbare Automatik, die
+   * dieses System sonst vermeidet. Und `imported` zaehlt nicht zur Statistik,
+   * sondern damit man sehen kann, was passiert ist.
+   *
+   * Wird NIE zwischen Geraeten abgeglichen: ein Pfad auf dem einen Rechner
+   * existiert auf dem anderen nicht, und eine Freigabe von aussen einzuschalten
+   * waere ein Einfallstor.
+   */
+  watch: {
+    path: { type: 'string', required: true, max: 1000 },
+    label: { type: 'string', default: '', max: 200 },
+    enabled: { type: 'boolean', default: false },
+    recursive: { type: 'boolean', default: true },
+    /** Leer = alle Endungen, aus denen dieses System Text lesen kann. */
+    extensions: { type: 'string[]', default: [] },
+    /** Was aufgenommene Dateien an Schlagwoertern bekommen. */
+    tags: { type: 'string[]', default: [] },
+    maxFileBytes: { type: 'number', default: 25 * 1024 * 1024 },
+    lastScanAt: { type: 'string', nullable: true, default: null },
+    lastError: { type: 'string', nullable: true, default: null },
+    imported: { type: 'number', default: 0 },
+    skipped: { type: 'number', default: 0 },
   },
   token: {
     label: { type: 'string', required: true },
