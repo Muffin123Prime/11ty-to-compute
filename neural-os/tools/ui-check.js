@@ -284,6 +284,44 @@ async function main() {
       app.scheduler.remove(plan.id);
     }
 
+    /* --------------------------- 5. Das Zurueck ist auffindbar und wirkt */
+    console.log(`\n${B}5 · Rückgängig ist auffindbar und wirkt${X}`);
+    const opfer = store.create('note', { title: 'Wird geändert', body: 'Original' });
+    // Eine Aenderung, die ein Agent gemacht hat -- der Fall, fuer den das
+    // Ganze existiert.
+    const { withActor } = require('../src/kernel/actor');
+    await withActor({ kind: 'agent', runId: 'run_uipruefung', agentId: 'agent_uipruefung' }, async () => {
+      store.update(opfer.id, { body: 'Vom Agenten geändert' });
+    });
+    await store.flush();
+
+    await page.goto(`${base}/#/timeline`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(900);
+    await dismissWelcome(page);
+    await page.waitForTimeout(400);
+
+    const tab = page.getByRole('button', { name: /Letzte Änderungen/ });
+    if (!(await tab.count())) {
+      bad('„Letzte Änderungen" ist in der Zeitachse erreichbar');
+    } else {
+      await tab.first().click();
+      await page.waitForTimeout(1200);
+      const text = await page.locator('body').innerText();
+      check(/Wird geändert/.test(text), 'Die Änderung steht in der Liste');
+      check(/Agent|agent/.test(text), 'Und es ist erkennbar, dass ein Agent sie gemacht hat');
+
+      const zurueck = page.getByRole('button', { name: /^Zurücknehmen|^Rückgängig/ });
+      if (!(await zurueck.count())) {
+        hmm('Ein Zurücknehmen-Knopf ist da', 'keiner gefunden — vielleicht anders beschriftet');
+      } else {
+        await zurueck.first().click();
+        await page.waitForTimeout(1400);
+        const jetzt = store.get(opfer.id).data.body;
+        check(jetzt === 'Original', 'Ein Klick darauf stellt den alten Stand wirklich her',
+          `im Tresor steht: ${JSON.stringify(jetzt)}`);
+      }
+    }
+
     check(errors.length === 0, 'Keine Konsolenfehler während all dessen',
       errors.slice(0, 2).join(' | ').slice(0, 200));
     await page.close();

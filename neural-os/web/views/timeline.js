@@ -135,6 +135,7 @@ const ICONS = {
     + 'M16.4 12.6v2.8a1 1 0 0 1-1 1h-2.8M7.4 16.4H4.6a1 1 0 0 1-1-1v-2.8"/>',
   arrowRight: '<path d="M4 10h11M11 6l4 4-4 4"/>',
   arrowLeft: '<path d="M16 10H5M9 6l-4 4 4 4"/>',
+  undo: '<path d="M6.8 5.2 4 8l2.8 2.8"/><path d="M4 8h7.6a4.2 4.2 0 0 1 0 8.4H8.2"/>',
 };
 
 /* ------------------------------------------------------------------ */
@@ -485,6 +486,10 @@ export default {
       inspectorToken: 0,
       picked: null,
 
+      // right-hand side: 'inspector' or 'history'
+      sideTab: 'inspector',
+      history: newHistoryState(),
+
       // canvas
       canvasCtx: null,
       dpr: 1,
@@ -647,6 +652,16 @@ function subscribe(self) {
         if (self.alive) reloadSoon(self);
       }));
     }
+    // The journal's own two events (src/store/history.js: publish()). While the
+    // panel is closed nothing is fetched -- it is marked stale and read when it
+    // is next opened, so a busy agent run does not cause one request per write.
+    for (const name of ['history.recorded', 'history.undone']) {
+      self.cleanups.push(ctx.bus.on(name, () => {
+        if (!self.alive) return;
+        self.history.stale = true;
+        if (self.sideTab === 'history') refreshHistorySoon(self);
+      }));
+    }
   }
   // The palette lives in CSS custom properties, so a theme change has to be
   // read again rather than guessed at.
@@ -752,7 +767,29 @@ function buildLayout(self) {
   dom.selectionBar = h('div.tlv__selbar', { hidden: true, role: 'group', 'aria-label': 'Ausgewählter Zeitraum' });
 
   dom.stage = h('div.tlv__stage', null, dom.canvas, dom.tooltip, dom.selectionBar, dom.stageState);
-  dom.side = h('aside.tlv__side', { 'aria-label': 'Inspektor' });
+
+  // Two panels, one column. The Inspektor answers "was ist das?", the journal
+  // answers "wer war das?" -- and the second question is asked by somebody who
+  // is already unhappy, so it must be one click away, not one screen away.
+  dom.sideTabs = h('div.segmented.tlv__side-tabs', { role: 'group', 'aria-label': 'Seitenbereich' },
+    h('button.segmented__option', {
+      type: 'button',
+      dataset: { tab: 'inspector' },
+      onClick: () => setSideTab(self, 'inspector'),
+    }, text('Inspektor')),
+    h('button.segmented__option', {
+      type: 'button',
+      dataset: { tab: 'history' },
+      title: 'Was zuletzt geändert wurde – von dir oder von einem Agenten – und wie du es zurücknimmst.',
+      onClick: () => setSideTab(self, 'history'),
+    }, text('Letzte Änderungen')));
+
+  dom.sideMain = h('div.tlv__side-body');
+  dom.historyPanel = h('div.tlv__side-body.tlv__hist', { hidden: true });
+  dom.side = h('aside.tlv__side', { 'aria-label': 'Inspektor und Änderungen' },
+    h('div.tlv__side-tabbar', null, dom.sideTabs),
+    dom.sideMain,
+    dom.historyPanel);
 
   dom.body = h('div.tlv__body', null, dom.stage, dom.side);
 
@@ -1721,12 +1758,16 @@ function showPick(self, hit) {
   self.picked = hit;
   self.selectedId = null;
   self.inspector = null;
+  // A click on the canvas asks "was ist das?" -- so the panel that answers it
+  // comes forward, even when the journal was open.
+  self.sideTab = 'inspector';
   renderSide(self);
 }
 
 function selectRecord(self, id) {
   self.picked = null;
   self.selectedId = id || null;
+  if (id) self.sideTab = 'inspector';
   if (!id) {
     self.inspector = null;
     renderSide(self);
@@ -1789,18 +1830,37 @@ async function loadInspector(self, id) {
 
 function renderSide(self) {
   const { dom } = self;
-  if (!dom.side) return;
-  clear(dom.side);
+  if (!dom.sideMain) return;
+  clear(dom.sideMain);
 
   if (self.picked) {
-    dom.side.appendChild(renderPicker(self));
-    return;
+    dom.sideMain.appendChild(renderPicker(self));
+  } else if (self.selectedId && self.inspector) {
+    dom.sideMain.appendChild(renderInspector(self));
+  } else {
+    dom.sideMain.appendChild(renderSideHelp(self));
   }
-  if (self.selectedId && self.inspector) {
-    dom.side.appendChild(renderInspector(self));
-    return;
+  syncSideTabs(self);
+}
+
+/** Which of the two panels is on screen; the other one keeps its state. */
+function syncSideTabs(self) {
+  const { dom } = self;
+  if (!dom.sideTabs) return;
+  const tab = self.sideTab === 'history' ? 'history' : 'inspector';
+  for (const button of dom.sideTabs.querySelectorAll('.segmented__option')) {
+    const active = button.dataset.tab === tab;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
-  dom.side.appendChild(renderSideHelp(self));
+  dom.sideMain.hidden = tab !== 'inspector';
+  dom.historyPanel.hidden = tab !== 'history';
+}
+
+function setSideTab(self, tab) {
+  self.sideTab = tab === 'history' ? 'history' : 'inspector';
+  syncSideTabs(self);
+  if (self.sideTab === 'history') openHistory(self);
 }
 
 function renderSideHelp(self) {
@@ -1970,6 +2030,683 @@ function renderEdgeRow(self, point, edge) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Side panel: „Letzte Änderungen" -- the change journal and its undo  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Why this sits in the Zeitachse
+ * ------------------------------
+ * The journal (`src/store/history.js`) had a backend and an HTTP API and no
+ * way in. This view already answers "was ist wann passiert?", so it is where
+ * somebody goes when something looks wrong -- and the next question they ask
+ * is "wer war das?". The panel is a tab next to the Inspektor rather than a
+ * screen of its own, because the person reaching for undo is already unhappy.
+ *
+ * What it refuses to do
+ * ---------------------
+ * It repeats what the server says and adds nothing: `canUndo` decides whether
+ * a button exists, `reason` takes its place when it does not, and what an undo
+ * actually did is read off `applied` rather than assumed. `force` is offered
+ * only for the one case the server marks as forceable (`details.force`), never
+ * on the first click, and with the loss spelled out.
+ */
+
+/** One page; a journal is read from the top, not browsed to the end. */
+const HISTORY_PAGE = 25;
+/** The API caps `limit` at 500; a refresh never asks for more than this. */
+const HISTORY_MAX_PAGE = 200;
+
+/**
+ * `DEFAULT_MAX_ENTRIES` / `DEFAULT_MAX_DAYS` in src/store/history.js. Both are
+ * configurable, and `stats()` does not report them, so the real values are
+ * read from `/api/config` and these two only stand in for an untouched config.
+ */
+const HISTORY_DEFAULT_MAX_ENTRIES = 2000;
+const HISTORY_DEFAULT_MAX_DAYS = 30;
+
+/**
+ * `UNDOABLE_TYPES` in src/store/history.js -- nothing else is ever journalled,
+ * so nothing else can appear here or in the filter.
+ */
+const JOURNAL_TYPES = ['note', 'chat', 'project', 'task', 'agent', 'file', 'entity', 'memory', 'schedule', 'trigger'];
+
+/**
+ * The journal's own German names (`TYPE_LABELS` in src/store/history.js). They
+ * are repeated rather than mapped onto this view's table because the server
+ * writes them into every `label`: a filter that says "Entität" while every row
+ * says "Begriff" would look like two different things.
+ */
+const JOURNAL_TYPE_LABELS = {
+  note: 'Notiz',
+  chat: 'Chat',
+  project: 'Projekt',
+  task: 'Aufgabe',
+  agent: 'Agent',
+  file: 'Datei',
+  entity: 'Begriff',
+  memory: 'Erinnerung',
+  schedule: 'Zeitplan',
+  trigger: 'Auslöser',
+};
+
+/** Field names as a reader knows them; anything else is shown as it is. */
+const FIELD_LABELS = {
+  title: 'Titel',
+  name: 'Name',
+  body: 'Text',
+  text: 'Text',
+  description: 'Beschreibung',
+  summary: 'Zusammenfassung',
+  tags: 'Schlagwörter',
+  goal: 'Ziel',
+  status: 'Status',
+  done: 'Erledigt',
+  enabled: 'Eingeschaltet',
+  pinned: 'Angeheftet',
+  priority: 'Priorität',
+  dueAt: 'Fällig am',
+  model: 'Modell',
+  permissions: 'Rechte',
+  projectId: 'Projekt',
+};
+
+function newHistoryState() {
+  return {
+    opened: false,
+    loading: false,
+    error: null,
+    items: [],
+    total: 0,
+    agentOnly: false,
+    type: '',
+    stats: null,
+    limits: null,
+    agents: new Map(),
+    agentsLoaded: false,
+    /** seq -> true while its undo is in flight */
+    busy: new Set(),
+    /** seq -> the `applied` object the server answered with */
+    results: new Map(),
+    /** seq -> {message, force} from a 409 */
+    conflicts: new Map(),
+    /** seq -> message of anything else that went wrong */
+    failures: new Map(),
+    stale: false,
+    token: 0,
+    refresh: null,
+  };
+}
+
+function openHistory(self) {
+  const state = self.history;
+  renderHistory(self);
+  if (!state.opened) {
+    state.opened = true;
+    loadHistoryLimits(self);
+    loadHistory(self);
+    return;
+  }
+  if (state.stale && !state.loading) loadHistory(self);
+}
+
+/**
+ * A run writing twenty records publishes twenty `history.recorded` events. The
+ * panel is worth one request afterwards, not twenty during.
+ */
+function refreshHistorySoon(self) {
+  const state = self.history;
+  if (!state.refresh) {
+    state.refresh = debounce(() => {
+      if (self.alive && self.sideTab === 'history') loadHistory(self);
+    }, 400);
+  }
+  state.refresh();
+}
+
+async function loadHistory(self, { append = false } = {}) {
+  const state = self.history;
+  const token = ++state.token;
+  state.loading = true;
+  state.error = null;
+  if (!append) state.stale = false;
+  renderHistory(self);
+
+  const offset = append ? state.items.length : 0;
+  const limit = append
+    ? HISTORY_PAGE
+    : Math.min(HISTORY_MAX_PAGE, Math.max(HISTORY_PAGE, state.items.length));
+
+  let payload;
+  try {
+    payload = await request(self, (signal) => self.ctx.api.get('/history', {
+      query: {
+        limit,
+        offset,
+        actor: state.agentOnly ? 'agent' : '',
+        type: state.type || '',
+      },
+      signal,
+      timeoutMs: 15000,
+    }));
+  } catch (err) {
+    if (!self.alive || token !== state.token || (err && err.isAborted)) return;
+    state.loading = false;
+    state.error = err;
+    renderHistory(self);
+    return;
+  }
+  if (!self.alive || token !== state.token) return;
+
+  const incoming = Array.isArray(payload && payload.items) ? payload.items : [];
+  if (append) {
+    // Offset paging over a journal that is still being written to can hand out
+    // the same entry twice; `seq` is unique, so the duplicate is dropped here.
+    const known = new Set(state.items.map((item) => item.seq));
+    state.items = state.items.concat(incoming.filter((item) => !known.has(item.seq)));
+  } else {
+    state.items = incoming;
+  }
+  state.total = Number.isFinite(payload && payload.total) ? payload.total : state.items.length;
+  state.loading = false;
+  renderHistory(self);
+
+  if (!append) loadHistoryStats(self);
+  loadHistoryAgents(self);
+}
+
+/** The counts over the whole journal, not just the page on screen. */
+async function loadHistoryStats(self) {
+  const state = self.history;
+  try {
+    const stats = await request(self, (signal) => self.ctx.api.get('/history/stats', { signal, timeoutMs: 10000 }));
+    if (!self.alive) return;
+    state.stats = stats && typeof stats === 'object' ? stats : null;
+    renderHistory(self);
+  } catch {
+    // The list itself already says when the journal is unreachable; a second
+    // red box for the same fact would only be noise.
+  }
+}
+
+/**
+ * The real bounds. `stats()` does not carry them, so they come from the
+ * configuration; an untouched config has no `history` section at all, and then
+ * the defaults from src/store/history.js are what is actually in force.
+ */
+async function loadHistoryLimits(self) {
+  const state = self.history;
+  let maxEntries = HISTORY_DEFAULT_MAX_ENTRIES;
+  let maxDays = HISTORY_DEFAULT_MAX_DAYS;
+  try {
+    const payload = await request(self, (signal) => self.ctx.api.get('/config', { signal, timeoutMs: 10000 }));
+    const cfg = payload && payload.config && payload.config.history;
+    if (cfg && Number.isFinite(cfg.maxEntries) && cfg.maxEntries > 0) maxEntries = Math.floor(cfg.maxEntries);
+    if (cfg && Number.isFinite(cfg.maxDays) && cfg.maxDays > 0) maxDays = Math.floor(cfg.maxDays);
+  } catch {
+    // Unreadable configuration: the defaults are still what an untouched
+    // installation uses, so the sentence below stays true for that case.
+  }
+  if (!self.alive) return;
+  state.limits = { maxEntries, maxDays };
+  renderHistory(self);
+}
+
+/** Agent names for the attribution line. An id alone answers nobody's question. */
+async function loadHistoryAgents(self) {
+  const state = self.history;
+  if (state.agentsLoaded) return;
+  if (!state.items.some((item) => item.actor && item.actor.agentId)) return;
+  state.agentsLoaded = true;
+  try {
+    const payload = await request(self, (signal) => self.ctx.api.get('/agents', {
+      query: { limit: 200 },
+      signal,
+      timeoutMs: 10000,
+    }));
+    if (!self.alive) return;
+    const items = Array.isArray(payload && payload.items) ? payload.items : [];
+    for (const agent of items) {
+      const name = agent && agent.data && typeof agent.data.name === 'string' ? agent.data.name : '';
+      if (agent && agent.id && name) state.agents.set(agent.id, name);
+    }
+    renderHistory(self);
+  } catch {
+    // Without names the rows fall back to the id, which is still true.
+    state.agentsLoaded = false;
+  }
+}
+
+async function undoEntry(self, item, { force = false } = {}) {
+  const state = self.history;
+  const seq = item.seq;
+  if (state.busy.has(seq)) return;
+  state.busy.add(seq);
+  state.conflicts.delete(seq);
+  state.failures.delete(seq);
+  renderHistory(self);
+
+  let payload;
+  try {
+    payload = await request(self, (signal) => self.ctx.api.post(
+      `/history/${encodeURIComponent(seq)}/undo`,
+      force ? { force: true } : {},
+      { signal, timeoutMs: 20000 },
+    ));
+  } catch (err) {
+    state.busy.delete(seq);
+    if (!self.alive || (err && err.isAborted)) return;
+    if (err && err.code === 'HISTORY_NOT_UNDOABLE') {
+      // The server names both revisions in `message`; `details.force` says
+      // whether forcing would even do anything. Both are shown as they came.
+      state.conflicts.set(seq, {
+        message: err.message,
+        force: !!(err.details && err.details.force === true),
+      });
+    } else {
+      state.failures.set(seq, (err && err.message) || 'Die Änderung konnte nicht zurückgenommen werden.');
+    }
+    renderHistory(self);
+    return;
+  }
+  if (!self.alive) return;
+
+  state.busy.delete(seq);
+  state.results.set(seq, (payload && payload.applied) || null);
+  self.ctx.toast(undoToast(payload && payload.applied), 'success');
+  // The bus event refreshes this too, but a panel that only works with a live
+  // stream would be a panel that sometimes lies.
+  loadHistory(self);
+}
+
+function undoToast(applied) {
+  if (applied && applied.note) return 'Zurückgenommen – mit Einschränkung, siehe Eintrag.';
+  return 'Zurückgenommen.';
+}
+
+/* ---------------------------------------------------------- rendering */
+
+function buildHistoryChrome(self) {
+  const { dom } = self;
+  const state = self.history;
+  clear(dom.historyPanel);
+
+  dom.histAgentOnly = h('button.tlv__hist-filter', {
+    type: 'button',
+    'aria-pressed': 'false',
+    title: 'Zeigt nur Änderungen, die ein Agentenlauf gemacht hat.',
+    onClick: () => {
+      state.agentOnly = !state.agentOnly;
+      state.items = [];
+      loadHistory(self);
+    },
+  }, text('Nur was ohne mich passiert ist'));
+
+  dom.histType = h('select.select.tlv__hist-type', {
+    'aria-label': 'Nach Art des Eintrags filtern',
+    onChange: (event) => {
+      state.type = event.target.value;
+      state.items = [];
+      loadHistory(self);
+    },
+  },
+  h('option', { value: '' }, text('Alle Arten')),
+  ...JOURNAL_TYPES.map((type) => h('option', { value: type }, text(JOURNAL_TYPE_LABELS[type]))));
+  // A select's value can only be set once its options exist.
+  dom.histType.value = state.type;
+
+  dom.histSummary = h('p.meta.tlv__hist-summary');
+  dom.histList = h('div.tlv__hist-list');
+  dom.histMore = h('div.tlv__hist-more');
+  dom.histFoot = h('div.tlv__hist-foot');
+
+  dom.historyPanel.appendChild(h('div.tlv__side-head', null,
+    h('div', { style: { flex: '1 1 auto', minWidth: '0' } },
+      h('h2.tlv__side-title', null, text('Letzte Änderungen')),
+      h('p.tlv__hint', null, text('Wer hat was geändert – und wie du es zurücknimmst.'))),
+    h('button.icon-button', {
+      type: 'button',
+      title: 'Änderungen neu laden',
+      'aria-label': 'Änderungen neu laden',
+      onClick: () => loadHistory(self),
+    }, icon(ICONS.refresh))));
+  dom.historyPanel.appendChild(h('div.tlv__hist-filters', null, dom.histAgentOnly, dom.histType));
+  dom.historyPanel.appendChild(dom.histSummary);
+  dom.historyPanel.appendChild(dom.histList);
+  dom.historyPanel.appendChild(dom.histMore);
+  dom.historyPanel.appendChild(dom.histFoot);
+}
+
+function renderHistory(self) {
+  const { dom } = self;
+  if (!dom.historyPanel) return;
+  const state = self.history;
+  if (!dom.histList) buildHistoryChrome(self);
+
+  dom.histAgentOnly.classList.toggle('is-active', state.agentOnly);
+  dom.histAgentOnly.setAttribute('aria-pressed', state.agentOnly ? 'true' : 'false');
+  if (dom.histType.value !== state.type) dom.histType.value = state.type;
+
+  renderHistorySummary(self);
+
+  clear(dom.histList);
+  clear(dom.histMore);
+
+  if (state.error) {
+    dom.histList.appendChild(renderHistoryError(self, state.error));
+  } else if (state.loading && !state.items.length) {
+    dom.histList.appendChild(h('p.tlv__hint', { role: 'status' }, text('Änderungen werden gelesen …')));
+  } else if (!state.items.length) {
+    dom.histList.appendChild(renderHistoryEmpty(self));
+  } else {
+    for (const item of state.items) dom.histList.appendChild(renderHistoryEntry(self, item));
+    if (state.items.length < state.total) {
+      dom.histMore.appendChild(h('button.btn.btn--small', {
+        type: 'button',
+        disabled: state.loading,
+        onClick: () => loadHistory(self, { append: true }),
+      }, text(state.loading ? 'Lädt …' : 'Weitere laden')));
+      dom.histMore.appendChild(h('span.meta', null,
+        text(`${formatNumber(state.items.length)} von ${formatNumber(state.total)}`)));
+    }
+  }
+
+  renderHistoryFoot(self);
+}
+
+function renderHistorySummary(self) {
+  const { dom } = self;
+  const state = self.history;
+  clear(dom.histSummary);
+  const stats = state.stats;
+  if (!stats) {
+    if (state.loading) dom.histSummary.appendChild(text('lädt …'));
+    return;
+  }
+  const parts = [`${formatNumber(stats.total)} Änderungen im Journal`];
+  const byActor = stats.byActor || {};
+  parts.push(`${formatNumber(byActor.agent || 0)} davon von Agenten`);
+  if (Number.isFinite(stats.undoable)) parts.push(`${formatNumber(stats.undoable)} noch zurücknehmbar`);
+  dom.histSummary.appendChild(text(parts.join(' · ')));
+}
+
+function renderHistoryError(self, err) {
+  const unavailable = err.status === 503 || err.code === 'SUBSYSTEM_UNAVAILABLE';
+  if (unavailable) {
+    // Not the same as "nichts passiert": there is no journal running here, so
+    // nothing was recorded and nothing can be taken back.
+    return h('div.tlv__hist-note', null,
+      h('strong', null, text('Der Änderungsverlauf ist in dieser Instanz nicht verfügbar')),
+      h('p', null, text(err.message || 'Das Journal läuft hier nicht.')),
+      h('p', null, text('Ohne ihn wird nichts aufgezeichnet und es lässt sich nichts zurücknehmen. '
+        + 'Die Zeitachse selbst arbeitet weiter.')));
+  }
+  return h('div.tlv__hist-note.tlv__hist-note--bad', null,
+    h('strong', null, text('Die Änderungen konnten nicht gelesen werden')),
+    h('p', null, text(err.message || 'Unbekannter Fehler.')),
+    h('button.btn.btn--small', { type: 'button', onClick: () => loadHistory(self) }, text('Erneut versuchen')));
+}
+
+/** Three different silences, three different sentences. */
+function renderHistoryEmpty(self) {
+  const state = self.history;
+  if (state.agentOnly && state.type) {
+    return h('p.tlv__hint', null, text(
+      `Nichts, was ohne dich passiert ist – jedenfalls nicht bei „${JOURNAL_TYPE_LABELS[state.type] || state.type}".`));
+  }
+  if (state.agentOnly) {
+    return h('div.stack', { style: { gap: 'var(--sp-05)' } },
+      h('p', null, text('Nichts, was ohne dich passiert ist.')),
+      h('p.tlv__hint', null, text('Seit das Journal läuft, hat kein Agentenlauf etwas geändert.')));
+  }
+  if (state.type) {
+    return h('p.tlv__hint', null, text(
+      `Für „${JOURNAL_TYPE_LABELS[state.type] || state.type}" ist nichts aufgezeichnet.`));
+  }
+  return h('div.stack', { style: { gap: 'var(--sp-05)' } },
+    h('p', null, text('Noch nichts passiert.')),
+    h('p.tlv__hint', null, text('Sobald etwas angelegt, geändert oder gelöscht wird, steht es hier – '
+      + 'mit dem Weg zurück.')));
+}
+
+function actorLabel(self, item) {
+  const actor = (item && item.actor) || { kind: 'user' };
+  if (actor.kind !== 'agent') return 'Du';
+  const name = actor.agentId ? self.history.agents.get(actor.agentId) : '';
+  if (name) return `Agent · ${clip(name, 40)}`;
+  if (actor.agentId) return 'Agent · Name unbekannt';
+  return 'Ein Agent';
+}
+
+/**
+ * Which fields an update touched. `fields` is the patch's key list, so it says
+ * what was written, not what visibly differed -- close enough to be useful and
+ * honest enough not to be rewritten into a claim about values.
+ */
+function fieldsLabel(item) {
+  if (item.op !== 'update' || !Array.isArray(item.fields) || !item.fields.length) return '';
+  const named = item.fields.slice(0, 4).map((field) => FIELD_LABELS[field] || field);
+  const rest = item.fields.length - named.length;
+  return `Geändert: ${named.join(', ')}${rest > 0 ? ` und ${rest} weitere` : ''}`;
+}
+
+function renderHistoryEntry(self, item) {
+  const state = self.history;
+  const actor = (item && item.actor) || { kind: 'user' };
+  const isAgent = actor.kind === 'agent';
+  /**
+   * `actorOf()` in src/store/history.js reads two sources. `via: 'kontext'` is
+   * the actor carried through the call chain -- it really says who made THIS
+   * change. `via: 'stempel'` is the provenance stamp on the record, which was
+   * written when the record was CREATED: for a create that is the same thing,
+   * for an update or a delete it only says where the record came from. Saying
+   * "ein Agent hat das geändert" on that basis would be a guess.
+   */
+  const stamped = isAgent && actor.via === 'stempel' && item.op !== 'create';
+
+  const row = h('article.tlv__hist-row', { class: item.undone ? 'is-undone' : '' });
+
+  row.appendChild(h('div.tlv__hist-who', null,
+    h('span.badge', {
+      class: cxClasses(isAgent && !stamped ? 'badge--accent' : '', stamped ? 'tlv__hist-badge--guess' : ''),
+      title: isAgent && actor.agentId ? `Agent-Kennung: ${actor.agentId}` : null,
+    }, text(actorLabel(self, item))),
+    isAgent && actor.runId
+      ? h('button.tlv__hist-run', {
+        type: 'button',
+        title: 'Öffnet den Lauf in der Agentenansicht.',
+        onClick: () => self.ctx.navigate(`#/agents?run=${encodeURIComponent(actor.runId)}`),
+      }, text('Lauf ansehen'))
+      : null,
+    item.undone ? h('span.badge', null, text('zurückgenommen')) : null));
+
+  row.appendChild(h('p.tlv__hist-label', null, text(item.label || `${JOURNAL_TYPE_LABELS[item.type] || item.type} geändert`)));
+
+  const meta = [formatDateTime(item.at), timeAgo(item.at)];
+  const fields = fieldsLabel(item);
+  if (fields) meta.push(fields);
+  row.appendChild(h('p.meta', null, text(meta.join(' · '))));
+
+  if (stamped) {
+    row.appendChild(h('p.tlv__hist-guess', null, text(
+      'Zugeordnet über den Herkunftsstempel: der Eintrag stammt aus diesem Lauf. '
+      + 'Wer ihn dieses Mal geändert hat, ist nicht festgehalten.')));
+  }
+  if (item.undone && item.undoneAt) {
+    row.appendChild(h('p.meta', null, text(`Zurückgenommen ${timeAgo(item.undoneAt)}.`)));
+  }
+
+  const busy = state.busy.has(item.seq);
+  const conflict = state.conflicts.get(item.seq);
+  const failure = state.failures.get(item.seq);
+  const applied = state.results.has(item.seq) ? state.results.get(item.seq) : undefined;
+
+  if (item.canUndo) {
+    row.appendChild(h('div.tlv__hist-actions', null,
+      h('button.btn.btn--small', {
+        type: 'button',
+        disabled: busy,
+        onClick: () => undoEntry(self, item),
+      }, icon(ICONS.undo), text(busy ? 'Nimmt zurück …' : 'Rückgängig'))));
+  } else if (item.reason) {
+    // No greyed-out button with a shrug: the server said why, so that is what
+    // stands here instead.
+    row.appendChild(h('p.tlv__hist-reason', null, text(item.reason)));
+    // One way further, and it is an attempt, not a promise: the request goes
+    // WITHOUT `force`, so the server decides again and answers with the real
+    // reason. Only if it then says the entry is forceable does a second,
+    // warned click appear. An entry that is already undone, or of a type this
+    // journal cannot undo, gets nothing here -- there would be nothing to try.
+    if (!item.undone && JOURNAL_TYPES.includes(item.type) && !conflict && applied === undefined) {
+      row.appendChild(h('div.tlv__hist-actions', null,
+        h('button.btn.btn--small.btn--ghost', {
+          type: 'button',
+          disabled: busy,
+          title: 'Fragt noch einmal beim Server nach. Ginge dabei etwas Neueres verloren, '
+            + 'wird es genannt und muss erst bestätigt werden.',
+          onClick: () => undoEntry(self, item),
+        }, text(busy ? 'Fragt nach …' : 'Trotzdem versuchen'))));
+    }
+  }
+
+  if (conflict) row.appendChild(renderHistoryConflict(self, item, conflict));
+  if (failure) {
+    row.appendChild(h('div.tlv__hist-note.tlv__hist-note--bad', null,
+      h('strong', null, text('Das Zurücknehmen ist fehlgeschlagen')),
+      h('p', null, text(failure))));
+  }
+  if (applied !== undefined) row.appendChild(renderHistoryApplied(self, item, applied));
+
+  return row;
+}
+
+/** A second click, with the loss named. Never the first one. */
+function renderHistoryConflict(self, item, conflict) {
+  const state = self.history;
+  const block = h('div.tlv__hist-note.tlv__hist-note--warn', null,
+    h('strong', null, text('Zurücknehmen abgelehnt')),
+    h('p', null, text(conflict.message)));
+
+  if (conflict.force) {
+    block.appendChild(h('p', null, text(item.op === 'create'
+      ? 'Wenn du trotzdem zurücknimmst, wird der Eintrag gelöscht – die neuere Änderung ist damit ebenfalls weg.'
+      : 'Wenn du trotzdem zurücknimmst, geht die neuere Änderung verloren.')));
+    block.appendChild(h('div.tlv__hist-actions', null,
+      h('button.btn.btn--small.btn--danger', {
+        type: 'button',
+        disabled: state.busy.has(item.seq),
+        onClick: () => undoEntry(self, item, { force: true }),
+      }, text('Trotzdem zurücknehmen')),
+      h('button.btn.btn--small.btn--ghost', {
+        type: 'button',
+        onClick: () => {
+          state.conflicts.delete(item.seq);
+          renderHistory(self);
+        },
+      }, text('Lassen'))));
+  }
+  return block;
+}
+
+/**
+ * What the undo really did, read off `applied`.
+ *
+ * A `note` means something did not work out the way the button promised -- a
+ * field that could not be emptied again, a record that came back under a new
+ * id, a change that had already been made by hand. Then the heading says so
+ * rather than reporting a clean undo.
+ */
+function renderHistoryApplied(self, item, applied) {
+  if (!applied) {
+    return h('div.tlv__hist-note', null, h('strong', null, text('Zurückgenommen')));
+  }
+  const note = typeof applied.note === 'string' ? applied.note : '';
+  const block = h('div.tlv__hist-note.tlv__hist-note--done', null,
+    h('strong', null, text(note ? 'Nicht vollständig zurückgenommen' : 'Zurückgenommen')));
+
+  if (applied.op === 'recreate') {
+    block.appendChild(h('p', null, text('Der Eintrag ist wieder da – aber unter einer neuen Kennung.')));
+    if (note) block.appendChild(h('p', null, text(note)));
+    if (applied.newId) {
+      block.appendChild(h('p.tlv__hist-id', null, text(`Neue Kennung: ${applied.newId}`)));
+      const route = OPEN_ROUTES[item.type];
+      if (route) {
+        block.appendChild(h('div.tlv__hist-actions', null,
+          h('button.btn.btn--small', {
+            type: 'button',
+            onClick: () => self.ctx.navigate(route(applied.newId)),
+          }, icon(ICONS.open), text('Wiederhergestellten Eintrag öffnen'))));
+      }
+    }
+    return block;
+  }
+
+  if (note) {
+    // The note is the whole truth for "war bereits gelöscht / bereits wieder
+    // da"; for a partial update it needs the other half said out loud.
+    block.appendChild(h('p', null, text(note)));
+    if (applied.op === 'update') {
+      block.appendChild(h('p', null, text('Die übrigen Felder stehen wieder auf ihrem vorherigen Wert.')));
+    }
+    return block;
+  }
+
+  const lines = {
+    delete: 'Der Eintrag wurde wieder entfernt.',
+    update: 'Die vorherigen Werte stehen wieder.',
+    restore: 'Der Eintrag ist wieder da.',
+  };
+  block.appendChild(h('p', null, text(lines[applied.op] || 'Die Änderung wurde zurückgenommen.')));
+  return block;
+}
+
+/**
+ * What the journal cannot do. At the bottom, quiet, and always there: a person
+ * who relies on this for longer than it lasts would be relying on nothing.
+ */
+function renderHistoryFoot(self) {
+  const { dom } = self;
+  const state = self.history;
+  clear(dom.histFoot);
+  const limits = state.limits || { maxEntries: HISTORY_DEFAULT_MAX_ENTRIES, maxDays: HISTORY_DEFAULT_MAX_DAYS };
+  const stats = state.stats;
+
+  dom.histFoot.appendChild(h('hr.divider'));
+  dom.histFoot.appendChild(h('p.tlv__hint', null, text(
+    `Das Journal ist kein Archiv: es hält höchstens ${formatNumber(limits.maxEntries)} Änderungen `
+    + `oder ${formatNumber(limits.maxDays)} Tage. Was darüber hinausgeht, ist weg – dafür gibt es die Sicherung.`)));
+  if (stats && stats.oldest) {
+    dom.histFoot.appendChild(h('p.tlv__hint', null,
+      text(`Ältester Eintrag: ${formatDateTime(stats.oldest)}.`)));
+  }
+  dom.histFoot.appendChild(h('p.tlv__hint', null, text(
+    'Aufgezeichnet werden Notizen, Chats, Projekte, Aufgaben, Agenten, Dateien, Begriffe, '
+    + 'Erinnerungen, Zeitpläne und Auslöser.')));
+  dom.histFoot.appendChild(h('p.tlv__hint', null, text(
+    'Verknüpfungen (Kanten) stehen nicht hier: sie werden bei jedem Schreiben aus dem Text neu '
+    + 'abgeleitet, ein Zurücknehmen wäre sofort wieder überschrieben. Von Hand gezogene Kanten '
+    + 'löschst du im Gehirn direkt.')));
+  dom.histFoot.appendChild(h('p.tlv__hint', null, text(
+    'Auch Nachrichten, Läufe, Freigaben und Vorschläge fehlen hier: sie halten fest, was '
+    + 'geschehen ist – ein alter Wert würde das nicht ungeschehen machen.')));
+
+  if (stats && stats.unreadable > 0) {
+    dom.histFoot.appendChild(h('p.tlv__hist-reason', null, text(
+      `${formatNumber(stats.unreadable)} Zeilen im Journal sind nicht lesbar. Sie bleiben unverändert `
+      + 'erhalten, lassen sich aber nicht anzeigen und nicht zurücknehmen.')));
+  }
+  if (stats && stats.failedWrites > 0) {
+    dom.histFoot.appendChild(h('p.tlv__hist-reason', null, text(
+      `${formatNumber(stats.failedWrites)} Änderungen konnten nicht aufgezeichnet werden. `
+      + 'Diese Liste ist seitdem nicht vollständig.')));
+  }
+}
+
+/** Join class names for `h()` without pulling `cx` in for two call sites. */
+function cxClasses(...names) {
+  return names.filter(Boolean).join(' ');
+}
+
+/* ------------------------------------------------------------------ */
 /* Styles (see decision 5 in views/graph.js: a view owns its layout)   */
 /* ------------------------------------------------------------------ */
 
@@ -2047,10 +2784,20 @@ const CSS = `
   padding: var(--sp-3); background: var(--bg);
 }
 
+/* The two panels share one column: the tab bar stays put, the panel below it
+   scrolls on its own, and the hidden one keeps its scroll position. */
 .tlv__side {
-  flex: 0 0 22rem; width: 22rem; min-width: 0; overflow: auto;
-  padding: var(--sp-2); background: var(--surface); border-left: 1px solid var(--border);
+  flex: 0 0 22rem; width: 22rem; min-width: 0;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface); border-left: 1px solid var(--border);
 }
+.tlv__side-tabbar {
+  flex: 0 0 auto; padding: var(--sp-1) var(--sp-2);
+  border-bottom: 1px solid var(--border);
+}
+.tlv__side-tabs { display: flex; width: 100%; }
+.tlv__side-tabs .segmented__option { flex: 1 1 0; text-align: center; }
+.tlv__side-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: var(--sp-2); }
 .tlv__side-head { display: flex; align-items: flex-start; gap: var(--sp-1); margin-bottom: var(--sp-1); }
 .tlv__side-title { font-size: var(--fs-md); line-height: var(--lh-tight); word-break: break-word; }
 .tlv__hint { color: var(--fg-subtle); font-size: var(--fs-sm); }
@@ -2072,6 +2819,54 @@ const CSS = `
 }
 .tlv__edge-target:hover { color: var(--accent); }
 .tlv__edge-reason { margin: 2px 0 0; color: var(--fg-subtle); font-size: var(--fs-sm); word-break: break-word; }
+
+/* --- „Letzte Änderungen" ---------------------------------------- */
+.tlv__hist { display: flex; flex-direction: column; gap: var(--sp-1); }
+.tlv__hist-filters { display: flex; flex-wrap: wrap; gap: var(--sp-05); align-items: center; }
+.tlv__hist-filter {
+  flex: 1 1 12rem;
+  padding: 4px var(--sp-1); background: none;
+  border: 1px solid var(--border); border-radius: var(--r-full);
+  color: var(--fg-muted); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer;
+}
+.tlv__hist-filter:hover { background: var(--surface-3); }
+.tlv__hist-filter.is-active {
+  color: var(--accent); background: var(--accent-soft); border-color: var(--accent);
+}
+.tlv__hist-type { flex: 1 1 8rem; width: auto; min-width: 8rem; font-size: var(--fs-sm); }
+.tlv__hist-summary { margin: 0; font-variant-numeric: tabular-nums; }
+.tlv__hist-list { display: flex; flex-direction: column; }
+.tlv__hist-more { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
+
+.tlv__hist-row {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: var(--sp-1) 0; border-top: 1px solid var(--border);
+}
+.tlv__hist-row.is-undone { opacity: 0.72; }
+.tlv__hist-who { display: flex; align-items: center; gap: var(--sp-05); flex-wrap: wrap; }
+.tlv__hist-badge--guess { border: 1px dashed var(--border-strong); }
+.tlv__hist-run {
+  padding: 0; background: none; border: 0; color: var(--accent);
+  font: inherit; font-size: var(--fs-sm); text-decoration: underline; cursor: pointer;
+}
+.tlv__hist-label { margin: 0; font-weight: 500; word-break: break-word; }
+.tlv__hist-guess { margin: 0; color: var(--fg-subtle); font-size: var(--fs-xs); }
+.tlv__hist-reason { margin: 2px 0 0; color: var(--fg-muted); font-size: var(--fs-sm); word-break: break-word; }
+.tlv__hist-actions { display: flex; align-items: center; gap: var(--sp-05); flex-wrap: wrap; margin-top: 2px; }
+.tlv__hist-id { margin: 0; font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--fg-muted); word-break: break-all; }
+
+.tlv__hist-note {
+  display: flex; flex-direction: column; gap: 3px;
+  margin-top: var(--sp-05); padding: var(--sp-1);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-1); font-size: var(--fs-sm);
+}
+.tlv__hist-note p { margin: 0; word-break: break-word; }
+.tlv__hist-note--warn { border-color: var(--warn); background: var(--surface-3); }
+.tlv__hist-note--bad { border-color: var(--danger); background: var(--danger-soft); }
+.tlv__hist-note--done { border-color: var(--accent); background: var(--accent-soft); }
+.tlv__hist-foot { display: flex; flex-direction: column; gap: var(--sp-05); margin-top: var(--sp-1); }
+.tlv__hist-foot .divider { margin: 0 0 var(--sp-05); }
 
 @media (max-width: 820px) {
   .tlv__body { flex-direction: column; }
