@@ -269,6 +269,126 @@ function buildIndex(store) {
   return { byTitle, byEntity, size: byTitle.size };
 }
 
+
+/**
+ * The title index, kept alive between calls.
+ *
+ * `deriveFor` runs on every single write, and rebuilding the index each time
+ * made a write O(number of notes): measured at 11 ms per record with 5 000
+ * notes, which turned importing 5 000 records from 0,6 s into 28 s. At 50 000
+ * notes it would be unusable.
+ *
+ * The cache is maintained incrementally and heals itself instead of trusting
+ * its own contents: every hit is validated against the store, and an entry
+ * that points at a deleted or renamed record triggers a rebuild. A stale index
+ * would otherwise link a note to something that is no longer there -- a wrong
+ * answer given quickly, which is worse than a slow right one.
+ *
+ * Keyed weakly, so a closed store is not kept alive by its index.
+ */
+const INDEX_CACHE = new WeakMap();
+
+/** Drop the cached index for a store. Used by scanAll and after bulk imports. */
+function invalidateIndex(store) {
+  if (store && typeof store === 'object') INDEX_CACHE.delete(store);
+}
+
+/** Fold a title the same way the index keys do. */
+function indexKey(value) {
+  return value ? fold(String(value).trim()) : '';
+}
+
+/**
+ * Index for `store`, built once and then kept current.
+ * @param {object} store
+ * @param {object} [record] the record being derived, upserted before use
+ */
+function indexFor(store, record) {
+  let index = INDEX_CACHE.get(store);
+  if (!index) {
+    index = buildIndex(store);
+    index.validate = true;
+    INDEX_CACHE.set(store, index);
+  }
+  if (record) upsertIntoIndex(index, record);
+  return index;
+}
+
+/**
+ * Add or refresh one record's titles in a live index.
+ *
+ * `keysById` exists so a rename costs O(1) instead of a walk over the whole
+ * index. Without it the upsert alone was 1,9 ms per write at 5 000 notes --
+ * the same O(n)-per-write shape the cache was introduced to remove, just
+ * moved one layer down.
+ */
+function upsertIntoIndex(index, record) {
+  if (!record || !record.id || !TITLE_TYPES.includes(record.type)) return;
+  if (!index.keysById) index.keysById = buildReverse(index);
+  // Remove whatever this record used to be keyed under; a rename must not
+  // leave its old title resolving to it.
+  const previous = index.keysById.get(record.id);
+  if (previous) {
+    for (const key of previous) {
+      if (index.byTitle.get(key) === record.id) index.byTitle.delete(key);
+      if (index.byEntity.get(key) === record.id) index.byEntity.delete(key);
+    }
+    index.keysById.delete(record.id);
+  }
+  if (record.deletedAt) return;
+  const keys = [];
+  const title = titleOf(record);
+  if (title) keys.push(indexKey(title));
+  if (record.type === 'entity' && Array.isArray(record.data && record.data.aliases)) {
+    for (const alias of record.data.aliases) {
+      if (typeof alias === 'string' && alias.trim()) keys.push(indexKey(alias));
+    }
+  }
+  const own = [];
+  for (const key of keys) {
+    if (!key) continue;
+    if (!index.byTitle.has(key)) { index.byTitle.set(key, record.id); own.push(key); }
+    if (record.type === 'entity' && !index.byEntity.has(key)) index.byEntity.set(key, record.id);
+  }
+  if (own.length) index.keysById.set(record.id, own);
+  index.size = index.byTitle.size;
+}
+
+/** id -> keys, derived once from a freshly built index. */
+function buildReverse(index) {
+  const reverse = new Map();
+  for (const [key, id] of index.byTitle) {
+    const list = reverse.get(id);
+    if (list) list.push(key);
+    else reverse.set(id, [key]);
+  }
+  return reverse;
+}
+
+/**
+ * Resolve a key through the index, proving the answer is still true.
+ * A hit that no longer matches the store means the cache has drifted, so it is
+ * thrown away and rebuilt rather than patched around.
+ */
+function lookupTitle(store, index, key) {
+  const id = index.byTitle.get(key);
+  if (!id) return null;
+  if (!index.validate) return id;
+  let record = null;
+  try {
+    record = store.get(id);
+  } catch {
+    record = null;
+  }
+  if (record && !record.deletedAt && indexKey(titleOf(record)) === key) return id;
+  INDEX_CACHE.delete(store);
+  const fresh = buildIndex(store);
+  fresh.validate = true;
+  INDEX_CACHE.set(store, fresh);
+  Object.assign(index, fresh);
+  return index.byTitle.get(key) || null;
+}
+
 /* ---------------------------------------------------------------- derive */
 
 function resolveRecord(store, recordOrId) {
@@ -313,7 +433,7 @@ function desiredEdges(store, record, index) {
     if (!text) continue;
     const found = extractLinks(text);
     for (const title of found.wikiLinks) {
-      const target = index.byTitle.get(fold(title));
+      const target = lookupTitle(store, index, fold(title));
       if (target && target !== record.id && live(target)) {
         want(target, 'links-to', `Wiki-Link [[${title}]] im Text`);
       } else if (!target) {
@@ -417,7 +537,7 @@ function deriveFor(store, recordOrId, opts = {}) {
     return { created, removed, updated, covered, unresolved: [], skipped };
   }
 
-  const index = opts.index && opts.index.byTitle ? opts.index : buildIndex(store);
+  const index = opts.index && opts.index.byTitle ? opts.index : indexFor(store, record);
   const { wanted, unresolved } = desiredEdges(store, record, index);
 
   for (const [key, spec] of wanted) {
@@ -475,7 +595,9 @@ function deriveFor(store, recordOrId, opts = {}) {
  */
 function scanAll(store, opts = {}) {
   const started = Date.now();
+  invalidateIndex(store);
   const index = buildIndex(store);
+  index.validate = false;
   const types = Array.isArray(opts.types) && opts.types.length ? opts.types : SCAN_TYPES;
   const maxUnresolved = Number.isInteger(opts.maxUnresolved) ? opts.maxUnresolved : 500;
   const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : null;
@@ -532,6 +654,7 @@ function scanAll(store, opts = {}) {
 }
 
 module.exports = {
+  invalidateIndex,
   extractLinks,
   deriveFor,
   scanAll,
