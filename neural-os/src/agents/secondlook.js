@@ -459,8 +459,9 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
    * welches Wort es war -- deshalb wird der Zieltext noch einmal zerlegt.
    *
    * Die Zerlegung eines Eintrags hält für den ganzen Aufruf: seit die Zahl
-   * neben einem Begriff gezählt und nicht geschätzt wird, sieht dieselbe Notiz
-   * bei vielen Begriffen als Fundstelle vorbei.
+   * neben einem Begriff gezählt und nicht geschätzt wird, kommt dieselbe Notiz
+   * bei vielen Begriffen als Fundstelle vorbei, und ohne dieses Gedächtnis
+   * würde ihr Text jedes Mal neu zerlegt.
    *
    * @returns {(record:object, term:string) => string|null} die gefundene
    *          Wortform, oder null
