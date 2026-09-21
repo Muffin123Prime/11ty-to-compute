@@ -152,6 +152,9 @@ betreibt. Dein Tablet sieht dieselbe Instanz, es synchronisiert nicht.
 
 ## Weiterlesen
 
+- **`docs/ANLEITUNG.md`** — Einrichtung auf PC und iPad, Autostart, Freigabe im
+  eigenen Netz, Sicherung, Fehlerbehebung. Enthält die ehrliche Antwort darauf,
+  warum Neural OS auf dem iPad nicht eigenständig laufen kann.
 - **`docs/EINGESTAENDNIS.md`** — die Fehler, die Grenzen und die Stellen, an denen
   ich etwas behauptet habe, das sich später als falsch herausstellte. Wenn du nur
   ein Dokument liest, dann dieses.
