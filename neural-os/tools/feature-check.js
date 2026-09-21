@@ -149,7 +149,10 @@ const SUBSYSTEM_ROUTES = {
   study: '/api/study/stats',
   compare: '/api/models',   // eigene Routen sind POST; /api/models zeigt, dass die Registry steht
   watcher: '/api/watch',
-  secondLook: '/api/notes',   // eigene Route ist POST /api/notes/:id/second-look
+  // Nur als POST erreichbar. Ein GET auf dieselbe Adresse antwortet mit 405 --
+  // und genau das ist der Beweis, dass die Route registriert ist: eine nicht
+  // verdrahtete Route gaebe 404.
+  secondLook: '/api/notes/probe/second-look',
   history: '/api/history',
   scheduler: '/api/automation/schedules',
   triggers: '/api/automation/triggers',
@@ -183,8 +186,10 @@ async function checkWiring(app) {
       if (!route) continue;
       const res = await api.get(route);
       // 503 mit einem Grund ist eine Antwort, kein Ausfall: so meldet die
-      // semantische Suche ein fehlendes Einbettungsmodell.
-      const antwortet = res.status === 200 || res.status === 503 || res.status === 403;
+      // semantische Suche ein fehlendes Einbettungsmodell. 405 ebenso: die
+      // Route ist registriert, nur nicht per GET -- ein 404 waere der Befund.
+      const antwortet = res.status === 200 || res.status === 503
+        || res.status === 403 || res.status === 405;
       if (!antwortet) kaputt.push(`${name} (${route}: HTTP ${res.status})`);
     }
     assert(!kaputt.length, kaputt.join(', '));
