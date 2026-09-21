@@ -471,6 +471,38 @@ async function main() {
     check(/kein lokales Modell|Kein Modell/i.test(chatText),
       'Ohne Modell sagt der Chat warum, statt leer zu bleiben');
 
+    /* ------------------- 11. Zweiter Blick: belegbar vs. nicht belegbar */
+    console.log(`\n${B}11 · Der zweite Blick trennt Belegbares von Nichtbelegbarem${X}`);
+    const langerText = 'Der Mahlgrad entscheidet über den Widerstand im Sieb. Ist er zu fein, steigt '
+      + 'der Druck und der Espresso läuft nur tropfenweise; ist er zu grob, rauscht das Wasser durch '
+      + 'und die Crema bleibt dünn. Die Brühtemperatur liegt bei rund 93 Grad, bei dunklen Röstungen '
+      + 'eher darunter. Neun bar sind die Norm, aber viele Maschinen schwanken. Der Wassertank sollte '
+      + 'weiches Wasser enthalten, sonst verkalkt die Maschine schnell. Entkalker gehört alle zwei '
+      + 'Monate hinein. Offen bleibt, wie stark sich die Bohnenfrische auf den Druck auswirkt.';
+    const langeNotiz = store.create('note', { title: 'Espresso in der Praxis', body: langerText });
+    store.create('note', { title: 'Mahlgrad', body: 'Feiner Mahlgrad erhöht den Druck.' });
+    const kurzeNotiz = store.create('note', { title: 'Kurz', body: 'Zwei Sätze. Mehr nicht.' });
+    await store.flush();
+
+    await page.goto(`${base}/#/notes?id=${langeNotiz.id}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(1200);
+    const zbKnopf = page.getByRole('button', { name: /Zweiter Blick/ });
+    if (!(await zbKnopf.count())) {
+      bad('Der Knopf steht an einer langen Notiz');
+    } else {
+      ok('Der Knopf steht an einer langen Notiz');
+      await zbKnopf.first().click();
+      await page.waitForTimeout(2500);
+      const zbText = await page.locator('main').innerText();
+      check(/Mahlgrad|Druck|Grad/.test(zbText), 'Die bekannten Begriffe erscheinen auch ohne Modell');
+      check(/Volltextindex/.test(zbText), 'und sind als belegbar gekennzeichnet');
+      check(/braucht ein Modell/i.test(zbText), 'während der andere Teil als "braucht ein Modell" dasteht');
+    }
+    await page.goto(`${base}/#/notes?id=${kurzeNotiz.id}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(1200);
+    check(await page.getByRole('button', { name: /Zweiter Blick/ }).count() === 0,
+      'An einer kurzen Notiz gibt es ihn gar nicht erst');
+
     check(errors.length === 0, 'Keine Konsolenfehler während all dessen',
       errors.slice(0, 2).join(' | ').slice(0, 200));
     await page.close();

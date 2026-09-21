@@ -48,6 +48,25 @@ const STATUS_TICK_MS = 3000;
 /** Types whose titles a `[[wiki link]]` may point at (mirrors derive.js). */
 const TITLE_TYPES = ['note', 'project', 'entity', 'task'];
 
+/**
+ * Ab dieser Länge (Titel + Text) erscheint „Zweiter Blick".
+ *
+ * Derselbe Wert wie `MIN_TEXT_CHARS` in src/agents/secondlook.js, und er muss
+ * derselbe bleiben: darunter weist der Server den Aufruf ab, und ein Knopf,
+ * der verlässlich in eine Fehlermeldung führt, ist schlimmer als keiner.
+ * Warum gerade hier: unter ~500 Zeichen überblickt man eine Notiz beim Lesen
+ * vollständig. Eine Kernaussage in zwei Sätzen wäre dann halb so lang wie der
+ * Text selbst, und die offenen Stellen stehen ohnehin vor Augen.
+ */
+const SECOND_LOOK_MIN_CHARS = 500;
+
+/**
+ * Ein kleines Modell auf einem Laptop braucht für diese Aufgabe eher Minuten
+ * als Sekunden; die 30 Sekunden Voreinstellung von lib/api.js würden den Lauf
+ * abschneiden, während er noch rechnet.
+ */
+const SECOND_LOOK_TIMEOUT_MS = 180000;
+
 const MODES = [
   { id: 'split', label: 'Geteilt' },
   { id: 'edit', label: 'Text' },
@@ -211,11 +230,15 @@ function createNotesView(container, ctx) {
     edgesOut: [],
     labels: new Map(), // record id -> {label, type, missing}
     suggest: null, // {query, range:{start,end}, items:[], index:number}
+    /** Der zweite Blick auf die gerade offene Notiz. */
+    second: { open: false, loading: false, error: null, result: null, noteId: null },
   };
 
   const dom = {};
   let statusTimer = null;
   let saveSeq = 0;
+  /** Läuft gerade ein zweiter Blick, gehört ihm dieser Abbrecher. */
+  let secondController = null;
 
   /* ---------------------------------------------------------------- */
   /* Skeleton                                                          */
@@ -277,6 +300,12 @@ function createNotesView(container, ctx) {
       onClick: () => state.noteId && ctx.navigate(`#/graph?focus=${encodeURIComponent(state.noteId)}`),
     }, text('Im Gehirn zeigen'));
 
+    dom.secondButton = h('button.btn.btn--small', {
+      type: 'button',
+      title: 'Kernaussage, offene Stellen und Begriffe, die schon anderswo im Tresor vorkommen',
+      onClick: () => toggleSecondLook(),
+    }, text('Zweiter Blick'));
+
     dom.deleteButton = h('button.btn.btn--small', {
       type: 'button',
       onClick: () => deleteNote(),
@@ -284,7 +313,7 @@ function createNotesView(container, ctx) {
 
     dom.head = h('header.notesv__head', null,
       h('div.notesv__head-main', null, dom.titleInput, dom.status),
-      h('div.notesv__head-actions', null, dom.modeSwitch, dom.graphButton, dom.deleteButton));
+      h('div.notesv__head-actions', null, dom.modeSwitch, dom.secondButton, dom.graphButton, dom.deleteButton));
 
     dom.tagBar = h('div.notesv__tags');
 
@@ -318,7 +347,12 @@ function createNotesView(container, ctx) {
 
     dom.links = h('section.notesv__links', { 'aria-label': 'Verknüpfungen' });
 
-    dom.main = h('section.notesv__main', null, dom.head, dom.tagBar, dom.split, dom.links);
+    // Unter dem Text, nicht als Dialog: man liest die Notiz und das, was über
+    // sie gesagt wird, nebeneinander -- ein Fenster davor würde genau das
+    // verdecken, worum es geht.
+    dom.second = h('section.notesv__second', { 'aria-label': 'Zweiter Blick', hidden: true });
+
+    dom.main = h('section.notesv__main', null, dom.head, dom.tagBar, dom.split, dom.second, dom.links);
     dom.root = h('div.notesv', null, dom.side, dom.main);
     dom.root.dataset.mode = state.mode;
     container.appendChild(dom.root);
@@ -426,6 +460,9 @@ function createNotesView(container, ctx) {
     state.saveError = null;
     state.savedAt = null;
     closeSuggest();
+    // Ein zweiter Blick gehört zu genau einer Notiz; beim Wechsel ist er weg,
+    // nicht etwa an der nächsten weiter sichtbar.
+    closeSecondLook();
     renderList();
 
     try {
@@ -537,6 +574,7 @@ function createNotesView(container, ctx) {
           fillEditor();
           renderTags();
           renderPreview();
+          updateSecondButton();
         }
       }
       reloadNotesSoon();
@@ -580,6 +618,14 @@ function createNotesView(container, ctx) {
     state.saveError = null;
     pendingEdits.set(state.noteId, currentEdit());
     renderStatus();
+    updateSecondButton();
+    // Ein zweiter Blick gilt für den Text, über den er gemacht wurde. Wird
+    // weitergeschrieben, wird er nicht falsch, aber alt -- und das steht dann
+    // dabei, statt dass er stillschweigend weiter danebensteht.
+    if (state.second.result && !state.second.stale && state.second.noteId === state.noteId) {
+      state.second.stale = true;
+      renderSecond();
+    }
     scheduleSave();
   }
 
@@ -749,6 +795,283 @@ function createNotesView(container, ctx) {
   }, 220);
 
   /* ---------------------------------------------------------------- */
+  /* Zweiter Blick                                                     */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Titel + Text, genauso gezählt wie in src/agents/secondlook.js. Gezählt
+   * wird, was im Feld steht, nicht was gespeichert ist -- sonst verschwindet
+   * der Knopf erst, nachdem gespeichert wurde, und erscheint beim Tippen zu
+   * spät.
+   */
+  function noteLength() {
+    if (!state.note) return 0;
+    const title = String(dom.titleInput.value || '').trim();
+    const body = String(dom.body.value || '').trim();
+    return (title ? `${title}\n\n${body}` : body).trimEnd().length;
+  }
+
+  function updateSecondButton() {
+    if (!dom.secondButton) return;
+    const longEnough = !!state.note && noteLength() >= SECOND_LOOK_MIN_CHARS;
+    // Kein ausgegrauter Knopf mit Erklärung: bei einer kurzen Notiz gibt es
+    // nichts zu holen, also steht da auch nichts.
+    dom.secondButton.hidden = !longEnough;
+  }
+
+  function cancelSecondLook() {
+    if (!secondController) return;
+    try {
+      secondController.abort();
+    } catch {
+      /* war schon beendet */
+    }
+    secondController = null;
+  }
+
+  function closeSecondLook() {
+    cancelSecondLook();
+    state.second = { open: false, loading: false, error: null, result: null, noteId: null };
+    renderSecond();
+  }
+
+  function toggleSecondLook() {
+    if (state.second.open && state.second.noteId === state.noteId && !state.second.loading) {
+      closeSecondLook();
+      return;
+    }
+    runSecondLook();
+  }
+
+  /**
+   * Den zweiten Blick holen.
+   *
+   * Vorher wird gespeichert. Der Server liest die Notiz aus dem Tresor, also
+   * würde er sonst einen Text beurteilen, den der Mensch vor sich gerade
+   * geändert hat -- und das Ergebnis wäre über etwas, das so nirgends steht.
+   */
+  async function runSecondLook() {
+    if (!state.note) return;
+    const noteId = state.noteId;
+    cancelSecondLook();
+    state.second = { open: true, loading: true, error: null, result: null, noteId };
+    renderSecond();
+
+    await flush();
+    if (disposed || state.noteId !== noteId || state.second.noteId !== noteId) return;
+
+    const controller = new AbortController();
+    secondController = controller;
+    try {
+      const result = await api.post(
+        `/notes/${encodeURIComponent(noteId)}/second-look`,
+        {},
+        { signal: controller.signal, timeoutMs: SECOND_LOOK_TIMEOUT_MS },
+      );
+      if (disposed || secondController !== controller) return;
+      state.second.result = result;
+      state.second.error = null;
+    } catch (err) {
+      if (disposed || secondController !== controller) return;
+      if (err && err.isAborted) {
+        // Abgebrochen heißt: nichts sagen. Kein halbes Ergebnis, kein Fehler.
+        state.second.open = false;
+        return;
+      }
+      state.second.error = err;
+    } finally {
+      if (!disposed && secondController === controller) {
+        secondController = null;
+        state.second.loading = false;
+        renderSecond();
+      }
+    }
+  }
+
+  function formatDuration(ms) {
+    if (!Number.isFinite(ms)) return '';
+    if (ms < 1000) return `${Math.round(ms)} ms`;
+    return `${(ms / 1000).toFixed(1).replace('.', ',')} s`;
+  }
+
+  /** Dorthin, wo der Begriff steht. */
+  function openHit(hit) {
+    if (!hit || !hit.id) return;
+    if (hit.type === 'note') open(hit.id);
+    else ctx.navigate(targetFor({ id: hit.id, type: hit.type }));
+  }
+
+  function renderSecond() {
+    const box = dom.second;
+    if (!box) return;
+    clear(box);
+    const second = state.second;
+    const visible = second.open && !!state.note && second.noteId === state.noteId;
+    box.hidden = !visible;
+    if (!visible) return;
+
+    const result = second.result;
+    const head = h('div.notesv__second-head', null,
+      h('h3.notesv__second-heading', null, text('Zweiter Blick')),
+      h('span.meta', null, text(`auf „${noteTitle(state.note)}“${result && Number.isFinite(result.ms) ? ` · ${formatDuration(result.ms)}` : ''}`)),
+      h('div.notesv__second-actions', null,
+        second.loading
+          ? h('button.btn.btn--small', { type: 'button', onClick: () => closeSecondLook() }, text('Abbrechen'))
+          : h('button.btn.btn--small', { type: 'button', onClick: () => runSecondLook() }, text('Neu lesen')),
+        h('button.btn.btn--small', {
+          type: 'button',
+          'aria-label': 'Zweiten Blick schließen',
+          onClick: () => closeSecondLook(),
+        }, text('Schließen'))));
+    box.appendChild(head);
+
+    if (second.loading) {
+      box.appendChild(h('div.notesv__second-state', { role: 'status' },
+        h('span.spinner', { 'aria-hidden': 'true' }),
+        h('p', null, text('Die Notiz wird gelesen. Die Begriffe kommen aus dem Index, die ersten beiden Teile von einem Modell – das kann dauern.'))));
+      return;
+    }
+
+    if (second.error) {
+      box.appendChild(h('div.notesv__second-state.is-danger', { role: 'alert' },
+        h('p', null, text(`Der zweite Blick ist fehlgeschlagen: ${errorMessage(second.error)}`)),
+        h('p.hint', null, text('Es wurde nichts zusammengefasst. Eine Antwort, die nicht gelesen werden konnte, wird hier nicht zu einem Satz gemacht.')),
+        h('button.btn.btn--small', { type: 'button', onClick: () => runSecondLook() }, text('Erneut versuchen'))));
+      return;
+    }
+
+    if (!result) return;
+
+    if (second.stale) {
+      box.appendChild(h('p.notesv__second-stale.hint', null,
+        text('Der Text hat sich seit diesem zweiten Blick geändert – was hier steht, gilt für die vorige Fassung.')));
+    }
+
+    box.appendChild(h('div.notesv__second-grid', null,
+      renderSecondModel(result),
+      renderSecondTerms(result)));
+  }
+
+  /**
+   * Die ersten beiden Teile. Sie tragen ein anderes Zeichen als der dritte,
+   * und das ist der eigentliche Punkt dieser Ansicht: was ein Modell gesagt
+   * hat, ist nicht belegt, und das steht dabei -- nicht im Kleingedruckten,
+   * sondern an der Überschrift.
+   */
+  function renderSecondModel(result) {
+    const block = h('div.notesv__second-block.notesv__second-block--modell');
+    const modell = (result && result.modell) || {};
+
+    if (!modell.verfuegbar) {
+      block.appendChild(h('h4.notesv__second-title', null,
+        text('Kernaussage und offene Stellen'),
+        h('span.badge.notesv__second-mark--fehlt', null, text('braucht ein Modell'))));
+      block.appendChild(h('p', null, text(result.hinweis
+        || 'Für diese beiden Teile wird ein Sprachmodell gebraucht; hier ist gerade keines erreichbar.')));
+      if (modell.grund) {
+        // Die Registry schreibt eine vollständige Diagnose: erste Zeile als
+        // Satz, der Rest zum Aufklappen. Alles auf einmal würde den zweiten
+        // Blick zu einer Fehlermeldung mit Anhang machen -- weglassen wäre
+        // aber auch falsch, denn genau dort steht, was zu tun ist.
+        const [erste, ...rest] = String(modell.grund).split('\n');
+        block.appendChild(h('p.meta', null, text(erste)));
+        const detail = rest.join('\n').trim();
+        if (detail) {
+          block.appendChild(h('details.notesv__second-details', null,
+            h('summary', null, text('Was genau geprüft wurde')),
+            h('p.notesv__second-grund.meta', null, text(detail))));
+        }
+      }
+      block.appendChild(h('button.btn.btn--small', {
+        type: 'button',
+        onClick: () => ctx.navigate('#/settings'),
+      }, text('Zu den Einstellungen')));
+      // Kein „rechts": unter 900 px steht der dritte Teil darunter, nicht daneben.
+      block.appendChild(h('p.hint', null,
+        text('Der dritte Teil braucht kein Modell und steht deshalb trotzdem da.')));
+      return block;
+    }
+
+    const marke = () => h('span.badge.notesv__second-mark--modell', null, text('vom Modell'));
+
+    block.appendChild(h('h4.notesv__second-title', null, text('Kernaussage'), marke()));
+    block.appendChild(h('p.notesv__second-kern', null, text(result.kern || '')));
+
+    block.appendChild(h('h4.notesv__second-title', null, text('Offene Stellen'), marke()));
+    const offen = Array.isArray(result.offeneStellen) ? result.offeneStellen : [];
+    if (offen.length) {
+      const rows = h('ul.notesv__second-list', { role: 'list' });
+      for (const stelle of offen) rows.appendChild(h('li', null, text(String(stelle))));
+      block.appendChild(rows);
+    } else {
+      block.appendChild(h('p.meta', null, text('Das Modell hat im Text keine offene Stelle gefunden.')));
+    }
+
+    if (result.gekuerzt) {
+      block.appendChild(h('p.hint', null,
+        text('Die Notiz war länger, als ins Fenster des Modells passt; beurteilt wurde nur ihr Anfang.')));
+    }
+    const wer = result.model && result.model.model
+      ? `${result.model.provider ? `${result.model.provider} · ` : ''}${result.model.model}`
+      : 'einem Sprachmodell';
+    block.appendChild(h('p.hint', null,
+      text(`Diese beiden Teile stammen von ${wer}. Sie sind nicht belegt – lies sie gegen den Text.`)));
+    return block;
+  }
+
+  /**
+   * Der dritte Teil. Er kommt aus dem Volltextindex, jeder Treffer wurde im
+   * Zieltext nachgesehen, und deshalb darf er als belegt gekennzeichnet sein.
+   */
+  function renderSecondTerms(result) {
+    const block = h('div.notesv__second-block.notesv__second-block--index');
+    const begriffe = Array.isArray(result.bekannteBegriffe) ? result.bekannteBegriffe : [];
+
+    block.appendChild(h('h4.notesv__second-title', null,
+      text('Bekannte Begriffe'),
+      h('span.badge.notesv__second-mark--index', null, text('aus dem Volltextindex'))));
+
+    if (!begriffe.length) {
+      block.appendChild(h('p.meta', null,
+        text('Kein Begriff aus dieser Notiz kommt bisher anderswo im Tresor vor.')));
+      return block;
+    }
+
+    const rows = h('ul.notesv__second-terms', { role: 'list' });
+    for (const eintrag of begriffe) {
+      const treffer = Array.isArray(eintrag.treffer) ? eintrag.treffer : [];
+      const row = h('li.notesv__second-term');
+      row.appendChild(h('div.notesv__second-term-head', null,
+        h('button.notesv__second-word', {
+          type: 'button',
+          title: treffer.length ? `Zu „${treffer[0].titel}“ springen` : '',
+          onClick: () => openHit(treffer[0]),
+        }, text(eintrag.begriff)),
+        h('span.meta', null, text(treffer.length === 1 ? 'in 1 Eintrag' : `in ${formatNumber(treffer.length)} Einträgen`))));
+
+      const hits = h('ul.notesv__second-hits', { role: 'list' });
+      for (const hit of treffer) {
+        hits.appendChild(h('li', null, h('button.notesv__second-hit', {
+          type: 'button',
+          onClick: () => openHit(hit),
+        },
+        h('span.notesv__second-hit-title', null, text(hit.titel)),
+        h('span.badge', null, text(TYPE_LABEL[hit.type] || hit.type)),
+        hit.wortform && hit.wortform !== eintrag.begriff
+          ? h('span.meta', null, text(`als „${hit.wortform}“`))
+          : null,
+        hit.stelle ? h('span.notesv__second-hit-snippet.meta', null, snippet(hit.stelle)) : null)));
+      }
+      row.appendChild(hits);
+      rows.appendChild(row);
+    }
+    block.appendChild(rows);
+    block.appendChild(h('p.hint', null,
+      text('Jeder Begriff hier steht wirklich in dem Eintrag, auf den er zeigt – nachgeschlagen, nicht geraten. Umlaute und ihre Umschrift zählen dabei als dasselbe Wort.')));
+    return block;
+  }
+
+  /* ---------------------------------------------------------------- */
   /* Wiki links                                                        */
   /* ---------------------------------------------------------------- */
 
@@ -897,6 +1220,7 @@ function createNotesView(container, ctx) {
     renderTags();
     renderPreview();
     renderLinks();
+    renderSecond();
     renderStatus();
   }
 
@@ -975,6 +1299,7 @@ function createNotesView(container, ctx) {
     dom.body.disabled = !hasNote;
     dom.deleteButton.disabled = !hasNote;
     dom.graphButton.disabled = !hasNote;
+    updateSecondButton();
   }
 
   function renderTags() {
@@ -1226,6 +1551,9 @@ function createNotesView(container, ctx) {
       /* flush() already turns failures into state; nothing to add here */
     }
     disposed = true;
+    // Ein laufender zweiter Blick, den niemand mehr sieht, soll kein Modell
+    // weiterrechnen lassen.
+    cancelSecondLook();
     if (statusTimer) clearInterval(statusTimer);
     scheduleSave.cancel();
     schedulePreview.cancel();
@@ -1310,13 +1638,16 @@ const NOTES_CSS = `
 .notesv__main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .notesv__head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-2);
   border-bottom: 1px solid var(--border);
   background: var(--surface);
 }
-.notesv__head-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+/* Lieber eine zweite Zeile für die Knöpfe als ein Titelfeld, in das nur noch
+   drei Buchstaben passen: der Titel ist das, was man liest und tippt. */
+.notesv__head-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 260px; }
 .notesv__head-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1); }
 .notesv__title {
   width: 100%;
@@ -1423,10 +1754,110 @@ const NOTES_CSS = `
 }
 .notesv__link:hover { background: var(--surface-3); }
 .notesv__link-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Zweiter Blick -- unter dem Text, mit eigenem Rollbereich, damit er den
+   Editor nicht verdrängt, sondern neben ihm steht. */
+.notesv__second {
+  flex: 0 0 auto;
+  max-height: 42vh;
+  overflow-y: auto;
+  padding: var(--sp-1) var(--sp-2) var(--sp-2);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.notesv__second-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-1); margin-bottom: var(--sp-1); }
+.notesv__second-heading { margin: 0; font-size: var(--fs-md); }
+.notesv__second-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+.notesv__second-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+}
+.notesv__second-state p { margin: 0; }
+.notesv__second-stale { margin: 0 0 var(--sp-1); }
+.notesv__second-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--sp-2); }
+.notesv__second-block {
+  min-width: 0;
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--surface-2);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--r-2);
+}
+/* Die Farbe ist die Kennzeichnung: was vom Modell kommt, ist nicht belegt. */
+.notesv__second-block--modell { border-left-color: var(--warn); }
+.notesv__second-block--index { border-left-color: var(--ok); }
+.notesv__second-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1);
+  margin: var(--sp-1) 0 var(--sp-05);
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+.notesv__second-mark--modell { color: var(--warn); }
+.notesv__second-mark--index { color: var(--ok); }
+.notesv__second-kern { margin: 0; }
+.notesv__second-details > summary { cursor: pointer; font-size: var(--fs-sm); color: var(--fg-muted); }
+.notesv__second-grund {
+  margin: var(--sp-05) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.notesv__second-list { margin: 0; padding-left: var(--sp-3); }
+.notesv__second-block p.hint { margin-top: var(--sp-1); }
+.notesv__second-terms { display: flex; flex-direction: column; gap: var(--sp-1); margin: 0; padding: 0; list-style: none; }
+.notesv__second-term-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-1); }
+.notesv__second-word {
+  padding: 0;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.notesv__second-word:hover { text-decoration: underline; }
+.notesv__second-word:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-1); }
+.notesv__second-hits { margin: 2px 0 0; padding-left: var(--sp-1); list-style: none; border-left: 1px solid var(--border); }
+.notesv__second-hit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 2px var(--sp-05);
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: var(--r-1);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.notesv__second-hit:hover { background: var(--surface-3); }
+.notesv__second-hit:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.notesv__second-hit-title { font-size: var(--fs-sm); font-weight: 500; }
+.notesv__second-hit-snippet {
+  display: -webkit-box;
+  flex-basis: 100%;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+}
+.notesv__second-hit-snippet mark { padding: 0 1px; color: inherit; background: var(--accent-soft); border-radius: 2px; }
+
 @media (max-width: 900px) {
   .notesv { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, 30vh) minmax(0, 1fr); }
   .notesv__side { border-right: 0; border-bottom: 1px solid var(--border); }
   .notesv__split { grid-template-columns: minmax(0, 1fr); }
   .notesv[data-mode="split"] .notesv__preview { display: none; }
+  .notesv__second-grid { grid-template-columns: minmax(0, 1fr); }
 }
 `;
