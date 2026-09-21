@@ -616,21 +616,34 @@ async function load(self, { fit = false } = {}) {
   }
   if (!self.alive) return;
 
-  if (collected.length > MAX_TOTAL) {
+  // Offset paging over a vault that is being written to can hand out the same
+  // record twice. A duplicate would inflate every counter, so it is dropped
+  // here rather than explained away in six places downstream.
+  const seen = new Set();
+  const unique = collected.filter((point) => (seen.has(point.id) ? false : (seen.add(point.id), true)));
+
+  if (unique.length > MAX_TOTAL) {
     // Keep the most recent ones: a timeline is read from the present backwards.
-    collected.sort((a, b) => (b.created || 0) - (a.created || 0));
-    collected.length = MAX_TOTAL;
+    unique.sort((a, b) => (b.created || 0) - (a.created || 0));
+    unique.length = MAX_TOTAL;
     truncated = true;
   }
 
-  self.points = collected;
+  self.points = unique;
   self.totals = totals;
   self.loaded = loaded;
   self.truncated = truncated;
   self.loading = false;
 
   if (fit) fitAll(self, { silent: true });
-  if (self.selectedId && !self.points.some((p) => p.id === self.selectedId)) selectRecord(self, null);
+  if (self.selectedId) {
+    const point = self.points.find((p) => p.id === self.selectedId) || null;
+    if (!point) selectRecord(self, null);
+    else if (self.inspector) {
+      self.inspector = { ...self.inspector, point };
+      renderSide(self);
+    }
+  }
 
   renderToolbar(self);
   renderStage(self);

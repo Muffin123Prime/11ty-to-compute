@@ -51,9 +51,14 @@ ollama pull llama3.2        # ~2 GB   · ab 8 GB RAM  · brauchbar
 ollama pull qwen2.5:7b      # ~4,7 GB · ab 16 GB RAM · deutlich stärker
 ollama pull qwen2.5:14b     # ~9 GB   · ab 32 GB RAM · sehr gut
 
-# Optional, für die semantische Suche:
-ollama pull nomic-embed-text   # ~280 MB
+# Optional, für die semantische Suche (findet Inhalte nach Bedeutung,
+# nicht nur nach Stichwort):
+ollama pull nomic-embed-text   # ~274 MB
 ```
+
+Nach dem Laden eines Einbettungsmodells: *Einstellungen → Modelle neu suchen*,
+dann die semantische Suche einmal neu indizieren. Fehlt das Modell, sagt die App
+das ausdrücklich und weicht **nicht** heimlich auf die Stichwortsuche aus.
 
 Ollama lauscht danach auf `127.0.0.1:11434`. Neural OS findet es von allein.
 **Ab diesem Moment brauchst du nie wieder Internet.**
@@ -225,7 +230,21 @@ zoomen), aber auf einem 11-Zoll-Bildschirm naturgemäß gedrängt.
 ## Teil 3 · Mehrere Geräte wirklich synchronisieren
 
 Zwei PCs (oder PC und Dauerläufer) können ihre Daten abgleichen, ohne dass ein
-fremder Anbieter beteiligt ist. *Einstellungen → Partner*.
+fremder Anbieter beteiligt ist. In der Seitenleiste: **Abgleich**.
+
+**So richtest du es ein:**
+
+1. Auf Gerät A: *Einstellungen → Freigabe* einschalten, ein Token erzeugen.
+   Es wird **genau einmal** angezeigt.
+2. Auf Gerät B: *Abgleich → Partner hinzufügen*. Name, Adresse von A
+   (`http://192.168.1.20:7777`) und das Token eintragen.
+3. *Verbindung prüfen* zeigt Erreichbarkeit, Anzahl Einträge und eine etwaige
+   Abweichung der Uhren zwischen den Geräten.
+4. *Jetzt abgleichen*.
+
+Der Abgleich braucht mindestens den Netzmodus **Lokales Netz** — im Modus
+Offline lehnt die Schleuse ihn ab. Das ist richtig so und wird unter *Netzwerk*
+geändert.
 
 **Wie es funktioniert:** Jedes Gerät hält seinen eigenen vollständigen Vault. Beim
 Abgleich tauschen sie nur die Änderungen aus.
@@ -238,6 +257,12 @@ wird überschrieben, bevor du es tust.
 Das ist bewusst unbequemer als bei anderen Programmen. Genau an dieser Stelle
 verlieren automatische Synchronisationen Daten — und man merkt es erst Wochen
 später.
+
+**Was bewusst nicht abgeglichen wird:** Zugangstoken, Netz-Freigaben, Agenten mit
+ihren Berechtigungen, die Partnerliste selbst sowie Läufe und Bestätigungen. Ein
+Partnergerät kann sich über den Abgleich also weder Rechte noch Netzzugang
+verschaffen. Abgeglichen werden Notizen, Projekte, Aufgaben, Begriffe,
+Erinnerungen, Chats samt Nachrichten, Dateien und Verknüpfungen.
 
 **Ein iPad kann nicht synchronisieren**, weil es keinen eigenen Vault hat. Es bleibt
 ein Fenster auf eine andere Instanz.
@@ -327,6 +352,9 @@ erlaubten. Ein Protokoll, das nur Blockaden zeigt, würde nichts beweisen.
 | iPad erreicht den PC nicht | Firewall (Port 7777), gleiches WLAN?, Freigabe in den Einstellungen wirklich an? |
 | Alles ist langsam beim Chat | Das Modell ist zu groß für deine Hardware. Ein kleineres nehmen. |
 | Agent erfindet Websuchen | Kleines Modell ohne Netzzugang. Größeres Modell, oder dem Agenten gezielt eine Freigabe erteilen. |
+| Abgleich schlägt mit „blockiert" fehl | Netzmodus steht auf Offline. Unter *Netzwerk* auf „Lokales Netz" stellen. |
+| Semantische Suche findet nichts | Einbettungsmodell fehlt (`ollama pull nomic-embed-text`) oder der Index ist noch leer — einmal neu indizieren. |
+| PDF liefert keinen Text | Ein gescanntes PDF ohne Textebene. Dafür bräuchte es eine Texterkennung, die Neural OS nicht hat. Die App sagt das, statt etwas zu erfinden. |
 | Ich will wissen, was wirklich passiert ist | `cat ~/.neural-os/audit.jsonl` — jede Netzentscheidung, chronologisch. |
 
 ---

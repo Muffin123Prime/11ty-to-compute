@@ -53,6 +53,11 @@ Der Vollständigkeit halber, nicht aus Zerknirschung:
 - **Ein Test, der am Code vorbeiging.** Meine erste Fassung der Berechtigungstests
   übergab Objekte in einer Form, die das Modul gar nicht als Agenten erkannte — der
   Test wäre grün geworden, ohne irgendetwas zu prüfen.
+- **Erfundene CSS-Token.** Als ich für eine ausbleibende Ansicht einsprang, benutzte
+  ich Variablennamen (`--space-4`, `--text-xl`), die es im Designsystem gar nicht
+  gibt. Die Ansicht rendelte vollständig unformatiert. Aufgefallen ist es nur, weil
+  ich mir einen Bildschirmabzug angesehen habe — kein Test hätte das gefangen, und
+  „keine JavaScript-Fehler" war dabei die ganze Zeit wahr.
 - **Der Audit war zunächst unvollständig.** Die Verifizierer für HTTP und Oberfläche
   brachen an einem Nutzungslimit ab. Ich habe das gemeldet statt es zu verschweigen,
   und die Funde anschließend von Hand nachgewiesen.
@@ -67,8 +72,11 @@ Ehrlich ist hier wichtiger als vollständig.
   echtes Modell**. Das Protokoll stimmt. Ob ein konkretes Modell auf deiner Hardware
   die Werkzeugaufrufe zuverlässig produziert, weiß ich nicht.
 - **Keine echte Mehrgeräte-Nutzung.** Die Synchronisation ist zwischen zwei echten
-  Speichern im selben Prozess getestet, nicht über zwei physische Geräte, zwei WLANs
-  und unterschiedliche Uhren.
+  Instanzen auf **derselben Maschine** geprüft — zwei Prozesse, zwei Vaults, echtes
+  HTTP dazwischen, inklusive eines echten Konflikts, der nichts überschrieben hat.
+  Nicht geprüft: zwei physische Geräte, ein echtes WLAN mit Paketverlust,
+  deutlich auseinanderlaufende Uhren, ein Abbruch mitten in der Übertragung über
+  eine wacklige Verbindung.
 - **Nur ein Browser.** Die Oberfläche ist in Chromium geprüft. Firefox und Safari
   sollten funktionieren (nichts darin ist exotisch), aber ich habe es nicht gesehen.
 - **Kein Langzeitverhalten.** Niemand hat dieses System ein halbes Jahr benutzt. Wie
