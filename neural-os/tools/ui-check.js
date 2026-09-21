@@ -400,6 +400,77 @@ async function main() {
         neu ? JSON.stringify(neu.data.tags) : 'Notiz nicht gefunden');
     }
 
+    /* --------------- 9. Beobachtete Ordner: erst ansehen, dann aufnehmen */
+    console.log(`\n${B}9 · Ein beobachteter Ordner nimmt erst auf, wenn er eingeschaltet ist${X}`);
+    const eingang = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-eingang-'));
+    fs.writeFileSync(path.join(eingang, 'notiz.md'), '# Espresso\n\nNeun bar, 93 Grad.\n');
+    fs.writeFileSync(path.join(eingang, 'liste.txt'), 'Bohnen\nFilter\n');
+    try {
+      await page.goto(`${base}/#/settings`, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(900);
+      await dismissWelcome(page);
+      await page.waitForTimeout(600);
+      check(/Beobachtete Ordner/.test(await page.locator('main').innerText()),
+        'Der Abschnitt steht in den Einstellungen');
+
+      const angelegt = await page.evaluate(async ([b, p]) => {
+        const res = await fetch(`${b}/api/watch`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-neural-os': '1' },
+          body: JSON.stringify({ path: p, label: 'Eingang' }),
+        });
+        return res.status;
+      }, [base, eingang]);
+      check(angelegt === 200, 'Ein Ordner lässt sich anlegen', `HTTP ${angelegt}`);
+
+      const ordner = store.all('watch')[0];
+      check(ordner && ordner.data.enabled === false, 'und ist ab Werk AUS',
+        ordner ? `enabled=${ordner.data.enabled}` : 'keiner gefunden');
+
+      if (ordner) {
+        const vorher = store.count('file');
+        const trocken = await page.evaluate(async ([b, id]) => {
+          const res = await fetch(`${b}/api/watch/${id}/scan`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-neural-os': '1' },
+            body: JSON.stringify({ dryRun: true }),
+          });
+          return res.json();
+        }, [base, ordner.id]);
+        check(store.count('file') === vorher, '„Erst ansehen" legt wirklich nichts an',
+          `gefunden: ${trocken && trocken.gefunden}, Dateien unverändert bei ${vorher}`);
+
+        await page.evaluate(async ([b, id]) => {
+          await fetch(`${b}/api/watch/${id}`, {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json', 'x-neural-os': '1' },
+            body: JSON.stringify({ enabled: true }),
+          });
+          await fetch(`${b}/api/watch/${id}/scan`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-neural-os': '1' },
+            body: JSON.stringify({}),
+          });
+        }, [base, ordner.id]);
+        check(store.count('file') > vorher, 'Eingeschaltet nimmt er die Dateien wirklich auf',
+          `${vorher} → ${store.count('file')}`);
+      }
+    } finally {
+      fs.rmSync(eingang, { recursive: true, force: true });
+    }
+
+    /* ------------------------------- 10. Der Modellvergleich ist da */
+    console.log(`\n${B}10 · Zwei Modelle nebeneinander${X}`);
+    const probe = store.create('chat', { title: 'Probe' });
+    await store.flush();
+    await page.goto(`${base}/#/chat?id=${probe.id}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(1500);
+    const chatText = await page.locator('main').innerText();
+    check(/Zwei Modelle|[Vv]ergleich/.test(chatText), 'Der Vergleich ist im Chat auffindbar');
+    // Ohne Modell muss der Chat ehrlich sein statt leer.
+    check(/kein lokales Modell|Kein Modell/i.test(chatText),
+      'Ohne Modell sagt der Chat warum, statt leer zu bleiben');
+
     check(errors.length === 0, 'Keine Konsolenfehler während all dessen',
       errors.slice(0, 2).join(' | ').slice(0, 200));
     await page.close();
