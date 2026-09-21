@@ -409,6 +409,17 @@ function createSandbox(deps = {}) {
     publish('module.failed', { id: moduleId, where, error: { code: e.code, message: e.message } });
   }
 
+  /**
+   * A call that came back cleanly. The registry counts CONSECUTIVE failures,
+   * so it has to hear about the successes too -- otherwise three unrelated
+   * hiccups spread over a week would switch off a module that works.
+   */
+  function reportSuccess(moduleId) {
+    if (moduleRegistry && typeof moduleRegistry.reportSuccess === 'function') {
+      try { moduleRegistry.reportSuccess(moduleId); } catch { /* counting is not critical */ }
+    }
+  }
+
   /* ------------------------------------------------------------- the realm */
 
   /**
@@ -476,6 +487,7 @@ function createSandbox(deps = {}) {
         if (disposed) return;
         try {
           call(fn, extra, { where: kind });
+          reportSuccess(id);
         } catch (err) {
           reportFailure(id, err, kind);
         }
@@ -683,6 +695,7 @@ function createSandbox(deps = {}) {
           if (instance.disposed) return;
           try {
             realm.call(fn, [toPlain(event)], { where: `Ereignis ${eventName}` });
+            reportSuccess(id);
           } catch (err) {
             reportFailure(id, err, `Ereignis ${eventName}`);
           }
@@ -984,13 +997,20 @@ function createSandbox(deps = {}) {
         );
       }
 
-      const candidates = path.isAbsolute(input)
-        ? [path.resolve(input)]
+      let target;
+      if (path.isAbsolute(input)) {
+        target = path.resolve(input);
+      } else {
         // A relative path always means "inside the first shared folder", so it
         // is predictable which one it lands in.
-        : [safeJoin(roots[0], input)];
-
-      const target = candidates[0];
+        try {
+          target = safeJoin(roots[0], input);
+        } catch (err) {
+          throw new PermissionError(
+            `"${input}" führt aus dem freigegebenen Ordner heraus (${roots[0]}).`,
+          );
+        }
+      }
       let probe = target;
       const missing = [];
       for (;;) {
@@ -1126,9 +1146,16 @@ function createSandbox(deps = {}) {
           agentId: (ctx && ctx.agent && ctx.agent.id) || null,
           runId: (ctx && ctx.run && ctx.run.id) || null,
         };
-        const result = await realm.call(fn, [toPlain(args) || {}, safeCtx], {
-          where: `Werkzeug ${toolName}`,
-        });
+        let result;
+        try {
+          result = await realm.call(fn, [toPlain(args) || {}, safeCtx], {
+            where: `Werkzeug ${toolName}`,
+          });
+        } catch (err) {
+          reportFailure(id, err, `Werkzeug ${toolName}`);
+          throw err; // the agent must learn that its tool failed, not get null
+        }
+        reportSuccess(id);
         return toPlain(result);
       },
     };
@@ -1184,7 +1211,14 @@ function createSandbox(deps = {}) {
           query: toPlain((rc && rc.query) || {}) || {},
           body: toPlain(body),
         };
-        const result = await realm.call(handler, [request], { where: `Adresse ${verb} ${p}` });
+        let result;
+        try {
+          result = await realm.call(handler, [request], { where: `Adresse ${verb} ${p}` });
+        } catch (err) {
+          reportFailure(id, err, `Adresse ${verb} ${p}`);
+          throw err; // the HTTP layer turns a NeuralError into a truthful status
+        }
+        reportSuccess(id);
         return toPlain(result);
       },
       /** The unwrapped function, for tests and for diagnostics. */
