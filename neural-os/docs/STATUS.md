@@ -9,11 +9,11 @@ teilweise oder gar nicht funktioniert, steht weiter unten — ungeschönt.
 ## Messwerte
 
 ```
-npm test          740 Tests, 740 bestanden, 0 fehlgeschlagen   (~35 s)
+npm test          843 Tests, 843 bestanden, 0 fehlgeschlagen   (~39 s)
 npm run check     108 Funktionen geprüft, 1 unklar, 0 defekt
 npm run proof      19 Prüfpunkte bestanden
-npm run ui         13 Ansichten geklickt, hell und dunkel, 0 Fehler
-npm run doctor     20 von 20 Subsystemen geladen
+npm run ui         15 Ansichten geklickt, hell und dunkel, 0 Fehler
+npm run doctor     23 von 23 Subsystemen geladen
 ```
 
 Die vier Werkzeuge prüfen absichtlich Verschiedenes: `test` den Code,
@@ -32,13 +32,25 @@ fällt von selbst auf.
 
 ```
 Start (createApp)                  126 ms
-2.000 Notizen anlegen              189 ms
+5.000 Notizen anlegen              829 ms
 Volltextsuche darüber                9 ms
-Link-Ableitung über 2.000 Notizen  110 ms   (zweiter Lauf: 42 ms, idempotent)
-Graph aus 2.000 Knoten bauen        16 ms
-Vorschläge prüfen                  116 ms
-Speicher bei 2.000 Notizen          28 MB
+Link-Ableitung über 5.000 Notizen  280 ms   (zweiter Lauf idempotent)
+Graph aus 5.000 Knoten bauen        88 ms
+Vorschläge prüfen                  299 ms
+3.000 Sätze importieren            238 ms   (am Änderungsjournal vorbei)
+Speicher bei 5.000 Notizen          56 MB
 ```
+
+Das Gehirn, im Browser gemessen (Chromium, DPR 2, 1280×860):
+
+```
+  200 Knoten     1,26 ms pro Bild
+1.000 Knoten     5,09 ms pro Bild
+3.000 Knoten    13,4 ms pro Bild   während das Layout noch läuft
+```
+
+Danach 0 CPU: die Simulation hält an, wenn sie sich gelegt hat, und läuft in
+einem versteckten Tab gar nicht erst.
 
 Die Link-Ableitung war vorher der Flaschenhals: 5.000 Notizen anzulegen
 dauerte 21 Sekunden, davon 20 in der Ableitung. Ein zwischengespeicherter,
@@ -149,6 +161,26 @@ Speicher, und ein Zeitplan wird erst nach der Rückfrage eingeschaltet.
 - **Herkunft** — jeder Satz aus einem Agentenlauf trägt `runId`, `agentId` und
   `source: 'agent'`. Eine *Änderung* stempelt nicht um: eine Notiz des Nutzers
   bleibt seine, auch wenn ein Agent sie angefasst hat
+- **Heute** — ein Bildschirm, der mit einer Tatsache beginnt („Zwei Aufgaben
+  sind fällig, eine davon überfällig"), nicht mit einer Begrüßung. Fällig,
+  was ohne dich lief, Vorschläge, seit gestern, Wiedervorlage. Fehlt ein
+  Teilsystem, steht der Grund dabei
+- **Lernen** — Kartenstapel nach SM-2, ohne Modell. Vier Noten auf den Tasten
+  1–4, jede sagt wann die Karte wiederkommt; der Text dafür kommt vom Server,
+  damit Oberfläche und Rechnung nicht auseinanderlaufen. Karten aus einer Notiz
+  nur aus ausdrücklichen Strukturen, nie geraten. Keine Gamification
+- **Beobachtete Ordner** — anlegen → erst ansehen → einschalten. Symbolischen
+  Links wird nicht gefolgt, der Tresor selbst lässt sich nicht beobachten, im
+  Quellordner wird nie etwas geändert. Ein großer Durchlauf läuft am
+  Änderungsjournal vorbei, damit er es nicht leerfegt
+- **Zwei Modelle** — dieselbe Frage an zwei Modelle. Vor dem Absenden steht da,
+  ob eine Seite das Gerät verlässt; scheitert eine, liefert die andere trotzdem
+  und die gescheiterte trägt ihren echten Fehler
+- **Zweiter Blick** — Kernaussage, offene Stellen, bekannte Begriffe. Der dritte
+  Teil braucht kein Modell und ist belegbar; ohne Modell liefert er ihn und sagt,
+  dass die anderen beiden fehlen, statt sie zu erfinden
+- **Schnellerfassung** — Strg+Umschalt+N, von überall aus, mit Vorschau dessen,
+  was daraus wird
 - **Rückgängig** — eigenes Journal (`vault/history.jsonl`), unabhängig vom
   Verdichten des Schreib-Logs, bei verschlüsseltem Tresor mitverschlüsselt.
   Höchstens 2000 Einträge oder 30 Tage. Jede Änderung trägt, **wer** sie
@@ -268,28 +300,33 @@ dass keine mehr existieren — es heißt, dass die gefundenen behoben sind.
 8. **Ein Schlüssel, den du direkt einträgst, liegt im Klartext** in
    `config.json` (Dateirechte 0600). Die Umgebungsvariable ist der sichere Weg,
    und die App sagt das auch — aber sie hindert dich nicht daran.
-9. **`npm run ui` braucht ein global installiertes Playwright.** Neural OS
+9. **Der Lernstand liegt auf einem Gerät.** Karten werden bewusst nicht
+   abgeglichen: zwei Geräte hätten zwei Terminpläne für dieselbe Karte, und
+   welcher gilt, ist eine Aussage darüber, wie gut du etwas kannst — nicht
+   darüber, welcher Zeitstempel größer ist. Das ist die Grenze in dieser Liste,
+   die mich am meisten stört, und der erste Punkt unter „Was als Nächstes käme"
+   in `docs/IDEEN.md`.
+10. **Ein beobachteter Ordner liest, sobald er eingeschaltet ist.** `fs.watch`
+   ist auf Netzlaufwerken und unter macOS unzuverlässig; deshalb läuft
+   zusätzlich ein langsamer Rundlauf. Eine Datei kann also mit Verzögerung
+   ankommen, aber sie geht nicht verloren.
+11. **`npm run ui` braucht ein global installiertes Playwright.** Neural OS
    selbst hat weiterhin null Abhängigkeiten; das Prüfwerkzeug läuft ohne
    Playwright gar nicht und sagt dann, dass es nichts geprüft hat, statt
    Entwarnung zu geben.
 
 ## Nächste sinnvolle Schritte
 
-Die vier Punkte, die hier früher standen — semantische Suche, Geräte-Abgleich,
-Textextraktion, Zeitachse — sind erledigt und stehen oben unter „fertiggestellt".
-Was ich als Nächstes bauen würde, mit Begründung und mit der Liste dessen, was
-ich **nicht** bauen würde, steht in `docs/IDEEN.md`. Die Kurzfassung:
+Alle acht Vorschläge aus `docs/IDEEN.md` sind abgearbeitet — sieben gebaut, einer
+(„Der Tresor auf dem Telefon") bewusst liegen gelassen, weil er keine Ergänzung
+ist, sondern eine zweite Oberfläche, und das eine Entscheidung des Nutzers ist.
 
-„Rückgängig für alles" stand hier als Nummer 1 und ist inzwischen gebaut —
-es war die Voraussetzung dafür, dass jemand die Automatik überhaupt einschaltet.
-Bleiben:
+Was jetzt anstünde, steht am Ende von `docs/IDEEN.md` und ist kleiner und
+langweiliger als das Bisherige — genau deshalb richtig:
 
-1. **Ein Tagesbeginn** — ein Bildschirm mit dem, was heute fällig ist, was sich
-   seit gestern geändert hat und was die Automatik vorschlägt. Die Daten dafür
-   liegen alle schon vor; es fehlt nur die Seite, die sie zusammenzieht.
-2. **Kartenstapel zum Wiederholen** — macht aus dem Wissensspeicher etwas, das
-   einem tatsächlich etwas beibringt. Braucht kein Modell.
-3. **Dateien beobachten statt importieren** — ein freigegebener Ordner, dessen
-   Inhalt automatisch gelesen und verknüpft wird. Die Textextraktion ist fertig;
-   es fehlt die Beobachtung und, wichtiger, die sichtbare Liste „das habe ich
-   aufgenommen".
+1. **Den Lernstand zwischen Geräten abgleichen.** Punkt 9 unter „Bekannte
+   Grenzen", und die einzige dort, die sich wie ein Mangel anfühlt statt wie
+   eine Entscheidung.
+2. **Karten aus dem zweiten Blick.** Was er an offenen Stellen findet, ist fast
+   schon eine Frage.
+3. **„Heute" zur Startseite machen**, wenn es sich im Alltag bewährt.
