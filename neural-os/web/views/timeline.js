@@ -2104,10 +2104,19 @@ const FIELD_LABELS = {
   enabled: 'Eingeschaltet',
   pinned: 'Angeheftet',
   priority: 'Priorität',
-  dueAt: 'Fällig am',
+  due: 'Fällig am',
   model: 'Modell',
   permissions: 'Rechte',
   projectId: 'Projekt',
+  systemPrompt: 'Systemanweisung',
+  network: 'Netzzugang',
+  kind: 'Art',
+  aliases: 'Andere Namen',
+  scope: 'Geltungsbereich',
+  importance: 'Gewicht',
+  every: 'Rhythmus',
+  atHour: 'Uhrzeit',
+  onWeekday: 'Wochentag',
 };
 
 function newHistoryState() {
@@ -2122,7 +2131,10 @@ function newHistoryState() {
     stats: null,
     limits: null,
     agents: new Map(),
+    /** a fetch was started (so it is not retried on every render) */
     agentsLoaded: false,
+    /** names really are available; before that a row says only „Agent" */
+    agentsReady: false,
     /** seq -> true while its undo is in flight */
     busy: new Set(),
     /** seq -> the `applied` object the server answered with */
@@ -2146,7 +2158,8 @@ function openHistory(self) {
     loadHistory(self);
     return;
   }
-  if (state.stale && !state.loading) loadHistory(self);
+  // Reopening after a failure is a request to try again.
+  if ((state.stale || state.error) && !state.loading) loadHistory(self);
 }
 
 /**
@@ -2269,9 +2282,11 @@ async function loadHistoryAgents(self) {
       const name = agent && agent.data && typeof agent.data.name === 'string' ? agent.data.name : '';
       if (agent && agent.id && name) state.agents.set(agent.id, name);
     }
+    state.agentsReady = true;
     renderHistory(self);
   } catch {
-    // Without names the rows fall back to the id, which is still true.
+    // Without the list a row says „Ein Agent" and keeps the id in its tooltip:
+    // less, but nothing made up. Cleared so the next refresh tries again.
     state.agentsLoaded = false;
   }
 }
@@ -2422,6 +2437,14 @@ function renderHistorySummary(self) {
     if (state.loading) dom.histSummary.appendChild(text('lädt …'));
     return;
   }
+  // `stats` counts the whole journal, the list only what the filter let
+  // through. Saying "11 Änderungen" over a list of five would be a small lie
+  // with a large effect, so a filtered panel counts its own rows instead.
+  if (state.agentOnly || state.type) {
+    dom.histSummary.appendChild(text(
+      `${formatNumber(state.total)} von ${formatNumber(stats.total)} Änderungen im Journal`));
+    return;
+  }
   const parts = [`${formatNumber(stats.total)} Änderungen im Journal`];
   const byActor = stats.byActor || {};
   parts.push(`${formatNumber(byActor.agent || 0)} davon von Agenten`);
@@ -2460,7 +2483,7 @@ function renderHistoryEmpty(self) {
   if (state.agentOnly) {
     return h('div.stack', { style: { gap: 'var(--sp-05)' } },
       h('p', null, text('Nichts, was ohne dich passiert ist.')),
-      h('p.tlv__hint', null, text('Seit das Journal läuft, hat kein Agentenlauf etwas geändert.')));
+      h('p.tlv__hint', null, text('In dem, was das Journal noch hält, hat kein Agentenlauf etwas geändert.')));
   }
   if (state.type) {
     return h('p.tlv__hint', null, text(
@@ -2477,7 +2500,8 @@ function actorLabel(self, item) {
   if (actor.kind !== 'agent') return 'Du';
   const name = actor.agentId ? self.history.agents.get(actor.agentId) : '';
   if (name) return `Agent · ${clip(name, 40)}`;
-  if (actor.agentId) return 'Agent · Name unbekannt';
+  // Before the names are in, "Agent" is all that is actually known.
+  if (actor.agentId && self.history.agentsReady) return 'Agent · Name unbekannt';
   return 'Ein Agent';
 }
 
