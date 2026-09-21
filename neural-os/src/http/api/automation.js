@@ -44,8 +44,13 @@ function triggers(rc, method) {
   return needMethod(
     rc.ctx.triggers,
     method,
-    'Die Auslöser',
-    'Sie werden beim Start zusammen mit der Agenten-Laufzeit aufgebaut.',
+    // Einzahl, weil `unavailable()` daraus "<Bezeichnung> ist in dieser Instanz
+    // nicht verfuegbar" baut. Mit "Die Ausloeser" stand dort "Die Ausloeser
+    // IST ..." -- ein Satz, den niemand schreibt, und der die Meldung wie eine
+    // Maschinenuebersetzung aussehen laesst, ausgerechnet dort, wo sie erklaeren
+    // soll, was fehlt.
+    'Die Auslöser-Verwaltung',
+    'Sie wird beim Start zusammen mit der Agenten-Laufzeit aufgebaut.',
   );
 }
 

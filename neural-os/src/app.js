@@ -629,6 +629,10 @@ async function createApp(opts = {}) {
       const problems = [];
       for (const [name, fn] of [
         ['watcher', () => watcher && watcher.stop && watcher.stop()],
+        // Auch die, die nur am Bus haengen: ein Abonnement, das ein
+        // heruntergefahrenes Teilsystem ueberlebt, arbeitet auf einem Speicher
+        // weiter, den gerade jemand schliesst.
+        ['study', () => study && study.stop && study.stop()],
         ['history', () => history && history.stop && history.stop()],
         ['scheduler', () => scheduler && scheduler.stop && scheduler.stop()],
         ['triggers', () => triggers && triggers.stop && triggers.stop()],
