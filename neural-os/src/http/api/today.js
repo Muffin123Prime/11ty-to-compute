@@ -21,14 +21,24 @@
  * safe to open it again and again: the second look shows the same morning as
  * the first.
  *
- * Why a missing subsystem lands in `fehlend`
- * ------------------------------------------
+ * Why every block says `stand` before it says anything else
+ * ----------------------------------------------------------
  * "Nichts steht an" and "ich konnte nicht nachsehen" are different statements,
  * and an empty block cannot tell them apart. Every subsystem here is optional
  * (src/app.js builds each one with `optional()`), so each block is fetched
- * behind its own guard: what is missing or throws is named in `fehlend` with
- * the reason, and the rest of the morning still arrives. Only the store is
- * non-negotiable -- without it there is no vault to report on at all.
+ * behind its own guard -- and hands back `{ stand, wert, grund }` rather than
+ * a bare value with the reason filed away somewhere else.
+ *
+ * That shape is not decoration. While the reasons lived in a separate
+ * `fehlend` list, every block had to remember, on its own, to go and read it;
+ * two of six forgot. One then announced "Die Automatik ist aus" although one
+ * of the two clocks had never answered, and another threw away runs it had
+ * already read because a *different* source under the same name was missing.
+ * With `stand` travelling inside the block, neither is expressible: a reader
+ * has to walk past it to reach the value.
+ *
+ * Only the store is non-negotiable -- without it there is no vault to report
+ * on at all.
  */
 
 const { NeuralError } = require('../../kernel/errors');
@@ -49,16 +59,25 @@ const SOON_DAYS = 7;
 
 const DAY_MS = 86400000;
 
-/** Upper bounds for the lists; the true counts travel alongside them. */
+/**
+ * Upper bounds for the lists; the true counts travel alongside them, and so
+ * does `gekuerzt` -- see `gekuerztAb()`.
+ *
+ * `ACTIVITY_MAX` is here rather than in the view for the same reason as the
+ * others: whoever cuts a list is the one who can say how much was cut. As long
+ * as the view trimmed "Seit gestern" a second time, on its own, no number the
+ * route sent about that list described what was on the screen.
+ */
 const REVISIT_MAX = 3;
 const RUN_MAX = 20;
 const SUGGESTION_MAX = 5;
+const ACTIVITY_MAX = 6;
 
 /**
  * How many journal entries to read before filtering. The journal itself caps
  * reads at 500, and a day's worth of agent writes is far below that -- but
- * when it is not, `ohneDich.gekuerzt` says so rather than quietly reporting a
- * smaller night than really happened.
+ * when it is not, `ohneDich.verlaufGekuerzt` says so rather than quietly
+ * reporting a smaller night than really happened.
  */
 const HISTORY_READ = 500;
 
@@ -151,23 +170,79 @@ function labelerFor(ctx) {
   };
 }
 
+/* ------------------------------------------------- what was actually asked */
+
 /**
- * Run one block. Whatever it throws is turned into an entry in `fehlend` and
- * the agreed fallback value -- one absent subsystem must never cost the other
- * four blocks.
+ * The three things a block can be, and there is no fourth.
  *
- * @param {Array<{teil:string, grund:string}>} fehlend
- * @param {string} teil  the block in the answer this reason belongs to
+ *   gemessen   asked and answered in full; `grund` is null.
+ *   teilweise  one source answered, another did not. `wert` holds what WAS
+ *              found and is shown; `grund` says what is missing from it.
+ *   unbekannt  nothing to be had; `wert` is only the agreed stand-in and
+ *              means nothing.
+ *
+ * The distinction that matters most is the middle one. It is the state the
+ * old shape could not express, and both places where this route claimed
+ * something it had not measured were sitting in it.
+ */
+function gemessen(wert) {
+  return { stand: 'gemessen', wert, grund: null };
+}
+
+function teilweise(wert, grund) {
+  return { stand: 'teilweise', wert, grund };
+}
+
+function unbekannt(wert, grund) {
+  return { stand: 'unbekannt', wert, grund };
+}
+
+/** The reason a source failed, as the German sentence it threw. */
+function grundVon(err) {
+  return (err && err.message) || String(err);
+}
+
+/**
+ * Run one block that has a single source. Whatever it throws becomes the
+ * reason -- one absent subsystem must never cost the other five blocks.
+ *
  * @param {*} fallback   what that block looks like when we could not look
  * @param {() => *} run
  */
-function block(fehlend, teil, fallback, run) {
+function messen(fallback, run) {
   try {
-    return run();
+    return gemessen(run());
   } catch (err) {
-    fehlend.push({ teil, grund: (err && err.message) || String(err) });
-    return fallback;
+    return unbekannt(fallback, grundVon(err));
   }
+}
+
+/**
+ * A block with two sources: measured when both answered, `teilweise` when one
+ * did, `unbekannt` when neither did.
+ *
+ * @param {*} wert       what the sources that answered produced
+ * @param {number} gefragt  how many sources answered
+ * @param {string[]} gruende  one sentence per source that did not
+ */
+function ausTeilen(wert, gefragt, gruende) {
+  if (!gruende.length) return gemessen(wert);
+  const grund = gruende.join(' ');
+  return gefragt ? teilweise(wert, grund) : unbekannt(wert, grund);
+}
+
+/**
+ * How much of a list actually made it into the answer, or null when nothing
+ * was left out.
+ *
+ * The subtraction belongs here and not in the view. While it was the view's,
+ * it was written four times over, and two of the four had simply been
+ * forgotten -- with the badge next to them still naming the true count. A
+ * number that belongs to no visible set is, on a screen whose only job is
+ * counting, a plain falsehood.
+ */
+function gekuerztAb(gezeigt, gesamt) {
+  return gesamt > gezeigt ? { gezeigt, gesamt, weitere: gesamt - gezeigt } : null;
 }
 
 /** The subsystem, or a throw carrying the same German sentence a 503 would. */
@@ -224,10 +299,16 @@ function faelligBlock(store, now, limit) {
     else spaeter += 1;
   }
 
+  const gezeigt = {
+    ueberfaellig: ueberfaellig.slice(0, limit),
+    heute: heute.slice(0, limit),
+    demnaechst: demnaechst.slice(0, limit),
+  };
+
   return {
-    ueberfaellig: ueberfaellig.slice(0, limit).map(taskOut),
-    heute: heute.slice(0, limit).map(taskOut),
-    demnaechst: demnaechst.slice(0, limit).map(taskOut),
+    ueberfaellig: gezeigt.ueberfaellig.map(taskOut),
+    heute: gezeigt.heute.map(taskOut),
+    demnaechst: gezeigt.demnaechst.map(taskOut),
     // The true numbers, which the lists above may be shorter than.
     anzahl: {
       ueberfaellig: ueberfaellig.length,
@@ -236,6 +317,12 @@ function faelligBlock(store, now, limit) {
       ohneDatum,
       spaeter,
     },
+    // ... and by exactly how much, counted over the three lists together,
+    // because that is what the block puts on the screen.
+    gekuerzt: gekuerztAb(
+      gezeigt.ueberfaellig.length + gezeigt.heute.length + gezeigt.demnaechst.length,
+      ueberfaellig.length + heute.length + demnaechst.length,
+    ),
   };
 }
 
@@ -248,16 +335,19 @@ function seitGesternBlock(store, sinceMs, limit, labelOf) {
   const nachArt = {};
   for (const r of items) nachArt[r.type] = (nachArt[r.type] || 0) + 1;
 
+  const gezeigt = items.slice(0, Math.min(limit, ACTIVITY_MAX));
+
   return {
     gesamt: items.length,
     nachArt,
-    eintraege: items.slice(0, limit).map((r) => ({
+    eintraege: gezeigt.map((r) => ({
       id: r.id,
       type: r.type,
       label: labelOf(r),
       updatedAt: r.updatedAt,
       neu: Date.parse(r.createdAt) >= sinceMs,
     })),
+    gekuerzt: gekuerztAb(gezeigt.length, items.length),
   };
 }
 
@@ -268,18 +358,21 @@ function vorschlaegeBlock(value) {
   const assist = subsystem(subsystem(value, 'list', 'Die Assistenz'), 'stats', 'Die Assistenz');
   const stats = assist.stats();
   const listed = assist.list({ status: 'open', limit: SUGGESTION_MAX });
+  const offen = Number.isFinite(stats.open) ? stats.open : listed.total;
+  // Sorted by confidence by the engine itself; the top few are enough here.
+  const oben = listed.items.map((rec) => ({
+    id: rec.id,
+    kind: rec.data.kind,
+    title: rec.data.title,
+    reason: rec.data.reason,
+    confidence: rec.data.confidence,
+    recordIds: rec.data.recordIds || [],
+  }));
   return {
-    offen: Number.isFinite(stats.open) ? stats.open : listed.total,
+    offen,
     nachArt: stats.byKind || {},
-    // Sorted by confidence by the engine itself; the top few are enough here.
-    oben: listed.items.map((rec) => ({
-      id: rec.id,
-      kind: rec.data.kind,
-      title: rec.data.title,
-      reason: rec.data.reason,
-      confidence: rec.data.confidence,
-      recordIds: rec.data.recordIds || [],
-    })),
+    oben,
+    gekuerzt: gekuerztAb(oben.length, offen),
   };
 }
 
@@ -310,14 +403,24 @@ function reallyAgent(entry) {
  * hast". Inferring the second from the first would be a guess, and the block
  * exists precisely because guesses about who did what are not good enough.
  */
-function ohneDichBlock(ctx, sinceMs, sinceIso, limit, fehlend) {
-  const out = {
-    laeufe: [], laeufeGesamt: 0, aenderungen: [], gesamt: 0, unsicher: 0, gekuerzt: false,
+function ohneDichBlock(ctx, sinceMs, sinceIso, limit) {
+  const wert = {
+    laeufe: [],
+    laeufeGesamt: 0,
+    aenderungen: [],
+    gesamt: 0,
+    unsicher: 0,
+    verlaufGekuerzt: false,
+    gekuerzt: null,
   };
+  const gruende = [];
+  let gefragt = 0;
 
   // The runs come straight from the store; the journal below is its own
-  // subsystem and may be absent on its own, so the two are guarded apart.
-  block(fehlend, 'ohneDich', null, () => {
+  // subsystem and may be absent on its own, so the two are guarded apart --
+  // and a failure of one leaves the other's rows standing. They used to share
+  // one name in `fehlend`, and the view then wiped both for one reason.
+  try {
     const store = ctx.store;
     const names = new Map();
     for (const agent of store.all('agent')) names.set(agent.id, agent.data.name || null);
@@ -326,7 +429,7 @@ function ohneDichBlock(ctx, sinceMs, sinceIso, limit, fehlend) {
       .filter((r) => Date.parse(r.data.startedAt || r.createdAt) >= sinceMs)
       .sort((a, b) => Date.parse(b.data.startedAt || b.createdAt) - Date.parse(a.data.startedAt || a.createdAt));
 
-    out.laeufe = runs.slice(0, Math.min(limit, RUN_MAX)).map((r) => ({
+    wert.laeufe = runs.slice(0, Math.min(limit, RUN_MAX)).map((r) => ({
       id: r.id,
       agentId: r.data.agentId,
       agent: names.has(r.data.agentId) ? names.get(r.data.agentId) : null,
@@ -338,34 +441,48 @@ function ohneDichBlock(ctx, sinceMs, sinceIso, limit, fehlend) {
       produziert: Array.isArray(r.data.producedIds) ? r.data.producedIds.length : 0,
       netz: r.data.usedNetwork === true,
     }));
-    out.laeufeGesamt = runs.length;
-    return true;
-  });
+    wert.laeufeGesamt = runs.length;
+    gefragt += 1;
+  } catch (err) {
+    gruende.push(grundVon(err));
+  }
 
-  const history = block(fehlend, 'ohneDich', null, () => subsystem(
-    ctx.history,
-    'list',
-    'Der Änderungsverlauf',
-    'Er wird beim Start zusammen mit dem Speicher aufgebaut.',
-  ).list({ actor: 'agent', since: sinceIso, limit: HISTORY_READ }));
+  try {
+    const history = subsystem(
+      ctx.history,
+      'list',
+      'Der Änderungsverlauf',
+      'Er wird beim Start zusammen mit dem Speicher aufgebaut.',
+    ).list({ actor: 'agent', since: sinceIso, limit: HISTORY_READ });
 
-  if (!history) return out;
+    const entries = (history.items || []).filter(reallyAgent);
+    wert.gesamt = entries.length;
+    wert.unsicher = (history.items || []).length - entries.length;
+    // A different cut from `gekuerzt`: not "more than fits on the screen" but
+    // "more than we even read". Two axes, and folding them into one would lose
+    // the difference between a long morning and a full journal.
+    wert.verlaufGekuerzt = Number.isFinite(history.total) && history.total > (history.items || []).length;
+    wert.aenderungen = entries.slice(0, limit).map((entry) => ({
+      seq: entry.seq,
+      at: entry.at,
+      op: entry.op,
+      id: entry.id,
+      type: entry.type,
+      label: entry.label,
+      agentId: (entry.actor && entry.actor.agentId) || null,
+      runId: (entry.actor && entry.actor.runId) || null,
+    }));
+    gefragt += 1;
+  } catch (err) {
+    gruende.push(grundVon(err));
+  }
 
-  const entries = (history.items || []).filter(reallyAgent);
-  out.gesamt = entries.length;
-  out.unsicher = (history.items || []).length - entries.length;
-  out.gekuerzt = Number.isFinite(history.total) && history.total > (history.items || []).length;
-  out.aenderungen = entries.slice(0, limit).map((entry) => ({
-    seq: entry.seq,
-    at: entry.at,
-    op: entry.op,
-    id: entry.id,
-    type: entry.type,
-    label: entry.label,
-    agentId: (entry.actor && entry.actor.agentId) || null,
-    runId: (entry.actor && entry.actor.runId) || null,
-  }));
-  return out;
+  wert.gekuerzt = gekuerztAb(
+    wert.laeufe.length + wert.aenderungen.length,
+    wert.laeufeGesamt + wert.gesamt,
+  );
+
+  return ausTeilen(wert, gefragt, gruende);
 }
 
 /**
@@ -374,50 +491,66 @@ function ohneDichBlock(ctx, sinceMs, sinceIso, limit, fehlend) {
  * `eingeschaltet: null` means "konnte nicht nachsehen" and is deliberately not
  * `false`: a screen that reported a stopped clock when it simply could not ask
  * would be the most misleading thing on this page.
+ *
+ * The two answers are not symmetric, and that is the whole point:
+ *
+ * - `true` needs ONE clock that answered and is running. Having seen a running
+ *   schedule is a measurement; the other clock cannot take it back.
+ * - `false` needs BOTH. "Nichts läuft von allein" is a statement about the
+ *   whole machine, and a clock that never answered may well be ticking. This
+ *   is exactly where a missing scheduler used to be counted as a stopped one.
  */
-function automatikBlock(ctx, fehlend) {
-  const out = { eingeschaltet: null, naechster: null, zeitplaene: null, ausloeser: null };
-  let asked = 0;
+function automatikBlock(ctx) {
+  const wert = { eingeschaltet: null, naechster: null, zeitplaene: null, ausloeser: null };
+  const gruende = [];
+  let gefragt = 0;
+  let laeuftEtwas = false;
 
   // Kein `hint` hier: die Gründe stehen auf diesem Bildschirm in einer Zeile
   // nebeneinander, und zwei Aufbauhinweise machen daraus einen Absatz.
-  const zeitplaene = block(fehlend, 'automatik', null, () => subsystemSaying(
-    ctx.scheduler,
-    'status',
-    'Die Zeitplanung ist in dieser Instanz nicht verfügbar.',
-  ).status());
-
-  if (zeitplaene) {
-    asked += 1;
-    out.zeitplaene = {
+  try {
+    const zeitplaene = subsystemSaying(
+      ctx.scheduler,
+      'status',
+      'Die Zeitplanung ist in dieser Instanz nicht verfügbar.',
+    ).status();
+    gefragt += 1;
+    wert.zeitplaene = {
       laeuft: zeitplaene.running === true,
       eingeschaltet: zeitplaene.enabled || 0,
       gesamt: zeitplaene.total || 0,
     };
-    out.naechster = zeitplaene.nextDue || null;
+    // Only the scheduler knows about a next run. If it did not answer,
+    // `naechster` stays null and the view says nothing about it at all --
+    // "steht nicht fest" would be an answer nobody gave.
+    wert.naechster = zeitplaene.nextDue || null;
+    laeuftEtwas = laeuftEtwas || (wert.zeitplaene.laeuft && wert.zeitplaene.eingeschaltet > 0);
+  } catch (err) {
+    gruende.push(grundVon(err));
   }
 
-  const ausloeser = block(fehlend, 'automatik', null, () => subsystemSaying(
-    ctx.triggers,
-    'status',
-    'Die Auslöser sind in dieser Instanz nicht verfügbar.',
-  ).status());
-
-  if (ausloeser) {
-    asked += 1;
-    out.ausloeser = {
+  try {
+    const ausloeser = subsystemSaying(
+      ctx.triggers,
+      'status',
+      'Die Auslöser sind in dieser Instanz nicht verfügbar.',
+    ).status();
+    gefragt += 1;
+    wert.ausloeser = {
       laeuft: ausloeser.running === true,
       eingeschaltet: ausloeser.enabled || 0,
       gesamt: ausloeser.total || 0,
       letzteStunde: ausloeser.firedLastHour || 0,
     };
+    laeuftEtwas = laeuftEtwas || (wert.ausloeser.laeuft && wert.ausloeser.eingeschaltet > 0);
+  } catch (err) {
+    gruende.push(grundVon(err));
   }
 
-  if (asked) {
-    out.eingeschaltet = (out.zeitplaene ? out.zeitplaene.laeuft && out.zeitplaene.eingeschaltet > 0 : false)
-      || (out.ausloeser ? out.ausloeser.laeuft && out.ausloeser.eingeschaltet > 0 : false);
-  }
-  return out;
+  if (laeuftEtwas) wert.eingeschaltet = true;
+  else if (gefragt === 2) wert.eingeschaltet = false;
+
+  return ausTeilen(wert, gefragt, gruende);
 }
 
 /**
@@ -446,7 +579,7 @@ function wiedervorlageBlock(store, now, labelOf) {
       return a.id < b.id ? -1 : 1;
     });
 
-  return candidates.slice(0, REVISIT_MAX).map((note) => {
+  const notizen = candidates.slice(0, REVISIT_MAX).map((note) => {
     const tage = Math.floor((now - Date.parse(note.updatedAt)) / DAY_MS);
     return {
       id: note.id,
@@ -459,6 +592,11 @@ function wiedervorlageBlock(store, now, labelOf) {
         : `Seit ${tage} Tagen nicht mehr geändert.`,
     };
   });
+
+  // Three is a reminder; thirty is a filing cabinet. But a list cut at three
+  // without a word is the same silent trimming as everywhere else, so the
+  // remainder is named too.
+  return { notizen, gekuerzt: gekuerztAb(notizen.length, candidates.length) };
 }
 
 /* ------------------------------------------------------------------ route */
@@ -478,41 +616,65 @@ function register(router) {
     const sinceMs = now - stunden * 3600000;
     const sinceIso = new Date(sinceMs).toISOString();
 
-    const fehlend = [];
     const labelOf = labelerFor(rc.ctx);
 
-    const faellig = block(fehlend, 'faellig',
-      { ueberfaellig: [], heute: [], demnaechst: [], anzahl: { ueberfaellig: 0, heute: 0, demnaechst: 0, ohneDatum: 0, spaeter: 0 } },
-      () => faelligBlock(store, now, limit));
+    const bloecke = {
+      faellig: messen(
+        {
+          ueberfaellig: [],
+          heute: [],
+          demnaechst: [],
+          anzahl: { ueberfaellig: 0, heute: 0, demnaechst: 0, ohneDatum: 0, spaeter: 0 },
+          gekuerzt: null,
+        },
+        () => faelligBlock(store, now, limit),
+      ),
 
-    const seitGestern = block(fehlend, 'seitGestern',
-      { gesamt: 0, nachArt: {}, eintraege: [] },
-      () => seitGesternBlock(store, sinceMs, limit, labelOf));
+      seitGestern: messen(
+        { gesamt: 0, nachArt: {}, eintraege: [], gekuerzt: null },
+        () => seitGesternBlock(store, sinceMs, limit, labelOf),
+      ),
 
-    const vorschlaege = block(fehlend, 'vorschlaege',
-      { offen: 0, nachArt: {}, oben: [] },
-      () => vorschlaegeBlock(rc.ctx.assist));
+      vorschlaege: messen(
+        { offen: 0, nachArt: {}, oben: [], gekuerzt: null },
+        () => vorschlaegeBlock(rc.ctx.assist),
+      ),
 
-    const ohneDich = ohneDichBlock(rc.ctx, sinceMs, sinceIso, limit, fehlend);
+      ohneDich: ohneDichBlock(rc.ctx, sinceMs, sinceIso, limit),
 
-    const automatik = automatikBlock(rc.ctx, fehlend);
+      automatik: automatikBlock(rc.ctx),
 
-    const wiedervorlage = block(fehlend, 'wiedervorlage', [],
-      () => wiedervorlageBlock(store, now, labelOf));
+      wiedervorlage: messen(
+        { notizen: [], gekuerzt: null },
+        () => wiedervorlageBlock(store, now, labelOf),
+      ),
+    };
 
     return {
       at: new Date(now).toISOString(),
       seit: sinceIso,
       stunden,
-      faellig,
-      seitGestern,
-      vorschlaege,
-      ohneDich,
-      automatik,
-      wiedervorlage,
-      fehlend,
+      ...bloecke,
+      fehlend: fehlendAus(bloecke),
     };
   });
+}
+
+/**
+ * Dieselbe Auskunft flach: was nicht (ganz) zu erfahren war, auf einen Blick.
+ *
+ * Abgeleitet und nicht gepflegt. Eine zweite, von Hand geführte Liste kann dem
+ * `stand` der Blöcke widersprechen, und genau das ist hier passiert: der Grund
+ * stand in `fehlend`, der Wert log daneben weiter. `stand` steht mit dabei,
+ * damit „teilweise" hier nicht als „nichts gesehen" gelesen werden kann.
+ */
+function fehlendAus(bloecke) {
+  const out = [];
+  for (const teil of Object.keys(bloecke)) {
+    const b = bloecke[teil];
+    if (b.grund) out.push({ teil, stand: b.stand, grund: b.grund });
+  }
+  return out;
 }
 
 module.exports = {

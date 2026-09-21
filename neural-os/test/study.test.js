@@ -433,6 +433,22 @@ test('createFromNote: legt genau das Angehakte an und verknüpft es', async () =
   });
 });
 
+test('createFromNote: derselbe Schlüssel mehrfach ist eine Karte, nicht fünf', async () => {
+  await withDeck(async ({ store, study }) => {
+    const note = store.create('note', { title: 'Kurz', body: 'Alpha :: Erste Erklärung' });
+    const key = study.proposeFromNote(note.id).items[0].key;
+
+    // „Nichts doppelt" muss auch innerhalb EINES Aufrufs gelten: der Schutz
+    // darf nicht an einer Momentaufnahme hängen, die vor der Schleife entstand.
+    const result = study.createFromNote(note.id, [key, key, key, key, key]);
+    assert.equal(result.created.length, 1, 'fünfmal derselbe Wunsch ist ein Wunsch');
+    assert.equal(store.count('card'), 1);
+    assert.equal(store.edges.for(result.created[0].id, { direction: 'out' }).length, 1,
+      'und genau eine Kante zur Notiz');
+    assert.equal(study.due().items.length, 1, 'der Stapel zeigt „Alpha" einmal');
+  });
+});
+
 test('createFromNote: ein Schlüssel, den es nicht mehr gibt, wird benannt', async () => {
   await withDeck(async ({ store, study }) => {
     const note = store.create('note', { title: 'Kurz', body: 'Begriff :: Erklärung' });
@@ -483,6 +499,141 @@ test('Eine von Hand ausgesetzte Karte bleibt ausgesetzt, wenn die Notiz zurückk
     assert.equal(store.get(cardId).data.suspended, true,
       'die Entscheidung des Menschen wird nicht stillschweigend zurückgenommen');
   });
+});
+
+test('stop(): nach dem Abbau hängt kein Zuhörer mehr am Bus', async () => {
+  const { Bus } = require('../src/kernel/bus');
+  const { home, cleanup } = tempHome('nos-study-stop');
+  const bus = new Bus();
+  const store = await openStore({ paths: path.join(home, 'nos'), bus, lock: false, logger: silentLogger });
+  // Was der Speicher selbst schon hört, gehört nicht dem Stapel.
+  const vorher = {
+    geloescht: bus.listenerCount('record.deleted'),
+    geaendert: bus.listenerCount('record.updated'),
+  };
+  const study = createStudy({ store, bus, logger: silentLogger });
+  try {
+    assert.ok(bus.listenerCount('record.deleted') > vorher.geloescht, 'solange er läuft, hört er zu');
+
+    const note = store.create('note', { title: 'Quelle', body: 'Begriff :: Erklärung' });
+    study.createFromNote(note.id, [study.proposeFromNote(note.id).items[0].key]);
+    const cardId = study.list().items[0].id;
+
+    study.stop();
+    assert.equal(bus.listenerCount('record.deleted'), vorher.geloescht, 'danach nicht mehr');
+    assert.equal(bus.listenerCount('record.updated'), vorher.geaendert);
+
+    // Ein abgebautes Teilsystem fasst den Speicher nicht mehr an -- genau
+    // deshalb ruft app.close() stop() auf.
+    store.remove(note.id);
+    assert.equal(store.get(cardId).data.suspended, false);
+
+    study.stop();
+    assert.equal(bus.listenerCount('record.deleted'), vorher.geloescht, 'zweimal abbauen schadet nicht');
+  } finally {
+    await store.close().catch(() => {});
+    cleanup();
+  }
+});
+
+/* ------------------------------------------------------- die Ansicht */
+
+/**
+ * Die Ansicht ist Browser-ESM, dieses Projekt ist CommonJS -- `require` kann
+ * sie nicht lesen. Sie wird deshalb unverändert in ein Verzeichnis kopiert,
+ * dessen package.json `"type": "module"` sagt, und von dort geladen: geprüft
+ * wird die echte Datei, keine Abschrift.
+ *
+ * Geprüft werden hier nur ihre reinen Entscheidungen -- welcher Zustand gilt,
+ * was gemessen ist und was nicht. Alles, was ein Dokument braucht, gehört in
+ * einen echten Browser; dafür gibt es tools/ui-check.js.
+ */
+let viewModule = null;
+async function studyView() {
+  if (viewModule) return viewModule;
+  const { pathToFileURL } = require('node:url');
+  const { home, cleanup } = tempHome('nos-study-view');
+  const web = path.join(__dirname, '..', 'web');
+  fs.writeFileSync(path.join(home, 'package.json'), '{"type":"module"}\n');
+  fs.mkdirSync(path.join(home, 'lib'));
+  fs.mkdirSync(path.join(home, 'views'));
+  fs.copyFileSync(path.join(web, 'lib', 'dom.js'), path.join(home, 'lib', 'dom.js'));
+  fs.copyFileSync(path.join(web, 'views', 'study.js'), path.join(home, 'views', 'study.js'));
+  try {
+    viewModule = await import(pathToFileURL(path.join(home, 'views', 'study.js')).href);
+    return viewModule;
+  } finally {
+    cleanup();
+  }
+}
+
+test('Ansicht: welcher Zustand gilt, entscheidet eine Stelle', async () => {
+  const { modeFor } = await studyView();
+
+  assert.equal(modeFor({ queue: [], cursor: 0, sessionSize: 0 }), 'leer');
+  assert.equal(modeFor({ queue: [1, 2], cursor: 0, sessionSize: 2 }), 'lernen');
+  assert.equal(modeFor({ queue: [1], cursor: 1, sessionSize: 1 }), 'fertig');
+
+  // Der Fall des ersten Tages: im Formular wurde eine Karte angelegt, die
+  // Runde von vorhin ist nicht mehr der Stapel. „leer" wäre hier gelogen.
+  assert.equal(modeFor({ queue: [], cursor: 0, sessionSize: 0, stale: true }), 'laden');
+  assert.equal(modeFor({ queue: [1], cursor: 1, sessionSize: 1, stale: true }), 'laden');
+  assert.equal(modeFor({ queue: [1, 2], cursor: 1, sessionSize: 2, stale: true }), 'lernen',
+    'eine angefangene Runde wird darüber nicht weggeworfen');
+});
+
+test('Ansicht: der Fortschritt wird am Stapel gemessen, nicht mitgezählt', async () => {
+  const { progressOf } = await studyView();
+  const karte = (id) => ({ record: { id, data: {} } });
+
+  // Zwei Karten; „a" wurde mit „Nochmal" bewertet und steht hinten wieder an.
+  const mitten = {
+    queue: [karte('a'), karte('b'), karte('a')],
+    cursor: 2,
+    sessionSize: 2,
+    answered: new Set(['a', 'b']),
+  };
+  assert.deepEqual(progressOf(mitten), { erledigt: 1, gesamt: 2, offen: 1, wieder: 1 },
+    'was noch einmal kommt, ist nicht geschafft');
+
+  // Runde zu Ende: nichts steht mehr aus, also wird auch nichts versprochen.
+  const ende = { ...mitten, cursor: 3 };
+  assert.deepEqual(progressOf(ende), { erledigt: 2, gesamt: 2, offen: 0, wieder: 0 });
+
+  const anfang = {
+    queue: [karte('a'), karte('b')], cursor: 0, sessionSize: 2, answered: new Set(),
+  };
+  assert.deepEqual(progressOf(anfang), { erledigt: 0, gesamt: 2, offen: 2, wieder: 0 });
+});
+
+test('Ansicht: der leere Bildschirm behauptet nur Gemessenes', async () => {
+  const { emptyMessage, nextDay } = await studyView();
+
+  // „nicht gemessen" darf nicht unterwegs zu „es steht nichts an" werden.
+  assert.equal(nextDay(undefined), undefined, 'keine Antwort ist keine Aussage');
+  assert.equal(nextDay({}), undefined);
+  assert.equal(nextDay({ naechste: null }), null, 'gemessen: es kommt keine');
+  assert.equal(nextDay({ naechste: '2026-12-24' }), '2026-12-24');
+
+  const leer = emptyMessage({ gesamt: 0 }, null);
+  assert.match(leer.titel, /Noch keine Karten/);
+
+  // Der Befund: eine einzige, frisch angelegte, nicht ausgesetzte Karte.
+  const frisch = emptyMessage({ gesamt: 1, faellig: 1, neu: 0, ausgesetzt: 0 }, null);
+  assert.doesNotMatch(frisch.satz, /ausgesetzt/, 'nichts ist ausgesetzt — also wird es nicht behauptet');
+  assert.doesNotMatch(frisch.titel, /nichts fällig/, 'und „nichts fällig" wäre das Gegenteil der Zahlen');
+  assert.match(frisch.satz, /1 Karte wartet/, 'sondern die gezählte Karte wird benannt');
+
+  const alle = emptyMessage({ gesamt: 3, faellig: 0, neu: 0, ausgesetzt: 3 }, null);
+  assert.match(alle.satz, /ausgesetzt/, 'wenn es zutrifft, darf es gesagt werden');
+
+  const spaeter = emptyMessage({ gesamt: 2, faellig: 0, neu: 0, ausgesetzt: 0 }, '2026-12-24');
+  assert.match(spaeter.satz, /nächste Karte/);
+  assert.doesNotMatch(spaeter.satz, /ausgesetzt/);
+
+  const ungemessen = emptyMessage({ gesamt: 2, faellig: 0, neu: 0, ausgesetzt: 1 }, undefined);
+  assert.doesNotMatch(ungemessen.satz, /keine weitere Wiederholung/,
+    'ohne Auskunft wird keine Auskunft erfunden');
 });
 
 /* -------------------------------------------------------------- HTTP */
@@ -596,6 +747,15 @@ test('Die HTTP-Routen liefern den vereinbarten Vertrag', async () => {
     assert.equal(angelegt.status, 200, angelegt.text);
     assert.equal(angelegt.json.created.length, 2);
     assert.equal(store.count('card'), 3);
+
+    // Derselbe Schlüssel mehrfach in einer Anfrage: „nichts doppelt" gilt
+    // auch dann, denn die Route reicht die Liste durch, wie sie kommt.
+    const key = vorschlaege.json.items[2].key;
+    const doppelt = await request(base, 'POST', `/api/study/from-note/${note.id}`,
+      { auswahl: [key, key, key, key, key], deck: 'Doppelt' });
+    assert.equal(doppelt.status, 200, doppelt.text);
+    assert.equal(doppelt.json.created.length, 1, 'fünfmal derselbe Wunsch ist ein Wunsch');
+    assert.equal(store.count('card'), 4);
 
     const fehlend = await request(base, 'GET', '/api/study/from-note/note_gibtesnicht00000000');
     assert.equal(fehlend.status, 404, fehlend.text);

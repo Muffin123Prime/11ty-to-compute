@@ -705,6 +705,22 @@ function createStudy({ store, bus, config, logger, now } = {}) {
   }
 
   /**
+   * The question sides this note already has cards for, folded.
+   *
+   * One function for the one question "gibt es die schon?", because the
+   * proposal and the creation used to answer it separately -- and two answers
+   * to the same question are exactly how a promise like "nichts doppelt"
+   * quietly stops holding.
+   */
+  function frontsOfNote(noteId) {
+    const fronts = new Set();
+    for (const card of allCards()) {
+      if (card.data.noteId === noteId) fronts.add(foldFront(card.data.front));
+    }
+    return fronts;
+  }
+
+  /**
    * What could become a card in this note -- proposals only, nothing written.
    *
    * Proposals that already exist as a card for this note are marked instead of
@@ -715,9 +731,7 @@ function createStudy({ store, bus, config, logger, now } = {}) {
     const note = mustNote(noteId);
     const { items, uebersprungen } = readNote(note.data.body);
 
-    const existing = new Set(
-      allCards().filter((card) => card.data.noteId === note.id).map((card) => foldFront(card.data.front)),
-    );
+    const existing = frontsOfNote(note.id);
     const vorschlaege = items.map((item) => ({
       ...item,
       schonVorhanden: existing.has(foldFront(item.front)),
@@ -760,28 +774,39 @@ function createStudy({ store, bus, config, logger, now } = {}) {
     const deck = assertDeck(opts.deck);
 
     const wanted = [];
+    const seen = new Set();
     for (const raw of auswahl) {
       if (typeof raw !== 'string' || !raw.trim()) {
         throw new ValidationError('"auswahl" darf nur Schlüssel aus den Vorschlägen enthalten.');
       }
-      const item = byKey.get(raw.trim());
+      const key = raw.trim();
+      const item = byKey.get(key);
       if (!item) {
         throw new ValidationError(
           `Der Vorschlag ${clip(raw, 40)} steht nicht mehr in dieser Notiz. Sieh dir die Vorschläge noch einmal an.`,
           { key: raw },
         );
       }
+      // Naming the same proposal twice is one wish, not two.
+      if (seen.has(key)) continue;
+      seen.add(key);
       wanted.push(item);
     }
 
+    // Carried along instead of read from the snapshot: the moment a card is
+    // made here it exists -- including for the next turn of this very loop.
+    // Otherwise "nichts doppelt" would only hold BETWEEN requests.
+    const vorhanden = frontsOfNote(note.id);
     const created = [];
     const uebersprungen = [];
     for (const item of wanted) {
-      if (item.schonVorhanden) {
+      const fold = foldFront(item.front);
+      if (vorhanden.has(fold)) {
         uebersprungen.push({ key: item.key, grund: `Für „${clip(item.front, 60)}“ gibt es bereits eine Karte.` });
         continue;
       }
       const card = create({ front: item.front, back: item.back, deck, noteId: note.id }, { source: 'note' });
+      vorhanden.add(fold);
       created.push(card);
       linkToNote(card, note, item.form);
     }

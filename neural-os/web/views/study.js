@@ -27,10 +27,20 @@
  *    fällig" plus the day the next card arrives is an answer. Next to it are
  *    the two ways to get cards: by hand, and from a note -- where the
  *    proposals are shown and ticked, never created behind the user's back.
+ *    Every sentence on that screen is measured: "alle ausgesetzt" is said
+ *    when the counted suspended cards ARE all of them, and a day the server
+ *    did not name stays unnamed instead of turning into "nothing is coming".
+ *    And because a card created in the form makes the round in hand older
+ *    than the deck, the deck is fetched again instead of being described from
+ *    memory -- otherwise the very first card somebody makes is answered with
+ *    "Heute ist nichts fällig", which is what this view used to do.
  * 6. **"Nochmal" really means today.** A card graded 0 goes back to the end of
  *    this session's queue instead of disappearing until tomorrow, and the
  *    progress line says how many are waiting to come round again. Counting it
- *    as "done" would be the flattering version of the truth.
+ *    as "done" would be the flattering version of the truth -- so progress is
+ *    READ from the queue (`progressOf`) rather than counted along the way: a
+ *    card that is waiting again is not done, and once nothing is waiting, the
+ *    head stops promising a repeat.
  */
 
 import {
@@ -111,6 +121,118 @@ function isTyping(node) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Was gerade gilt                                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Die vier Funktionen hier treffen die Aussagen dieser Ansicht und rühren
+ * dabei kein Dokument an. Sie sind exportiert, weil sich genau hier der
+ * teuerste Fehler einer Oberfläche zeigt -- eine Behauptung, die niemand
+ * gemessen hat -- und weil sie sich so ohne Browser prüfen lassen. Gezeichnet
+ * wird weiterhin nur im Browser; dafür gibt es tools/ui-check.js.
+ */
+
+/**
+ * Welcher Zustand jetzt gilt. EINE Stelle, damit das Ende einer Runde und die
+ * Rückkehr aus einem Formular nicht zu zwei verschiedenen Meinungen darüber
+ * kommen, ob der Stapel leer ist.
+ *
+ * `laden` ist dabei kein Bildschirm, sondern ein Auftrag: es wurde etwas
+ * angelegt, die Runde in der Hand ist nicht mehr der Stapel im Tresor, und
+ * bevor irgendetwas behauptet wird, muss er geholt werden. Eine angefangene
+ * Runde geht vor — die wird dafür nicht weggeworfen.
+ */
+export function modeFor({ queue = [], cursor = 0, sessionSize = 0, stale = false } = {}) {
+  if (cursor < queue.length) return 'lernen';
+  if (stale) return 'laden';
+  return sessionSize ? 'fertig' : 'leer';
+}
+
+/**
+ * Der Stand dieser Runde, aus der Warteschlange GELESEN statt mitgezählt.
+ *
+ * Eine Karte, die mit „Nochmal“ hinten wieder eingereiht wurde, steht wieder
+ * offen; sie als geschafft zu zählen wäre die schmeichelhafte Version der
+ * Wahrheit. `wieder` ist aus demselben Grund nicht die Zahl der gedrückten
+ * Nochmal-Tasten, sondern was davon jetzt noch aussteht — am Ende der Runde
+ * ist das null, und dann verspricht der Kopf auch keine Wiederholung mehr.
+ */
+export function progressOf({ queue = [], cursor = 0, sessionSize = 0, answered = null } = {}) {
+  const offen = new Set();
+  let wieder = 0;
+  for (let i = cursor; i < queue.length; i++) {
+    const item = queue[i];
+    const id = item && item.record && item.record.id;
+    if (!id || offen.has(id)) continue;
+    offen.add(id);
+    if (answered && answered.has(id)) wieder += 1;
+  }
+  return {
+    erledigt: Math.max(0, sessionSize - offen.size),
+    gesamt: sessionSize,
+    offen: offen.size,
+    wieder,
+  };
+}
+
+/**
+ * Der nächste fällige Tag, so wie der Server ihn nennt — oder `undefined`,
+ * wenn er ihn nicht genannt hat. Eine fehlende Auskunft und die Aussage „es
+ * steht nichts mehr an“ sind zwei verschiedene Dinge, und der Unterschied
+ * darf auf dem Weg zur Anzeige nicht zu einer Null werden.
+ */
+export function nextDay(queue) {
+  if (!queue || typeof queue !== 'object' || !('naechste' in queue)) return undefined;
+  const day = queue.naechste;
+  return typeof day === 'string' && day ? day : null;
+}
+
+/** Ein Satz über die nächste Wiederholung, der zu allen drei Fällen passt. */
+function nextSentence(next) {
+  if (next === undefined) return 'Wann die nächste Karte fällig ist, steht gerade nicht fest.';
+  if (next === null) return 'Es steht keine weitere Wiederholung an.';
+  return `Die nächste Karte kommt ${dayLabel(next)}.`;
+}
+
+/**
+ * Was auf dem leeren Bildschirm steht — aus den gezählten Karten, nicht aus
+ * dem Fehlen eines Signals erschlossen. „Alle ausgesetzt“ ist eine Aussage
+ * über den Stapel und wird deshalb an ihm gemessen; dass kein nächster Tag
+ * genannt wurde, heißt für sich genommen gar nichts.
+ */
+export function emptyMessage(stats, next) {
+  const gezaehlt = stats || {};
+  const gesamt = gezaehlt.gesamt || 0;
+  const wartend = (gezaehlt.faellig || 0) + (gezaehlt.neu || 0);
+  const ausgesetzt = gezaehlt.ausgesetzt || 0;
+
+  if (!gesamt) {
+    return {
+      titel: 'Noch keine Karten',
+      satz: 'Ein Kartenstapel entsteht aus dem, was du behalten willst. Leg eine Karte von Hand an, oder lass dir aus einer Notiz vorschlagen, was sich als Frage stellen lässt.',
+    };
+  }
+  // Der Stapel im Tresor und die Runde in der Hand sind auseinandergelaufen.
+  // „Heute ist nichts fällig“ wäre hier das Gegenteil der Zahlen darüber.
+  if (wartend > 0) {
+    return {
+      titel: 'Der Stapel hat sich geändert',
+      satz: `${formatNumber(wartend)} ${plural(wartend, 'Karte wartet', 'Karten warten')} inzwischen; `
+        + 'diese Runde wurde vorher geholt. „Neu laden“ zeigt, was ansteht.',
+    };
+  }
+  if (ausgesetzt === gesamt) {
+    return {
+      titel: 'Heute ist nichts fällig',
+      satz: gesamt === 1
+        ? 'Es steht keine weitere Wiederholung an — die einzige Karte im Stapel ist ausgesetzt.'
+        : `Es steht keine weitere Wiederholung an — alle ${formatNumber(gesamt)} Karten im Stapel sind ausgesetzt.`,
+    };
+  }
+  return { titel: 'Heute ist nichts fällig', satz: nextSentence(next) };
+}
+
+/* ------------------------------------------------------------------ */
 /* View                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -142,9 +264,12 @@ export default {
       cursor: 0,
       revealed: false,
       answered: new Set(),  // card ids answered at least once
-      again: 0,             // how many were sent back into this session
+      nochmal: new Set(),   // ... und welche davon "Nochmal" bekamen
       sessionSize: 0,
-      naechste: null,
+      // Ein Tag · null (gemessen: keiner) · undefined (nicht gemessen).
+      naechste: undefined,
+      // Im Formular wurde etwas angelegt: die Runde ist nicht mehr der Stapel.
+      stale: false,
       busy: false,
 
       panel: null,          // the node of the current form, kept so typing survives
@@ -199,13 +324,14 @@ async function load(self) {
     if (!self.alive) return;
     self.stats = stats;
     self.queue = Array.isArray(queue && queue.items) ? queue.items.slice() : [];
-    self.naechste = (queue && queue.naechste) || null;
+    self.naechste = nextDay(queue);
     self.cursor = 0;
     self.revealed = false;
     self.answered = new Set();
-    self.again = 0;
+    self.nochmal = new Set();
     self.sessionSize = self.queue.length;
-    self.mode = self.queue.length ? 'lernen' : 'leer';
+    self.stale = false;
+    self.mode = modeFor(self);
   } catch (err) {
     if (!self.alive || (err && err.isAborted)) return;
     self.error = err;
@@ -223,11 +349,23 @@ async function refreshStats(self) {
     ]);
     if (!self.alive) return;
     self.stats = stats;
-    self.naechste = (queue && queue.naechste) || null;
+    self.naechste = nextDay(queue);
     renderHead(self);
   } catch {
     /* die Zahlen sind eine Zugabe; ihr Ausbleiben ist kein Fehlerbildschirm */
   }
+}
+
+/**
+ * Nach dem Anlegen. Der Stapel im Tresor ist ab jetzt nicht mehr der, aus dem
+ * diese Runde geholt wurde: die Zahlen oben werden sofort nachgezogen, und
+ * der Stapel selbst, sobald keine Runde mehr offen ist. Ohne das stünde nach
+ * der allerersten Karte „Heute ist nichts fällig“ über einer Karte, die
+ * gerade entstanden ist.
+ */
+function afterCreate(self) {
+  self.stale = true;
+  refreshStats(self);
 }
 
 /* ------------------------------------------------------------------ */
@@ -259,9 +397,10 @@ function renderHead(self) {
   clear(dom.actions);
 
   if (self.mode === 'lernen' || self.mode === 'fertig') {
-    dom.progress.appendChild(text(`${formatNumber(self.answered.size)} von ${formatNumber(self.sessionSize)}`));
-    if (self.again > 0) {
-      dom.counts.appendChild(text(`${formatNumber(self.again)} ${plural(self.again, 'Karte kommt', 'Karten kommen')} heute noch einmal.`));
+    const stand = progressOf(self);
+    dom.progress.appendChild(text(`${formatNumber(stand.erledigt)} von ${formatNumber(stand.gesamt)}`));
+    if (stand.wieder > 0) {
+      dom.counts.appendChild(text(`${formatNumber(stand.wieder)} ${plural(stand.wieder, 'Karte kommt', 'Karten kommen')} heute noch einmal.`));
     }
   } else if (self.stats) {
     const offen = (self.stats.faellig || 0) + (self.stats.neu || 0);
@@ -353,20 +492,14 @@ function renderError(self) {
 
 function renderEmpty(self) {
   const stats = self.stats || {};
-  const leer = !stats.gesamt;
+  const { titel, satz } = emptyMessage(stats, self.naechste);
   const box = h('div.studyv__state', null);
 
-  if (leer) {
-    box.appendChild(h('h2', null, text('Noch keine Karten')));
-    box.appendChild(h('p', null, text('Ein Kartenstapel entsteht aus dem, was du behalten willst. Leg eine Karte von Hand an, oder lass dir aus einer Notiz vorschlagen, was sich als Frage stellen lässt.')));
-  } else {
-    box.appendChild(h('h2', null, text('Heute ist nichts fällig')));
-    box.appendChild(h('p', null, text(self.naechste
-      ? `Die nächste Karte kommt ${dayLabel(self.naechste)}.`
-      : 'Es steht keine weitere Wiederholung an — alle Karten im Stapel sind ausgesetzt.')));
-    if (stats.ausgesetzt) {
-      box.appendChild(h('p.hint', null, text(`${formatNumber(stats.ausgesetzt)} ${plural(stats.ausgesetzt, 'Karte ist', 'Karten sind')} ausgesetzt und ${plural(stats.ausgesetzt, 'wird', 'werden')} nicht abgefragt.`)));
-    }
+  box.appendChild(h('h2', null, text(titel)));
+  box.appendChild(h('p', null, text(satz)));
+  // Der Hinweis nur, solange er etwas hinzufügt: sind es alle, steht es oben.
+  if (stats.ausgesetzt && stats.ausgesetzt !== stats.gesamt) {
+    box.appendChild(h('p.hint', null, text(`${formatNumber(stats.ausgesetzt)} ${plural(stats.ausgesetzt, 'Karte ist', 'Karten sind')} ausgesetzt und ${plural(stats.ausgesetzt, 'wird', 'werden')} nicht abgefragt.`)));
   }
 
   box.appendChild(h('div.studyv__stateActions', null,
@@ -402,12 +535,10 @@ function renderDone(self) {
     h('h2', null, icon(ICONS.check), text('Für heute durch')),
     h('p', null, text(`${formatNumber(self.answered.size)} ${plural(self.answered.size, 'Karte', 'Karten')} beantwortet.`)));
 
-  if (self.again > 0) {
-    box.appendChild(h('p', null, text(`${formatNumber(self.again)} davon ${plural(self.again, 'kam', 'kamen')} noch einmal — „Nochmal“ heißt heute.`)));
+  if (self.nochmal.size > 0) {
+    box.appendChild(h('p', null, text(`${formatNumber(self.nochmal.size)} davon ${plural(self.nochmal.size, 'kam', 'kamen')} noch einmal — „Nochmal“ heißt heute.`)));
   }
-  box.appendChild(h('p', null, text(self.naechste
-    ? `Die nächste Karte ist ${dayLabel(self.naechste)} fällig.`
-    : 'Es steht keine weitere Wiederholung an.')));
+  box.appendChild(h('p', null, text(nextSentence(self.naechste))));
   if (stats.gesamt) {
     box.appendChild(h('p.meta', null, text(`${formatNumber(stats.gesamt)} ${plural(stats.gesamt, 'Karte', 'Karten')} im Stapel, davon ${formatNumber(stats.gelernt || 0)} mindestens einmal beantwortet.`)));
   }
@@ -501,19 +632,23 @@ async function grade(self, value) {
     // "Nochmal" heisst heute: die Karte geht ans Ende dieser Runde zurueck,
     // statt bis morgen zu verschwinden.
     if (value === 0 && result && result.record) {
-      self.again += 1;
+      self.nochmal.add(item.record.id);
       self.queue.push({ record: result.record, vorschau: result.vorschau || item.vorschau });
     }
     self.cursor += 1;
     self.revealed = false;
     self.busy = false;
-    if (self.cursor >= self.queue.length) {
-      self.mode = 'fertig';
-      render(self);
-      await refreshNext(self);
+    const next = modeFor(self);
+    // Wurde waehrend der Runde etwas angelegt, ist sie am Ende nicht "durch":
+    // dann wird geholt, statt "Fuer heute durch" ueber eine neue Karte zu
+    // schreiben.
+    if (next === 'laden') {
+      await load(self);
       return;
     }
+    self.mode = next;
     render(self);
+    if (next === 'fertig') await refreshNext(self);
   } catch (err) {
     if (!self.alive || (err && err.isAborted)) return;
     self.busy = false;
@@ -530,7 +665,7 @@ async function refreshNext(self) {
       request(self, (signal) => self.api.get('/study/stats', { signal })),
     ]);
     if (!self.alive) return;
-    self.naechste = (queue && queue.naechste) || null;
+    self.naechste = nextDay(queue);
     self.stats = stats;
     if (self.mode === 'fertig') render(self);
   } catch {
@@ -544,13 +679,19 @@ async function refreshNext(self) {
 
 /**
  * Back to where the user was. A half-finished round is resumed rather than
- * thrown away -- cards that were already answered stay answered.
+ * thrown away -- cards that were already answered stay answered. Was a card
+ * created in the form and no round is open, `modeFor` asks for the deck
+ * instead of a state: what is on the screen afterwards is then measured,
+ * not remembered from before.
  */
 function leaveForm(self) {
   self.panel = null;
-  if (self.cursor < self.queue.length) self.mode = 'lernen';
-  else if (self.sessionSize) self.mode = 'fertig';
-  else self.mode = 'leer';
+  const next = modeFor(self);
+  if (next === 'laden') {
+    load(self);
+    return;
+  }
+  self.mode = next;
   render(self);
 }
 
@@ -592,7 +733,7 @@ function openAnlegen(self) {
       clear(status);
       status.appendChild(text('Angelegt. Die nächste kann gleich folgen.'));
       front.focus();
-      refreshStats(self);
+      afterCreate(self);
     } catch (err) {
       if (!self.alive || (err && err.isAborted)) return;
       clear(status);
@@ -769,7 +910,7 @@ async function loadProposals(self, note, into) {
           box.disabled = true;
         }
       }
-      refreshStats(self);
+      afterCreate(self);
     } catch (err) {
       if (!self.alive || (err && err.isAborted)) return;
       clear(status);

@@ -1423,11 +1423,17 @@ async function checkToday(app) {
   await check('Überfällig und demnächst werden getrennt', async () => {
     const t = ok(await api.get('/api/today'), 'today');
     assert(t.faellig, `kein Block "faellig": ${Object.keys(t).join(', ')}`);
+    // Jeder Block sagt erst, wie sicher er ist, und erst danach was er weiß:
+    // { stand, wert, grund }. Ein Leser muss an `stand` vorbei, um an `wert`
+    // zu kommen -- deshalb wird hier auch `stand` geprüft und nicht nur Zahlen.
+    assert(t.faellig.stand === 'gemessen',
+      `der Block gibt sich nicht als gemessen aus: ${JSON.stringify(t.faellig).slice(0, 200)}`);
+    const w = t.faellig.wert || {};
     const ids = (arr) => (arr || []).map((x) => x.id || (x.record && x.record.id));
-    assert(ids(t.faellig.ueberfaellig).includes(ueberfaellig.id),
+    assert(ids(w.ueberfaellig).includes(ueberfaellig.id),
       `die überfällige Aufgabe steht nicht unter "ueberfaellig": ${JSON.stringify(t.faellig)}`);
-    assert(!ids(t.faellig.ueberfaellig).includes('Regal bauen'), 'die künftige wurde als überfällig gezählt');
-    return `${(t.faellig.ueberfaellig || []).length} überfällig, ${(t.faellig.demnaechst || []).length} demnächst`;
+    assert(!ids(w.ueberfaellig).includes('Regal bauen'), 'die künftige wurde als überfällig gezählt');
+    return `${(w.ueberfaellig || []).length} überfällig, ${(w.demnaechst || []).length} demnächst`;
   });
 
   await check('Was ohne dich lief, steht als eigener Block da', async () => {

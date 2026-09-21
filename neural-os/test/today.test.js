@@ -10,12 +10,18 @@
  * eine Attrappe alle verdecken:
  *
  * 1. Ob „überfällig" und „heute" am richtigen Tagesschnitt auseinandergehen.
- * 2. Ob ein fehlendes Teilsystem die ganze Route kippt, statt mit einem Grund
- *    in `fehlend` zu landen.
+ * 2. Ob ein fehlendes Teilsystem die ganze Route kippt, statt mit `stand` und
+ *    einem Grund am eigenen Block zu landen.
  * 3. Ob eine Änderung, die ein Agent gemacht hat, auch wirklich als solche
  *    erkannt wird -- und ob eine, die nur der Herkunftsstempel behauptet,
  *    ehrlich als unsicher gilt.
  * 4. Ob ein Bildschirm, den man nur ansieht, tatsächlich nichts verändert.
+ *
+ * Und, seit dieser Bildschirm einmal „Die Automatik ist aus" gesagt hat, ohne
+ * eine der beiden Uhren gefragt zu haben, ein fünftes:
+ *
+ * 5. Ob jede Zahl und jeder Satz, die hier herauskommen, auch wirklich
+ *    gemessen wurden -- und ob eine gekappte Liste sagt, dass sie gekappt ist.
  */
 
 const assert = require('node:assert/strict');
@@ -183,7 +189,8 @@ test('überfällige, heutige und demnächst fällige Aufgaben werden getrennt', 
 
     const res = await request(base, 'GET', '/api/today');
     assert.equal(res.status, 200, res.text);
-    const { faellig } = res.json;
+    const faellig = res.json.faellig.wert;
+    assert.equal(res.json.faellig.stand, 'gemessen', 'der Speicher war da und hat geantwortet');
 
     assert.deepEqual(faellig.ueberfaellig.map((t) => t.id), [vorgestern.id, gestern.id],
       'das Älteste zuerst – die Reihenfolge, die tasks.list auch liefert');
@@ -209,7 +216,7 @@ test('bei gleichem Datum entscheidet die Priorität, wie in tasks.list', async (
     const hoch = store.create('task', { title: 'Dringend', due: isoDate(-1), priority: 1 });
 
     const res = await request(base, 'GET', '/api/today');
-    assert.deepEqual(res.json.faellig.ueberfaellig.map((t) => t.id), [hoch.id, niedrig.id]);
+    assert.deepEqual(res.json.faellig.wert.ueberfaellig.map((t) => t.id), [hoch.id, niedrig.id]);
   });
 });
 
@@ -222,7 +229,7 @@ test('seit gestern zählt, was sich geändert hat, und sagt was davon neu ist', 
 
     const res = await request(base, 'GET', '/api/today');
     assert.equal(res.status, 200, res.text);
-    const seit = res.json.seitGestern;
+    const seit = res.json.seitGestern.wert;
 
     assert.equal(seit.gesamt, 2);
     assert.deepEqual(seit.nachArt, { note: 1, task: 1 });
@@ -243,7 +250,7 @@ test('ein kürzeres Fenster lässt Älteres draußen', async () => {
     store.create('note', { title: 'Eben erst' });
     const res = await request(base, 'GET', '/api/today?stunden=1');
     assert.equal(res.json.stunden, 1);
-    assert.equal(res.json.seitGestern.gesamt, 1, 'gerade angelegt liegt auch in einer Stunde');
+    assert.equal(res.json.seitGestern.wert.gesamt, 1, 'gerade angelegt liegt auch in einer Stunde');
   });
 });
 
@@ -262,7 +269,8 @@ test('eine Änderung durch einen Agenten erscheint unter ohneDich', async () => 
 
     const res = await request(base, 'GET', '/api/today');
     assert.equal(res.status, 200, res.text);
-    const { ohneDich } = res.json;
+    const ohneDich = res.json.ohneDich.wert;
+    assert.equal(res.json.ohneDich.stand, 'gemessen', 'Speicher und Verlauf haben beide geantwortet');
 
     assert.equal(ohneDich.gesamt, 2, 'beide Schreibvorgänge im Lauf gehören dem Agenten');
     assert.equal(ohneDich.unsicher, 0);
@@ -308,7 +316,7 @@ test('ein Herkunftsstempel auf einer späteren Änderung gilt als unsicher, nich
     store.update(angelegt.id, { body: 'Vom Menschen nachbearbeitet' });
 
     const res = await request(base, 'GET', '/api/today');
-    const { ohneDich } = res.json;
+    const ohneDich = res.json.ohneDich.wert;
     assert.equal(ohneDich.gesamt, 1, 'nur das Anlegen war wirklich der Agent');
     assert.equal(ohneDich.aenderungen[0].op, 'create');
     assert.equal(ohneDich.unsicher, 1,
@@ -329,8 +337,8 @@ test('Agentenläufe werden gemeldet, mit Namen des Agenten wenn er bekannt ist',
     });
 
     const res = await request(base, 'GET', '/api/today');
-    assert.equal(res.json.ohneDich.laeufeGesamt, 1);
-    const gemeldet = res.json.ohneDich.laeufe[0];
+    assert.equal(res.json.ohneDich.wert.laeufeGesamt, 1);
+    const gemeldet = res.json.ohneDich.wert.laeufe[0];
     assert.equal(gemeldet.id, run.id);
     assert.equal(gemeldet.agent, 'Aufräumer');
     assert.equal(gemeldet.status, 'done');
@@ -364,10 +372,13 @@ test('fehlende Teilsysteme landen in fehlend, statt die Route zu kippen', async 
     assert.match(gruende, /Die Zeitplanung ist in dieser Instanz nicht verfügbar\./);
 
     // Was da ist, kommt trotzdem an.
-    assert.equal(res.json.faellig.anzahl.ueberfaellig, 1);
-    assert.deepEqual(res.json.vorschlaege, { offen: 0, nachArt: {}, oben: [] });
-    assert.equal(res.json.ohneDich.gesamt, 0);
-    assert.equal(res.json.automatik.eingeschaltet, null,
+    assert.equal(res.json.faellig.stand, 'gemessen');
+    assert.equal(res.json.faellig.wert.anzahl.ueberfaellig, 1);
+    assert.equal(res.json.vorschlaege.stand, 'unbekannt');
+    assert.deepEqual(res.json.vorschlaege.wert, { offen: 0, nachArt: {}, oben: [], gekuerzt: null });
+    assert.equal(res.json.ohneDich.wert.gesamt, 0);
+    assert.equal(res.json.automatik.stand, 'unbekannt');
+    assert.equal(res.json.automatik.wert.eingeschaltet, null,
       '„konnte nicht nachsehen" ist nicht dasselbe wie „ist aus"');
   }, { history: false });
 });
@@ -383,7 +394,8 @@ test('ein Teilsystem, das beim Nachsehen scheitert, kippt die Route ebenso wenig
     const eintrag = res.json.fehlend.find((f) => f.teil === 'vorschlaege');
     assert.ok(eintrag, 'der Fehler muss benannt werden, nicht verschluckt');
     assert.match(eintrag.grund, /beschädigt/, 'und zwar mit dem, was wirklich passiert ist');
-    assert.deepEqual(res.json.vorschlaege.oben, []);
+    assert.equal(eintrag.stand, 'unbekannt', 'die flache Liste nennt auch, wie viel fehlt');
+    assert.deepEqual(res.json.vorschlaege.wert.oben, []);
   }, { assist: kaputt });
 });
 
@@ -408,10 +420,13 @@ test('offene Vorschläge werden mit Zahl und Art gemeldet', async () => {
   };
   await withServer(async ({ base }) => {
     const res = await request(base, 'GET', '/api/today');
-    assert.equal(res.json.vorschlaege.offen, 3);
-    assert.deepEqual(res.json.vorschlaege.nachArt, { duplicate: 2, orphan: 1 });
-    assert.equal(res.json.vorschlaege.oben[0].kind, 'duplicate');
-    assert.equal(res.json.vorschlaege.oben[0].confidence, 0.82);
+    const v = res.json.vorschlaege.wert;
+    assert.equal(v.offen, 3);
+    assert.deepEqual(v.nachArt, { duplicate: 2, orphan: 1 });
+    assert.equal(v.oben[0].kind, 'duplicate');
+    assert.equal(v.oben[0].confidence, 0.82);
+    assert.deepEqual(v.gekuerzt, { gezeigt: 1, gesamt: 3, weitere: 2 },
+      'drei offen, einer gezeigt – die anderen zwei werden benannt');
     assert.ok(!res.json.fehlend.some((f) => f.teil === 'vorschlaege'));
   }, { assist });
 });
@@ -425,10 +440,11 @@ test('die Automatik meldet, ob sie läuft und wann sie das nächste Mal dran ist
 
   await withServer(async ({ base }) => {
     const res = await request(base, 'GET', '/api/today');
-    assert.equal(res.json.automatik.eingeschaltet, true);
-    assert.equal(res.json.automatik.naechster, naechster);
-    assert.deepEqual(res.json.automatik.zeitplaene, { laeuft: true, eingeschaltet: 2, gesamt: 3 });
-    assert.deepEqual(res.json.automatik.ausloeser, { laeuft: true, eingeschaltet: 1, gesamt: 1, letzteStunde: 4 });
+    assert.equal(res.json.automatik.stand, 'gemessen', 'beide Uhren haben geantwortet');
+    assert.equal(res.json.automatik.wert.eingeschaltet, true);
+    assert.equal(res.json.automatik.wert.naechster, naechster);
+    assert.deepEqual(res.json.automatik.wert.zeitplaene, { laeuft: true, eingeschaltet: 2, gesamt: 3 });
+    assert.deepEqual(res.json.automatik.wert.ausloeser, { laeuft: true, eingeschaltet: 1, gesamt: 1, letzteStunde: 4 });
     assert.ok(!res.json.fehlend.some((f) => f.teil === 'automatik'));
   }, { scheduler, triggers });
 });
@@ -439,8 +455,10 @@ test('eine gestoppte Uhr meldet aus – und das ist etwas anderes als unbekannt'
 
   await withServer(async ({ base }) => {
     const res = await request(base, 'GET', '/api/today');
-    assert.equal(res.json.automatik.eingeschaltet, false, 'aus ist false, nicht null');
-    assert.equal(res.json.automatik.naechster, null);
+    assert.equal(res.json.automatik.stand, 'gemessen',
+      'beide Uhren haben geantwortet – erst dann darf „aus" dastehen');
+    assert.equal(res.json.automatik.wert.eingeschaltet, false, 'aus ist false, nicht null');
+    assert.equal(res.json.automatik.wert.naechster, null);
   }, { scheduler, triggers });
 });
 
@@ -450,7 +468,7 @@ test('eine frische Notiz ist keine Wiedervorlage', async () => {
   await withServer(async ({ store, base }) => {
     store.create('note', { title: 'Heute geschrieben', body: 'Noch warm' });
     const res = await request(base, 'GET', '/api/today');
-    assert.deepEqual(res.json.wiedervorlage, [],
+    assert.deepEqual(res.json.wiedervorlage.wert.notizen, [],
       `was gerade entstanden ist, liegt nicht seit ${todayApi.REVISIT_MIN_AGE_DAYS} Tagen`);
   });
 });
@@ -473,9 +491,10 @@ test('was lange liegt, kommt auf die Wiedervorlage – Angeheftetes zuerst', asy
     assert.ok(Date.parse(alt.updatedAt) < Date.parse(aelter.updatedAt), 'die Zeitstempel müssen sich unterscheiden');
 
     const spaeter = Date.parse(angeheftet.updatedAt) + (todayApi.REVISIT_MIN_AGE_DAYS + 30) * DAY;
-    const items = todayApi.wiedervorlageBlock(store, spaeter, todayApi.labelerFor({ graph: GRAPH }));
+    const { notizen: items, gekuerzt } = todayApi.wiedervorlageBlock(store, spaeter, todayApi.labelerFor({ graph: GRAPH }));
 
     assert.equal(items.length, 3);
+    assert.equal(gekuerzt, null, 'drei Notizen, drei gezeigt – da ist nichts abgeschnitten');
     assert.equal(items[0].id, angeheftet.id, 'Angeheftetes zuerst – das stärkste Signal, das es gibt');
     assert.equal(items[0].angeheftet, true);
     assert.match(items[0].grund, /^Angeheftet und seit \d+ Tagen nicht mehr geändert\.$/);
@@ -489,7 +508,7 @@ test('was lange liegt, kommt auf die Wiedervorlage – Angeheftetes zuerst', asy
     // Ein Schnitt kurz nach dem Anlegen findet nichts.
     assert.deepEqual(
       todayApi.wiedervorlageBlock(store, Date.parse(alt.updatedAt) + DAY, todayApi.labelerFor({})),
-      [],
+      { notizen: [], gekuerzt: null },
     );
   });
 });
@@ -500,14 +519,18 @@ test('ein leerer Tresor ergibt einen leeren Tagesbeginn, keinen Fehler', async (
   await withServer(async ({ base }) => {
     const res = await request(base, 'GET', '/api/today');
     assert.equal(res.status, 200, res.text);
-    assert.deepEqual(res.json.faellig.anzahl,
+    assert.deepEqual(res.json.faellig.wert.anzahl,
       { ueberfaellig: 0, heute: 0, demnaechst: 0, ohneDatum: 0, spaeter: 0 });
-    assert.equal(res.json.seitGestern.gesamt, 0);
-    assert.deepEqual(res.json.seitGestern.eintraege, []);
-    assert.equal(res.json.ohneDich.gesamt, 0);
-    assert.deepEqual(res.json.ohneDich.laeufe, []);
-    assert.deepEqual(res.json.wiedervorlage, []);
+    assert.equal(res.json.seitGestern.wert.gesamt, 0);
+    assert.deepEqual(res.json.seitGestern.wert.eintraege, []);
+    assert.equal(res.json.ohneDich.wert.gesamt, 0);
+    assert.deepEqual(res.json.ohneDich.wert.laeufe, []);
+    assert.deepEqual(res.json.wiedervorlage.wert.notizen, []);
     assert.ok(Array.isArray(res.json.fehlend));
+    // Ein leerer Tresor ist eine Antwort, kein Schweigen.
+    assert.equal(res.json.faellig.stand, 'gemessen');
+    assert.equal(res.json.seitGestern.stand, 'gemessen');
+    assert.equal(res.json.wiedervorlage.stand, 'gemessen');
   });
 });
 
@@ -544,8 +567,10 @@ test('auch die Wiedervorlage schreibt nichts, obwohl sie den ganzen Tresor liest
     for (let i = 0; i < 20; i++) store.create('note', { title: `Notiz ${i}`, body: 'Text' });
     const vorher = snapshot(store);
     const spaeter = Date.now() + (todayApi.REVISIT_MIN_AGE_DAYS + 10) * DAY;
-    const items = todayApi.wiedervorlageBlock(store, spaeter, todayApi.labelerFor({}));
+    const { notizen: items, gekuerzt } = todayApi.wiedervorlageBlock(store, spaeter, todayApi.labelerFor({}));
     assert.equal(items.length, 3, 'höchstens drei – mehr als drei ist keine Wiedervorlage mehr');
+    assert.deepEqual(gekuerzt, { gezeigt: 3, gesamt: 20, weitere: 17 },
+      'und die siebzehn anderen werden nicht verschwiegen');
     assert.deepEqual(snapshot(store), vorher);
   });
 });
@@ -561,6 +586,179 @@ test('unsinnige Parameter werden geklemmt, nicht geglaubt', async () => {
     const text = await request(base, 'GET', '/api/today?stunden=viele');
     assert.equal(text.status, 400, text.text);
     assert.match(text.json.error.message, /muss eine Zahl sein/);
+  });
+});
+
+/* -------------------------------------------- eine Uhr, die nicht antwortet */
+
+/**
+ * Der schwerste Fall, den dieser Bildschirm kennt.
+ *
+ * `src/app.js` baut Zeitplanung und Auslöser unabhängig voneinander mit
+ * `optional()`. Fehlt eine der beiden, darf die andere nicht für sie mitreden:
+ * „aus" ist eine Tatsachenbehauptung, und wer nicht fragen konnte, hat sie
+ * nicht erhoben.
+ */
+test('eine Uhr, die nicht antwortet, macht die Automatik nicht zu „aus"', async () => {
+  const triggers = { status: () => ({ running: true, enabled: 0, total: 0, firedLastHour: 0 }) };
+
+  await withServer(async ({ base }) => {
+    const res = await request(base, 'GET', '/api/today');
+    assert.equal(res.status, 200, res.text);
+    const a = res.json.automatik;
+
+    assert.equal(a.stand, 'teilweise',
+      'eine von zwei Uhren geantwortet: das ist weder eine ganze Messung noch gar keine');
+    assert.equal(a.wert.eingeschaltet, null,
+      '„aus" darf erst gesagt werden, wenn BEIDE Uhren geantwortet haben');
+    assert.equal(a.wert.zeitplaene, null, 'die ungefragte Uhr steht nicht als Null da');
+    assert.match(a.grund, /Die Zeitplanung ist in dieser Instanz nicht verfügbar\./,
+      'und der Grund reist mit dem Block, nicht in einer zweiten Liste');
+  }, { scheduler: null, triggers });
+});
+
+test('eine laufende Uhr bleibt eine Messung, auch wenn die andere schweigt', async () => {
+  const scheduler = { status: () => ({ running: true, enabled: 2, total: 3, nextDue: null }) };
+
+  await withServer(async ({ base }) => {
+    const res = await request(base, 'GET', '/api/today');
+    const a = res.json.automatik;
+
+    assert.equal(a.wert.eingeschaltet, true,
+      'ein eingeschalteter Zeitplan ist gesehen worden – daran ändert die fehlende zweite Uhr nichts');
+    assert.equal(a.stand, 'teilweise');
+    assert.match(a.grund, /Die Auslöser sind in dieser Instanz nicht verfügbar\./,
+      'dass die Auslöser nicht zu erreichen waren, muss trotzdem gesagt werden');
+  }, { scheduler, triggers: null });
+});
+
+test('fehlen beide Uhren, ist der Stand unbekannt – nicht „aus"', async () => {
+  await withServer(async ({ base }) => {
+    const a = (await request(base, 'GET', '/api/today')).json.automatik;
+    assert.equal(a.stand, 'unbekannt');
+    assert.equal(a.wert.eingeschaltet, null);
+  });
+});
+
+/* ------------------------------------- ein halber Block bleibt ein Block */
+
+test('gelesene Läufe bleiben erhalten, wenn nur der Änderungsverlauf fehlt', async () => {
+  await withServer(async ({ store, base }) => {
+    const agent = store.create('agent', { name: 'Aufräumer' });
+    store.create('run', {
+      agentId: agent.id,
+      goal: 'Nachts verknüpft',
+      status: 'done',
+      startedAt: new Date(Date.now() - 3600000).toISOString(),
+    });
+
+    const res = await request(base, 'GET', '/api/today');
+    const o = res.json.ohneDich;
+
+    assert.equal(o.stand, 'teilweise',
+      'die Läufe kamen aus dem Speicher, nur der Verlauf fehlte');
+    assert.equal(o.wert.laeufeGesamt, 1);
+    assert.equal(o.wert.laeufe.length, 1,
+      'was gelesen wurde, darf der fehlende zweite Teil nicht wieder wegnehmen');
+    assert.equal(o.wert.laeufe[0].agent, 'Aufräumer');
+    assert.match(o.grund, /Änderungsverlauf/);
+  }, { history: false });
+});
+
+/* ------------------------------------------------- gekappte Listen sagen es */
+
+test('eine bei limit gekappte Aufgabenliste nennt, wie viel nicht dasteht', async () => {
+  await withServer(async ({ store, base }) => {
+    for (let i = 0; i < 25; i++) store.create('task', { title: `Überfällig ${i}`, due: isoDate(-2 - i) });
+    store.create('task', { title: 'Heute fällig', due: isoDate(0) });
+
+    const res = await request(base, 'GET', '/api/today');
+    const f = res.json.faellig.wert;
+
+    assert.equal(f.anzahl.ueberfaellig, 25, 'die wahre Zahl bleibt die wahre Zahl');
+    assert.equal(f.ueberfaellig.length + f.heute.length, 21, 'gezeichnet werden 20 + 1');
+    assert.deepEqual(f.gekuerzt, { gezeigt: 21, gesamt: 26, weitere: 5 },
+      'fünf Aufgaben fehlen in der Liste – das gehört in die Antwort, nicht in die Rechenkunst der Ansicht');
+  });
+});
+
+test('auch „Ohne dich gelaufen" sagt, wie viel es abgeschnitten hat', async () => {
+  await withServer(async ({ store, base }) => {
+    const agent = store.create('agent', { name: 'Nachtschicht' });
+    for (let i = 0; i < 30; i++) {
+      store.create('run', {
+        agentId: agent.id,
+        goal: `Lauf ${i}`,
+        status: 'done',
+        startedAt: new Date(Date.now() - 3600000 - i * 1000).toISOString(),
+      });
+    }
+    withActor({ kind: 'agent', runId: RUN_ID, agentId: agent.id }, () => {
+      for (let i = 0; i < 30; i++) store.create('note', { title: `Vom Agenten ${i}` });
+    });
+
+    const o = (await request(base, 'GET', '/api/today')).json.ohneDich.wert;
+    assert.equal(o.laeufeGesamt, 30);
+    assert.equal(o.gesamt, 30);
+    assert.equal(o.laeufe.length + o.aenderungen.length, 40, '20 Läufe und 20 Änderungen');
+    assert.deepEqual(o.gekuerzt, { gezeigt: 40, gesamt: 60, weitere: 20 });
+  });
+});
+
+/**
+ * Zwei Achsen, die man nicht verwechseln darf: `gekuerzt` sagt „mehr, als
+ * hierhin passt", `verlaufGekuerzt` sagt „mehr, als überhaupt gelesen wurde".
+ * Im zweiten Fall ist auch `gesamt` nur eine Untergrenze, und der Bildschirm
+ * muss das sagen, statt die kleinere Nacht zu melden, die er gesehen hat.
+ */
+test('ein Verlauf, der tiefer reicht als der Lesevorgang, sagt das getrennt', async () => {
+  await withServer(async ({ store, base }) => {
+    // Eine über die Lesegrenze (500) hinaus – das ist die einzige Art, den
+    // Fall echt herzustellen; eine Attrappe würde genau die Naht verdecken.
+    withActor({ kind: 'agent', runId: RUN_ID, agentId: AGENT_ID }, () => {
+      for (let i = 0; i < 501; i++) store.create('note', { title: `Vom Agenten ${i}` });
+    });
+
+    const o = (await request(base, 'GET', '/api/today')).json.ohneDich.wert;
+    assert.equal(o.verlaufGekuerzt, true, 'es steht mehr im Verlauf, als gelesen wurde');
+    assert.equal(o.gesamt, 500, 'und `gesamt` ist deshalb nur, was gelesen wurde');
+    assert.deepEqual(o.gekuerzt, { gezeigt: 20, gesamt: 500, weitere: 480 },
+      'die Anzeigekürzung bleibt davon unberührt – zwei verschiedene Aussagen');
+  });
+});
+
+test('eine vollständige Liste meldet keine Kürzung', async () => {
+  await withServer(async ({ store, base }) => {
+    store.create('task', { title: 'Einzige', due: isoDate(-1) });
+    const res = await request(base, 'GET', '/api/today');
+    assert.equal(res.json.faellig.wert.gekuerzt, null,
+      'ein Hinweis auf Fehlendes, wo nichts fehlt, wäre genauso falsch herum');
+    assert.equal(res.json.seitGestern.wert.gekuerzt, null);
+  });
+});
+
+/* ------------------------------------------------- Stand und fehlend passen */
+
+test('fehlend wird aus den Blöcken abgeleitet und kann ihnen nicht widersprechen', async () => {
+  await withServer(async ({ base }) => {
+    const res = await request(base, 'GET', '/api/today');
+    const bloecke = ['faellig', 'seitGestern', 'vorschlaege', 'ohneDich', 'automatik', 'wiedervorlage'];
+
+    for (const teil of bloecke) {
+      const b = res.json[teil];
+      assert.ok(b && typeof b === 'object', `Block ${teil} fehlt`);
+      assert.ok(['gemessen', 'teilweise', 'unbekannt'].includes(b.stand),
+        `Block ${teil} hat keinen Stand: ${JSON.stringify(b.stand)}`);
+      assert.ok('wert' in b, `Block ${teil} hat keinen Wert`);
+      assert.equal(b.stand === 'gemessen', b.grund === null,
+        `Block ${teil}: ein Grund ohne Stand (oder umgekehrt) ist der alte Fehler`);
+    }
+
+    const ausBloecken = bloecke
+      .filter((teil) => res.json[teil].grund)
+      .map((teil) => ({ teil, stand: res.json[teil].stand, grund: res.json[teil].grund }));
+    assert.deepEqual(res.json.fehlend, ausBloecken,
+      'fehlend ist ein Abzug der Blöcke, keine zweite, von Hand geführte Liste');
   });
 });
 

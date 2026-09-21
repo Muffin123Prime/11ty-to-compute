@@ -19,15 +19,23 @@
  *    andere -- ändern, verschieben, löschen -- passiert dort, wo auch der
  *    Zusammenhang steht. Aber eine erledigte Aufgabe abzuhaken, wäre von hier
  *    aus drei Klicks weit weg, und das ist genau der Weg, den niemand geht.
- * 5. **„Nichts gefunden" und „konnte nicht nachsehen" sehen verschieden aus.**
- *    Die Route sagt in `fehlend`, welcher Teil des Systems nicht erreichbar
- *    war; dieser Block zeigt dann den Grund statt einer leeren Liste, die wie
- *    eine gute Nachricht aussähe.
- * 6. **Der leere Bildschirm ist ein Ergebnis.** Nichts fällig, nichts ohne
+ * 5. **„Nichts gefunden", „nicht alles gesehen" und „konnte nicht nachsehen"
+ *    sehen verschieden aus.** Jeder Block der Route bringt seinen `stand`
+ *    selbst mit -- `gemessen`, `teilweise`, `unbekannt` --, und `blockNode()`
+ *    zeichnet genau diese drei Fälle an einer Stelle. Vorher lag der Grund in
+ *    einer zweiten Liste, die jeder Block einzeln lesen musste: einer las sie
+ *    gar nicht und sagte „Die Automatik ist aus", obwohl eine der beiden Uhren
+ *    nie geantwortet hatte, ein anderer las sie zu grob und räumte Läufe vom
+ *    Bildschirm, die er schon in der Hand hatte.
+ * 6. **Gezählt wird nicht hier.** Wie viel eine Liste abgeschnitten hat, sagt
+ *    die Route in `gekuerzt`. Solange diese Subtraktion in der Ansicht stand,
+ *    stand sie viermal da -- und zweimal gar nicht, während das Abzeichen
+ *    daneben weiter die wahre Zahl nannte.
+ * 7. **Der leere Bildschirm ist ein Ergebnis.** Nichts fällig, nichts ohne
  *    dich gelaufen, kein Vorschlag offen: das ist der beste Morgen, den es
  *    gibt, und er wird auch so dargestellt -- nicht als leere Seite, die nach
  *    einem Ladefehler aussieht.
- * 7. **Zuschreibung wird nicht aufgerundet.** Die Route trennt Änderungen, die
+ * 8. **Zuschreibung wird nicht aufgerundet.** Die Route trennt Änderungen, die
  *    wirklich in einem Agentenlauf entstanden sind, von solchen, bei denen nur
  *    der Herkunftsstempel einen Agenten nennt. Die zweite Sorte wird gezählt
  *    und benannt, aber nicht als „ohne dich" ausgegeben.
@@ -159,7 +167,7 @@ function dueLabel(due, now = Date.now()) {
  * Mensch schreibt.
  */
 function leadSentence(data) {
-  const a = (data.faellig && data.faellig.anzahl) || {};
+  const a = wertVon(data, 'faellig').anzahl || {};
   const ueber = a.ueberfaellig || 0;
   const heute = a.heute || 0;
   const offen = ueber + heute;
@@ -179,21 +187,41 @@ function leadSentence(data) {
   return `${kopf}, ${nach}.`;
 }
 
+/** Die sechs Blöcke der Antwort, in der Reihenfolge, in der sie entstehen. */
+const BLOECKE = ['faellig', 'seitGestern', 'vorschlaege', 'ohneDich', 'automatik', 'wiedervorlage'];
+
+/**
+ * Der gemessene Teil eines Blocks.
+ *
+ * Der Umweg über `.wert` ist Absicht: wer ihn geht, kommt an `stand` und
+ * `grund` nicht vorbei. Genau daran hat es vorher gefehlt -- die Zahlen lagen
+ * offen, der Grund einen Griff weiter weg, und zwei Blöcke haben ihn nie
+ * geholt.
+ */
+function wertVon(data, teil) {
+  const block = (data && data[teil]) || {};
+  return block.wert || {};
+}
+
 /** Ist wirklich gar nichts zu tun? Drei Fragen, nicht eine. */
 function nothingToDo(data) {
-  const a = (data.faellig && data.faellig.anzahl) || {};
-  const ohne = data.ohneDich || {};
-  const vor = data.vorschlaege || {};
+  const a = wertVon(data, 'faellig').anzahl || {};
+  const ohne = wertVon(data, 'ohneDich');
+  const vor = wertVon(data, 'vorschlaege');
   return !(a.ueberfaellig || 0) && !(a.heute || 0) && !(a.demnaechst || 0)
     && !(ohne.gesamt || 0) && !(ohne.laeufeGesamt || 0) && !(ohne.unsicher || 0)
     && !(vor.offen || 0);
 }
 
-/** Der Grund, warum ein Block nichts sagen kann -- oder null. */
-function missingReason(data, teil) {
-  const list = Array.isArray(data.fehlend) ? data.fehlend : [];
-  const hits = list.filter((entry) => entry && entry.teil === teil).map((entry) => entry.grund);
-  return hits.length ? hits.join(' ') : null;
+/**
+ * Wurde wirklich überall nachgesehen?
+ *
+ * „Nichts ist fällig, nichts lief ohne dich" darf nur dastehen, wenn jede der
+ * sechs Fragen auch beantwortet wurde. Ein halb beantworteter Morgen sieht
+ * sonst aus wie ein ruhiger.
+ */
+function allesGemessen(data) {
+  return BLOECKE.every((teil) => (data[teil] || {}).stand === 'gemessen');
 }
 
 /* ------------------------------------------------------------------ */
@@ -352,7 +380,7 @@ function render(self) {
   dom.lead.appendChild(text(leadSentence(data)));
   dom.stand.appendChild(text(`Stand ${timeAgo(data.at)}${self.loading ? ' · sieht nach …' : ''}`));
 
-  if (nothingToDo(data) && !(data.fehlend || []).length) {
+  if (nothingToDo(data) && allesGemessen(data)) {
     dom.blocks.appendChild(h('div.todayv__clear', null,
       h('span.todayv__clear-icon', { 'aria-hidden': 'true' }, icon(ICONS.check)),
       h('p.todayv__clear-text', null,
@@ -369,10 +397,32 @@ function render(self) {
 }
 
 /**
+ * Die Zeile, die sagt, was nicht zu erfahren war.
+ *
+ * Zwei Wortlaute, weil es zwei verschiedene Aussagen sind. „Konnte nicht
+ * nachsehen" steht ANSTELLE des Inhalts und gilt für den ganzen Block;
+ * „Nicht alles war zu erfahren" steht UNTER dem Inhalt und nimmt ihn nicht
+ * zurück. Dass es den zweiten Fall nicht gab, war der Fehler: ein Block, der
+ * Läufe gelesen und ein Abzeichen dafür gesetzt hatte, zeigte stattdessen nur
+ * den Grund für das, was daneben fehlte.
+ */
+function grundNode(stand, grund) {
+  return h('p.todayv__missing', null,
+    h('span.todayv__missing-icon', { 'aria-hidden': 'true' }, icon(ICONS.alert)),
+    text(stand === 'teilweise'
+      ? `Nicht alles war zu erfahren: ${grund}`
+      : `Konnte nicht nachsehen: ${grund}`));
+}
+
+/**
  * Ein Block: Überschrift, Zahl, Inhalt -- und der Weg dorthin, wo man etwas
  * tun kann.
+ *
+ * `stand` und `grund` kommen unverändert aus der Antwort. Der Block
+ * entscheidet nicht mehr selbst, ob ein Grund ihn betrifft; er bekommt seinen
+ * eigenen mit.
  */
-function blockNode(self, { name, titel, zahl, ziel, zielLabel, kinder, grund }) {
+function blockNode(self, { name, titel, zahl, ziel, zielLabel, kinder, stand, grund }) {
   const head = h('div.todayv__block-head', null,
     h('h2.todayv__block-title', null, text(titel)),
     zahl ? h('span.todayv__count.badge', null, text(zahl)) : null,
@@ -383,13 +433,30 @@ function blockNode(self, { name, titel, zahl, ziel, zielLabel, kinder, grund }) 
       }, text(zielLabel || 'Ansehen'), icon(ICONS.arrow))
       : null);
 
-  const body = grund
-    ? h('p.todayv__missing', null,
-      h('span.todayv__missing-icon', { 'aria-hidden': 'true' }, icon(ICONS.alert)),
-      text(`Konnte nicht nachsehen: ${grund}`))
-    : kinder;
+  let body = kinder;
+  if (grund) {
+    body = stand === 'teilweise'
+      ? frag(kinder, grundNode(stand, grund))
+      : grundNode(stand, grund);
+  }
 
   return h(`section.todayv__block.todayv__block--${name}`, { 'aria-label': titel }, head, body);
+}
+
+/**
+ * „N weitere …" -- und nur dann, wenn die Route sagt, dass gekürzt wurde.
+ *
+ * Die Zahl kommt aus `gekuerzt.weitere`; hier wird nichts mehr subtrahiert.
+ * Wo die Ansicht das selbst tat, tat sie es an vier Stellen und vergaß es an
+ * zwei -- und die vergessenen waren genau die beiden mit einem Abzeichen, das
+ * weiterhin die wahre Zahl nannte.
+ */
+function kuerzungNode(self, gekuerzt, ziel, einer, viele) {
+  if (!gekuerzt || !gekuerzt.weitere) return null;
+  return h('button.todayv__note', {
+    type: 'button',
+    onClick: () => self.ctx.navigate(ziel),
+  }, text(gekuerzt.weitere === 1 ? einer : viele(formatNumber(gekuerzt.weitere))));
 }
 
 /** Eine Zeile, die irgendwohin führt. */
@@ -411,9 +478,9 @@ function emptyLine(satz) {
 /* ------------------------------------------------------- 1 · was fällig ist */
 
 function renderFaellig(self, data) {
-  const f = data.faellig || {};
+  const block = data.faellig || {};
+  const f = wertVon(data, 'faellig');
   const a = f.anzahl || {};
-  const grund = missingReason(data, 'faellig');
   const offen = (a.ueberfaellig || 0) + (a.heute || 0);
 
   const rows = [];
@@ -428,6 +495,11 @@ function renderFaellig(self, data) {
 
   const kinder = h('div.todayv__rows', null,
     rows.length ? rows : emptyLine('Nichts ist fällig.'),
+    // Zuerst, was von dieser Liste fehlt -- danach erst, was gar nicht in sie
+    // gehört. Umgekehrt läse sich der Hinweis wie eine Erklärung dafür.
+    kuerzungNode(self, f.gekuerzt, '#/projects',
+      'Eine weitere Aufgabe steht nicht in dieser Liste.',
+      (n) => `${n} weitere Aufgaben stehen nicht in dieser Liste.`),
     a.ohneDatum
       ? h('button.todayv__note', {
         type: 'button',
@@ -448,7 +520,8 @@ function renderFaellig(self, data) {
     zahl: offen ? formatNumber(offen) : '',
     ziel: '#/projects',
     zielLabel: 'Projekte',
-    grund,
+    stand: block.stand,
+    grund: block.grund,
     kinder,
   });
 }
@@ -510,8 +583,8 @@ async function completeTask(self, task) {
 /* --------------------------------------------------- 2 · was ohne dich lief */
 
 function renderOhneDich(self, data) {
-  const o = data.ohneDich || {};
-  const grund = missingReason(data, 'ohneDich');
+  const block = data.ohneDich || {};
+  const o = wertVon(data, 'ohneDich');
   const summe = (o.gesamt || 0) + (o.laeufeGesamt || 0);
 
   const rows = [];
@@ -539,6 +612,9 @@ function renderOhneDich(self, data) {
 
   const kinder = h('div.todayv__rows', null,
     rows.length ? rows : emptyLine('Nichts lief ohne dich.'),
+    kuerzungNode(self, o.gekuerzt, '#/timeline',
+      'Ein weiterer Eintrag steht nicht in dieser Liste.',
+      (n) => `${n} weitere Einträge stehen nicht in dieser Liste.`),
     o.unsicher
       ? h('p.todayv__note-quiet.meta', null, text(o.unsicher === 1
         ? 'Eine weitere Änderung trägt nur den Herkunftsstempel eines Agenten. '
@@ -546,7 +622,10 @@ function renderOhneDich(self, data) {
         : `${formatNumber(o.unsicher)} weitere Änderungen tragen nur den Herkunftsstempel eines Agenten. `
           + 'Der sagt, wer den Eintrag angelegt hat – nicht, wer ihn zuletzt geändert hat.'))
       : null,
-    o.gekuerzt
+    // Etwas anderes als `gekuerzt`: nicht „mehr, als hierhin passt", sondern
+    // „mehr, als überhaupt gelesen wurde". Dann ist auch die Zahl oben nur
+    // eine Untergrenze, und das muss dastehen.
+    o.verlaufGekuerzt
       ? h('p.todayv__note-quiet.meta', null,
         text('Es sind mehr Einträge im Verlauf, als hier gelesen wurden. Die Zeitachse zeigt alle.'))
       : null);
@@ -557,7 +636,8 @@ function renderOhneDich(self, data) {
     zahl: summe ? formatNumber(summe) : '',
     ziel: '#/timeline',
     zielLabel: 'Zeitachse',
-    grund,
+    stand: block.stand,
+    grund: block.grund,
     kinder,
   });
 }
@@ -577,8 +657,8 @@ function statusWort(status) {
 /* -------------------------------------------------- 3 · was vorgeschlagen ist */
 
 function renderVorschlaege(self, data) {
-  const v = data.vorschlaege || {};
-  const grund = missingReason(data, 'vorschlaege');
+  const block = data.vorschlaege || {};
+  const v = wertVon(data, 'vorschlaege');
 
   const rows = (v.oben || []).map((vorschlag) => rowNode(self, {
     ziel: `#/assist?kind=${encodeURIComponent(vorschlag.kind || '')}`,
@@ -587,15 +667,11 @@ function renderVorschlaege(self, data) {
       .filter(Boolean).join(' · ')),
   }));
 
-  const rest = (v.offen || 0) - rows.length;
   const kinder = h('div.todayv__rows', null,
     rows.length ? rows : emptyLine('Kein Vorschlag ist offen.'),
-    rest > 0
-      ? h('button.todayv__note', {
-        type: 'button',
-        onClick: () => self.ctx.navigate('#/assist'),
-      }, text(rest === 1 ? 'Ein weiterer Vorschlag wartet.' : `${formatNumber(rest)} weitere Vorschläge warten.`))
-      : null);
+    kuerzungNode(self, v.gekuerzt, '#/assist',
+      'Ein weiterer Vorschlag wartet.',
+      (n) => `${n} weitere Vorschläge warten.`));
 
   return blockNode(self, {
     name: 'vorschlaege',
@@ -603,7 +679,8 @@ function renderVorschlaege(self, data) {
     zahl: v.offen ? formatNumber(v.offen) : '',
     ziel: '#/assist',
     zielLabel: 'Vorschläge',
-    grund,
+    stand: block.stand,
+    grund: block.grund,
     kinder,
   });
 }
@@ -611,25 +688,24 @@ function renderVorschlaege(self, data) {
 /* ------------------------------------------------ 4 · was sich geändert hat */
 
 function renderSeitGestern(self, data) {
-  const s = data.seitGestern || {};
-  const grund = missingReason(data, 'seitGestern');
+  const block = data.seitGestern || {};
+  const s = wertVon(data, 'seitGestern');
 
-  const rows = (s.eintraege || []).slice(0, 6).map((eintrag) => rowNode(self, {
+  // Kein zweites `slice` hier: die Route kappt diese Liste und sagt in
+  // `gekuerzt`, um wie viel. Schnitte die Ansicht danach noch einmal nach,
+  // beschriebe diese Zahl nichts, was auf dem Bildschirm steht.
+  const rows = (s.eintraege || []).map((eintrag) => rowNode(self, {
     ziel: targetFor(eintrag.type, eintrag.id),
     titel: eintrag.label || `${SINGULAR[eintrag.type] || eintrag.type} ${eintrag.id}`,
     unten: text([SINGULAR[eintrag.type] || eintrag.type, eintrag.neu ? 'neu' : 'geändert', timeAgo(eintrag.updatedAt)]
       .filter(Boolean).join(' · ')),
   }));
 
-  const rest = (s.gesamt || 0) - rows.length;
   const kinder = h('div.todayv__rows', null,
     rows.length ? rows : emptyLine('Seit gestern hat sich nichts geändert.'),
-    rest > 0
-      ? h('button.todayv__note', {
-        type: 'button',
-        onClick: () => self.ctx.navigate('#/timeline'),
-      }, text(rest === 1 ? 'Ein weiterer Eintrag hat sich geändert.' : `${formatNumber(rest)} weitere Einträge haben sich geändert.`))
-      : null);
+    kuerzungNode(self, s.gekuerzt, '#/timeline',
+      'Ein weiterer Eintrag hat sich geändert.',
+      (n) => `${n} weitere Einträge haben sich geändert.`));
 
   return blockNode(self, {
     name: 'seitgestern',
@@ -637,7 +713,8 @@ function renderSeitGestern(self, data) {
     zahl: s.gesamt ? formatNumber(s.gesamt) : '',
     ziel: '#/timeline',
     zielLabel: 'Zeitachse',
-    grund,
+    stand: block.stand,
+    grund: block.grund,
     kinder,
   });
 }
@@ -645,8 +722,9 @@ function renderSeitGestern(self, data) {
 /* --------------------------------------------------- 5 · die Wiedervorlage */
 
 function renderWiedervorlage(self, data) {
-  const items = Array.isArray(data.wiedervorlage) ? data.wiedervorlage : [];
-  const grund = missingReason(data, 'wiedervorlage');
+  const block = data.wiedervorlage || {};
+  const w = wertVon(data, 'wiedervorlage');
+  const items = Array.isArray(w.notizen) ? w.notizen : [];
 
   const rows = items.map((notiz) => rowNode(self, {
     ziel: targetFor('note', notiz.id),
@@ -656,7 +734,10 @@ function renderWiedervorlage(self, data) {
   }));
 
   const kinder = h('div.todayv__rows', null,
-    rows.length ? rows : emptyLine('Es liegt nichts lange genug, um daran zu erinnern.'));
+    rows.length ? rows : emptyLine('Es liegt nichts lange genug, um daran zu erinnern.'),
+    kuerzungNode(self, w.gekuerzt, '#/notes',
+      'Eine weitere Notiz liegt genauso lange.',
+      (n) => `${n} weitere Notizen liegen genauso lange.`));
 
   return blockNode(self, {
     name: 'wiedervorlage',
@@ -664,45 +745,84 @@ function renderWiedervorlage(self, data) {
     zahl: '',
     ziel: '#/notes',
     zielLabel: 'Notizen',
-    grund,
+    stand: block.stand,
+    grund: block.grund,
     kinder,
   });
 }
 
 /* -------------------------------------------------------- Fuß: die Automatik */
 
+/** Was eine der beiden Uhren über sich gesagt hat -- oder null, wenn keine. */
+function uhrSatz(uhr, einer, viele, gestoppt, keiner) {
+  if (!uhr) return null;
+  if (!uhr.laeuft) return gestoppt;
+  if (uhr.eingeschaltet === 1) return einer;
+  if (uhr.eingeschaltet > 1) return viele(zahlwort(uhr.eingeschaltet));
+  return keiner;
+}
+
+/**
+ * Der Fuß: läuft nachts etwas ohne dich?
+ *
+ * Hier stand der schwerste Fehler dieses Bildschirms. „Die Automatik ist aus.
+ * Nichts läuft von allein." las sich wie eine Messung und war keine: fehlte
+ * eine der beiden Uhren, ging sie als `false` in die Rechnung ein, und der
+ * Grund dafür wurde gar nicht erst gelesen. Deshalb gilt jetzt dreierlei:
+ *
+ * - Eine Uhr, die nicht geantwortet hat, steht in keinem Satz -- auch nicht
+ *   als Null. Was sie wüsste, weiß niemand.
+ * - „Aus" sagt nur die Route, und nur, wenn beide Uhren geantwortet haben.
+ * - Was nicht zu erfahren war, steht sichtbar daneben, nicht statt allem.
+ */
 function renderAutomatik(self, data) {
-  const a = data.automatik || {};
-  const grund = missingReason(data, 'automatik');
+  const block = data.automatik || {};
+  const a = wertVon(data, 'automatik');
+  const grund = block.grund || null;
+
+  const teile = [
+    uhrSatz(a.zeitplaene,
+      'ein Zeitplan ist eingeschaltet',
+      (n) => `${n} Zeitpläne sind eingeschaltet`,
+      'die Zeitplanung ist gestoppt',
+      'kein Zeitplan ist eingeschaltet'),
+    uhrSatz(a.ausloeser,
+      'ein Auslöser ist scharf',
+      (n) => `${n} Auslöser sind scharf`,
+      'die Auslöser sind gestoppt',
+      'kein Auslöser ist scharf'),
+  ].filter(Boolean);
 
   let satz;
-  if (a.eingeschaltet === null || a.eingeschaltet === undefined) {
-    satz = grund
-      ? `Ob die Automatik läuft, war nicht zu erfahren. ${grund}`
-      : 'Ob die Automatik läuft, war nicht zu erfahren.';
-  } else if (a.eingeschaltet) {
-    const teile = [];
-    if (a.zeitplaene && a.zeitplaene.eingeschaltet) {
-      teile.push(a.zeitplaene.eingeschaltet === 1
-        ? 'ein Zeitplan ist eingeschaltet'
-        : `${zahlwort(a.zeitplaene.eingeschaltet)} Zeitpläne sind eingeschaltet`);
+  if (a.eingeschaltet === true) {
+    // Über den nächsten Lauf weiß nur die Zeitplanung etwas. Schwieg sie,
+    // schweigt auch dieser Satz: „steht nicht fest" wäre eine Auskunft, die
+    // niemand gegeben hat.
+    let naechster = '';
+    if (a.zeitplaene) {
+      naechster = a.naechster
+        ? ` Der nächste Lauf ist am ${formatDate(a.naechster)} um ${uhrzeit(a.naechster)}.`
+        : ' Ein nächster Lauf steht nicht fest.';
     }
-    if (a.ausloeser && a.ausloeser.eingeschaltet) {
-      teile.push(a.ausloeser.eingeschaltet === 1
-        ? 'ein Auslöser ist scharf'
-        : `${zahlwort(a.ausloeser.eingeschaltet)} Auslöser sind scharf`);
-    }
-    const naechster = a.naechster
-      ? ` Der nächste Lauf ist am ${formatDate(a.naechster)} um ${uhrzeit(a.naechster)}.`
-      : ' Ein nächster Lauf steht nicht fest.';
-    satz = `Die Automatik läuft: ${teile.join(', ') || 'ohne eingeschaltete Einträge'}.${naechster}`;
-  } else {
+    satz = `Die Automatik läuft: ${teile.join(', ')}.${naechster}`;
+  } else if (a.eingeschaltet === false) {
     satz = 'Die Automatik ist aus. Nichts läuft von allein.';
+  } else if (teile.length) {
+    // Eine Uhr gesehen, die andere nicht: sagen, was man gesehen hat, und
+    // keinen Schluss daraus ziehen.
+    satz = `Was zu sehen war: ${teile.join(', ')}.`;
+  } else {
+    satz = 'Ob die Automatik läuft, war nicht zu erfahren.';
   }
 
   return h('section.todayv__automatik', { 'aria-label': 'Automatik' },
     h('span.todayv__automatik-icon', { 'aria-hidden': 'true' }, icon(ICONS.clock)),
-    h('p.todayv__automatik-text', null, text(satz)),
+    h('p.todayv__automatik-text', null,
+      text(satz),
+      grund
+        ? h('span.todayv__automatik-grund', null,
+          text(block.stand === 'teilweise' ? ` Nicht alles war zu erfahren: ${grund}` : ` ${grund}`))
+        : null),
     h('button.btn.btn--small.btn--ghost', {
       type: 'button',
       onClick: () => self.ctx.navigate('#/automation'),
@@ -907,6 +1027,8 @@ const CSS = `
   font-size: var(--fs-sm);
   color: var(--fg-muted);
 }
+/* Was nicht zu erfahren war, darf nicht wie das aussehen, was zu erfahren war. */
+.todayv__automatik-grund { color: var(--warn); }
 
 .todayv__state {
   display: flex;
