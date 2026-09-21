@@ -84,20 +84,33 @@ const ICONS = {
  * loaded -- and it has to stay complete when one of them cannot be loaded at
  * all. When a module does load and carries its own `title`/`icon`, those win.
  */
+/**
+ * Die Bereiche, in der Reihenfolge der Seitenleiste.
+ *
+ * `group` teilt die dreizehn Eintraege in drei ruhige Bloecke: womit man
+ * arbeitet, was einem Arbeit abnimmt, und was das System ueber sich selbst
+ * sagt. Eine Liste aus dreizehn gleichwertigen Symbolen zwingt einen jedes
+ * Mal, sie ganz zu lesen; drei Bloecke à vier bis sechs kann man ansehen.
+ * Die Trennlinien sind reine Optik -- jeder Bereich bleibt ueber `g` + Taste
+ * und ueber die Befehlspalette gleich erreichbar.
+ *
+ * `primary` ist etwas anderes und bleibt: es entscheidet, was auf einem
+ * schmalen Bildschirm in der unteren Leiste ueberlebt.
+ */
 const VIEWS = [
-  { id: 'chat', title: 'Chat', icon: ICONS.chat, key: 'c', primary: true, keywords: 'unterhaltung modell fragen gespräch' },
-  { id: 'notes', title: 'Notizen', icon: ICONS.notes, key: 'n', primary: true, keywords: 'note texte wissen schreiben' },
-  { id: 'projects', title: 'Projekte', icon: ICONS.projects, key: 'p', primary: false, keywords: 'aufgaben tasks vorhaben' },
-  { id: 'graph', title: 'Gehirn', icon: ICONS.graph, key: 'g', primary: true, keywords: 'graph netz verknüpfungen karte' },
-  { id: 'agents', title: 'Agenten', icon: ICONS.agents, key: 'a', primary: true, keywords: 'automatik werkzeuge läufe runs' },
-  { id: 'assist', title: 'Vorschläge', icon: ICONS.assist, key: 'v', primary: true, keywords: 'hinweise dubletten waisen aufgaben schlagwörter aufräumen posteingang' },
-  { id: 'automation', title: 'Automatik', icon: ICONS.automation, key: 'u', primary: false, keywords: 'zeitplan auslöser trigger regelmäßig von allein wiederkehrend' },
-  { id: 'network', title: 'Netzwerk', icon: ICONS.network, key: 'w', primary: false, keywords: 'internet schleuse gate freigaben audit' },
-  { id: 'timeline', title: 'Zeitachse', icon: ICONS.timeline, key: 'z', primary: false, keywords: 'verlauf chronik historie wann zeit' },
-  { id: 'sync', title: 'Abgleich', icon: ICONS.sync, key: 'y', primary: false, keywords: 'synchronisation geräte partner peer konflikte' },
-  { id: 'workshop', title: 'Werkstatt', icon: ICONS.workshop, key: 'e', primary: false, keywords: 'erweiterungen module code einfügen ändern plugin anpassen' },
-  { id: 'search', title: 'Suche', icon: ICONS.search, key: 'f', primary: false, keywords: 'finden volltext' },
-  { id: 'settings', title: 'Einstellungen', icon: ICONS.settings, key: 's', primary: true, keywords: 'konfiguration tresor modelle sicherung' },
+  { id: 'chat', title: 'Chat', icon: ICONS.chat, key: 'c', primary: true, group: 'arbeiten', keywords: 'unterhaltung modell fragen gespräch' },
+  { id: 'notes', title: 'Notizen', icon: ICONS.notes, key: 'n', primary: true, group: 'arbeiten', keywords: 'note texte wissen schreiben' },
+  { id: 'projects', title: 'Projekte', icon: ICONS.projects, key: 'p', primary: false, group: 'arbeiten', keywords: 'aufgaben tasks vorhaben' },
+  { id: 'graph', title: 'Gehirn', icon: ICONS.graph, key: 'g', primary: true, group: 'arbeiten', keywords: 'graph netz verknüpfungen karte' },
+  { id: 'agents', title: 'Agenten', icon: ICONS.agents, key: 'a', primary: true, group: 'helfer', keywords: 'automatik werkzeuge läufe runs' },
+  { id: 'assist', title: 'Vorschläge', icon: ICONS.assist, key: 'v', primary: true, group: 'helfer', keywords: 'hinweise dubletten waisen aufgaben schlagwörter aufräumen posteingang' },
+  { id: 'automation', title: 'Automatik', icon: ICONS.automation, key: 'u', primary: false, group: 'helfer', keywords: 'zeitplan auslöser trigger regelmäßig von allein wiederkehrend' },
+  { id: 'network', title: 'Netzwerk', icon: ICONS.network, key: 'w', primary: false, group: 'system', keywords: 'internet schleuse gate freigaben audit' },
+  { id: 'timeline', title: 'Zeitachse', icon: ICONS.timeline, key: 'z', primary: false, group: 'system', keywords: 'verlauf chronik historie wann zeit' },
+  { id: 'sync', title: 'Abgleich', icon: ICONS.sync, key: 'y', primary: false, group: 'system', keywords: 'synchronisation geräte partner peer konflikte' },
+  { id: 'workshop', title: 'Werkstatt', icon: ICONS.workshop, key: 'e', primary: false, group: 'system', keywords: 'erweiterungen module code einfügen ändern plugin anpassen' },
+  { id: 'search', title: 'Suche', icon: ICONS.search, key: 'f', primary: false, group: 'system', keywords: 'finden volltext' },
+  { id: 'settings', title: 'Einstellungen', icon: ICONS.settings, key: 's', primary: true, group: 'system', keywords: 'konfiguration tresor modelle sicherung' },
 ];
 
 const VIEW_IDS = new Set(VIEWS.map((v) => v.id));
@@ -362,7 +375,15 @@ function createShell() {
 
     const nav = h('div.rail__items', { role: 'list' });
     dom.navLinks = new Map();
+    let lastGroup = null;
     for (const view of VIEWS) {
+      // Rein dekorativ und deshalb aria-hidden: die Gruppen sind eine
+      // Lesehilfe, keine Navigationsebene, und ein Screenreader soll nicht
+      // dreizehn Eintraege in drei Listen zerlegt vorfinden.
+      if (lastGroup !== null && view.group !== lastGroup) {
+        nav.appendChild(h('span.rail__divider', { 'aria-hidden': 'true' }));
+      }
+      lastGroup = view.group || null;
       const badge = h('span.rail__badge', { hidden: true });
       const link = h('a.rail__item', {
         href: `#/${view.id}`,

@@ -351,6 +351,16 @@ mark {
   height: 22px;
 }
 
+/* A hairline between the three groups of areas: what you work with, what
+   works for you, and what the system says about itself. Purely a reading aid
+   -- every area keeps the same shortcut and the same place in the palette. */
+.rail__divider {
+  display: block;
+  height: 1px;
+  margin: var(--sp-1) var(--sp-2);
+  background: var(--border);
+}
+
 .rail__items {
   display: flex;
   flex-direction: column;
@@ -1516,6 +1526,11 @@ pre.code {
 
   /* Secondary areas stay reachable through the palette and the header chips. */
   .rail__item--secondary {
+    display: none;
+  }
+
+  /* With most items hidden, the dividers would separate nothing. */
+  .rail__divider {
     display: none;
   }
 
