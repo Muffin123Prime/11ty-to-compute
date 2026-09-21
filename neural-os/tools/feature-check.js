@@ -103,6 +103,7 @@ function request(method, urlPath, body, headers = {}) {
 const api = {
   get: (p) => request('GET', p),
   post: (p, b) => request('POST', p, b === undefined ? {} : b),
+  put: (p, b) => request('PUT', p, b),
   patch: (p, b) => request('PATCH', p, b),
   del: (p) => request('DELETE', p),
 };
@@ -533,6 +534,52 @@ async function checkNetwork(app) {
     }
     return 'IPv4-in-IPv6, URL, Grossschreibung, Punkt';
   });
+  // Der Gegenbeweis zum Offline-Beweis. `npm run proof` zeigt, dass nichts
+  // durchkommt. Ein Online-Modus, der nur blockiert, waere aber genauso
+  // kaputt wie einer, der alles durchlaesst -- also wird hier geprueft, dass
+  // die Schleuse nach einer ausdruecklichen Freigabe wirklich oeffnet und
+  // danach wieder schliesst.
+  await check('Online-Modus lässt nach Freigabe wirklich durch', async () => {
+    const vorher = ok(await api.get('/api/network'), 'netz').mode;
+    try {
+      ok(await api.put('/api/network', { mode: 'online' }), 'modus online');
+      // Die Antwort traegt die Entscheidung unter `decision` -- sie ist das
+      // Urteil der Schleuse, nicht das Ergebnis eines Verbindungsversuchs.
+      const gesperrt = ok(await api.post('/api/network/test', { host: 'pruefung.invalid' }), 'test ohne Freigabe');
+      // Im Online-Modus ohne strikte Allowlist waere alles erlaubt; mit ihr
+      // (Standard) braucht auch ein oeffentlicher Host eine Freigabe.
+      const strikt = gesperrt.decision.allowed === false;
+
+      const freigabe = ok(await api.post('/api/network/grants', {
+        scope: 'global', level: 'online', hosts: ['pruefung.invalid'],
+        reason: 'Funktionsprüfung',
+      }), 'freigabe');
+
+      const erlaubt = ok(await api.post('/api/network/test', { host: 'pruefung.invalid' }), 'test mit Freigabe');
+      assert(erlaubt.decision.allowed === true,
+        `die Freigabe wirkt nicht: ${JSON.stringify(erlaubt.decision)}`);
+
+      ok(await api.del(`/api/network/grants/${freigabe.record.id}`), 'freigabe zurücknehmen');
+      const wieder = ok(await api.post('/api/network/test', { host: 'pruefung.invalid' }), 'test nach Rücknahme');
+      if (strikt) {
+        assert(wieder.decision.allowed === false, 'die zurückgenommene Freigabe wirkt weiter');
+      }
+      return strikt
+        ? 'gesperrt → freigegeben → wieder gesperrt'
+        : 'freigegeben (ohne strikte Allowlist ist im Online-Modus ohnehin alles erlaubt)';
+    } finally {
+      ok(await api.put('/api/network', { mode: vorher }), 'modus zurück');
+    }
+  });
+
+  await check('Nach dem Zurückschalten ist wieder zu', async () => {
+    const n = ok(await api.get('/api/network'), 'netz');
+    assert(n.mode === 'offline', `Modus steht auf ${n.mode} statt offline`);
+    const res = ok(await api.post('/api/network/test', { host: 'pruefung.invalid' }), 'test');
+    assert(res.decision.allowed === false, 'im Offline-Modus wäre ein öffentlicher Host erreichbar');
+    return 'offline, und der Host ist gesperrt';
+  });
+
   await check('Jede Entscheidung steht im Protokoll', async () => {
     const a = ok(await api.get('/api/network/audit?limit=20'), 'audit');
     const list = a.items || a.entries || [];
