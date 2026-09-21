@@ -342,7 +342,88 @@ erlaubten. Ein Protokoll, das nur Blockaden zeigt, würde nichts beweisen.
 
 ---
 
-## Teil 6 · Wenn etwas nicht geht
+## Teil 6 · Was dir Arbeit abnimmt
+
+Zwei Bereiche, die beide **ohne jedes KI-Modell** funktionieren. Das ist Absicht:
+das Nützlichste soll nicht der Teil sein, für den du 5 GB herunterladen musst.
+
+### Vorschläge (`g` dann `v`)
+
+Ein Posteingang. Du drückst auf **Prüfen**, das System sieht sich deine Einträge an
+und schlägt etwas vor. Geschehen tut davon nichts, bis du auf *Übernehmen* drückst —
+und davor steht in klarem Deutsch, was genau passieren wird.
+
+| Art | Was es findet |
+|---|---|
+| **Doppelt** | Zwei fast gleiche Notizen. Vorgeschlagen wird eine *Verknüpfung*, nie ein Zusammenführen: dabei verschwände Text unwiderruflich. |
+| **Verwaist** | Eine alte Notiz, auf die keine Verknüpfung zeigt — samt den drei Notizen, die inhaltlich am ehesten dazugehören. |
+| **Schlagwort** | Ein Schlagwort, das zwei Nachbarn im Graphen teilen und diese Notiz noch nicht hat. |
+| **Aufgabe** | Ausdrückliche Merker im Text: `- [ ]`, `TODO:`, `Offen:`, `Zu tun:`. Aus gewöhnlichen Sätzen wird **nichts** geraten. |
+| **Wiedervorlage** | Was du seit über 90 Tagen nicht mehr angesehen hast, aber gut verknüpft ist. |
+| **Fehlender Link** | Ein `[[Verweis]]`, zu dem es noch keine Notiz gibt. |
+
+Ein verworfener Vorschlag kommt nie wieder. Zweimal prüfen erzeugt keine doppelten
+Vorschläge. Welche Verfahren nicht laufen konnten, steht dabei — statt so zu tun,
+als hätte es nichts zu finden gegeben.
+
+### Automatik (`g` dann `u`)
+
+Agenten, die von allein laufen. **Beides ist ab Werk aus**, und ein neu angelegter
+Plan bleibt aus, bis du ihn einschaltest. Ganz oben steht immer, was gerade gilt —
+im Normalfall: *„Nichts läuft von allein."*
+
+- **Zeitplan** — stündlich, täglich oder wöchentlich zu einer Uhrzeit.
+  Beispiel: *täglich um 7 Uhr, „Schreib mir einen Rückblick auf gestern"*.
+- **Auslöser** — reagiert, wenn ein Eintrag angelegt, geändert oder gelöscht wird,
+  wahlweise gefiltert nach Satzart, Schlagwort oder Titel.
+  Beispiel: *„sobald eine Notiz mit `#projekt` angelegt wird, verschlagworte sie"*.
+
+Vier Bremsen sorgen dafür, dass ein Auslöser sich nicht selbst hochschaukelt: das
+System weiß, welche Einträge aus einem Agentenlauf stammen (die reagieren nicht
+noch einmal), eine Entprellung, eine Obergrenze pro Stunde und höchstens drei
+gleichzeitige Läufe. War der Rechner drei Tage aus, holt ein Tagesplan **einen**
+Lauf nach, nicht drei.
+
+Scheitert ein Lauf, steht der echte Grund am Plan. Ein Zeitplan, der still
+gescheitert ist, wäre genau die Unehrlichkeit, die dieses Programm vermeiden soll.
+
+---
+
+## Teil 7 · Ein Online-Modell einrichten (optional)
+
+Du brauchst das nicht. Der ganze Rest funktioniert ohne. Aber wenn du für schwere
+Aufgaben ein großes Modell dazuschalten willst, geht das seit Neuestem, ohne eine
+Datei von Hand zu bearbeiten:
+
+**Einstellungen → Online-Modelle → Online-Anbieter hinzufügen.**
+
+Es gibt Vorlagen für OpenAI, Anthropic, Mistral, Groq, OpenRouter, DeepSeek und
+für einen eigenen Server im Heimnetz. Die Vorlagen sind mitgeliefert — ein
+Anbieterverzeichnis aus dem Netz zu holen wäre genau der stille Online-Zugriff,
+den dieses System verhindern soll.
+
+Den Schlüssel gibst du am besten als **Umgebungsvariable** an, dann steht er in
+keiner Datei dieses Programms:
+
+```bash
+export OPENAI_API_KEY="sk-..."       # Linux/macOS, vor dem Start
+setx OPENAI_API_KEY "sk-..."         # Windows, einmalig
+```
+
+Trägst du ihn stattdessen direkt ein, liegt er im Klartext in `config.json`
+(Dateirechte 0600). Die App sagt dir das auch.
+
+**Anlegen öffnet die Schleuse nicht.** Der Anbieter steht danach da und ist
+gesperrt; jeder Eintrag zeigt, was die Schleuse gerade über seinen Host sagt.
+Freigeben ist ein zweiter, eigener Klick und steht als eigener Eintrag im
+Protokoll. *Verbindung testen* verbindet wirklich und unterscheidet dabei
+„die Schleuse hat abgelehnt" (deine eigene Einstellung) von „nicht erreichbar"
+(eine Störung) — im nackten Fehlertext sehen die beiden gleich aus und sind das
+Gegenteil voneinander.
+
+---
+
+## Teil 8 · Wenn etwas nicht geht
 
 | Problem | Ursache und Abhilfe |
 |---|---|
@@ -356,6 +437,11 @@ erlaubten. Ein Protokoll, das nur Blockaden zeigt, würde nichts beweisen.
 | Semantische Suche findet nichts | Einbettungsmodell fehlt (`ollama pull nomic-embed-text`) oder der Index ist noch leer — einmal neu indizieren. |
 | PDF liefert keinen Text | Ein gescanntes PDF ohne Textebene. Dafür bräuchte es eine Texterkennung, die Neural OS nicht hat. Die App sagt das, statt etwas zu erfinden. |
 | Ich will wissen, was wirklich passiert ist | `cat ~/.neural-os/audit.jsonl` — jede Netzentscheidung, chronologisch. |
+| „Prüfen" findet nie etwas | Normal bei wenigen Notizen: die meisten Verfahren brauchen Alter (14 bzw. 90 Tage) oder Verknüpfungen. Was übersprungen wurde, steht nach der Prüfung dabei. |
+| Ein Zeitplan läuft nicht | Erst: ist er eingeschaltet? Dann: steht ein Fehler am Plan? Ohne Modell scheitert der Lauf — gestartet wird er trotzdem, und der Grund steht dran. |
+| Ein Auslöser feuert nicht | Die Filter prüfen (der Satz unter dem Auslöser sagt, worauf er reagiert), und: Einträge aus einem Agentenlauf lösen absichtlich nichts aus. |
+| Online-Anbieter bleibt „gesperrt" | Anlegen öffnet die Schleuse nicht. *Host freigeben* drücken, oder unter *Netzwerk* den Modus auf Internet stellen. |
+| Online-Anbieter meldet HTTP 401 | Kein oder falscher Schlüssel. Bei `apiKeyEnv`: die Variable muss gesetzt sein, **bevor** Neural OS startet. |
 
 ---
 
