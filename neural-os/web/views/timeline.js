@@ -2434,9 +2434,13 @@ function renderHistoryError(self, err) {
   if (unavailable) {
     // Not the same as "nichts passiert": there is no journal running here, so
     // nothing was recorded and nothing can be taken back.
+    const head = 'Der Änderungsverlauf ist in dieser Instanz nicht verfügbar';
+    const message = err.message || '';
+    // The server says the same sentence; only what it adds to it is kept.
+    const detail = message.startsWith(head) ? message.slice(head.length).replace(/^[.\s]+/, '') : message;
     return h('div.tlv__hist-note', null,
-      h('strong', null, text('Der Änderungsverlauf ist in dieser Instanz nicht verfügbar')),
-      h('p', null, text(err.message || 'Das Journal läuft hier nicht.')),
+      h('strong', null, text(head)),
+      detail ? h('p', null, text(detail)) : null,
       h('p', null, text('Ohne ihn wird nichts aufgezeichnet und es lässt sich nichts zurücknehmen. '
         + 'Die Zeitachse selbst arbeitet weiter.')));
   }
@@ -2487,6 +2491,22 @@ function fieldsLabel(item) {
   const named = item.fields.slice(0, 4).map((field) => FIELD_LABELS[field] || field);
   const rest = item.fields.length - named.length;
   return `Geändert: ${named.join(', ')}${rest > 0 ? ` und ${rest} weitere` : ''}`;
+}
+
+/**
+ * `REASON_GONE` in src/store/history.js. Compared as a whole string and only
+ * to hide one button: if the sentence ever changes, the comparison stops
+ * matching and the attempt is offered again -- the server still refuses it
+ * with the truth, so the failure mode of this coupling is a redundant button,
+ * never a wrong claim.
+ */
+const REASON_RECORD_GONE = 'Der Eintrag existiert nicht mehr.';
+
+/** Is there anything left that a second request could still do? */
+function isHopeless(item) {
+  if (item.undone) return true;
+  if (!JOURNAL_TYPES.includes(item.type)) return true;
+  return item.reason === REASON_RECORD_GONE;
 }
 
 function renderHistoryEntry(self, item) {
@@ -2547,16 +2567,20 @@ function renderHistoryEntry(self, item) {
         disabled: busy,
         onClick: () => undoEntry(self, item),
       }, icon(ICONS.undo), text(busy ? 'Nimmt zurück …' : 'Rückgängig'))));
-  } else if (item.reason) {
+  } else if (item.reason && !item.undone && !conflict) {
     // No greyed-out button with a shrug: the server said why, so that is what
-    // stands here instead.
+    // stands here instead. (For an entry that was taken back the badge and the
+    // line above already say it, and once the server has answered a fresh 409
+    // that answer is the newer one -- in both cases repeating this would only
+    // be noise.)
     row.appendChild(h('p.tlv__hist-reason', null, text(item.reason)));
     // One way further, and it is an attempt, not a promise: the request goes
     // WITHOUT `force`, so the server decides again and answers with the real
     // reason. Only if it then says the entry is forceable does a second,
-    // warned click appear. An entry that is already undone, or of a type this
-    // journal cannot undo, gets nothing here -- there would be nothing to try.
-    if (!item.undone && JOURNAL_TYPES.includes(item.type) && !conflict && applied === undefined) {
+    // warned click appear. An entry that is already undone, of a type this
+    // journal cannot undo, or whose record is gone for good gets nothing here
+    // -- there would be nothing left to try.
+    if (!isHopeless(item) && applied === undefined) {
       row.appendChild(h('div.tlv__hist-actions', null,
         h('button.btn.btn--small.btn--ghost', {
           type: 'button',
