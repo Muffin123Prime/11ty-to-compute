@@ -46,7 +46,10 @@
 import {
   h, text, clear, on, icon, timeAgo, formatDate, formatDateTime, formatNumber, debounce,
 } from '../lib/dom.js';
-import { GRAPH_TYPES } from '../lib/graph-canvas.js';
+// Dieselbe Zeichenfunktion wie im Gehirn. Zwei Ansichten, die dieselben
+// Satzarten zeigen, muessen dieselbe Sprache sprechen -- eine Raute muss
+// hier und dort eine Aufgabe sein, sonst muss man zweimal lernen.
+import { GRAPH_TYPES, drawNodeShape } from '../lib/graph-canvas.js';
 
 /* ------------------------------------------------------------------ */
 /* Vocabulary (German UI copy)                                         */
@@ -114,29 +117,6 @@ const OPEN_ROUTES = {
  * keeps them module-private. They are only reached when the stylesheet
  * defines no `--graph-*` tokens; the tokens, when present, win in both files.
  */
-const TYPE_COLORS_LIGHT = {
-  note: '#2f5bd0',
-  chat: '#7a4cc0',
-  project: '#1c7a4c',
-  task: '#b8761a',
-  agent: '#b22a21',
-  file: '#4a5561',
-  entity: '#0f7f8f',
-  run: '#7a6a2a',
-  unknown: '#6d737d',
-};
-
-const TYPE_COLORS_DARK = {
-  note: '#7f9cff',
-  chat: '#b596ff',
-  project: '#4cbd86',
-  task: '#e0a84e',
-  agent: '#ff8a7d',
-  file: '#9aa7b5',
-  entity: '#4fc6d4',
-  run: '#cbb96a',
-  unknown: '#838a95',
-};
 
 const VIEW_ICON = '<path d="M2.5 10h15"/><circle cx="6" cy="10" r="1.9"/><circle cx="11.4" cy="10" r="1.9"/>'
   + '<circle cx="16" cy="10" r="1.4"/><path d="M6 5.4v2.7M11.4 11.9v2.7"/>';
@@ -852,9 +832,6 @@ function readPalette(self) {
   };
   const surface = prop('--surface', '#ffffff');
   const dark = isDark(surface);
-  const base = dark ? TYPE_COLORS_DARK : TYPE_COLORS_LIGHT;
-  const types = {};
-  for (const type of [...GRAPH_TYPES, 'unknown']) types[type] = prop(`--graph-${type}`, base[type]);
   return {
     dark,
     bg: prop('--bg', dark ? '#0b0c0f' : '#f4f4f6'),
@@ -864,7 +841,6 @@ function readPalette(self) {
     muted: prop('--fg-muted', dark ? '#9aa1ac' : '#585e68'),
     subtle: prop('--fg-subtle', dark ? '#6a717c' : '#858b95'),
     accent: prop('--accent', dark ? '#7f9cff' : '#2f5bd0'),
-    types,
   };
 }
 
@@ -882,9 +858,55 @@ function isDark(color) {
   return (Number(rgb[0]) * 0.2126 + Number(rgb[1]) * 0.7152 + Number(rgb[2]) * 0.0722) < 120;
 }
 
-function colorOf(self, type) {
+/**
+ * Die Tinte fuer einen Punkt.
+ *
+ * Frueher acht gesaettigte Farben, eine je Satzart. Das widersprach der
+ * Designregel dieses Projekts ("Schwarz, Weiss und Grau tragen die Struktur,
+ * genau ein Akzent") und war hier ausserdem doppelt gemoppelt: in einer
+ * Zeitachse hat jede Satzart ohnehin ihre eigene Spur mit Beschriftung am
+ * Rand. Die Farbe trug also keine Information, die nicht schon dastand -- sie
+ * machte nur die Abweichung, auf die es ankommt (eine Auswahl), schwerer
+ * sichtbar. Jetzt: eine neutrale Tinte, und der Akzent bleibt fuer das, was
+ * gerade gemeint ist.
+ */
+/**
+ * Die Silhouette einer Satzart als kleines Canvas, gezeichnet mit derselben
+ * Funktion wie im Gehirn.
+ *
+ * Der Renderer selbst laeuft hier nicht (die Zeitachse hat keinen Graphen), die
+ * Zeichenfunktion aber schon -- und genau die ist die gemeinsame Wahrheit. Eine
+ * Zeitachse mit einer eigenen Vorstellung davon, wie ein Projekt aussieht,
+ * waere die zweite Quelle, und die erste, die veraltet.
+ */
+function typeGlyph(self, type, size = 12) {
+  const node = document.createElement('canvas');
+  node.className = 'tlv__glyph';
+  node.setAttribute('aria-hidden', 'true');
+  const ratio = Math.min(Math.max(window.devicePixelRatio || 1, 1), 3);
+  node.width = Math.round(size * ratio);
+  node.height = Math.round(size * ratio);
+  node.style.width = `${size}px`;
+  node.style.height = `${size}px`;
+
+  const c = node.getContext('2d');
+  if (!c) return node;
   const palette = self.palette || (self.palette = readPalette(self));
-  return palette.types[type] || palette.types.unknown;
+  c.setTransform(ratio, 0, 0, ratio, 0, 0);
+  c.lineJoin = 'round';
+  c.beginPath();
+  drawNodeShape(c, type, size / 2, size / 2, size * 0.3);
+  c.fillStyle = palette.surface;
+  c.fill();
+  c.lineWidth = 1.2;
+  c.strokeStyle = palette.muted;
+  c.stroke();
+  return node;
+}
+
+function colorOf(self) {
+  const palette = self.palette || (self.palette = readPalette(self));
+  return palette.muted;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1057,7 +1079,7 @@ function paintDots(self, ctx, geom, palette) {
       const type = geom.lanes[lane];
       const baseline = geom.top + (lane + 1) * geom.laneH - 5;
       const drawn = Math.min(count, capacity);
-      ctx.fillStyle = colorOf(self, type);
+      ctx.fillStyle = colorOf(self);
       for (let k = 0; k < drawn; k += 1) {
         ctx.beginPath();
         ctx.arc(cx, baseline - k * DOT_STEP, DOT_R, 0, Math.PI * 2);
@@ -1155,10 +1177,14 @@ function paintGutter(self, ctx, geom, palette) {
       ctx.textAlign = 'right';
       ctx.fillStyle = palette.muted;
       ctx.fillText(typePlural(type), geom.gutter - 20, y);
-      ctx.fillStyle = colorOf(self, type);
+      // Dieselbe Silhouette wie im Gehirn, damit die Spur ohne einen Blick
+      // auf ihre Beschriftung wiedererkennbar ist.
+      ctx.fillStyle = palette.muted;
+      ctx.strokeStyle = palette.muted;
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.arc(geom.gutter - 11, y, 3.4, 0, Math.PI * 2);
-      ctx.fill();
+      drawNodeShape(ctx, type, geom.gutter - 11, y, 4);
+      ctx.stroke();
     } else {
       ctx.textAlign = 'left';
       ctx.globalAlpha = 0.55;
@@ -1524,7 +1550,7 @@ function renderFilters(self) {
       title: `${typePlural(type)} im sichtbaren Zeitraum: ${formatNumber(count)}`,
       onClick: () => toggleType(self, type),
     },
-    h('span.tlv__type-dot', { style: { background: colorOf(self, type) } }),
+    typeGlyph(self, type),
     h('span.tlv__type-label', null, text(typePlural(type))),
     h('span.tlv__type-count', null, text(formatNumber(count))));
     dom.filters.appendChild(button);
@@ -1827,7 +1853,7 @@ function renderPicker(self) {
         type: 'button',
         onClick: () => selectRecord(self, point.id),
       },
-      h('span.tlv__type-dot', { style: { background: colorOf(self, point.type) } }),
+      typeGlyph(self, point.type),
       h('span.tlv__pick-main', null,
         h('span.tlv__pick-title', null, text(point.label)),
         h('span.meta', null, text(formatDateTime(atOf(point, self.axis)))))))));
@@ -1985,7 +2011,7 @@ const CSS = `
 }
 .tlv__type:hover { background: var(--surface-3); }
 .tlv__type.is-active { opacity: 1; color: var(--fg); border-color: var(--border); }
-.tlv__type-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.tlv__glyph { width: 12px; height: 12px; flex: 0 0 auto; display: block; }
 .tlv__type-count { font-variant-numeric: tabular-nums; color: var(--fg-subtle); }
 
 .tlv__body { display: flex; flex: 1 1 auto; min-height: 0; }
