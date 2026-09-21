@@ -58,6 +58,20 @@ const GONE = 'gone';
  *  - `peer` holds the ACCESS TOKENS of other devices in clear text.
  *  - `conflict`, `approval`, `run` record what happened on one device. They
  *    describe local decisions and local executions, not shared knowledge.
+ *  - `schedule`, `trigger` would make an agent run TWICE -- once on each
+ *    device -- for a single intention. Worse, they carry `enabled`, so a peer
+ *    could switch on something that runs by itself on a machine its owner is
+ *    not looking at. Automation is a per-device decision, like the network
+ *    mode, and it is made where it takes effect.
+ *  - `suggestion` is a local reading of a local vault. Once the notes it is
+ *    about have travelled, the other device produces its own suggestions in
+ *    milliseconds -- and a "dismissed" decision made there belongs to whoever
+ *    made it, not to everyone.
+ *
+ * This is an ALLOW-list, and that is the point: a record type added later is
+ * excluded until someone decides what sharing it would mean. The opposite
+ * (a deny-list) would share every new type by default and only stop the ones
+ * somebody remembered.
  */
 const SYNC_TYPES = ['note', 'project', 'task', 'entity', 'memory', 'chat', 'message', 'file', 'edge'];
 

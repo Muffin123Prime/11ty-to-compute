@@ -223,6 +223,38 @@ function titleOf(device, id) {
 
 /* ============================================================ merge tests */
 
+/**
+ * Die Erlaubnisliste ist eine Sicherheitsgrenze, keine Bequemlichkeit.
+ *
+ * Wer sie erweitert, soll das merken. Drei Faelle mit sehr verschiedenen
+ * Folgen: ein Token waere Rechteausweitung, ein Zeitplan liesse denselben
+ * Agenten auf zwei Geraeten laufen, und ein Vorschlag ist die lokale Lesart
+ * eines lokalen Tresors.
+ */
+test('die Abgleich-Liste bleibt eine Erlaubnisliste, und diese Arten stehen nicht drin', () => {
+  const niemals = [
+    ['token', 'ein Partner koennte sich einen Zugang ausstellen'],
+    ['grant', 'ein Partner koennte sich das Internet freigeben'],
+    ['agent', 'ein Partner koennte Berechtigungen setzen'],
+    ['peer', 'enthaelt die Zugangstoken anderer Geraete im Klartext'],
+    ['run', 'beschreibt, was auf EINEM Geraet passiert ist'],
+    ['approval', 'eine lokale Entscheidung'],
+    ['conflict', 'eine lokale Entscheidung'],
+    ['schedule', 'derselbe Agent liefe auf beiden Geraeten'],
+    ['trigger', 'derselbe Agent liefe auf beiden Geraeten'],
+    ['suggestion', 'die lokale Lesart eines lokalen Tresors'],
+    ['module', 'fremder Code, der auf dem Zielgeraet ausgefuehrt wuerde'],
+  ];
+  for (const [type, grund] of niemals) {
+    assert.equal(merge.SYNC_TYPES.includes(type), false, `${type} wird abgeglichen — ${grund}`);
+    assert.equal(merge.isSyncable ? merge.isSyncable(type) : false, false, `isSyncable('${type}') sagt ja`);
+  }
+  // Und das, was geteilt werden SOLL, ist weiterhin dabei.
+  for (const type of ['note', 'project', 'task', 'chat', 'message', 'file', 'edge', 'entity', 'memory']) {
+    assert.equal(merge.SYNC_TYPES.includes(type), true, `${type} fehlt in der Abgleich-Liste`);
+  }
+});
+
 test('fingerprint ignoriert Schlüsselreihenfolge, rev und Zeitstempel', () => {
   const one = record({ data: { title: 'A', body: 'x', tags: ['t'] } });
   const two = record({ rev: 9, updatedAt: '2030-01-01T00:00:00.000Z', data: { tags: ['t'], body: 'x', title: 'A' } });
