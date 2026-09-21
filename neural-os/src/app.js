@@ -242,6 +242,26 @@ async function createApp(opts = {}) {
     ? optional(failures, 'sync', () => syncMod.createSync({ store, gate, config, bus, logger, auth: null, paths }))
     : null;
 
+  // --- user-installed extensions -------------------------------------------
+  //
+  // Loaded LAST on purpose. Everything a module can touch must already exist
+  // and be in a known-good state before third-party code runs against it, and
+  // a module that fails must not be able to prevent the rest of the system
+  // from having come up.
+  const sandboxMod = tryRequire('./modules/sandbox');
+  const registryModulesMod = tryRequire('./modules/registry');
+  let modules = null;
+  if (sandboxMod && registryModulesMod) {
+    const sandbox = optional(failures, 'module-sandbox', () => sandboxMod.createSandbox({
+      store, gate, bus, config, logger, paths, audit,
+    }));
+    if (sandbox) {
+      modules = optional(failures, 'modules', () => registryModulesMod.createModuleRegistry({
+        store, sandbox, bus, logger, config, audit, paths,
+      }));
+    }
+  }
+
   // --- support services ----------------------------------------------------
   const backupMod = tryRequire('./store/backup');
   const backup = backupMod
@@ -274,6 +294,7 @@ async function createApp(opts = {}) {
     runtime,
     backup,
     auth,
+    modules,
     vectors,
     embeddings,
     extract,
@@ -322,6 +343,7 @@ async function createApp(opts = {}) {
         auth: !!auth,
         extraction: !!extract,
         sync: !!sync,
+        modules: !!modules,
         vectors: !!vectors,
         embeddings: !!embeddings,
       };
@@ -361,9 +383,36 @@ async function createApp(opts = {}) {
         subsystems,
         models,
         semantic,
+        extensions: modules && typeof modules.status === 'function' ? modules.status() : null,
         peers: sync && typeof sync.summary === 'function' ? sync.summary() : null,
         failures,
       };
+    },
+
+    /**
+     * Start user-installed extensions.
+     *
+     * Separate from createApp() so a caller can boot the system, decide the
+     * app is healthy, and only then hand control to code the user pasted in.
+     * `safeMode` skips all of them -- the escape hatch for a module that
+     * breaks the app, reachable with `neural-os start --safe`.
+     */
+    async loadModules({ safeMode = false } = {}) {
+      if (!modules || typeof modules.loadAll !== 'function') return { loaded: 0, failed: 0, disabled: 0, safeMode };
+      try {
+        const result = await modules.loadAll({ safeMode });
+        if (result && result.failed) {
+          log.warn(`${result.failed} Erweiterung(en) konnten nicht geladen werden und wurden deaktiviert.`);
+        }
+        audit.write('modules.load', result || {});
+        return result;
+      } catch (err) {
+        // A registry that cannot even start must not take the app with it.
+        const e = asNeuralError(err);
+        failures.push({ subsystem: 'modules', reason: e.message, code: e.code });
+        log.error(`Erweiterungen konnten nicht geladen werden: ${e.message}`);
+        return { loaded: 0, failed: 0, disabled: 0, safeMode, error: e.message };
+      }
     },
 
     async listen() {
@@ -379,6 +428,7 @@ async function createApp(opts = {}) {
       const problems = [];
       for (const [name, fn] of [
         ['server', () => app.server && app.server.close()],
+        ['modules', () => modules && modules.disposeAll && modules.disposeAll()],
         ['runtime', () => runtime && runtime.abortAll && runtime.abortAll()],
         ['vectors', () => vectors && vectors.close && vectors.close()],
         ['store', () => store.close()],

@@ -12,6 +12,7 @@
  *   neural-os version
  *
  * Global flags: --home DIR  --port N  --host H  --log LEVEL  --no-harden
+ *               --safe   (startet ohne die selbst eingefügten Erweiterungen)
  *               --passphrase P   (prefer NEURAL_OS_PASSPHRASE)
  */
 
@@ -98,6 +99,8 @@ async function cmdStart(flags) {
     }
 
     const seeded = await seedIfEmpty(app);
+    // Extensions come up only after the rest of the system is known healthy.
+    const extensions = await app.loadModules({ safeMode: flags.safe === true });
     const health = await app.doctor();
     const { host, port } = app.config.server;
 
@@ -118,6 +121,16 @@ async function cmdStart(flags) {
     }
     if (app.failures.length) {
       console.log(`  ${Y}Eingeschränkt${X}  ${app.failures.map((f) => f.subsystem).join(', ')} ${D}— 'neural-os doctor' zeigt Details${X}`);
+    }
+    if (extensions && (extensions.loaded || extensions.failed || extensions.safeMode)) {
+      if (extensions.safeMode) {
+        console.log(`  Erweiterungen ${Y}abgeschaltet${X} ${D}(--safe)${X}`);
+      } else {
+        const parts = [`${extensions.loaded} aktiv`];
+        if (extensions.failed) parts.push(`${R}${extensions.failed} fehlerhaft${X}`);
+        if (extensions.disabled) parts.push(`${extensions.disabled} aus`);
+        console.log(`  Erweiterungen  ${parts.join(', ')}`);
+      }
     }
     if (seeded) console.log(`  ${D}Neuer Vault angelegt und mit einer Einführung befüllt.${X}`);
     console.log(`${D}${'─'.repeat(58)}${X}`);

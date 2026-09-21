@@ -27,6 +27,8 @@ Eine einzige Anwendung, die zusammenführt, wofür man sonst fünf Programme
 - **Visuelles Gehirn** — ein interaktiver Graph aus Notizen, Chats, Projekten,
   Aufgaben, Dateien, Agenten und Begriffen, und den Verbindungen dazwischen
 - **Notizen** mit `[[Wiki-Links]]`, `#tags`, Rückverweisen und Volltextsuche
+- **Werkstatt** — die App verändert sich durch Code, den du einfügst; alles
+  abschaltbar, jede Fassung bleibt erhalten
 - **Agenten** mit einzeln erteilten Berechtigungen, Bestätigungspflicht und
   vollständigem Protokoll
 - **Projekte und Aufgaben**, verknüpft mit allem anderen
@@ -152,6 +154,9 @@ betreibt. Dein Tablet sieht dieselbe Instanz, es synchronisiert nicht.
 
 ## Weiterlesen
 
+- **`docs/ERWEITERN.md`** — wie du die App selbst veränderst: Code einfügen,
+  prüfen, aktivieren, und zu jeder früheren Fassung zurück. Ohne von vorne
+  anzufangen.
 - **`docs/ANLEITUNG.md`** — Einrichtung auf PC und iPad, Autostart, Freigabe im
   eigenen Netz, Sicherung, Fehlerbehebung. Enthält die ehrliche Antwort darauf,
   warum Neural OS auf dem iPad nicht eigenständig laufen kann.

@@ -26,7 +26,7 @@ const { ValidationError } = require('../kernel/errors');
 const GRAPH_TYPES = ['note', 'chat', 'project', 'task', 'agent', 'file', 'entity', 'run'];
 
 /** All record types, including non-graph bookkeeping types. */
-const TYPES = [...GRAPH_TYPES, 'message', 'edge', 'memory', 'approval', 'grant', 'token', 'peer', 'conflict'];
+const TYPES = [...GRAPH_TYPES, 'message', 'edge', 'memory', 'approval', 'grant', 'token', 'peer', 'conflict', 'module'];
 
 /**
  * Edge kinds. `source` distinguishes user intent from machine inference:
@@ -232,6 +232,39 @@ const FIELDS = {
     status: { type: 'string', default: 'open', enum: ['open', 'resolved'] },
     resolution: { type: 'string', nullable: true, default: null }, // local | remote | merged
     resolvedAt: { type: 'string', nullable: true, default: null },
+  },
+  /**
+   * An extension the user installed by pasting code into the workshop.
+   *
+   * The full source of every version is kept here on purpose. A change the
+   * user cannot undo is a change they cannot safely try, and the entire point
+   * of this feature is that experimenting must not cost them their system.
+   * `versions` is append-only; `source` is whichever version is active.
+   *
+   * Capabilities work exactly like an agent's permissions: absent means
+   * denied, the user approves them explicitly, and the network ones are
+   * enforced by the same gate under the scope `module:<id>`.
+   */
+  module: {
+    name: { type: 'string', required: true, max: 200 },
+    description: { type: 'string', default: '' },
+    kind: { type: 'string', default: 'ui', enum: ['ui', 'server'] },
+    source: { type: 'string', required: true },
+    version: { type: 'number', default: 1 },
+    /** [{version, source, at, note}] -- every past version, for rollback. */
+    versions: { type: 'object[]', default: [] },
+    capabilities: { type: 'string[]', default: [] },
+    enabled: { type: 'boolean', default: false },
+    /**
+     * Set when loading or running the module threw. A module that fails is
+     * disabled rather than retried into a boot loop, and this is what the
+     * workshop shows instead of a blank screen.
+     */
+    lastError: { type: 'object', nullable: true, default: null },
+    /** Counts how often it failed; a repeat offender stays off until reviewed. */
+    failures: { type: 'number', default: 0 },
+    author: { type: 'string', default: '' },
+    builtin: { type: 'boolean', default: false },
   },
   token: {
     label: { type: 'string', required: true },

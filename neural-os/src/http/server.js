@@ -273,6 +273,7 @@ async function createServer(ctx = {}) {
     require('./api/agents'),
     require('./api/vault'),
     require('./api/sync'),
+    require('./api/modules'),
   ]) {
     mod.register(router);
   }

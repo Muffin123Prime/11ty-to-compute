@@ -49,6 +49,7 @@ const ICONS = {
   search: '<circle cx="8.8" cy="8.8" r="5.2"/><path d="m12.7 12.7 4 4"/>',
   settings: '<path d="M2.8 6.4h5.4M13.2 6.4h4M2.8 13.6h3.4M11.2 13.6h6"/><circle cx="10.6" cy="6.4" r="2.2"/><circle cx="8.6" cy="13.6" r="2.2"/>',
   timeline: '<path d="M2.5 10h15"/><circle cx="6" cy="10" r="1.9"/><circle cx="11.4" cy="10" r="1.9"/><circle cx="16" cy="10" r="1.4"/><path d="M6 5.4v2.7M11.4 11.9v2.7"/>',
+  workshop: '<path d="M7.6 3.4 4 7l2.6 2.6"/><path d="M12.4 3.4 16 7l-2.6 2.6"/><path d="M11.2 3.2 8.8 16.8"/><rect x="3.6" y="12.4" width="12.8" height="4.4" rx="1.4"/>',
   sync: '<rect x="2.5" y="4" width="7" height="12" rx="1.8"/><rect x="12" y="6.5" width="5.5" height="9" rx="1.6"/><path d="M10.4 8.6h1.1M10.4 11.4h1.1"/>',
   sun: '<circle cx="10" cy="10" r="3.4"/><path d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M15.8 4.2l-1.5 1.5M5.7 14.3l-1.5 1.5"/>',
   moon: '<path d="M16.2 11.6A6.7 6.7 0 0 1 8.4 3.8a6.7 6.7 0 1 0 7.8 7.8z"/>',
@@ -86,6 +87,7 @@ const VIEWS = [
   { id: 'network', title: 'Netzwerk', icon: ICONS.network, key: 'w', primary: false, keywords: 'internet schleuse gate freigaben audit' },
   { id: 'timeline', title: 'Zeitachse', icon: ICONS.timeline, key: 'z', primary: false, keywords: 'verlauf chronik historie wann zeit' },
   { id: 'sync', title: 'Abgleich', icon: ICONS.sync, key: 'y', primary: false, keywords: 'synchronisation geräte partner peer konflikte' },
+  { id: 'workshop', title: 'Werkstatt', icon: ICONS.workshop, key: 'e', primary: false, keywords: 'erweiterungen module code einfügen ändern plugin anpassen' },
   { id: 'search', title: 'Suche', icon: ICONS.search, key: 'f', primary: false, keywords: 'finden volltext' },
   { id: 'settings', title: 'Einstellungen', icon: ICONS.settings, key: 's', primary: true, keywords: 'konfiguration tresor modelle sicherung' },
 ];
