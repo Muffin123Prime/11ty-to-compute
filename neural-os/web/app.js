@@ -876,7 +876,11 @@ function createShell() {
     const rest = lines.slice(1).join('\n').trim();
 
     if (isTask) {
-      return { kind: 'task', title: first.slice(0, 500), body: rest, tags };
+      // Aufgaben tragen im Datenmodell keine Schlagwörter (siehe
+      // src/store/schema.js). Ein erkanntes `#wort` bleibt deshalb einfach im
+      // Text stehen -- und die Vorschau sagt das, statt ein Schlagwort zu
+      // versprechen, das nirgends ankommt.
+      return { kind: 'task', title: first.slice(0, 500), body: rest, tags: [], erkannteWorte: tags };
     }
     // Eine einzelne Zeile ist ein Titel. Mehrere Zeilen: die erste ist der
     // Titel, der Rest der Text -- so, wie eine Notiz ohnehin aufgebaut ist.
@@ -925,6 +929,11 @@ function createShell() {
       const art = parsed.kind === 'task' ? 'Aufgabe' : 'Notiz';
       const schlag = parsed.tags.length ? ` · ${parsed.tags.map((t) => `#${t}`).join(' ')}` : '';
       preview.appendChild(text(`Wird angelegt als ${art}: „${snippetTitle(parsed.title)}“${schlag}`));
+      if (parsed.kind === 'task' && parsed.erkannteWorte && parsed.erkannteWorte.length) {
+        preview.appendChild(h('br'));
+        preview.appendChild(text(`Aufgaben tragen keine Schlagwörter — ${parsed.erkannteWorte
+          .map((t) => `#${t}`).join(' ')} bleibt im Text stehen.`));
+      }
     };
 
     const save = async (keepOpen) => {
