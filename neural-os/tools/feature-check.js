@@ -149,6 +149,7 @@ const SUBSYSTEM_ROUTES = {
   study: '/api/study/stats',
   compare: '/api/models',   // eigene Routen sind POST; /api/models zeigt, dass die Registry steht
   watcher: '/api/watch',
+  secondLook: '/api/notes',   // eigene Route ist POST /api/notes/:id/second-look
   history: '/api/history',
   scheduler: '/api/automation/schedules',
   triggers: '/api/automation/triggers',

@@ -197,6 +197,26 @@ test('ein Begriff, den es nur in dieser Notiz gibt, ist kein bekannter Begriff',
   });
 });
 
+/**
+ * Der Grund für die Wortartenregel, als Prüfung.
+ *
+ * "offen" steht in der Kaffeenotiz ("Offen ist, ob …") und in der Imkernotiz
+ * ("das Flugloch offen bleibt"). Ohne die Regel verbindet dieser eine
+ * Adjektivtreffer zwei Notizen, die nichts miteinander zu tun haben -- und die
+ * Liste, die sich "belegbar" nennt, wird zu Lärm.
+ */
+test('Adjektive und Verben werden nicht zu Begriffen, auch wenn sie geteilt sind', async () => {
+  await withVault('nos-sl-wortart', async ({ store, secondLook }) => {
+    const { kaffee } = seed(store);
+    const result = await secondLook.look(kaffee.id);
+    for (const wort of ['offen', 'gemessen', 'wirklich', 'nicht']) {
+      assert.equal(begriff(result, wort), undefined, `"${wort}" ist kein Begriff, sondern ein Füllwort`);
+    }
+    // Aber die Substantive sind da.
+    assert.ok(begriff(result, 'mahlgrad'), 'ein echtes Substantiv fehlt');
+  });
+});
+
 test('jeder gemeldete Treffer ist im Zieltext wirklich nachweisbar', async () => {
   await withVault('nos-sl-belegbar', async ({ store, secondLook }) => {
     const { kaffee } = seed(store);

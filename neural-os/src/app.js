@@ -191,6 +191,20 @@ async function createApp(opts = {}) {
     ? optional(failures, 'compare', () => compareMod.createCompare({ registry, gate, store, bus, config, logger }))
     : null;
 
+  // --- zweiter Blick ---------------------------------------------------------
+  //
+  // Zwei der drei Teile brauchen ein Modell, der dritte nicht: "welche
+  // Begriffe aus dieser Notiz kommen schon anderswo vor" ist reine Textarbeit
+  // und der Volltextindex. Deshalb wird das Teilsystem AUCH ohne Registry
+  // gebaut -- es liefert dann den dritten Teil und sagt ehrlich, was fehlt,
+  // statt gar nicht zu erscheinen.
+  const secondLookMod = tryRequire('./agents/secondlook');
+  const secondLook = secondLookMod
+    ? optional(failures, 'secondLook', () => secondLookMod.createSecondLook({
+      store, registry, graph, gate, bus, config, logger,
+    }))
+    : null;
+
   // --- agents --------------------------------------------------------------
   const approvalsMod = tryRequire('./agents/approvals');
   const approvals = approvalsMod
@@ -412,6 +426,7 @@ async function createApp(opts = {}) {
     assist,
     study,
     compare,
+    secondLook,
     watcher,
     history,
     scheduler,
@@ -482,6 +497,7 @@ async function createApp(opts = {}) {
         assist: !!assist,
         study: !!study,
         compare: !!compare,
+        secondLook: !!secondLook,
         watcher: !!watcher,
         history: !!history,
         scheduler: !!scheduler,

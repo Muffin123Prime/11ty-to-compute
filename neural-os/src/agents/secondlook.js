@@ -317,23 +317,71 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
     return record;
   }
 
-  /** Titel und Text, so wie ein Mensch die Notiz liest. */
+  /**
+   * Titel und Text, so wie ein Mensch die Notiz liest. `titleEnd` ist der
+   * Offset, bis zu dem der Titel reicht -- die Wortartenregel weiter unten
+   * behandelt ihn anders als den Fließtext.
+   */
   function noteText(record) {
     const d = dataOf(record);
     const title = String(d.title || '').trim();
-    const body = String(d.body || '');
-    return `${title}\n\n${body}`.trim();
+    const body = String(d.body || '').trim();
+    const text = title ? `${title}\n\n${body}` : body;
+    return { text: text.trimEnd(), titleEnd: title.length };
   }
 
   /* -------------------------------------------------- bekannte Begriffe */
 
   /**
-   * Kandidaten: gefaltete Wörter der Notiz, ohne Stoppwörter und ohne die
-   * ganz kurzen, in der Reihenfolge ihrer Häufigkeit im Text. Zu jedem wird
-   * die Schreibweise gemerkt, die im Text wirklich steht -- der Mensch soll
-   * sein eigenes Wort wiedererkennen, nicht dessen Umschrift.
+   * Steht dieses Wort am Anfang eines Satzes (oder eines Aufzählungspunktes)?
+   * Gebraucht für die Regel eine Ebene tiefer.
    */
-  function candidates(text, record) {
+  function startsSentence(text, start) {
+    for (let i = start - 1; i >= 0; i--) {
+      const ch = text[i];
+      if (/\s/.test(ch)) continue;
+      return '.!?:;…•*->#|'.includes(ch);
+    }
+    return true;
+  }
+
+  /**
+   * Ist dieses Vorkommen ein Substantiv?
+   *
+   * Im Deutschen werden Substantive großgeschrieben, und ein Begriff, der zwei
+   * Notizen verbindet, ist fast immer ein Substantiv. Das ist die billigste
+   * verlässliche Wortartenprüfung, die es für diese Sprache gibt -- und sie
+   * ist der Unterschied zwischen einer Liste aus "Brühtemperatur, Mahlgrad"
+   * und einer aus "offen, gemessen, bleibt", die zwei Notizen über Kaffee und
+   * über Bienenvölker fürs selbe Thema erklärt.
+   *
+   * Groß am Satzanfang zählt nicht, denn dort ist alles groß. Im TITEL zählt
+   * es doch: ein Titel ist kein Satz, sondern der Name, den der Mensch der
+   * Sache selbst gegeben hat -- wie ein Schlagwort.
+   *
+   * Was diese Regel kostet, ehrlich: ein Substantiv, das in dieser Notiz
+   * ausschließlich am Satzanfang steht, fällt heraus, und kleingeschriebene
+   * englische Fachwörter fallen ebenfalls heraus. Beides ist seltener als der
+   * Lärm, den die Regel fernhält.
+   */
+  function isNoun(text, span, titleEnd) {
+    const first = text[span.start];
+    if (!first) return false;
+    const upper = first.toLocaleUpperCase('de-DE');
+    const lower = first.toLocaleLowerCase('de-DE');
+    if (first !== upper || upper === lower) return false;
+    if (span.start < titleEnd) return true;
+    return !startsSentence(text, span.start);
+  }
+
+  /**
+   * Kandidaten: gefaltete Wörter der Notiz, ohne Stoppwörter, ohne die ganz
+   * kurzen und ohne alles, was nirgends als Substantiv auftritt -- in der
+   * Reihenfolge ihrer Häufigkeit im Text. Zu jedem wird die Schreibweise
+   * gemerkt, die im Text wirklich steht: der Mensch soll sein eigenes Wort
+   * wiedererkennen, nicht dessen Umschrift.
+   */
+  function candidates(text, record, titleEnd) {
     const counts = new Map();
     for (const span of tokenSpans(text, MIN_TERM_LENGTH)) {
       const term = span.term;
@@ -341,9 +389,20 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
       if (stopwords.has(term)) continue;
       // Reine Zahlen sind keine Begriffe ("2026" verbindet nichts).
       if (!/[a-z]/.test(term)) continue;
+      const noun = isNoun(text, span, titleEnd);
       const seen = counts.get(term);
-      if (seen) seen.count++;
-      else counts.set(term, { term, form: text.slice(span.start, span.end), count: 1 });
+      if (seen) {
+        seen.count++;
+        if (noun && !seen.noun) {
+          seen.noun = true;
+          seen.form = text.slice(span.start, span.end);
+        }
+      } else {
+        counts.set(term, { term, form: text.slice(span.start, span.end), count: 1, noun });
+      }
+    }
+    for (const entry of [...counts.keys()]) {
+      if (!counts.get(entry).noun) counts.delete(entry);
     }
 
     // Schlagworte zählen als Begriff, auch wenn sie im Fließtext nicht stehen:
@@ -355,7 +414,7 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
       if (!folded || folded.length < MIN_TERM_LENGTH || stopwords.has(folded)) continue;
       const seen = counts.get(folded);
       if (seen) seen.count += 2;
-      else counts.set(folded, { term: folded, form: clean, count: 2 });
+      else counts.set(folded, { term: folded, form: clean, count: 2, noun: true });
     }
 
     return [...counts.values()]
@@ -385,11 +444,11 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
    * Der dritte Teil: welche Begriffe dieser Notiz anderswo im Tresor stehen.
    * Braucht kein Modell, kein Netz und keine Einbettungen -- nur den Index.
    */
-  function knownTerms(record, text, opts = {}) {
+  function knownTerms(record, parts, opts = {}) {
     const types = Array.isArray(opts.types) && opts.types.length ? opts.types : SEARCH_TYPES;
     const found = [];
 
-    for (const candidate of candidates(text, record)) {
+    for (const candidate of candidates(parts.text, record, parts.titleEnd)) {
       if (found.length >= MAX_TERMS * 2) break;
       let result;
       try {
@@ -513,7 +572,8 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
   async function look(noteId, opts = {}) {
     const started = Date.now();
     const record = getNote(noteId);
-    const text = noteText(record);
+    const parts = noteText(record);
+    const text = parts.text;
 
     if (text.length < MIN_TEXT_CHARS) {
       throw new ValidationError(
@@ -525,7 +585,7 @@ function createSecondLook({ store, registry, graph, gate, bus, config, logger } 
 
     // Zuerst der Teil, der immer geht. Auch wenn gleich alles andere
     // fehlschlägt, ist dieser hier schon berechnet und wird geliefert.
-    const bekannteBegriffe = knownTerms(record, text, { types: opts.types });
+    const bekannteBegriffe = knownTerms(record, parts, { types: opts.types });
 
     const basis = {
       noteId: record.id,
