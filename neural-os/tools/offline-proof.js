@@ -178,6 +178,60 @@ async function main() {
       fs.existsSync(path.join(home, 'vault', 'log')) ? 'pass' : 'fail',
       `${JSON.stringify(statsBefore.counts)}`);
 
+    // ---------------------------------- 3b. Die Helfer, ohne Modell und Netz
+    //
+    // Der Punkt, auf den es ankommt: das Nuetzlichste an diesem System soll
+    // nicht der Teil sein, fuer den man 5 GB herunterladen und danach online
+    // gehen muss. Also wird genau das hier gemessen -- mit blockierter
+    // Schleuse und ohne ein einziges installiertes Modell.
+    if (app.assist) {
+      const vor = new Date(Date.now() - 200 * 86400000).toISOString();
+      const t = 'Erst den Wassertank leeren. Dann Entkalker einfuellen. Zwei Durchlaeufe.';
+      app.store.create('note', { title: 'Maschine entkalken', body: t, createdAt: vor });
+      app.store.create('note', { title: 'Maschine entkalken (Kopie)', body: t });
+      app.store.create('note', { title: 'Kuechenplan', body: '- [ ] Dichtung nachbestellen' });
+      app.store.create('note', { title: 'Mahlgrad', body: 'Siehe [[Bruehtemperatur]].' });
+      const scan = await app.assist.scan({});
+      const arten = Object.keys(scan.byKind || {}).filter((k) => scan.byKind[k] > 0);
+      record('app', 'Vorschläge ohne Modell und ohne Netz', arten.length ? 'pass' : 'fail',
+        `${scan.created} Vorschläge in ${scan.durationMs} ms, Arten: ${arten.join(', ') || 'keine'}`);
+
+      const offen = app.assist.list({ status: 'open' }).items
+        .find((x) => (x.data.action || {}).op === 'createTask');
+      if (offen) {
+        const res = await app.assist.accept(offen.id);
+        const angelegt = res.applied && res.applied.taskId ? app.store.get(res.applied.taskId) : null;
+        record('app', 'Ein übernommener Vorschlag ändert wirklich etwas', angelegt ? 'pass' : 'fail',
+          angelegt ? `Aufgabe „${angelegt.data.title}" angelegt` : JSON.stringify(res.applied));
+      } else {
+        record('app', 'Ein übernommener Vorschlag ändert wirklich etwas', 'info',
+          'kein Vorschlag mit ausführbarer Aktion in diesem Durchlauf');
+      }
+    } else {
+      record('app', 'Vorschläge ohne Modell und ohne Netz', 'fail', 'Teilsystem nicht geladen');
+    }
+
+    if (app.scheduler && app.triggers) {
+      const agent = app.store.all('agent')[0];
+      const plan = agent ? app.scheduler.create({
+        agentId: agent.id, goal: 'Rückblick schreiben', every: 'daily', atHour: 7,
+      }) : null;
+      const ausloeser = agent ? app.triggers.create({
+        agentId: agent.id, goal: 'Verschlagworten', on: 'record.created', recordType: 'note',
+      }) : null;
+      // Der Kern der Zusage: nichts laeuft, was niemand eingeschaltet hat.
+      const aus = plan && plan.data.enabled === false && ausloeser && ausloeser.data.enabled === false;
+      const tick = await app.scheduler.tick();
+      record('app', 'Automatik ist ab Werk aus und feuert nicht von allein',
+        aus && (tick.fired || []).length === 0 ? 'pass' : 'fail',
+        aus ? `Zeitplan und Auslöser angelegt, beide aus; Prüfung startete ${(tick.fired || []).length} Läufe`
+          : 'ein neu angelegter Plan war bereits eingeschaltet');
+      if (plan) app.scheduler.remove(plan.id);
+      if (ausloeser) app.triggers.remove(ausloeser.id);
+    } else {
+      record('app', 'Automatik ist ab Werk aus und feuert nicht von allein', 'fail', 'Teilsystem nicht geladen');
+    }
+
     // ------------------------------------------------- 4. Modelle, ehrlich
     console.log(`\n${B}4. Modellanbindung${X}`);
     if (app.registry) {
