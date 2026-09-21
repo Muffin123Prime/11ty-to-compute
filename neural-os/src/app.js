@@ -186,6 +186,38 @@ async function createApp(opts = {}) {
     ? optional(failures, 'runtime', () => runtimeMod.createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, config, logger, paths }))
     : null;
 
+  // --- model-free assistance ------------------------------------------------
+  //
+  // Deliberately independent of `registry`: everything it does is text and
+  // graph analysis, so it keeps working on a machine that has no model at all.
+  // That is the point -- the most useful help this system gives should not be
+  // the part that needs a 5 GB download.
+  const assistMod = tryRequire('./assist/engine');
+  const assist = assistMod
+    ? optional(failures, 'assist', () => assistMod.createAssist({ store, graph, bus, config, logger }))
+    : null;
+
+  // --- automation -----------------------------------------------------------
+  //
+  // Both are built even when `runtime` is absent, and both are inert until
+  // `start()` is called (which happens in `listen()`, not here -- a `doctor`
+  // run must not start a timer). Without a runtime they record the real
+  // reason in `lastError` instead of failing silently: a schedule that cannot
+  // run and says nothing is exactly the kind of quiet lie this system avoids.
+  const scheduleMod = tryRequire('./agents/schedule');
+  const scheduler = scheduleMod
+    ? optional(failures, 'scheduler', () => scheduleMod.createScheduler({
+      store, runtime, bus, config, logger, audit,
+    }))
+    : null;
+
+  const triggersMod = tryRequire('./agents/triggers');
+  const triggers = triggersMod
+    ? optional(failures, 'triggers', () => triggersMod.createTriggers({
+      store, runtime, bus, config, logger, audit,
+    }))
+    : null;
+
   // --- semantic search ------------------------------------------------------
   // Optional in the strongest sense: it needs a second model (an embedding
   // model) that most people will not have installed. Everything else keeps
@@ -305,6 +337,9 @@ async function createApp(opts = {}) {
     approvals,
     toolbox,
     runtime,
+    assist,
+    scheduler,
+    triggers,
     backup,
     auth,
     modules,
@@ -352,6 +387,9 @@ async function createApp(opts = {}) {
         chat: !!chat,
         agents: !!runtime,
         approvals: !!approvals,
+        assist: !!assist,
+        scheduler: !!scheduler,
+        triggers: !!triggers,
         backup: !!backup,
         auth: !!auth,
         extraction: !!extract,
@@ -396,6 +434,11 @@ async function createApp(opts = {}) {
         subsystems,
         models,
         semantic,
+        automation: {
+          scheduler: scheduler && typeof scheduler.status === 'function' ? scheduler.status() : null,
+          triggers: triggers && typeof triggers.status === 'function' ? triggers.status() : null,
+        },
+        assistance: assist && typeof assist.stats === 'function' ? assist.stats() : null,
         extensions: modules && typeof modules.status === 'function' ? modules.status() : null,
         peers: sync && typeof sync.summary === 'function' ? sync.summary() : null,
         failures,
@@ -434,12 +477,36 @@ async function createApp(opts = {}) {
       app.server = created;
       await created.listen(opts);
       audit.write('server.listen', { host: config.server.host, port: config.server.port });
+
+      // Automation starts here rather than in createApp(), so a command that
+      // only inspects the vault (`doctor`, `export`) never starts a clock and
+      // never fires an agent as a side effect of being asked a question.
+      // Individual schedules and triggers are still off until switched on.
+      if (scheduler && typeof scheduler.start === 'function') {
+        try {
+          const every = Number(config.agents && config.agents.scheduleIntervalMs);
+          scheduler.start(Number.isFinite(every) && every >= 1000 ? { intervalMs: every } : {});
+        } catch (err) {
+          failures.push({ subsystem: 'scheduler', reason: asNeuralError(err).message });
+          log.error(`Zeitplan konnte nicht gestartet werden: ${err && err.message}`);
+        }
+      }
+      if (triggers && typeof triggers.start === 'function') {
+        try {
+          triggers.start();
+        } catch (err) {
+          failures.push({ subsystem: 'triggers', reason: asNeuralError(err).message });
+          log.error(`Auslöser konnten nicht gestartet werden: ${err && err.message}`);
+        }
+      }
       return created;
     },
 
     async close() {
       const problems = [];
       for (const [name, fn] of [
+        ['scheduler', () => scheduler && scheduler.stop && scheduler.stop()],
+        ['triggers', () => triggers && triggers.stop && triggers.stop()],
         ['server', () => app.server && app.server.close()],
         ['modules', () => modules && modules.disposeAll && modules.disposeAll()],
         ['runtime', () => runtime && runtime.abortAll && runtime.abortAll()],

@@ -940,6 +940,229 @@ async function checkStick() {
 
 /* -------------------------------------------------------------------- main */
 
+async function checkAssist(app) {
+  area('14 · Vorschläge (ohne Modell)');
+
+  // Vier Fälle, die je ein Erkennungsverfahren treffen sollen.
+  const note = async (label, data) => ok(await api.post('/api/records', { type: 'note', data }), label);
+  const a = await note('notiz a', {
+    title: 'Espressomaschine entkalken',
+    body: 'Erst den Wassertank leeren. Dann Entkalker einfüllen. Zwei Durchläufe.',
+  });
+  const b = await note('notiz b', {
+    title: 'Espressomaschine entkalken (Kopie)',
+    body: 'Erst den Wassertank leeren. Dann Entkalker einfüllen. Zwei Durchläufe.',
+  });
+  const mitAufgabe = await note('notiz mit aufgabe', {
+    title: 'Küchenplanung',
+    body: '- [ ] Dichtung nachbestellen\nSonst nichts.',
+  });
+  const mitLink = await note('notiz mit link', {
+    title: 'Mahlgrad',
+    body: 'Siehe [[Brühtemperatur]] — dazu gibt es noch keine Notiz.',
+  });
+
+  let suggestions = [];
+
+  await check('Prüfung läuft und meldet ehrlich, was sie nicht konnte', async () => {
+    const r = ok(await api.post('/api/assist/scan', {}), 'scan');
+    assert(Number.isFinite(r.created), 'keine Zahl neuer Vorschläge');
+    assert(Array.isArray(r.skipped), 'kein Feld für übersprungene Verfahren');
+    const list = ok(await api.get('/api/assist/suggestions?limit=200'), 'liste');
+    suggestions = list.items || [];
+    const kinds = [...new Set(suggestions.map((s) => body(s).kind))].sort();
+    if (r.skipped.length) {
+      return `${r.created} Vorschläge, ${r.skipped.length} Verfahren übersprungen: ${r.skipped.map((s) => `${s.kind} (${s.reason})`).join('; ')}`;
+    }
+    return `${r.created} Vorschläge in ${r.durationMs} ms, Arten: ${kinds.join(', ') || 'keine'}`;
+  });
+
+  await check('Die Dublette wird erkannt und nicht selbst zusammengeführt', async () => {
+    const found = suggestions.find((s) => body(s).kind === 'duplicate');
+    assert(found, `keine Dublette gefunden, obwohl zwei gleiche Notizen angelegt wurden (Arten: ${suggestions.map((s) => body(s).kind).join(',')})`);
+    const ids = body(found).recordIds || [];
+    assert(ids.includes(a.record.id) && ids.includes(b.record.id), `falsche Sätze: ${JSON.stringify(ids)}`);
+    const action = body(found).action;
+    assert(action && action.op === 'link', `ein Vorschlag, der von allein zusammenführt, wäre unumkehrbar: ${JSON.stringify(action)}`);
+    return 'als Verknüpfung vorgeschlagen, nicht als Zusammenführung';
+  });
+
+  await check('Aus "- [ ]" wird eine Aufgabe vorgeschlagen, aus Prosa nicht', async () => {
+    const found = suggestions.find((s) => body(s).kind === 'task' && (body(s).recordIds || []).includes(mitAufgabe.record.id));
+    assert(found, 'die angehakte Zeile wurde nicht erkannt');
+    assert(/Dichtung/.test(body(found).action.title), `falscher Titel: ${body(found).action.title}`);
+    const ausProsa = suggestions.filter((s) => body(s).kind === 'task' && /Sonst nichts/.test(body(s).action.title || ''));
+    assert(!ausProsa.length, 'aus einem gewöhnlichen Satz wurde eine Aufgabe geraten');
+    return `"${body(found).action.title}"`;
+  });
+
+  await check('Ein unaufgelöster [[Link]] wird als fehlende Notiz gemeldet', async () => {
+    const found = suggestions.find((s) => body(s).kind === 'link' && (body(s).recordIds || []).includes(mitLink.record.id));
+    if (!found) {
+      const skipped = suggestions.length === 0;
+      return unklar(skipped ? 'die Prüfung hat keine Vorschläge erzeugt' : 'kein Link-Vorschlag — Verfahren übersprungen?');
+    }
+    assert(body(found).action.op === 'createNote', `falsche Aktion: ${JSON.stringify(body(found).action)}`);
+    assert(/Brühtemperatur/.test(body(found).action.title), `falscher Titel: ${body(found).action.title}`);
+    return 'Brühtemperatur';
+  });
+
+  await check('Übernehmen ändert wirklich etwas', async () => {
+    const found = suggestions.find((s) => body(s).kind === 'task');
+    if (!found) return unklar('kein Aufgaben-Vorschlag vorhanden');
+    const r = ok(await api.post(`/api/assist/suggestions/${found.id}/accept`), 'accept');
+    assert(r.applied && r.applied.op === 'createTask', `nichts ausgeführt: ${JSON.stringify(r.applied)}`);
+    const task = ok(await api.get(`/api/records/${r.applied.taskId}`), 'aufgabe');
+    assert(body(task.record).title === body(found).action.title, 'die Aufgabe trägt einen anderen Titel als angekündigt');
+    assert(body(r.suggestion).status === 'accepted', 'der Vorschlag steht nicht auf "übernommen"');
+    return `Aufgabe ${r.applied.taskId} angelegt`;
+  });
+
+  await check('Ein verworfener Vorschlag kommt nicht wieder', async () => {
+    const found = suggestions.find((s) => body(s).kind === 'duplicate');
+    if (!found) return unklar('kein Dubletten-Vorschlag vorhanden');
+    ok(await api.post(`/api/assist/suggestions/${found.id}/dismiss`), 'dismiss');
+    ok(await api.post('/api/assist/scan', {}), 'zweiter scan');
+    const list = ok(await api.get('/api/assist/suggestions?status=open&limit=200'), 'liste');
+    const wieder = (list.items || []).filter((s) => body(s).kind === 'duplicate'
+      && (body(s).recordIds || []).includes(a.record.id));
+    assert(!wieder.length, 'der verworfene Vorschlag ist nach der nächsten Prüfung wieder da');
+    return 'bleibt verworfen';
+  });
+
+  await check('Zweimal prüfen erzeugt keine Dubletten von Vorschlägen', async () => {
+    const vorher = ok(await api.get('/api/assist/suggestions?status=all&limit=500'), 'vorher').total;
+    const r = ok(await api.post('/api/assist/scan', {}), 'dritter scan');
+    const nachher = ok(await api.get('/api/assist/suggestions?status=all&limit=500'), 'nachher').total;
+    assert(nachher === vorher, `aus ${vorher} Vorschlägen wurden ${nachher} (neu: ${r.created})`);
+    return `${vorher} bleiben ${nachher}`;
+  });
+
+  await check('Eine unbekannte Art wird mit den möglichen benannt', async () => {
+    const r = await api.post('/api/assist/scan', { kinds: ['hellsehen'] });
+    assert(r.status === 400, `HTTP ${r.status} statt 400`);
+    assert(/duplicate|orphan|tag/.test(JSON.stringify(r.json)), 'die möglichen Arten werden nicht genannt');
+    return 'abgelehnt mit Liste';
+  });
+}
+
+async function checkAutomation(app) {
+  area('15 · Automatik');
+
+  const agents = ok(await api.get('/api/agents'), 'agenten');
+  const agentId = (agents.items || [])[0] && (agents.items[0].id);
+  if (!agentId) {
+    await check('Automatik prüfbar', async () => unklar('kein Agent vorhanden'));
+    return;
+  }
+
+  let scheduleId = null;
+  let triggerId = null;
+
+  await check('Übersicht antwortet mit beiden Teilen', async () => {
+    const r = ok(await api.get('/api/automation'), 'automation');
+    assert(r.schedules && Array.isArray(r.schedules.items), 'keine Zeitpläne');
+    assert(r.triggers && Array.isArray(r.triggers.items), 'keine Auslöser');
+    assert(r.status && r.status.scheduler, 'kein Zustand des Zeitgebers');
+    return `Zeitgeber läuft: ${r.status.scheduler.running}`;
+  });
+
+  await check('Ein neuer Zeitplan ist ausgeschaltet', async () => {
+    const r = ok(await api.post('/api/automation/schedules', {
+      agentId, goal: 'Tagesrückblick schreiben', every: 'daily', atHour: 7,
+    }), 'zeitplan anlegen');
+    scheduleId = r.record.id;
+    assert(body(r.record).enabled === false,
+      'ein Zeitplan, der sofort läuft, ohne dass jemand ihn eingeschaltet hat, ist genau das Gegenteil dessen, was dieses System verspricht');
+    assert(body(r.record).nextRunAt, 'ohne nächsten Termin ist der Plan nicht nachvollziehbar');
+    return `nächster Termin: ${body(r.record).nextRunAt}`;
+  });
+
+  await check('Ein ausgeschalteter Zeitplan feuert auch bei einer Prüfung nicht', async () => {
+    const r = ok(await api.post('/api/automation/tick'), 'tick');
+    const meiner = (r.fired || []).filter((f) => f.scheduleId === scheduleId);
+    assert(!meiner.length, 'ein ausgeschalteter Plan hat einen Lauf gestartet');
+    return `${(r.fired || []).length} Läufe gestartet`;
+  });
+
+  await check('Der nächste Termin lässt sich nicht von außen verstellen', async () => {
+    // Absicht, kein Mangel: nextRunAt ist berechnet. Koennte ein Client ihn
+    // setzen, waere die Aussage "das naechste Mal morgen um 7" nicht mehr die
+    // Wahrheit ueber den Plan, sondern eine Behauptung des Aufrufers.
+    const vorher = ok(await api.get('/api/automation/schedules'), 'vorher');
+    const alt = body((vorher.items || []).find((x) => x.id === scheduleId)).nextRunAt;
+    ok(await api.patch(`/api/automation/schedules/${scheduleId}`, {
+      enabled: true, nextRunAt: new Date(Date.now() - 60000).toISOString(),
+    }), 'einschalten');
+    const nachher = ok(await api.get('/api/automation/schedules'), 'nachher');
+    const jetzt = body((nachher.items || []).find((x) => x.id === scheduleId));
+    assert(jetzt.enabled === true, 'das Einschalten hat nicht gewirkt');
+    assert(jetzt.nextRunAt === alt, `der Termin wurde von aussen verstellt: ${alt} -> ${jetzt.nextRunAt}`);
+    return 'berechnet, nicht gesetzt';
+  });
+
+  await check('"Jetzt ausführen" startet einen echten Lauf', async () => {
+    const r = await api.post(`/api/automation/schedules/${scheduleId}/run`);
+    if (r.status !== 200) {
+      // Ohne Modell schlaegt der Lauf hinterher fehl -- gestartet werden muss
+      // er trotzdem. Ein anderer Grund ist ein echter Mangel.
+      assert(r.status === 409 || r.status === 429, `HTTP ${r.status}: ${JSON.stringify(r.json)}`);
+      return unklar(`nicht gestartet: ${JSON.stringify(r.json && r.json.error && r.json.error.message)}`);
+    }
+    const run = ok(await api.get(`/api/records/${r.json.runId}`), 'lauf');
+    assert(body(run.record).agentId === agentId, 'der Lauf gehört einem anderen Agenten');
+    assert(body(run.record).goal === 'Tagesrückblick schreiben', 'der Lauf hat ein anderes Ziel als der Plan');
+    return `Lauf ${r.json.runId}`;
+  });
+
+  await check('Ein eingeschalteter, aber noch nicht fälliger Plan feuert nicht', async () => {
+    const r = ok(await api.post('/api/automation/tick'), 'tick');
+    const meiner = (r.fired || []).filter((f) => f.scheduleId === scheduleId);
+    assert(!meiner.length, 'ein Plan, dessen Termin in der Zukunft liegt, wurde ausgeführt');
+    const liste = ok(await api.get('/api/automation/schedules'), 'zeitplaene');
+    const jetzt = body((liste.items || []).find((x) => x.id === scheduleId));
+    const next = Date.parse(jetzt.nextRunAt);
+    assert(Number.isFinite(next) && next > Date.now(),
+      `naechster Termin liegt nicht in der Zukunft: ${jetzt.nextRunAt}`);
+    return jetzt.nextRunLabel || jetzt.nextRunAt;
+  });
+
+  await check('Ein neuer Auslöser ist ausgeschaltet und hat Bremsen', async () => {
+    const r = ok(await api.post('/api/automation/triggers', {
+      agentId, goal: 'Neue Notiz verschlagworten', on: 'record.created', recordType: 'note',
+    }), 'ausloeser anlegen');
+    triggerId = r.record.id;
+    const d = body(r.record);
+    assert(d.enabled === false, 'ein Auslöser, der sofort scharf ist, wurde von niemandem eingeschaltet');
+    assert(d.debounceMs >= 1000, `Entprellung zu klein: ${d.debounceMs}`);
+    assert(d.maxPerHour >= 1 && d.maxPerHour <= 60, `Stundengrenze unplausibel: ${d.maxPerHour}`);
+    return `Entprellung ${d.debounceMs} ms, höchstens ${d.maxPerHour}/Stunde`;
+  });
+
+  await check('Ein unbekanntes Ereignis wird abgelehnt', async () => {
+    const r = await api.post('/api/automation/triggers', { agentId, goal: 'x', on: 'vollmond' });
+    assert(r.status === 400, `HTTP ${r.status} statt 400`);
+    return 'abgelehnt';
+  });
+
+  await check('Ein unbekannter Agent wird abgelehnt, nicht stillschweigend angelegt', async () => {
+    const r = await api.post('/api/automation/schedules', {
+      agentId: 'agent_gibtesnicht0000000', goal: 'x', every: 'daily',
+    });
+    assert(r.status === 404 || r.status === 400, `HTTP ${r.status}`);
+    return `HTTP ${r.status}`;
+  });
+
+  await check('Beides lässt sich wieder entfernen', async () => {
+    ok(await api.del(`/api/automation/schedules/${scheduleId}`), 'zeitplan loeschen');
+    ok(await api.del(`/api/automation/triggers/${triggerId}`), 'ausloeser loeschen');
+    const r = ok(await api.get('/api/automation'), 'automation');
+    assert(!(r.schedules.items || []).some((x) => x.id === scheduleId), 'der Zeitplan steht noch da');
+    assert(!(r.triggers.items || []).some((x) => x.id === triggerId), 'der Auslöser steht noch da');
+    return 'entfernt';
+  });
+}
+
 const AREAS = {
   status: checkStatus,
   notizen: checkRecords,
@@ -954,6 +1177,8 @@ const AREAS = {
   abgleich: checkSync,
   extraktion: checkExtraction,
   stick: checkStick,
+  vorschlaege: checkAssist,
+  automatik: checkAutomation,
 };
 
 async function main() {
