@@ -354,6 +354,16 @@ mark {
 /* A hairline between the three groups of areas: what you work with, what
    works for you, and what the system says about itself. Purely a reading aid
    -- every area keeps the same shortcut and the same place in the palette. */
+/* Schnellerfassung: eine Zeile, von überall aus. Bewusst schmal -- wer hier
+   einen Aufsatz schreibt, ist im falschen Fenster und soll das merken. */
+.quick { display: flex; flex-direction: column; gap: var(--sp-2); min-width: min(560px, 86vw); }
+.quick__title { margin: 0; font-size: var(--fs-lg); font-weight: 600; }
+.quick__field { min-height: 76px; resize: vertical; font-size: var(--fs-md); line-height: var(--lh); }
+.quick__preview { margin: 0; min-height: 1.2em; }
+.quick__status { margin: 0; min-height: 1.2em; }
+.quick__status.is-danger { color: var(--danger); }
+.quick__actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+
 .rail__divider {
   display: block;
   height: 1px;

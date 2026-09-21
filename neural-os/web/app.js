@@ -798,6 +798,7 @@ function createShell() {
   /* ---------------------------------------------------------------- */
 
   const overlayStack = [];
+  let quickCaptureOpen = false;
 
   function openOverlay({ node, onClose, closeOnBackdrop = true, labelledBy }) {
     const backdrop = h('div.overlay', { 'data-closable': closeOnBackdrop ? '1' : '0' });
@@ -835,6 +836,165 @@ function createShell() {
     }
 
     return entry;
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Schnellerfassung                                                  */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Was in der Eingabe steht, und was daraus wird.
+   *
+   * Reine Funktion, damit sie prüfbar ist, ohne ein Fenster zu öffnen.
+   *
+   * Die erkannten Merker sind ABSICHTLICH dieselben, die auch die Vorschläge
+   * in einer Notiz finden (`- [ ]`, `TODO:`, `Offen:` — siehe
+   * src/assist/detectors.js). Zwei Stellen, die aus demselben Text
+   * Verschiedenes machen, wären ein Vokabular, das man zweimal lernen muss.
+   *
+   * Geraten wird nichts: ohne Merker entsteht eine Notiz, nie eine Aufgabe.
+   */
+  function parseQuickCapture(raw) {
+    const text = String(raw || '').replace(/\r\n/g, '\n');
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+
+    const taskMarker = /^(?:[-*+]\s*\[\s*\]\s*|todo\s*:?\s+|@todo\s+|offen\s*:\s*|zu\s+tun\s*:\s*)/i;
+    const isTask = taskMarker.test(trimmed);
+    const body = isTask ? trimmed.replace(taskMarker, '') : trimmed;
+
+    // Schlagwörter werden gelesen, aber NICHT aus dem Text entfernt: wer
+    // "#kaffee" schreibt, meint es meistens auch als Wort im Satz.
+    const tags = [];
+    for (const match of body.matchAll(/(?:^|\s)#([\p{L}\p{N}_-]{2,40})/gu)) {
+      const tag = match[1].toLowerCase();
+      if (!tags.includes(tag)) tags.push(tag);
+    }
+
+    const lines = body.split('\n');
+    const first = lines[0].trim();
+    const rest = lines.slice(1).join('\n').trim();
+
+    if (isTask) {
+      return { kind: 'task', title: first.slice(0, 500), body: rest, tags };
+    }
+    // Eine einzelne Zeile ist ein Titel. Mehrere Zeilen: die erste ist der
+    // Titel, der Rest der Text -- so, wie eine Notiz ohnehin aufgebaut ist.
+    return {
+      kind: 'note',
+      title: (first || 'Notiz').slice(0, 500),
+      body: rest,
+      tags,
+    };
+  }
+
+  /**
+   * Eine Zeile, von überall aus.
+   *
+   * Der Grund, warum es das gibt: die Hürde zum Aufschreiben ist der
+   * Bereichswechsel. Wer erst zu "Notizen" navigieren, dort "Neue Notiz"
+   * drücken und warten muss, bis ein Editor geladen ist, schreibt den
+   * Gedanken nicht auf.
+   *
+   * Ehrliche Grenze, die auch in docs/IDEEN.md steht: ein systemweites
+   * Tastenkürzel geht aus dem Browser heraus nicht. Das hier wirkt, solange
+   * ein Fenster von Neural OS offen ist -- mehr verspricht es nicht.
+   */
+  function openQuickCapture() {
+    if (quickCaptureOpen) return;
+    quickCaptureOpen = true;
+
+    const titleId = 'quick-capture-title';
+    const field = h('textarea.input.quick__field', {
+      rows: 3,
+      placeholder: 'Ein Gedanke. Mit „- [ ]“ davor wird eine Aufgabe daraus, #schlagwort wird ein Schlagwort.',
+      'aria-label': 'Was willst du festhalten?',
+      spellcheck: 'true',
+    });
+    const preview = h('p.quick__preview.meta');
+    const status = h('p.quick__status.meta', { role: 'status' });
+    let busy = false;
+
+    const describe = () => {
+      const parsed = parseQuickCapture(field.value);
+      clear(preview);
+      if (!parsed) {
+        preview.appendChild(text('Noch nichts eingegeben.'));
+        return;
+      }
+      const art = parsed.kind === 'task' ? 'Aufgabe' : 'Notiz';
+      const schlag = parsed.tags.length ? ` · ${parsed.tags.map((t) => `#${t}`).join(' ')}` : '';
+      preview.appendChild(text(`Wird angelegt als ${art}: „${snippetTitle(parsed.title)}“${schlag}`));
+    };
+
+    const save = async (keepOpen) => {
+      if (busy) return;
+      const parsed = parseQuickCapture(field.value);
+      if (!parsed) return;
+      busy = true;
+      clear(status);
+      status.appendChild(text('Wird gespeichert …'));
+      try {
+        const data = parsed.kind === 'task'
+          ? { title: parsed.title, body: parsed.body }
+          : { title: parsed.title, body: parsed.body, tags: parsed.tags };
+        const created = await api.post('/records', { type: parsed.kind, data });
+        const id = created && (created.id || (created.record && created.record.id));
+        const art = parsed.kind === 'task' ? 'Aufgabe' : 'Notiz';
+        if (keepOpen) {
+          field.value = '';
+          describe();
+          clear(status);
+          // Kein Zurücknehmen-Knopf hier, sondern der Hinweis, wo es steht:
+          // dieses Fenster ist für den nächsten Gedanken da, nicht für eine
+          // Verwaltungsoberfläche.
+          status.appendChild(text(`${art} angelegt. Zurücknehmen geht unter Zeitachse → Letzte Änderungen.`));
+          field.focus();
+        } else {
+          entry.close(null);
+          toast(`${art} angelegt.`, 'success');
+          if (id) navigate(parsed.kind === 'task' ? '#/projects' : `#/notes?id=${encodeURIComponent(id)}`);
+        }
+      } catch (err) {
+        clear(status);
+        status.classList.add('is-danger');
+        status.appendChild(text(`Nicht gespeichert: ${(err && err.message) || 'unbekannter Fehler'}`));
+      } finally {
+        busy = false;
+      }
+    };
+
+    on(field, 'input', describe);
+    on(field, 'keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        // Strg+Enter: speichern und offen bleiben -- für mehrere Gedanken
+        // hintereinander, was der häufigste Fall ist, wenn man gerade etwas
+        // im Kopf hat.
+        save(event.metaKey || event.ctrlKey);
+      }
+    });
+
+    const node = h('div.quick', null,
+      h('h2.quick__title', { id: titleId }, text('Schnell festhalten')),
+      field,
+      preview,
+      status,
+      h('div.quick__actions', null,
+        h('span.meta', null, text('Enter speichert · Strg+Enter speichert und bleibt offen · Umschalt+Enter macht einen Zeilenumbruch')),
+        h('span.spacer'),
+        h('button.btn', { type: 'button', onClick: () => entry.close(null) }, text('Abbrechen')),
+        h('button.btn.btn--primary', { type: 'button', onClick: () => save(false) }, text('Speichern'))));
+
+    const entry = openOverlay({ node, labelledBy: titleId, onClose: () => { quickCaptureOpen = false; } });
+    describe();
+    field.focus();
+  }
+
+  /** Kurzform eines Titels für die Vorschau, ohne ihn zu verstümmeln. */
+  function snippetTitle(value) {
+    const s = String(value || '');
+    return s.length > 60 ? `${s.slice(0, 60)}…` : s;
   }
 
   function closeTopOverlay() {
@@ -923,6 +1083,14 @@ function createShell() {
       const status = state.get('status');
       const vaultState = status && status.vault ? (status.vault.state || status.vault.encryption) : null;
       const actions = [
+        {
+          id: 'act:quick',
+          group: 'Aktionen',
+          label: 'Schnell festhalten',
+          hint: 'Strg+Umschalt+N · eine Zeile, ohne den Bereich zu wechseln',
+          icon: ICONS.plus,
+          run: () => openQuickCapture(),
+        },
         {
           id: 'act:new-note',
           group: 'Aktionen',
@@ -1328,6 +1496,7 @@ function createShell() {
       ['/', 'Suche öffnen'],
       ['?', 'Diese Übersicht'],
       ['Esc', 'Overlay schließen'],
+      ['Strg Umschalt N', 'Schnell festhalten – eine Zeile, von überall aus'],
       ...VIEWS.map((v) => [`g ${v.key}`, `Zu ${v.title}`]),
     ];
     const titleId = 'shortcuts-title';
@@ -1359,6 +1528,15 @@ function createShell() {
       event.preventDefault();
       if (palette.isOpen) palette.close();
       else palette.open();
+      return;
+    }
+    // Schnellerfassung. Strg/Cmd + Umschalt + N, und zwar absichtlich auch
+    // waehrend man tippt: der ganze Sinn ist, den Gedanken loszuwerden, ohne
+    // vorher irgendwohin zu wechseln. Ein Tastenkuerzel, das erst wirkt, wenn
+    // man das Textfeld verlaesst, waere genau das, was es verhindern soll.
+    if ((event.key === 'n' || event.key === 'N') && (event.metaKey || event.ctrlKey) && event.shiftKey) {
+      event.preventDefault();
+      openQuickCapture();
       return;
     }
     if (event.key === 'Escape') {

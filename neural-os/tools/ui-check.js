@@ -322,6 +322,33 @@ async function main() {
       }
     }
 
+    /* ------------------------ 6. Schnellerfassung von ueberall aus */
+    console.log(`\n${B}6 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
+    // Absichtlich aus dem Gehirn heraus: der ganze Sinn ist, dass man nicht
+    // erst irgendwohin navigieren muss.
+    await page.goto(`${base}/#/graph`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(700);
+    await dismissWelcome(page);
+    const notizenVorher = store.count('note');
+    await page.keyboard.press('Control+Shift+KeyN');
+    await page.waitForTimeout(500);
+    if (!(await page.getByText('Schnell festhalten').count())) {
+      bad('Strg+Umschalt+N öffnet die Schnellerfassung');
+    } else {
+      ok('Strg+Umschalt+N öffnet die Schnellerfassung', 'aus dem Gehirn heraus');
+      await page.keyboard.type('Espresso nachbestellen #kaffee');
+      await page.waitForTimeout(300);
+      const vorschau = await page.locator('body').innerText();
+      check(/Wird angelegt als Notiz/.test(vorschau), 'Die Vorschau sagt vorher, was daraus wird');
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(1300);
+      check(store.count('note') === notizenVorher + 1, 'Eine Notiz steht wirklich im Tresor',
+        `${notizenVorher} → ${store.count('note')}`);
+      const neu = store.all('note').find((n) => n.data.title === 'Espresso nachbestellen #kaffee');
+      check(!!neu && (neu.data.tags || []).includes('kaffee'), 'mit dem erkannten Schlagwort',
+        neu ? JSON.stringify(neu.data.tags) : 'Notiz nicht gefunden');
+    }
+
     check(errors.length === 0, 'Keine Konsolenfehler während all dessen',
       errors.slice(0, 2).join(' | ').slice(0, 200));
     await page.close();
