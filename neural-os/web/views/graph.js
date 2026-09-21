@@ -386,6 +386,13 @@ export default {
     teardown(); // defensive: a failed unmount must not leak the old renderer
 
     const params = (ctx.route && ctx.route.params) || {};
+
+  /** An ISO timestamp from the address bar, or null when it is not one. */
+  function parseStamp(value) {
+    if (typeof value !== 'string' || !value) return null;
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  }
     const depthParam = Number.parseInt(params.depth, 10);
 
     const self = {
@@ -412,8 +419,19 @@ export default {
       depth: Number.isFinite(depthParam) ? Math.min(Math.max(depthParam, 0), 6) : 2,
       serverQuery: typeof params.q === 'string' ? params.q : '',
 
+      // Time window handed over by the timeline view ("Im Gehirn zeigen").
+      // Without this the button navigated here and silently showed everything,
+      // which is worse than not offering it: the user believes they are looking
+      // at the selected period.
+      from: parseStamp(params.from),
+      to: parseStamp(params.to),
+
       // client-side filters
-      activeTypes: new Set(GRAPH_TYPES),
+      activeTypes: new Set(
+        typeof params.types === 'string' && params.types
+          ? params.types.split(',').map((t) => t.trim()).filter((t) => GRAPH_TYPES.includes(t))
+          : GRAPH_TYPES,
+      ),
       onlyMine: false,
       clusterMode: false,
       manualIds: new Set(),
@@ -724,7 +742,23 @@ function applyFilter(self) {
 function visibleNodes(self) {
   const types = self.activeTypes;
   const onlyMine = self.onlyMine;
-  return self.nodes.filter((node) => types.has(node.type) && (!onlyMine || self.manualIds.has(node.id)));
+  const from = self.from;
+  const to = self.to;
+  return self.nodes.filter((node) => {
+    if (!types.has(node.type)) return false;
+    if (onlyMine && !self.manualIds.has(node.id)) return false;
+    if (from || to) {
+      // A node without a usable timestamp is kept: dropping it would silently
+      // hide records the window cannot judge, and the user would read the gap
+      // as "nothing happened then".
+      const stamp = Date.parse(node.updatedAt || node.createdAt || '');
+      if (Number.isFinite(stamp)) {
+        if (from && stamp < from) return false;
+        if (to && stamp > to) return false;
+      }
+    }
+    return true;
+  });
 }
 
 function visibleEdges(self, nodeIds) {
@@ -1085,6 +1119,8 @@ function syncRoute(self) {
     params.set('depth', String(self.depth));
   }
   if (self.serverQuery) params.set('q', self.serverQuery);
+  if (self.from) params.set('from', new Date(self.from).toISOString());
+  if (self.to) params.set('to', new Date(self.to).toISOString());
   const hash = params.toString() ? `#/graph?${params.toString()}` : '#/graph';
   if (window.location.hash === hash) return;
   // Replace instead of navigate: re-rendering the view here would throw away

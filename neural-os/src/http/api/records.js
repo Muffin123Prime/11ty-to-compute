@@ -20,7 +20,7 @@
  */
 
 const schema = require('../../store/schema');
-const { ValidationError } = require('../../kernel/errors');
+const { NoModelError, ValidationError } = require('../../kernel/errors');
 const {
   need,
   asObject,
@@ -179,7 +179,20 @@ function register(router) {
     return { record: store.restore(record.id) };
   });
 
-  router.get('/api/search', (rc) => {
+  /**
+   * Search.
+   *
+   * `mode` decides HOW, and the answer always says which mode actually ran.
+   * That matters because the two find different things: keyword search finds
+   * the word you typed, semantic search finds the meaning. Quietly giving
+   * someone the first when they asked for the second is answering a different
+   * question than the one asked -- and they would conclude their notes do not
+   * contain the topic.
+   *
+   * So a semantic request with no embedding model does NOT fall back. It
+   * fails, with the reason and the one command that fixes it.
+   */
+  router.get('/api/search', async (rc) => {
     rc.requireCapability('read');
     const store = need(rc.ctx.store, 'Der Speicher');
     const query = strParam(rc.query, 'q', 500);
@@ -188,8 +201,96 @@ function register(router) {
     if (types) types.forEach(assertKnownType);
     const limit = intParam(rc.query, 'limit', 30, 1, 200);
     const offset = intParam(rc.query, 'offset', 0, 0, 100000);
-    const found = store.search(query, { types: types || undefined, limit, offset });
-    return { items: found.items, total: found.total, query };
+
+    const mode = strParam(rc.query, 'mode', 20) || 'text';
+    if (!['text', 'semantic', 'hybrid'].includes(mode)) {
+      throw new ValidationError(`Unbekannte Suchart "${mode}". Erlaubt: text, semantic, hybrid.`);
+    }
+
+    const textSearch = () => {
+      const found = store.search(query, { types: types || undefined, limit, offset });
+      return { items: found.items, total: found.total, query, mode: 'text' };
+    };
+
+    if (mode === 'text') return textSearch();
+
+    const embeddings = rc.ctx.embeddings;
+    if (!embeddings || typeof embeddings.search !== 'function') {
+      throw new NoModelError(
+        'Die semantische Suche ist auf diesem Gerät nicht eingerichtet. '
+        + 'Die Stichwortsuche steht unverändert zur Verfügung (mode=text).',
+      );
+    }
+
+    // Errors from here travel to the client untouched: NO_MODEL_AVAILABLE
+    // carries the install instructions, and STORAGE_ERROR carries
+    // details.action = 'reindex'. Both are actionable; a generic 500 is not.
+    const hits = await embeddings.search(query, {
+      types: types || undefined,
+      limit: mode === 'hybrid' ? Math.max(limit, 30) : limit,
+    });
+
+    const semanticItems = [];
+    for (const hit of hits) {
+      const record = store.get(hit.id);
+      if (!record) continue; // deleted between indexing and now
+      semanticItems.push({ record, score: hit.score, snippet: hit.snippet || null, via: 'semantic' });
+    }
+
+    if (mode === 'semantic') {
+      return { items: semanticItems.slice(offset, offset + limit), total: semanticItems.length, query, mode: 'semantic' };
+    }
+
+    // Hybrid: keyword hits first (they are exact), then semantic ones the
+    // keyword search missed. Each item says which side found it, so the user
+    // can tell an exact match from a suggested one.
+    const textFound = store.search(query, { types: types || undefined, limit: Math.max(limit, 30), offset: 0 });
+    const merged = [];
+    const seen = new Set();
+    for (const item of textFound.items) {
+      seen.add(item.record.id);
+      merged.push({ ...item, via: 'text' });
+    }
+    for (const item of semanticItems) {
+      if (seen.has(item.record.id)) continue;
+      merged.push(item);
+    }
+    return {
+      items: merged.slice(offset, offset + limit),
+      total: merged.length,
+      query,
+      mode: 'hybrid',
+      counts: { text: textFound.items.length, semantic: semanticItems.length },
+    };
+  });
+
+  /** State of the semantic index, so the UI can offer indexing when it is empty. */
+  router.get('/api/search/index', async (rc) => {
+    rc.requireCapability('read');
+    const embeddings = rc.ctx.embeddings;
+    if (!embeddings) return { available: false, reason: 'Die semantische Suche ist nicht eingerichtet.' };
+    const state = await embeddings.available().catch((err) => ({ ok: false, reason: err && err.message }));
+    const info = typeof embeddings.info === 'function' ? embeddings.info() : null;
+    return { available: !!(state && state.ok), model: state && state.model, dim: state && state.dim, reason: state && state.reason, index: info };
+  });
+
+  /**
+   * Build or rebuild the semantic index. Long-running by nature, so progress
+   * goes over the bus and this returns the summary when it is done.
+   */
+  router.post('/api/search/reindex', async (rc) => {
+    rc.requireCapability('write');
+    const embeddings = rc.ctx.embeddings;
+    if (!embeddings || typeof embeddings.reindexAll !== 'function') {
+      throw new NoModelError('Die semantische Suche ist auf diesem Gerät nicht eingerichtet.');
+    }
+    const bus = rc.ctx.bus;
+    const result = await embeddings.reindexAll({
+      onProgress(progress) {
+        if (bus) bus.publish('embeddings.reindex', progress);
+      },
+    });
+    return result;
   });
 }
 

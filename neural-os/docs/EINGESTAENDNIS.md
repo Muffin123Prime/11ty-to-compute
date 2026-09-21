@@ -62,6 +62,24 @@ Der Vollständigkeit halber, nicht aus Zerknirschung:
   brachen an einem Nutzungslimit ab. Ich habe das gemeldet statt es zu verschweigen,
   und die Funde anschließend von Hand nachgewiesen.
 
+## 2a. Und einer, den ich beinahe übersehen hätte
+
+Ich habe dir gemeldet, die vier letzten Bausteine seien fertig. Sie waren
+gebaut — aber die **semantische Suche war über die API gar nicht erreichbar**.
+Rund 1600 Zeilen Vektorspeicher und Einbettungsdienst lagen funktionsfähig auf
+der Platte, ohne dass irgendeine Route sie aufgerufen hätte. Aufgefallen ist es
+nur, weil die Bau-Agenten am Ende eine Liste offener Integrationspunkte
+zurückgaben und ich sie gelesen habe.
+
+Ebenso unverdrahtet: die Textextraktion (2627 Zeilen, niemand rief sie auf) und
+der Knopf „Im Gehirn zeigen" in der Zeitachse, der einen Zeitraum übergab, den
+die Graph-Ansicht schlicht ignorierte — ein Knopf, der aussah als täte er etwas.
+
+Alle drei sind jetzt verdrahtet und geprüft. Der Punkt bleibt: **„Die Tests sind
+grün" und „die Funktion ist erreichbar" sind zwei verschiedene Aussagen.** Die
+Tests der semantischen Suche waren die ganze Zeit grün. Sie testeten ein Modul,
+das kein Nutzer je hätte aufrufen können.
+
 ## 3. Was ich nicht überprüfen konnte
 
 Ehrlich ist hier wichtiger als vollständig.

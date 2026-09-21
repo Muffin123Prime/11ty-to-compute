@@ -181,6 +181,15 @@ async function cmdDoctor(flags) {
       console.log(`  ${D}Abhilfe: ollama.com/download installieren, dann 'ollama pull llama3.2'.${X}`);
     }
 
+    console.log(`\n${B}Semantische Suche${X}`);
+    if (h.semantic && h.semantic.available) {
+      console.log(`  ${mark(true)} ${h.semantic.model} ${D}(${h.semantic.dim} Dimensionen, ${h.semantic.indexed} Einträge indiziert)${X}`);
+    } else {
+      const reason = (h.semantic && h.semantic.reason) || 'nicht eingerichtet';
+      console.log(`  ${Y}—${X} ${D}${String(reason).split('\n')[0]}${X}`);
+      console.log(`  ${D}Einrichten: ollama pull nomic-embed-text${X}`);
+    }
+
     if (h.failures.length) {
       console.log(`\n${B}${Y}Nicht geladene Subsysteme${X}`);
       for (const f of h.failures) console.log(`  ${R}✗${X} ${f.subsystem}: ${f.reason}`);
@@ -213,7 +222,8 @@ async function cmdImport(flags, args) {
   try {
     if (!app.backup) throw new Error('Backup-Subsystem nicht verfügbar');
     const mode = typeof flags.mode === 'string' ? flags.mode : 'merge';
-    const res = await app.backup.importAll({ dir: source, mode });
+    const run = () => app.backup.importAll({ dir: source, mode });
+    const res = typeof app.withoutIndexing === 'function' ? await app.withoutIndexing(run) : await run();
     console.log(`${G}✓${X} ${res.imported} übernommen, ${res.skipped} übersprungen, ${res.conflicts ? res.conflicts.length || res.conflicts : 0} Konflikte`);
     return 0;
   } finally {

@@ -397,6 +397,15 @@ function htmlToText(html) {
 
 /* ----------------------------------------------------------------- toolbox */
 
+const extract = (() => {
+  // Optional: a device without the extraction module keeps every other tool.
+  try {
+    return require('../store/extract');
+  } catch {
+    return null;
+  }
+})();
+
 function createToolbox({ store, registry, gate, graph, paths, approvals, config, logger, audit } = {}) {
   if (!store || typeof store.create !== 'function') {
     throw new ValidationError('createToolbox benötigt einen Store.');
@@ -795,13 +804,43 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
           if (err.code === 'EACCES') throw new PermissionError(`Kein Lesezugriff auf ${target}.`);
           throw new NeuralError('FS_ERROR', `Datei ${target} nicht lesbar: ${err.message}`, { status: 500 });
         }
+        // A PDF, a Word document or a spreadsheet is not "not a text file" --
+        // it is a text file the agent cannot read by itself. Refusing it used
+        // to leave the model to guess what was inside, which is exactly the
+        // kind of gap an agent fills with invention.
         if (buffer.includes(0)) {
-          throw new ValidationError(`${target} ist keine Textdatei (enthält Nullbytes).`);
+          if (!extract || typeof extract.extractText !== 'function') {
+            throw new ValidationError(
+              `${target} ist keine Textdatei, und die Textextraktion ist auf diesem Gerät nicht verfügbar.`,
+            );
+          }
+          let extracted;
+          try {
+            extracted = extract.extractText(buffer, { name: target, maxBytes: limit });
+          } catch (err) {
+            throw new ValidationError(
+              `Aus ${target} liess sich kein Text gewinnen: ${err && err.message}`,
+            );
+          }
+          // Warnings travel to the model verbatim. A scanned PDF has no text
+          // layer, and the model must be told that rather than handed an empty
+          // string it will happily paper over.
+          return {
+            path: target,
+            size: stat.size,
+            kind: extracted.kind,
+            pages: extracted.pages,
+            truncated: extracted.truncated || stat.size > buffer.length,
+            warnings: extracted.warnings || [],
+            text: extracted.text,
+          };
         }
         return {
           path: target,
           size: stat.size,
+          kind: 'text',
           truncated: stat.size > buffer.length,
+          warnings: [],
           text: buffer.toString('utf8'),
         };
       },

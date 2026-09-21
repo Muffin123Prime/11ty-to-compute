@@ -207,8 +207,15 @@ async function createApp(opts = {}) {
   // Keep the semantic index in step with the data, the same way derived links
   // are kept in step: as a consequence of the write, never as a separate thing
   // the user has to remember to run.
+  //
+  // `suspendIndexing` exists for bulk writes (a restore, an import). Without
+  // it a 5000-record import means 5000 model calls and 5000 full index writes,
+  // which is slower than the import itself and pointless: one reindexAll()
+  // afterwards produces the same result.
+  let indexingSuspended = 0;
   if (embeddings && typeof embeddings.indexRecord === 'function') {
     const reindex = (evt) => {
+      if (indexingSuspended > 0) return;
       const record = evt && evt.payload && evt.payload.record;
       if (!record || record.type === 'edge' || record.type === 'message') return;
       Promise.resolve(embeddings.indexRecord(record)).catch((err) => {
@@ -274,6 +281,19 @@ async function createApp(opts = {}) {
     failures,
     server: null,
 
+    /**
+     * Run `fn` without feeding every write to the embedding model.
+     * Bulk writers (import, restore) use this and then reindex once.
+     */
+    async withoutIndexing(fn) {
+      indexingSuspended++;
+      try {
+        return await fn();
+      } finally {
+        indexingSuspended = Math.max(0, indexingSuspended - 1);
+      }
+    },
+
     /** Persist a changed configuration and apply what can be applied live. */
     saveConfig(patch) {
       const next = configMod.deepMerge(config, patch);
@@ -302,6 +322,8 @@ async function createApp(opts = {}) {
         auth: !!auth,
         extraction: !!extract,
         sync: !!sync,
+        vectors: !!vectors,
+        embeddings: !!embeddings,
       };
       let semantic = { available: false, reason: 'Semantische Suche nicht geladen' };
       if (embeddings && typeof embeddings.available === 'function') {
@@ -358,6 +380,7 @@ async function createApp(opts = {}) {
       for (const [name, fn] of [
         ['server', () => app.server && app.server.close()],
         ['runtime', () => runtime && runtime.abortAll && runtime.abortAll()],
+        ['vectors', () => vectors && vectors.close && vectors.close()],
         ['store', () => store.close()],
       ]) {
         try {

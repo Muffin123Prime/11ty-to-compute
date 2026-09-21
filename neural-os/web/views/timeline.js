@@ -1004,16 +1004,24 @@ function paint(self) {
   renderToolbar(self);
 }
 
-/** The density band: how busy each slice of time was, behind everything else. */
+/**
+ * The density band: how busy each slice of time was, behind everything else.
+ *
+ * Capped at a share of the plot rather than its full height. A bar that
+ * reaches the top edge stops reading as a bar and starts reading as a
+ * highlighted column -- which is exactly the wrong signal when only two
+ * slices happen to carry anything.
+ */
 function paintDensity(self, ctx, geom, palette) {
   if (!self.maxDensity) return;
   ctx.save();
   ctx.globalAlpha = palette.dark ? 0.16 : 0.12;
   ctx.fillStyle = palette.fg;
   const max = self.maxDensity;
+  const tallest = geom.height * 0.6;
   for (const bin of self.bins) {
     if (!bin) continue;
-    const height = (bin.total / max) * geom.height;
+    const height = (bin.total / max) * tallest;
     ctx.fillRect(geom.left + bin.index * BIN_PX, geom.bottom - height, BIN_PX - 0.6, height);
   }
   ctx.restore();
@@ -1636,9 +1644,14 @@ function renderSelectionBar(self) {
       },
     }, icon(ICONS.close))));
 
-  node.appendChild(h('p.tlv__selbar-note', null, text(
-    'Der Zeitraum wird als from/to an die Adresse übergeben. Das Gehirn wertet diese beiden Angaben '
-    + 'noch nicht aus und öffnet bis dahin den vollständigen Ausschnitt.')));
+  // With a single record the brain really does open on it (`focus`). With a
+  // range it does not yet filter, and saying so is cheaper than a button that
+  // quietly means something else than it says.
+  if (items.length > 1) {
+    node.appendChild(h('p.tlv__selbar-note', null, text(
+      'Der Zeitraum wird als from/to an die Adresse übergeben. Das Gehirn wertet diese beiden Angaben '
+      + 'noch nicht aus und öffnet bis dahin den vollständigen Ausschnitt.')));
+  }
 }
 
 function recordsInSelection(self) {
@@ -2015,6 +2028,8 @@ const CSS = `
 .tlv__side-head { display: flex; align-items: flex-start; gap: var(--sp-1); margin-bottom: var(--sp-1); }
 .tlv__side-title { font-size: var(--fs-md); line-height: var(--lh-tight); word-break: break-word; }
 .tlv__hint { color: var(--fg-subtle); font-size: var(--fs-sm); }
+/* The stack already spaces its children; the rule's own margin doubles it. */
+.tlv__side .divider { margin: 0; }
 
 .tlv__pick { width: 100%; background: none; border: 0; border-bottom: 1px solid var(--border); text-align: left; color: inherit; font: inherit; }
 .tlv__pick-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }

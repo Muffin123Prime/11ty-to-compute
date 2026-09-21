@@ -174,7 +174,14 @@ function register(router) {
     if (!dir && !file) throw new ValidationError('Der Import braucht "dir" oder "file".');
     const mode = optionalString(body.mode, 'mode', { max: 20 }) || 'merge';
     if (!MODES.has(mode)) throw new ValidationError(`Unbekannter Modus "${mode}". Erlaubt: merge, replace, fresh.`);
-    const result = await backup.importAll({ dir: dir || undefined, file: file || undefined, mode });
+    // A restore is a bulk write. Feeding every record to the embedding model
+    // on the way in would cost one model call and one full index write per
+    // record -- slower than the import itself, and pointless: one reindex
+    // afterwards produces exactly the same index.
+    const run = () => backup.importAll({ dir: dir || undefined, file: file || undefined, mode });
+    const result = typeof rc.ctx.withoutIndexing === 'function'
+      ? await rc.ctx.withoutIndexing(run)
+      : await run();
     audit(rc, 'backup.import', { dir, file, mode, imported: result.imported });
     return result;
   });

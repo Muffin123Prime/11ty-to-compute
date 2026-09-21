@@ -11,7 +11,7 @@ teilweise oder gar nicht funktioniert, steht weiter unten — ungeschönt.
 ```
 npm test          509 Tests, 509 bestanden, 0 fehlgeschlagen   (~28 s)
 npm run proof     15 Prüfpunkte bestanden, 0 fehlgeschlagen
-npm run doctor    13 von 13 Subsystemen geladen
+npm run doctor    15 von 15 Subsystemen geladen
 ```
 
 | Testdatei | Tests | Gegenstand |

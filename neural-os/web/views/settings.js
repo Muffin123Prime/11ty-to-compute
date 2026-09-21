@@ -83,6 +83,7 @@ const TOKEN_PERMISSIONS = [
   { key: 'write', label: 'Schreiben', hint: 'Einträge anlegen, ändern und löschen.' },
   { key: 'chat', label: 'Chatten', hint: 'Mit dem Modell sprechen – verbraucht Rechenzeit auf diesem Gerät.' },
   { key: 'agents', label: 'Agenten', hint: 'Läufe starten und Bestätigungen beantworten.' },
+  { key: 'sync', label: 'Abgleich', hint: 'Dieses Gerät als Partner für den Datenabgleich nutzen. Überträgt Notizen, Projekte, Aufgaben, Chats und Verknüpfungen – keine Token, Freigaben oder Agentenrechte.' },
 ];
 
 const VAULT_STATE_LABEL = {
