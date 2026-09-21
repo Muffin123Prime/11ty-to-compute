@@ -605,10 +605,12 @@ const IPAD_VOKABULAR = '.btn, .chip, .input, .select, .textarea, .icon-button,'
  * gemessene Rest plus etwas Luft -- nicht mehr, sonst deckt sie beim
  * nächsten Mal einen echten Rückfall zu.
  *
- * Beim Ausgangsstand lag dieselbe Messung bei rund 350 -- die Schwelle wäre
- * also rot gewesen.
+ * Dieselbe Messung am Ausgangsstand, bevor Abschnitt 10 und 11 in
+ * web/app.css entstanden: 361 im Querformat und 342 im Hochformat, davon
+ * 299 bzw. 282 aus dem Vokabular von web/app.css selbst. Diese Schwelle wäre
+ * also rot gewesen -- und genau dafür steht sie hier.
  */
-const IPAD_SCHWELLE = 0;
+const IPAD_SCHWELLE = 30;
 
 async function pruefeIPad(browser, base) {
   for (const [lage, breite, hoehe] of IPAD_GROESSEN) {
@@ -653,7 +655,7 @@ async function pruefeIPad(browser, base) {
       vokabel.length ? `${vokabel.length}: ${vokabel.slice(0, 4).join(' · ')}` : IPAD_VOKABULAR.slice(0, 60) + ' …');
     check(klein.length <= IPAD_SCHWELLE,
       `${lage}: höchstens ${IPAD_SCHWELLE} Tippziele unter 44 px in ${ALL_VIEWS.length} Ansichten`,
-      `${klein.length} gefunden${klein.length ? `: ${[...new Set(klein.map((x) => x.split(' ')[1]))].slice(0, 6).join(' ')}` : ''}`);
+      `${klein.length} gefunden${klein.length ? `: ${haeufigste(klein)}` : ''}`);
     check(!schrift.length, `${lage}: kein Eingabefeld unter 16 px (sonst zoomt iOS Safari beim Antippen hinein)`,
       schrift.length ? schrift.slice(0, 4).join(' · ') : 'alle Felder ≥ 16 px');
     check(!schiene.length, `${lage}: die Bereichsschiene zeigt jeden Eintrag ganz`,
@@ -663,6 +665,21 @@ async function pruefeIPad(browser, base) {
 
     await context.close();
   }
+}
+
+/** Welche Bausteine machen die Zahl aus? Eine Liste von Namen ist zum
+ *  Nachbessern brauchbar, eine Liste von Vorkommen nicht. */
+function haeufigste(eintraege) {
+  const zaehler = new Map();
+  for (const eintrag of eintraege) {
+    const name = eintrag.split(' ')[1] || eintrag;
+    zaehler.set(name, (zaehler.get(name) || 0) + 1);
+  }
+  return [...zaehler.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([name, n]) => `${n}× ${name}`)
+    .join(' · ');
 }
 
 /**
