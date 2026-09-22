@@ -559,6 +559,21 @@ async function weg(page) {
       await p.waitForTimeout(600);
       await shot(p, 'netz-freigabe-erteilen-hell');
     });
+    await step('Stick: Modell mitnehmen', async () => {
+      // Der Abschnitt steht unten im Bereich; geknipst wird, was er auf DIESEM
+      // Rechner sagt -- ohne Ollama also der Befund samt Anleitung, nicht ein
+      // gestelltes Bild mit einem Modell, das es hier nicht gibt.
+      await los(p, base, 'stick', 1800);
+      const traf = await p.evaluate(() => {
+        const kopf = [...document.querySelectorAll('.card__head strong')].find((x) => x.textContent.trim() === 'Modell mitnehmen');
+        if (!kopf) return false;
+        kopf.closest('section').scrollIntoView({ block: 'start' });
+        return true;
+      });
+      if (!traf) throw new Error('Der Abschnitt „Modell mitnehmen“ ist nicht da');
+      await p.waitForTimeout(700);
+      await shot(p, 'stick-modell-mitnehmen-hell');
+    });
     await step('Abgleich: Partnergerät hinzufügen', async () => {
       await los(p, base, 'sync', 1400);
       await klick(p, /Partnergerät hinzufügen/, { warten: 1200 });

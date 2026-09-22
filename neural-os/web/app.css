@@ -79,6 +79,11 @@
   --bottom-h: 62px;
   --content-max: 860px;
 
+  /* Die kleinste Flaeche, die ein Finger sicher trifft (Apples Mass). Gilt
+     erst unter (pointer: coarse), Abschnitt 11 -- mit der Maus bleibt alles
+     wie es ist. */
+  --tap-min: 44px;
+
   /* Neutrals (light) */
   --bg: #f4f4f6;
   --surface: #ffffff;
@@ -1480,14 +1485,24 @@ pre.code {
 }
 
 /* ------------------------------------------------------------------ */
-/* 9. Narrow viewports: the rail becomes a bottom bar                  */
+/* 9. Die Schiene wird zur unteren Leiste: schmal ODER mit dem Finger   */
 /* ------------------------------------------------------------------ */
 
-@media (max-width: 820px) {
-  :root {
-    --topbar-h: 50px;
-  }
+/* Zwei Gruende fuehren zur selben Leiste.
 
+   Schmal (bis 820 px): fuer eine Schiene ist kein Platz.
+
+   Finger (pointer: coarse), in jeder Breite: die Schiene mit allen sechzehn
+   Bereichen braucht rund 950 px Hoehe, mit fingergrossen Eintraegen mehr.
+   Ein iPad im Querformat hat 768. Mit der Maus verraet ein Scrollbalken, dass
+   es weitergeht; auf dem iPad gibt es keinen, und der unterste, halb
+   abgeschnittene Eintrag liest sich als Fehler. Schmalere Eintraege scheiden
+   aus, weil sie dann nicht mehr treffbar sind. Also dieselbe Leiste wie im
+   Hochformat: beim Drehen des Geraets springt die Navigation nicht von links
+   nach unten, und der Daumen erreicht die Unterkante ohne Umgreifen. Die
+   zweitrangigen Bereiche bleiben ueber "Mehr", die Palette und die Chips im
+   Kopf erreichbar -- genau wie im Hochformat. */
+@media (max-width: 820px), (pointer: coarse) {
   .shell {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: var(--topbar-h) minmax(0, 1fr) auto;
@@ -1500,6 +1515,7 @@ pre.code {
   .rail {
     flex-direction: row;
     align-items: stretch;
+    justify-content: center;
     gap: 0;
     padding: 0 var(--sp-05) env(safe-area-inset-bottom, 0px);
     border-right: 0;
@@ -1511,8 +1527,11 @@ pre.code {
     display: none;
   }
 
+  /* Auf einem breiten Bildschirm bleibt die Leiste in der Mitte gebuendelt,
+     statt acht Eintraege ueber 1300 px zu verteilen. */
   .rail__items {
-    flex: 1;
+    flex: 1 1 auto;
+    max-width: 720px;
     flex-direction: row;
     justify-content: space-around;
     gap: 0;
@@ -1549,6 +1568,20 @@ pre.code {
     flex: 0 0 64px;
     margin-top: 0;
     height: var(--bottom-h);
+  }
+
+  .toasts {
+    bottom: calc(var(--bottom-h) + env(safe-area-inset-bottom, 0px) + var(--sp-1));
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 10. Narrow viewports: what only the missing width demands           */
+/* ------------------------------------------------------------------ */
+
+@media (max-width: 820px) {
+  :root {
+    --topbar-h: 50px;
   }
 
   .topbar {
@@ -1610,7 +1643,6 @@ pre.code {
   .toasts {
     right: var(--sp-1);
     left: var(--sp-1);
-    bottom: calc(var(--bottom-h) + env(safe-area-inset-bottom, 0px) + var(--sp-1));
     width: auto;
   }
 
@@ -1621,7 +1653,115 @@ pre.code {
 }
 
 /* ------------------------------------------------------------------ */
-/* 10. Motion preferences                                              */
+/* 11. Finger statt Maus: (pointer: coarse)                            */
+/* ------------------------------------------------------------------ */
+
+/* Ein iPad ist kein schmales Telefon: im Querformat ist es 1024 px breit,
+   und trotzdem trifft ein Finger nichts unter 44 px sicher. Deshalb haengt
+   dieser Abschnitt nicht an der Breite, sondern am Zeigegeraet -- und
+   deshalb aendert er auf dem Laptop mit Maus nichts. Er packt die Bausteine
+   an der Wurzel, nicht Ansicht fuer Ansicht: jede Ansicht, die .btn oder
+   .input benutzt, wird damit von allein fingertauglich.
+
+   Die !important sind hier Absicht, wie bei der Bewegungsvorliebe in
+   Abschnitt 12: eine Ansicht darf einen Knopf gern kleiner zeichnen, aber
+   nicht kleiner, als ein Finger ihn treffen kann. Gemessen: ohne sie blieb
+   der Chat bei 26 px hohen Zeilenknoepfen und die Notiz bei 12,5 px Schrift
+   im Textfeld -- beides aus Ansichtsregeln, die diese hier sonst
+   ueberstimmen wuerden. */
+@media (pointer: coarse) {
+  :root {
+    --topbar-h: 56px;
+  }
+
+  .btn,
+  .chip,
+  .icon-button,
+  .segmented__option,
+  .topbar__search,
+  .toast__action,
+  .skip-link,
+  [role="radio"],
+  [role="tab"],
+  [role="switch"] {
+    min-height: var(--tap-min) !important;
+  }
+
+  /* Kleine Knoepfe bleiben schmal in der Schrift, nicht in der Flaeche. */
+  .btn--small {
+    padding: 0 var(--sp-2);
+  }
+
+  .chip {
+    padding: 0 12px;
+  }
+
+  .segmented__option {
+    padding: 0 var(--sp-2);
+  }
+
+  .icon-button,
+  .toast__close {
+    width: var(--tap-min) !important;
+    height: var(--tap-min) !important;
+  }
+
+  .toast__action {
+    padding: 0 var(--sp-2);
+  }
+
+  .list__row,
+  .palette__item {
+    min-height: var(--tap-min) !important;
+  }
+
+  .table td {
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  /* Ein Aufklapper bleibt list-item: als Flexbox verloere er in Chromium
+     sein Dreieck. Der Abstand zentriert eine Zeile in 44 px. */
+  summary {
+    min-height: var(--tap-min);
+    padding-block: 11px;
+  }
+
+  /* Unter 16 px zoomt iOS Safari beim Antippen in die ganze Seite hinein und
+     laesst den Nutzer verschoben zurueck. Ankreuzfelder und Regler bleiben
+     aussen vor: die tippt man ueber ihr <label>, nicht ueber das Kaestchen. */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+    min-height: var(--tap-min) !important;
+  }
+
+  /* Ohne Maus gibt es kein :hover. Der gedrueckte Zustand ist die einzige
+     Rueckmeldung, die ein Finger bekommt -- also gibt es ihn. */
+  .btn:active:not(:disabled),
+  .chip:active,
+  .icon-button:active,
+  .rail__item:active,
+  .list__row:active,
+  .palette__item:active,
+  .topbar__search:active,
+  .toast__close:active {
+    background: var(--surface-3);
+  }
+
+  .btn--primary:active:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+
+  .toast__action:active {
+    background: var(--accent-soft);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 12. Motion preferences                                              */
 /* ------------------------------------------------------------------ */
 
 @media (prefers-reduced-motion: reduce) {

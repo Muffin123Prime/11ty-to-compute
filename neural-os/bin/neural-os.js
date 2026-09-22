@@ -18,6 +18,12 @@
  *   neural-os stick prepare <pfad>   bereitet einen USB-Stick vor
  *   neural-os stick update  <pfad>   erneuert nur den Programmcode
  *   neural-os stick verify  <pfad>   prueft einen Stick
+ *   neural-os stick model list [pfad]   Modelle hier und auf dem Stick
+ *   neural-os stick model plan <pfad>   was "copy" tun wuerde (schreibt nichts)
+ *   neural-os stick model copy <pfad>   Modell samt Laufzeitkern auf den Stick
+ *               --auswahl id1,id2   nur diese Funde (Vorgabe: alles)
+ *               --fuer plattform    fuer welchen Rechner gefragt wird (z. B. win-x64, ipados)
+ *               --pruefsummen alle  auch grosse Dateien nach dem Kopieren pruefen
  *               --passphrase P   (prefer NEURAL_OS_PASSPHRASE)
  */
 
@@ -333,6 +339,7 @@ async function cmdCompact(flags) {
 
 async function cmdStick(flags, args) {
   const action = args._[1] || 'verify';
+  if (action === 'model') return cmdStickModel(flags, args);
   const target = args._[2];
   if (!target) {
     throw new Error(`Bitte den Pfad zum Stick angeben: neural-os stick ${action} /pfad/zum/stick`);
@@ -410,11 +417,146 @@ async function cmdStick(flags, args) {
       return res.ok ? 0 : 1;
     }
 
-    console.error(`Unbekannte Stick-Aktion "${action}". Verfügbar: prepare, update, verify, runtime`);
+    console.error(`Unbekannte Stick-Aktion "${action}". Verfügbar: prepare, update, verify, runtime, model`);
     return 1;
   } finally {
     await app.close();
   }
+}
+
+/* ------------------------------------------------------------ stick model */
+
+/**
+ * Das Modell auf den Stick -- derselbe Weg wie im Browser, ohne Browser.
+ *
+ * Dieselbe Maschinerie (`src/portable/model.js`), kein zweiter Weg: `list`
+ * ist finden() + aufDemStick(), `plan` ist planen() und schreibt nichts,
+ * `copy` ist planen() und dann kopieren(). Ein Stopp-Hindernis wird vorher
+ * gemeldet und der Vorgang gar nicht erst begonnen -- die Kommandozeile hat
+ * dieselbe Pflicht wie die Ansicht, kein halbes Modell zu hinterlassen.
+ *
+ * Es wird KEINE Anwendung hochgefahren: finden und kopieren brauchen weder
+ * den Tresor noch den Server, und ein `stick model list` soll auch dann
+ * gehen, wenn Neural OS gerade laeuft und den Heimatordner gesperrt haelt.
+ */
+async function cmdStickModel(flags, args) {
+  const action = args._[2] || 'list';
+  const target = args._[3];
+  const { createPortableModels, GERAETE } = require('../src/portable/model');
+  const { humanBytes } = require('../src/portable/stick');
+  const logMod = require('../src/kernel/log');
+  // Ohne createApp() setzt niemand die Stufe -- und eine INFO-Zeile mitten im
+  // Fortschrittsbalken liest sich wie ein Fehler.
+  logMod.setLevel(typeof flags.log === 'string' ? flags.log : (process.env.NEURAL_OS_LOG_LEVEL || 'warn'));
+  const modelle = createPortableModels({ logger: logMod.logger });
+  const fuer = typeof flags.fuer === 'string' ? flags.fuer : undefined;
+  const auswahl = typeof flags.auswahl === 'string'
+    ? flags.auswahl.split(',').map((s) => s.trim()).filter(Boolean)
+    : undefined;
+
+  const befund = modelle.finden();
+  const alle = [...befund.kerne, ...befund.modelle];
+
+  const zeigeRechner = () => {
+    console.log('');
+    console.log(`${B}Auf diesem Rechner${X} ${D}(${befund.rechner.plattform})${X}`);
+    if (!alle.length) {
+      console.log(`  ${Y}·${X} kein lokales Modell und kein Laufzeitkern gefunden`);
+    }
+    for (const fund of alle) {
+      const art = fund.rolle === 'kern' ? `Laufzeitkern (${fund.art}, ${fund.plattform})` : `Modell (${fund.art})`;
+      const bit = fund.rolle === 'kern' && !fund.ausfuehrbar ? ` ${Y}ohne Ausfuehrbar-Bit${X}` : '';
+      console.log(`  ${G}✓${X} ${fund.name}  ${D}${art} · ${humanBytes(fund.bytes)} · ${fund.id}${X}${bit}`);
+    }
+    printProblems(befund.hinweise, 'Hinweise');
+  };
+
+  const zeigeStick = (stand) => {
+    console.log('');
+    console.log(`${B}Auf dem Stick${X} ${stand.wurzel} ${D}(gefragt fuer ${stand.fuer.name})${X}`);
+    for (const k of stand.kerne) {
+      console.log(`  ${mark(k.plattform === stand.fuer.plattform && stand.fuer.kannProgrammeStarten)} Laufzeitkern ${k.name} fuer ${k.plattform}  ${D}${humanBytes(k.bytes)}${X}`);
+    }
+    for (const m of stand.modelle) {
+      console.log(`  ${G}✓${X} ${m.name}  ${D}${m.art} · ${humanBytes(m.bytes)} · ${m.dateien} Datei(en)${X}`);
+    }
+    console.log(`  ${stand.passt ? G : Y}${stand.satz}${X}`);
+    printProblems(stand.warnungen, 'Warnungen');
+    printProblems(stand.hinweise, 'Hinweise');
+  };
+
+  const zeigePlan = (plan) => {
+    console.log('');
+    console.log(`${B}Plan${X} ${plan.zusammenfassung}`);
+    if (plan.dateisystem) {
+      const fsInfo = plan.dateisystem;
+      const grenze = Number.isFinite(fsInfo.maxFileBytes) ? ` · groesste Datei max. ${humanBytes(fsInfo.maxFileBytes)}` : '';
+      console.log(`  ${D}Dateisystem: ${fsInfo.typeName || 'unbekannt'}${grenze}${X}`);
+    }
+    if (plan.groessteDatei) console.log(`  ${D}groesste Datei: ${humanBytes(plan.groessteDatei.bytes)}${X}`);
+    console.log(`  ${D}gebraucht: ${humanBytes(plan.bytesMitKopfraum)} · frei: ${plan.frei === null ? 'unbekannt' : humanBytes(plan.frei)}${X}`);
+    if (plan.uebersprungen.length) {
+      console.log(`  ${D}${plan.uebersprungen.length} Datei(en) liegen schon dort oder sind geteilt (${humanBytes(plan.bytesUebersprungen)})${X}`);
+    }
+    for (const h of plan.hindernisse) {
+      console.log(`  ${h.schwere === 'stopp' ? `${R}✗` : `${Y}·`}${X} ${h.satz}`);
+    }
+    printProblems(plan.hinweise, 'Hinweise');
+    console.log('');
+    console.log(plan.kannLosgehen
+      ? `${G}✓ Nichts spricht dagegen.${X}`
+      : `${R}✗ So kann es nicht losgehen.${X}`);
+  };
+
+  if (action === 'list') {
+    zeigeRechner();
+    if (target) zeigeStick(modelle.aufDemStick(target, { fuer }));
+    else {
+      console.log('');
+      console.log(`${D}Mit Pfad (neural-os stick model list /pfad/zum/stick) steht hier auch, was auf dem Stick liegt.${X}`);
+    }
+    return 0;
+  }
+
+  if (action === 'plan' || action === 'copy') {
+    if (!target) throw new Error(`Bitte den Pfad zum Stick angeben: neural-os stick model ${action} /pfad/zum/stick`);
+    const gewaehlt = auswahl || alle.map((f) => f.id);
+    const plan = modelle.planen({ ziel: target, befund, auswahl: gewaehlt, fuer });
+    zeigeRechner();
+    zeigePlan(plan);
+    if (action === 'plan') return plan.kannLosgehen ? 0 : 1;
+    if (!plan.kannLosgehen) return 1;
+
+    let lastPhase = null;
+    const onProgress = (p) => {
+      if (!p) return;
+      if (p.phase && p.phase !== lastPhase) {
+        lastPhase = p.phase;
+        process.stdout.write(`\n  ${D}${p.message || p.phase}${X}`);
+      } else if (p.message) {
+        readline.clearLine(process.stdout, 0);
+        readline.cursorTo(process.stdout, 0);
+        process.stdout.write(`  ${D}${String(p.message).slice(0, 70)}${X}`);
+      }
+    };
+    const res = await modelle.kopieren(target, {
+      befund,
+      auswahl: gewaehlt,
+      fuer,
+      pruefsummen: typeof flags.pruefsummen === 'string' ? flags.pruefsummen : 'auto',
+      onProgress,
+    });
+    console.log('');
+    console.log(`${G}✓${X} ${res.kopiert.dateien} Datei(en), ${humanBytes(res.kopiert.bytes)} liegen jetzt auf dem Stick: ${B}${res.ordner}${X}`);
+    if (res.uebersprungen) console.log(`  ${D}${res.uebersprungen} Datei(en) lagen schon dort (${humanBytes(res.bytesUebersprungen)}).${X}`);
+    printProblems(res.warnungen, 'Hinweise');
+    zeigeStick(modelle.aufDemStick(target, { fuer }));
+    return 0;
+  }
+
+  console.error(`Unbekannte Modell-Aktion "${action}". Verfügbar: list, plan, copy`
+    + `${D} · --fuer kennt u. a. ${Object.keys(GERAETE).join(', ')}${X}`);
+  return 1;
 }
 
 /** Print whatever the stick tool reported, in whichever shape it used. */

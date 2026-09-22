@@ -1311,6 +1311,121 @@ async function checkStick() {
       assert(/bereits ein Datenbestand/.test(satz), `kein brauchbarer Satz: ${satz.slice(0, 120)}`);
       return `409 ohne Strom, "${satz.slice(0, 55)}…"`;
     });
+
+    /* ---- das Modell: dieselbe Lehre, ein zweites Mal beherzigt ---- */
+    //
+    // src/portable/model.js konnte finden, planen und kopieren, bevor es eine
+    // Route dafuer gab. Deshalb hier ausschliesslich die HTTP-Tuer -- und
+    // zuerst so, wie dieser Rechner wirklich ist: ohne Ollama. Der Kasten
+    // darf dann nicht leer sein, sondern muss sagen, was zu tun waere.
+
+    await check('GET /api/stick/models sagt ohne Klick, was auf diesem Rechner liegt – oder was zu tun waere', async () => {
+      const r = ok(await api.get('/api/stick/models'), 'GET /api/stick/models');
+      assert(r.rechner && typeof r.rechner.gefunden === 'boolean', 'kein Befund ueber diesen Rechner');
+      assert(Array.isArray(r.rechner.kerne) && Array.isArray(r.rechner.modelle), 'keine Listen');
+      assert(r.dieserRechner === LOCAL_PLATFORM, `Plattform ${r.dieserRechner} statt ${LOCAL_PLATFORM}`);
+      if (!r.rechner.gefunden) {
+        assert(r.rechner.hinweise.some((s) => /ollama pull/.test(s)), 'nichts gefunden, aber kein Satz, was zu tun waere');
+        return 'kein Modell auf diesem Rechner – und der Satz dazu nennt "ollama pull"';
+      }
+      return `${r.rechner.modelle.length} Modell(e), ${r.rechner.kerne.length} Kern(e) gefunden`;
+    });
+
+    await check('Mit Pfad: was auf dem Stick liegt, das Dateisystem und der Platz – ohne ein Byte zu schreiben', async () => {
+      const vorher = fs.readdirSync(httpZiel).sort().join(',');
+      const r = ok(await api.get(`/api/stick/models?path=${encodeURIComponent(httpZiel)}`), 'GET mit Pfad');
+      assert(r.stick && typeof r.stick.satz === 'string' && r.stick.satz.length > 20, 'kein Satz ueber den Stick');
+      assert(r.stick.vorhanden === false && /kein Modell/.test(r.stick.satz), `frischer Stick meldet: ${r.stick.satz}`);
+      assert(r.vorschau && r.vorschau.dateisystem, 'die Vorschau nennt das Dateisystem nicht');
+      assert(Number.isFinite(r.vorschau.frei), 'die Vorschau nennt den freien Platz nicht');
+      assert(Array.isArray(r.vorschau.hindernisse) && r.vorschau.hindernisse.every((h) => h.code && h.schwere && h.satz),
+        'Hindernis ohne Code, Schwere oder Satz');
+      assert(fs.readdirSync(httpZiel).sort().join(',') === vorher, 'GET hat auf den Stick geschrieben');
+      // models/ legt schon prepare() an (leer); hineingeschrieben hat GET nichts.
+      assert(fs.readdirSync(path.join(httpZiel, 'models')).length === 0, 'GET hat in models/ geschrieben');
+      return `${r.vorschau.dateisystem.typeName || 'Typ unbekannt'}, ${Math.round(r.vorschau.frei / 1048576)} MB frei, ${r.vorschau.hindernisse.length} Hindernis(se)`;
+    });
+
+    await check('Fuer ein iPad steht der unbequeme Satz da, kein gruener Haken', async () => {
+      const r = ok(await api.get(`/api/stick/models?path=${encodeURIComponent(httpZiel)}&fuer=ipados`), 'GET fuer=ipados');
+      assert(r.stick && r.stick.fuer && r.stick.fuer.kannProgrammeStarten === false, 'ein iPad gilt als Rechner, der Programme startet');
+      assert(r.stick.passt === false, 'fuer ein iPad wird "passt" behauptet');
+      return r.stick.fuer.name;
+    });
+
+    await check('Kopieren ohne Auswahl wird VOR dem ersten Byte abgelehnt – als Statuscode, nicht als Strom', async () => {
+      const r = await api.post('/api/stick/models/copy', { path: httpZiel, auswahl: [] });
+      assert(r.status === 400, `HTTP ${r.status} statt 400: ${String(r.text).slice(0, 160)}`);
+      assert(!/^event:/m.test(String(r.text)), 'es wurde doch ein Ereignisstrom geoeffnet');
+      const satz = (r.json && r.json.error && r.json.error.message) || '';
+      assert(/ausgewaehlt/.test(satz), `kein brauchbarer Satz: ${satz.slice(0, 120)}`);
+      assert(fs.readdirSync(path.join(httpZiel, 'models')).length === 0, 'ein abgelehnter Vorgang hat in models/ geschrieben');
+      return `HTTP 400, "${satz.slice(0, 60)}…"`;
+    });
+
+    await check('Ein Modell laesst sich ueber HTTP wirklich auf den Stick legen (Statist statt Ollama)', async () => {
+      // Kein Ollama auf diesem Rechner -- also ein Statist an seiner Stelle:
+      // ein Skript im PATH und ein inhaltsadressierter Speicher unter
+      // OLLAMA_MODELS. Die Route baut das Werkzeug mit process.env, genau wie
+      // im Betrieb; deshalb wird die Umgebung DIESES Prozesses umgebogen und
+      // hinterher zurueckgestellt. Der Statist erfindet nichts.
+      const heim = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-usb-modell-'));
+      const vorherEnv = { OLLAMA_MODELS: process.env.OLLAMA_MODELS, PATH: process.env.PATH };
+      try {
+        const bin = path.join(heim, 'bin');
+        fs.mkdirSync(bin, { recursive: true });
+        const kern = path.join(bin, process.platform === 'win32' ? 'ollama.exe' : 'ollama');
+        fs.writeFileSync(kern, '#!/usr/bin/env node\n/* STATIST aus tools/feature-check.js */\nprocess.stdout.write("statist");\n');
+        fs.chmodSync(kern, 0o755);
+        const speicher = path.join(heim, 'speicher');
+        const blobs = path.join(speicher, 'blobs');
+        const manifest = path.join(speicher, 'manifests', 'registry.ollama.ai', 'library', 'mini');
+        fs.mkdirSync(blobs, { recursive: true });
+        fs.mkdirSync(manifest, { recursive: true });
+        const inhalt = Buffer.from('GEWICHTE'.padEnd(4096, 'x'));
+        const hex = require('node:crypto').createHash('sha256').update(inhalt).digest('hex');
+        fs.writeFileSync(path.join(blobs, `sha256-${hex}`), inhalt);
+        fs.writeFileSync(path.join(manifest, '8b'), JSON.stringify({
+          schemaVersion: 2,
+          layers: [{ mediaType: 'application/vnd.ollama.image.model', digest: `sha256:${hex}`, size: inhalt.length }],
+        }));
+        process.env.OLLAMA_MODELS = speicher;
+        process.env.PATH = `${bin}${path.delimiter}${vorherEnv.PATH || ''}`;
+
+        const befund = ok(await api.get('/api/stick/models'), 'finden');
+        assert(befund.rechner.gefunden === true, 'der Statist wurde nicht gefunden');
+        assert(befund.rechner.modelle.some((m) => m.name === 'mini:8b'), 'das Modell aus dem Manifest fehlt');
+
+        const plan = ok(await api.post('/api/stick/models/preview', { path: httpZiel }), 'preview');
+        assert(plan.kannLosgehen === true, `Hindernis: ${JSON.stringify(plan.hindernisse)}`);
+        assert(fs.readdirSync(path.join(httpZiel, 'models')).length === 0, 'die Vorschau hat in models/ geschrieben');
+
+        const lauf = await sse('/api/stick/models/copy', { path: httpZiel });
+        assert(lauf.status === 200, `HTTP ${lauf.status}: ${String(lauf.text).slice(0, 200)}`);
+        const arten = lauf.events.map((e) => e.event);
+        assert(arten.includes('fertig'), `kein Abschluss gemeldet: ${arten.join(',')}`);
+        assert(!arten.includes('fehler'), `Fehler im Strom: ${JSON.stringify(lauf.events.find((e) => e.event === 'fehler'))}`);
+        const prozente = lauf.events.filter((e) => e.event === 'fortschritt').map((e) => e.data && e.data.percent).filter(Number.isFinite);
+        assert(prozente.length && prozente[prozente.length - 1] === 100, `der Balken endet nicht bei 100: ${prozente.join(',')}`);
+        assert(fs.existsSync(path.join(httpZiel, 'models', 'ollama', 'blobs', `sha256-${hex}`)), 'der Blob liegt nicht auf dem Stick');
+        assert(fs.existsSync(path.join(httpZiel, 'models', 'kern', LOCAL_PLATFORM, path.basename(kern))), 'der Kern liegt nicht auf dem Stick');
+        assert(fs.existsSync(path.join(httpZiel, 'models', 'modelle.json')), 'keine Beschreibung');
+
+        const danach = ok(await api.get(`/api/stick/models?path=${encodeURIComponent(httpZiel)}`), 'danach');
+        assert(danach.stick.vorhanden === true && danach.stick.passt === true, danach.stick.satz);
+        assert(danach.stick.plattformen.includes(LOCAL_PLATFORM), 'die Plattform des Kerns steht nicht da');
+        // Nach dem Kopieren gilt "Nur Programm erneuern" weiter: models/ bleibt.
+        const vorherBlob = fs.statSync(path.join(httpZiel, 'models', 'ollama', 'blobs', `sha256-${hex}`)).mtimeMs;
+        const erneuern = await sse('/api/stick/update', { path: httpZiel });
+        assert(erneuern.status === 200, `update: HTTP ${erneuern.status}`);
+        assert(fs.statSync(path.join(httpZiel, 'models', 'ollama', 'blobs', `sha256-${hex}`)).mtimeMs === vorherBlob, 'update hat models/ angefasst');
+        return `mini:8b und Kern fuer ${LOCAL_PLATFORM} auf dem Stick, "${danach.stick.satz.slice(0, 50)}…"`;
+      } finally {
+        if (vorherEnv.OLLAMA_MODELS === undefined) delete process.env.OLLAMA_MODELS; else process.env.OLLAMA_MODELS = vorherEnv.OLLAMA_MODELS;
+        process.env.PATH = vorherEnv.PATH;
+        fs.rmSync(heim, { recursive: true, force: true });
+      }
+    });
   } finally {
     if (app) await app.close().catch(() => {});
     fs.rmSync(tmp, { recursive: true, force: true });

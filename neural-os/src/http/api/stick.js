@@ -29,6 +29,16 @@
  *    einen Fehler und der Stick würde trotzdem fertig. Deshalb SSE, nach dem
  *    Muster von `src/http/api/chat.js`.
  *
+ * Das Modell (`/api/stick/models`, `/preview`, `/copy`)
+ * ------------------------------------------------------
+ * Dieselben drei Entscheidungen, ein zweites Mal: `GET /api/stick/models`
+ * schreibt nichts und beantwortet trotzdem alles, was man VOR dem Klick
+ * wissen muss -- was hier liegt, was auf dem Stick liegt und für welches
+ * Betriebssystem, ob das Dateisystem eine 4-GB-Datei überhaupt aufnimmt, und
+ * ob der Platz reicht. `preview` ist derselbe Plan für eine eigene Auswahl,
+ * `copy` derselbe Plan und dann der Vorgang als Ereignisstrom. Die Maschinerie
+ * steht in `src/portable/model.js`; hier steht nur die Tür.
+ *
  * Was hier NICHT passiert
  * -----------------------
  * Keine dieser Routen nimmt einen `sourceRoot` entgegen. Was auf den Stick
@@ -50,6 +60,7 @@ const {
   needMethod,
   asObject,
   requireString,
+  optionalString,
   requireStringArray,
   strParam,
   boolParam,
@@ -60,6 +71,9 @@ const { describePortable } = require('../../kernel/paths');
 /** Höchstlänge eines getippten Pfads. Ein Pfad, der länger ist, ist ein Versehen. */
 const MAX_PATH = 1000;
 
+/** Mehr Kennungen wählt niemand von Hand aus; mehr Funde gibt es auch selten. */
+const MAX_AUSWAHL = 64;
+
 function stickOf(rc, method = 'verify') {
   return needMethod(
     rc.ctx.stick,
@@ -67,6 +81,99 @@ function stickOf(rc, method = 'verify') {
     'Das Stick-Werkzeug',
     'Ohne es kann diese Instanz keinen Stick vorbereiten – und behauptet es auch nicht.',
   );
+}
+
+/* ------------------------------------------------------------ das Modell */
+
+/**
+ * Das Modellwerkzeug (`src/portable/model.js`) -- eines je Instanz.
+ *
+ * WARUM hier gebaut und nicht in app.js: das Werkzeug hat keinen Zustand
+ * ausser seinen Abhängigkeiten (Logger, Umgebung, Heimatordner), und die
+ * Sperre je Stick-Wurzel hängt am Pfad, nicht am Objekt. Es beim ersten
+ * Aufruf zu bauen hält den Start der Anwendung frei von einer Modellsuche --
+ * `finden()` liest Ollamas Manifeste und darf nicht laufen, nur weil jemand
+ * `doctor` aufgerufen hat.
+ */
+const modelTools = new WeakMap();
+
+function modelsOf(rc) {
+  const ctx = rc.ctx || {};
+  let tool = modelTools.get(ctx);
+  if (tool === undefined) {
+    tool = null;
+    try {
+      const mod = require('../../portable/model');
+      tool = mod.createPortableModels({ logger: ctx.logger });
+    } catch (err) {
+      tool = null;
+      if (rc.log && typeof rc.log.error === 'function') rc.log.error(`Modellwerkzeug nicht ladbar: ${err && err.message}`);
+    }
+    modelTools.set(ctx, tool);
+  }
+  return needMethod(
+    tool,
+    'finden',
+    'Das Modellwerkzeug des Sticks',
+    'Ohne es kann diese Instanz kein Modell auf einen Stick legen – und behauptet es auch nicht.',
+  );
+}
+
+/**
+ * Welcher Statuscode zu einem Stopp-Hindernis aus `planen()` gehört.
+ *
+ * Dieselbe Linie wie bei `stick.preview()`: was den Vorgang aufhält, wird als
+ * gewöhnliche Fehlerantwort abgelehnt, bevor ein Strom geöffnet wird. Ein
+ * unbekannter Code ist ein Konflikt mit dem Stick, kein Serverfehler.
+ */
+const HINDERNIS_STATUS = {
+  ZU_WENIG_PLATZ: 507,
+  KEIN_SCHREIBRECHT: 403,
+  ZIEL_FEHLT: 404,
+  QUELLE_FEHLT: 404,
+  NICHTS_AUSGEWAEHLT: 400,
+  UNBEKANNTE_AUSWAHL: 400,
+  VORGANG_LAEUFT: 409,
+  DATEI_ZU_GROSS: 409,
+};
+
+/**
+ * Der Plan ohne seine Dateiliste.
+ *
+ * Ein Ollama-Modell besteht aus einem Dutzend Blobs mit absoluten Quellpfaden;
+ * für die Anzeige zählt die Zahl, nicht die Liste. `anzahl`, `bytes` und die
+ * Hindernisse bleiben unverändert -- es sind dieselben Zahlen, mit denen
+ * `kopieren()` danach rechnet.
+ */
+function planFuerHttp(plan) {
+  if (!plan || typeof plan !== 'object') return plan;
+  const { dateien, ...rest } = plan;
+  return { ...rest, anzahl: Array.isArray(dateien) ? dateien.length : rest.anzahl };
+}
+
+/** Der Stick, von dem diese Instanz läuft -- oder null. */
+function eigenerStickPfad(rc) {
+  const portable = describePortable(rc.ctx.portable);
+  return portable && portable.root ? portable.root : null;
+}
+
+/** Die Kennungen aller Funde: die Vorgabe, wenn niemand etwas ausgewählt hat. */
+function alleKennungen(befund) {
+  return [...(befund.kerne || []), ...(befund.modelle || [])].map((f) => f.id);
+}
+
+/** Auswahl aus dem Anfragekörper; fehlt sie, gilt alles, was gefunden wurde. */
+function auswahlAus(body, befund) {
+  if (body.auswahl === undefined || body.auswahl === null) return alleKennungen(befund);
+  return requireStringArray(body.auswahl, 'auswahl', { maxItems: MAX_AUSWAHL, max: 200 });
+}
+
+/** Für welches Gerät gefragt wird ('ipados', 'win-x64', …) -- oder dieser Rechner. */
+function fuerAus(source) {
+  const value = source && typeof source === 'object'
+    ? (typeof source.fuer === 'string' ? source.fuer.trim().slice(0, 40) : '')
+    : '';
+  return value || undefined;
 }
 
 /** Der getippte Pfad, aus der Abfrage oder aus dem Anfragekörper. */
@@ -99,24 +206,47 @@ function runtimeSummary(list) {
 }
 
 /**
- * Was diese Instanz über Modelle WEISS -- ohne nachzusehen.
+ * Was diese Instanz über Modelle WEISS -- ohne auf diesem Rechner nachzusehen.
  *
  * Absichtlich der zwischengespeicherte Stand (wie `/api/status`): die Frage
  * "kommt das Sprachmodell mit auf den Stick" darf keine Modellsuche auslösen.
- * Die Antwort lautet immer nein; diese Zahlen sagen nur, was auf DIESEM Rechner
- * gerade erreichbar ist -- und damit, was auf einem fremden Rechner fehlen wird.
+ * Von selbst reist es nie mit -- `reistMit` sagt nur, ob auf dem Stick, von
+ * dem diese Instanz läuft, schon eines liegt (dazugelegt über
+ * `/api/stick/models/copy`). Diese Zahlen sagen, was auf DIESEM Rechner gerade
+ * erreichbar ist -- und damit, was auf einem fremden Rechner fehlen wird.
  */
 function modelNote(rc) {
   const registry = rc.ctx.registry;
   const out = {
     reistMit: false,
-    grund: 'Ein Sprachmodell ist mehrere Gigabyte gross und gehört einem Anbieter auf diesem Rechner '
-      + '(z. B. Ollama), nicht Neural OS. Der Stick nimmt deine Notizen, Chats und Verknüpfungen mit – '
-      + 'das Modell nicht.',
+    vonSelbst: false,
+    grund: 'Ein Sprachmodell reist nicht von selbst mit: es ist mehrere Gigabyte gross und gehört einem '
+      + 'Anbieter auf diesem Rechner (z. B. Ollama), nicht Neural OS. Der Stick nimmt deine Notizen, Chats und '
+      + 'Verknüpfungen immer mit – das Modell nur, wenn du es unter „Modell mitnehmen" ausdrücklich dazulegst.',
     geprueft: false,
     hierErreichbar: null,
     anbieter: [],
+    // Nur im portablen Betrieb: was auf DIESEM Stick schon liegt und ob es zu
+    // diesem Rechner passt. Sonst null -- es gibt keinen Stick, über den man
+    // etwas sagen könnte.
+    aufDemStick: null,
+    // Der Aufseher über den Laufzeitkern (src/models/local-runner.js), falls
+    // diese Instanz einen hat: einer von vier Zuständen, nie ein Ja/Nein.
+    laufzeitkern: null,
   };
+  const pfad = eigenerStickPfad(rc);
+  if (pfad) {
+    try {
+      out.aufDemStick = modelsOf(rc).aufDemStick(pfad);
+      out.reistMit = !!(out.aufDemStick && out.aufDemStick.vorhanden);
+    } catch (err) {
+      out.aufDemStick = { fehler: asNeuralError(err).message };
+    }
+  }
+  const runner = rc.ctx.localRunner;
+  if (runner && typeof runner.zustand === 'function') {
+    try { out.laufzeitkern = runner.zustand(); } catch { out.laufzeitkern = null; }
+  }
   if (!registry || typeof registry.list !== 'function') return out;
   let snapshot = null;
   try {
@@ -182,10 +312,12 @@ function openStreamOrExplain(rc, what) {
  * läuft mitten im Kopieren voll), kommt als `fehler`-Ereignis, weil es vorher
  * niemand wissen konnte.
  */
-async function streamed(rc, { what, root, previewOpts, run }) {
-  const stick = stickOf(rc, 'preview');
-
-  const vorschau = stick.preview(root, previewOpts);
+async function streamed(rc, { what, root, previewOpts, vorschauVon, run }) {
+  // Entweder die Vorschau des Stick-Werkzeugs oder eine eigene (das Modell
+  // plant mit `planen()`); beide liefern `blockers` mit Satz und Statuscode.
+  const vorschau = typeof vorschauVon === 'function'
+    ? vorschauVon()
+    : stickOf(rc, 'preview').preview(root, previewOpts);
   if (vorschau.blockers.length) {
     const erste = vorschau.blockers[0];
     throw new NeuralError(erste.code, erste.message, {
@@ -355,6 +487,115 @@ function register(router) {
       root,
       previewOpts: { action: 'runtime', platform },
       run: ({ signal, onProgress }) => stick.addRuntime(root, platform, { signal, onProgress }),
+    });
+  });
+
+  /* ------------------------------------------------- das Modell mitnehmen */
+
+  /**
+   * Was liegt auf diesem Rechner, was auf dem Stick, und passt es zusammen?
+   *
+   * Drei Antworten in einer, weil die Ansicht alle drei braucht, BEVOR jemand
+   * klickt: `rechner` (finden: Modelle und Laufzeitkerne hier, mit Grösse),
+   * `stick` (aufDemStick: was dort liegt, für welches Betriebssystem, und der
+   * eine ehrliche Satz dazu) und `vorschau` (planen: Dateisystem, freier
+   * Platz, die 4-GB-Grenze -- gerechnet für alles, was gefunden wurde).
+   * Nichts davon schreibt; planen() legt nicht einmal einen Ordner an.
+   *
+   * `path` ist freiwillig: fehlt er, gilt der Stick, von dem diese Instanz
+   * läuft; gibt es auch den nicht, kommt nur `rechner` zurück -- und die
+   * Ansicht sagt, dass ein Pfad fehlt, statt einen leeren Kasten zu zeigen.
+   *
+   * `requireOwner`, weil finden() Verzeichnisse dieses Rechners liest (den
+   * Heimatordner, den PATH): das ist die Linie, die auch verify zieht.
+   */
+  router.get('/api/stick/models', (rc) => {
+    rc.requireOwner('Nach Modellen auf diesem Rechner zu suchen');
+    const modelle = modelsOf(rc);
+    const pfad = strParam(rc.query, 'path', MAX_PATH) || eigenerStickPfad(rc);
+    const fuer = strParam(rc.query, 'fuer', 40) || undefined;
+
+    const befund = modelle.finden();
+    const antwort = {
+      dieserRechner: modelle.dieserRechner,
+      pfad: pfad || null,
+      rechner: befund,
+      stick: null,
+      vorschau: null,
+    };
+    if (pfad) {
+      antwort.stick = modelle.aufDemStick(pfad, { fuer });
+      antwort.vorschau = planFuerHttp(modelle.planen({ ziel: pfad, befund, auswahl: alleKennungen(befund), fuer }));
+    }
+    return antwort;
+  });
+
+  /**
+   * „Erst ansehen" für das Modell: derselbe Plan, mit dem `copy` danach
+   * arbeitet. Ein POST, obwohl nichts geschrieben wird -- die Auswahl ist eine
+   * Liste, und eine Liste gehört in den Anfragekörper, nicht in die Adresse.
+   */
+  router.post('/api/stick/models/preview', async (rc) => {
+    rc.requireOwner('Einen Modellplan anzusehen');
+    const modelle = modelsOf(rc);
+    const body = asObject(await rc.body());
+    const root = requireString(body.path, 'path', { max: MAX_PATH });
+    const befund = modelle.finden();
+    return planFuerHttp(modelle.planen({
+      ziel: root,
+      befund,
+      auswahl: auswahlAus(body, befund),
+      fuer: fuerAus(body),
+    }));
+  });
+
+  /**
+   * Das Modell auf den Stick legen -- als Ereignisstrom, weil es um Gigabyte
+   * geht und `web/lib/api.js` ein gewöhnliches POST nach 30 Sekunden abbricht.
+   *
+   * Vor dem ersten Byte: der Plan. Ein Stopp-Hindernis (FAT32 und eine 5-GB-
+   * Datei, zu wenig Platz, nichts ausgewählt) wird als Statuscode abgelehnt,
+   * nicht als Strom, der sich sofort entschuldigt. Ein geschlossener Tab
+   * bricht ab; das halb Kopierte verschwindet, und was vorher auf dem Stick
+   * lag, wurde nie angefasst -- das sichert `kopieren()` selbst zu.
+   */
+  router.post('/api/stick/models/copy', async (rc) => {
+    rc.requireOwner('Ein Modell auf den Stick zu kopieren');
+    const modelle = modelsOf(rc);
+    const body = asObject(await rc.body());
+    const root = requireString(body.path, 'path', { max: MAX_PATH });
+    const pruefsummen = optionalString(body.pruefsummen, 'pruefsummen', { max: 10 }) || 'auto';
+    if (!['auto', 'alle', 'keine'].includes(pruefsummen)) {
+      throw new ValidationError(`"${pruefsummen}" ist keine bekannte Prüfsummen-Einstellung. Möglich sind: auto, alle, keine.`);
+    }
+    const befund = modelle.finden();
+    const auswahl = auswahlAus(body, befund);
+    const fuer = fuerAus(body);
+
+    return streamed(rc, {
+      what: 'Modell auf den Stick kopieren',
+      root,
+      vorschauVon: () => {
+        const plan = modelle.planen({ ziel: root, befund, auswahl, fuer });
+        return {
+          ...planFuerHttp(plan),
+          root: plan.ziel,
+          blockers: plan.hindernisse
+            .filter((h) => h.schwere === 'stopp')
+            .map((h) => ({ code: h.code, message: h.satz, status: HINDERNIS_STATUS[h.code] || 409, details: h.details })),
+        };
+      },
+      run: async ({ signal, onProgress }) => {
+        const ergebnis = await modelle.kopieren(root, { befund, auswahl, fuer, pruefsummen, signal, onProgress });
+        // `files`/`bytes`/`warnings` sind die Felder, die die Ansicht schon von
+        // den anderen Vorgängen kennt; der Rest bleibt daneben stehen.
+        return {
+          ...ergebnis,
+          files: ergebnis.kopiert ? ergebnis.kopiert.dateien : 0,
+          bytes: ergebnis.kopiert ? ergebnis.kopiert.bytes : 0,
+          warnings: ergebnis.warnungen || [],
+        };
+      },
     });
   });
 }

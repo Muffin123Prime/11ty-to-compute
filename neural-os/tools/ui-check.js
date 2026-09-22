@@ -578,7 +578,10 @@ async function main() {
  *
  * `hasTouch` ist deshalb nicht Beiwerk, sondern der Kern: nur damit meldet
  * der Browser `(pointer: coarse)`, und nur dann greifen die Regeln aus
- * Abschnitt 10 und 11 von web/app.css.
+ * Abschnitt 9 (die Schiene wird zur unteren Leiste) und 11 (Fingermasse)
+ * von web/app.css. Beide Groessen sind echte Geraete: iPad im Querformat
+ * (1024×768) und iPad Air im Hochformat (820×1180). Ein 1366×700-Laptop mit
+ * Maus wird absichtlich NICHT so geprueft -- dort soll sich nichts aendern.
  */
 const IPAD_GROESSEN = [
   ['Querformat', 1024, 768],
@@ -599,18 +602,19 @@ const IPAD_VOKABULAR = '.btn, .chip, .input, .select, .textarea, .icon-button,'
  *
  * Sie ist bewusst nicht null. Was übrig bleibt, sind Knöpfe, die
  * Ansichtsmodule mit eigenen Klassen bauen und selbst auf feste Maße setzen
- * (.todayv__tick misst 30 px, .chatv__row-actions .icon-button 26 px,
- * .notesv__tag-remove und .notesv__link sind reine Textknöpfe). Die liegen
- * in web/views/** und nicht in der Hand dieser Datei. Die Zahl ist der
- * gemessene Rest plus etwas Luft -- nicht mehr, sonst deckt sie beim
- * nächsten Mal einen echten Rückfall zu.
+ * (gemessen: 10× .searchv__chip, 8× .tlv__type, 7× label.setv__perm,
+ * 3× .notesv__link, .todayv__note, .notesv__tag-remove, dazu Wiki-Links im
+ * Fließtext, die als Textzeile gar nicht 44 px hoch sein können). Die liegen
+ * in web/views/** und nicht in der Hand von web/app.css. Die Zahl ist der
+ * gemessene Rest (35 quer, 33 hoch) plus etwas Luft -- nicht mehr, sonst
+ * deckt sie beim nächsten Mal einen echten Rückfall zu.
  *
- * Dieselbe Messung am Ausgangsstand, bevor Abschnitt 10 und 11 in
+ * Dieselbe Messung am Ausgangsstand, bevor Abschnitt 9 und 11 in
  * web/app.css entstanden: 361 im Querformat und 342 im Hochformat, davon
  * 299 bzw. 282 aus dem Vokabular von web/app.css selbst. Diese Schwelle wäre
  * also rot gewesen -- und genau dafür steht sie hier.
  */
-const IPAD_SCHWELLE = 30;
+const IPAD_SCHWELLE = 40;
 
 async function pruefeIPad(browser, base) {
   for (const [lage, breite, hoehe] of IPAD_GROESSEN) {

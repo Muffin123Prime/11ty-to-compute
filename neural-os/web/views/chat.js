@@ -315,6 +315,23 @@ function modelRefOf(record) {
 }
 
 /**
+ * Die Marke „vom Stick" am Modellnamen.
+ *
+ * Ein Modell, das vom Datenträger in der Tasche läuft, ist eine andere
+ * Situation als eines auf diesem fremden Rechner -- und „127.0.0.1" sagt
+ * das nicht. Der Anbieter `stick` wird von src/app.js nur für einen vom
+ * Stick gestarteten Kern angemeldet; sonst entscheidet, was /api/models über
+ * den Anbieter meldet (`vomStick`). Ein gespeicherter Chat von früher trägt
+ * nur den Anbieternamen, deshalb zählt beides.
+ */
+function stickMarke(model, models) {
+  if (!model || !model.provider) return '';
+  if (model.provider === 'stick') return ' · vom Stick';
+  const providers = models && Array.isArray(models.providers) ? models.providers : [];
+  return providers.some((p) => p && p.id === model.provider && p.vomStick) ? ' · vom Stick' : '';
+}
+
+/**
  * Which exact plan a consent belongs to.
  *
  * The key names every side that would leave the device, with its host and its
@@ -1551,7 +1568,7 @@ function createChatView(container, ctx) {
     const model = modelRefOf(state.chat);
     const stance = state.stance || {};
     const parts = [];
-    parts.push(model ? `Modell: ${model.model}${model.provider ? ` (${model.provider})` : ''}` : 'Modell: Standard');
+    parts.push(model ? `Modell: ${model.model}${model.provider ? ` (${model.provider})` : ''}${stickMarke(model, state.models)}` : 'Modell: Standard');
     if (stance.known) {
       if (stance.internet) parts.push(stance.internetAny ? 'Internet freigegeben' : `Internet nur für ${stance.internetHosts.join(', ')}`);
       else if (stance.lan) parts.push(stance.lanAny ? 'LAN freigegeben' : `LAN nur für ${stance.lanHosts.join(', ')}`);
@@ -1860,7 +1877,7 @@ function createChatView(container, ctx) {
     const model = modelRefOf(record);
 
     row.appendChild(h('span.badge', { title: 'Das Modell, das diese Antwort erzeugt hat' },
-      text(model ? `${model.model || 'unbekannt'}${model.provider ? ` · ${model.provider}` : ''}` : 'Modell nicht vermerkt')));
+      text(model ? `${model.model || 'unbekannt'}${model.provider ? ` · ${model.provider}` : ''}${stickMarke(model, state.models)}` : 'Modell nicht vermerkt')));
 
     const stats = data.stats || {};
     const duration = formatDuration(stats.ms);

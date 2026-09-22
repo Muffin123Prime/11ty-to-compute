@@ -39,8 +39,12 @@ Eine einzige Anwendung, die zusammenführt, wofür man sonst fünf Programme
 - **Netzwerkkontrolle**, die tatsächlich durchgesetzt wird — nicht nur angezeigt
 - **Auf dem USB-Stick** — im Bereich *Stick* vorbereiten, und die ganze
   Anwendung samt Node-Laufzeit und allen Notizen läuft danach an jedem Rechner
-  per Doppelklick, ohne Installation. Was nicht mitreist, steht dort genauso
-  deutlich: das Sprachmodell. Einzelheiten in `docs/STICK.md`
+  per Doppelklick, ohne Installation. Das Sprachmodell reist nicht von selbst
+  mit: unter *Modell mitnehmen* legst du Modell und Laufzeitkern dazu, sofern
+  sie auf deinem Rechner liegen — Neural OS kann kein Modell herunterladen, und
+  ein Laufzeitkern gilt nur für das Betriebssystem, für das er gebaut ist. Der
+  Bereich sagt das vorher, samt der 4-GB-Grenze von FAT32. Einzelheiten in
+  `docs/STICK.md`
 
 ## Die drei Versprechen
 
@@ -100,6 +104,10 @@ node bin/neural-os.js export --passphrase X    # ... verschlüsselt
 node bin/neural-os.js import <ordner>          # wiederherstellen (zusammenführen)
 node bin/neural-os.js import <ordner> --mode restore   # diese Installation ersetzen
 node bin/neural-os.js compact                  # Log zusammenfassen
+
+node bin/neural-os.js stick prepare <stick>    # USB-Stick vorbereiten (docs/STICK.md)
+node bin/neural-os.js stick model list [stick] # Modelle hier und auf dem Stick
+node bin/neural-os.js stick model copy <stick> # Modell samt Laufzeitkern auf den Stick
 
 # Optionen: --home <ordner> --port <n> --host <adresse> --log debug
 ```

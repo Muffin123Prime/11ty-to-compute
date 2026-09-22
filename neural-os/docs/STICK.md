@@ -73,7 +73,7 @@ nur die Programmdatei entpackt. Blockiert die Schleuse, ist das kein Fehler —
 der Stick läuft trotzdem auf deinem eigenen Betriebssystem.
 
 Platzbedarf: rund **120 MB pro Betriebssystem**, plus deine Daten. Ein 8-GB-Stick
-reicht für alles außer den KI-Modellen.
+reicht für alles außer den KI-Modellen — für die siehe Teil 6.
 
 ### Derselbe Weg über die Kommandozeile
 
@@ -146,26 +146,30 @@ du vertraust. In einem Internetcafé würde ich ihn nicht einstecken.
 
 ### FAT32 kann keine Datei über 4 GB
 
-Falls du später ein KI-Modell mit auf den Stick nehmen willst: Modelle sind oft
-größer. **Formatiere den Stick als exFAT**, dann fällt diese Grenze weg. Der
-Bereich **Stick** sagt dir unter „Was du vorher wissen solltest", welches
-Dateisystem er vorgefunden hat und ob diese Grenze gilt — und der
-Vorbereitungsbefehl warnt ebenfalls.
+Falls du ein KI-Modell mit auf den Stick nehmen willst: Modelle sind fast
+immer eine einzige Datei, und die ist oft größer als 4 GB. **Formatiere den
+Stick als exFAT** (läuft auf Windows, macOS und Linux) oder NTFS (Windows),
+dann fällt diese Grenze weg — **dabei werden alle Daten auf dem Stick
+gelöscht**, also vorher sichern, auch den Ordner `data/`. Der Bereich
+**Stick** sagt dir unter „Modell mitnehmen" und unter „Was du vorher wissen
+solltest", welches Dateisystem er vorgefunden hat und ob diese Grenze gilt,
+bevor irgendetwas kopiert wird.
 
-### Das Sprachmodell kommt NICHT mit auf den Stick
+### Das Sprachmodell kommt nicht von selbst mit auf den Stick
 
 Das ist der Satz, der hinterher am meisten enttäuscht, deshalb steht er hier
 und im Bereich **Stick** ausdrücklich da: mitgenommen werden deine Notizen,
-Chats, Projekte, Dateien und Verknüpfungen. **Das Modell nicht.** Es ist
-mehrere Gigabyte groß und gehört einem Anbieter auf dem jeweiligen Rechner
-(z. B. Ollama), nicht Neural OS.
+Chats, Projekte, Dateien und Verknüpfungen — **das Modell nur, wenn du es
+dazulegst** (Teil 6). Es ist mehrere Gigabyte groß und gehört einem Anbieter
+auf dem jeweiligen Rechner (z. B. Ollama), nicht Neural OS. Neural OS kann es
+deshalb auch **nicht herunterladen**: es kopiert, was auf deinem Rechner schon
+liegt.
 
-Konkret heißt das: an einem fremden Rechner ohne eigenes Modell hast du dein
-gesamtes Wissen — und bekommst keine neuen Antworten. Suche, Notizen, Graph,
-Zeitachse und Export funktionieren vollständig; Chat und alles, was ein Modell
-braucht, sagen dann, dass keines erreichbar ist, statt etwas zu erfinden. Teil 6
-beschreibt den Weg, ein Modell doch mitzunehmen — Handarbeit, und nur auf einem
-schnellen Datenträger sinnvoll.
+Konkret heißt das: an einem fremden Rechner ohne eigenes Modell und ohne
+Modell auf dem Stick hast du dein gesamtes Wissen — und bekommst keine neuen
+Antworten. Suche, Notizen, Graph, Zeitachse und Export funktionieren
+vollständig; Chat und alles, was ein Modell braucht, sagen dann, dass keines
+erreichbar ist, statt etwas zu erfinden.
 
 ### Geschwindigkeit
 
@@ -231,22 +235,104 @@ ohne deine Passphrase kann es nicht lesen — und sagt das, statt Müll zu liefe
 
 ## Teil 6 · Ein KI-Modell mit auf den Stick
 
-Geht, ist aber Handarbeit und lohnt sich nur bei einem schnellen Stick:
+Damit auf einem fremden Rechner nicht nur das Wissen da ist, sondern auch
+eine Antwort kommt, müssen **zwei** Dinge mitreisen:
 
-1. Stick als **exFAT** formatieren (wegen der 4-GB-Grenze).
-2. Ollama portabel auf den Stick legen und mit
-   `OLLAMA_MODELS=<stick>/models` starten.
-3. Neural OS findet es wie immer auf `127.0.0.1:11434`.
+1. die **Modelldateien** — die großen Dateien, sie passen auf jeden Rechner;
+2. der **Laufzeitkern**, der sie öffnet (Ollama oder llama.cpp) — ein
+   Programm, und Programme sind an ein Betriebssystem und eine
+   Prozessorarchitektur gebunden. Ein Windows-Kern startet auf einem Mac
+   nicht, und keine Dateikopie der Welt ändert daran etwas.
 
-Ehrlich: Ein 7B-Modell von einem USB-2-Stick ist zäh. Von einer externen SSD
-läuft es gut. Die Alternative — Modell auf dem jeweiligen PC, Daten auf dem
-Stick — ist in den meisten Fällen die bessere.
+Neural OS bringt beides auf den Stick, **sofern es auf deinem Rechner schon
+liegt**. Es lädt kein Modell herunter — das ist Sache des Anbieters (`ollama
+pull`) und deiner Netz-Einstellung.
+
+### So geht es mit der Maus
+
+Bereich **Stick**, Abschnitt **„Modell mitnehmen"**. Er sagt, ohne dass du
+etwas anklickst:
+
+- **Auf diesem Rechner:** welche Modelle und Laufzeitkerne gefunden wurden,
+  mit Größe. Ist nichts da, steht dort, was zu tun wäre — Ollama von
+  ollama.com installieren, `ollama pull llama3.2` (rund 2 GB), „Neu
+  nachsehen" — und kein leerer Kasten.
+- **Auf dem Stick:** was dort schon liegt und **für welches Betriebssystem**
+  der Laufzeitkern gebaut ist. Mit „Für welchen Rechner soll das gelten?"
+  kannst du für einen anderen Rechnertyp fragen — oder für ein iPad, und
+  bekommst dann die ehrliche Antwort, dass ein iPad gar kein Programm von
+  einem Stick startet.
+- **Dateisystem und Platz:** ob der Stick eine Datei in der Größe des Modells
+  überhaupt aufnehmen kann (FAT32: nein, über 4 GB) und ob der Platz reicht —
+  bevor ein Byte geschrieben wird.
+
+Dann: Modell und Kern ankreuzen (beides ist vorausgewählt), **„Erst
+ansehen"** zeigt den Plan mit jedem Hindernis als ganzem Satz, **„Auf den
+Stick kopieren"** legt los — mit demselben gemessenen Balken wie beim
+Vorbereiten. Was schon auf dem Stick liegt, bleibt unverändert; ein zweites
+Modell kommt daneben, geteilte Schichten werden nur einmal kopiert, und ein
+abgebrochener Vorgang hinterlässt nichts Halbes.
+
+Danach liegt auf dem Stick zusätzlich:
+
+```
+DEIN-STICK/
+  models/
+    modelle.json           was hier liegt, mit Prüfsummen
+    ollama/                der Modellspeicher, so wie Ollama ihn erwartet
+    kern/<plattform>/      der Laufzeitkern, z. B. kern/linux-x64/ollama
+```
+
+Läuft Neural OS vom Stick, startet es beim Hochfahren den Kern von dort
+(nur auf `127.0.0.1`, nie ins Netz freigegeben) und meldet das Modell im Chat
+mit der Marke **„vom Stick"** — so ist erkennbar, ob die Antwort aus deiner
+Tasche kommt oder von dem fremden Rechner. Beim ersten Mal dauert es, bis das
+Modell im Arbeitsspeicher ist; solange steht im Chat, dass der Kern noch
+startet.
+
+### Zwei Betriebssysteme auf einem Stick
+
+Für die **Node-Laufzeit** ist das einfach: fehlende Plattformen holt der
+Bereich „Welche Rechner der Stick starten kann" einmalig von nodejs.org, durch
+die Netzschleuse (siehe Teil 1).
+
+Für den **Modell-Laufzeitkern gilt das nicht.** Den kann Neural OS nicht
+herunterladen. Ein Kern für ein anderes Betriebssystem kommt nur von einem
+Rechner mit genau diesem System, auf dem Ollama installiert ist: Stick dort
+einstecken, „Modell mitnehmen", kopieren. Die Modelldateien liegen dann schon
+da und werden nicht noch einmal kopiert — es kommt nur der Kern dazu. Der
+Abschnitt sagt dir, welche Plattformen noch fehlen.
+
+### Derselbe Weg über die Kommandozeile
+
+```bash
+node bin/neural-os.js stick model list                    # was liegt auf diesem Rechner
+node bin/neural-os.js stick model list /pfad/zum/stick    # … und was auf dem Stick, passt es?
+node bin/neural-os.js stick model list /pfad/zum/stick --fuer win-x64
+node bin/neural-os.js stick model plan /pfad/zum/stick    # was "copy" tun würde – schreibt nichts
+node bin/neural-os.js stick model copy /pfad/zum/stick    # Modell samt Kern auf den Stick
+node bin/neural-os.js stick model copy /pfad/zum/stick --auswahl kern:ollama,ollama:llama3.2:latest   # Kennungen aus "list"
+```
+
+Es ist dieselbe Funktion wie hinter den Knöpfen. `plan` und `copy` beenden
+sich mit Fehlercode, wenn ein Hindernis im Weg steht — und schreiben dann
+nichts.
+
+### Ehrlich
+
+Ein 7B-Modell von einem USB-2-Stick ist zäh. Von einem USB-3-Stick oder einer
+externen SSD läuft es gut. Die Alternative — Modell auf dem jeweiligen PC,
+Daten auf dem Stick — ist oft die bessere; dann brauchst du diesen Teil nicht.
+Auf einem iPad hilft keines von beiden: dort läuft Neural OS nur im Browser
+gegen einen Rechner im selben Netz, und der Stick zeigt dort nur Dateien.
 
 ## Teil 7 · Wenn etwas nicht geht
 
 | Problem | Abhilfe |
 |---|---|
 | „Keine passende Laufzeit auf dem Stick" | Der Stick wurde für ein anderes Betriebssystem vorbereitet. Bereich **Stick** → „Welche Rechner der Stick starten kann" → bei diesem System „Jetzt kopieren" (ohne Internet) oder bei einem fremden „Holen" (einmalig Internet). Über die Kommandozeile: `stick runtime /pfad/zum/stick <plattform>`. |
+| „Der Laufzeitkern auf dem Stick ist für …, dieser Rechner ist …" | Der Modell-Kern wurde auf einem anderen Betriebssystem kopiert. Neural OS kann keinen herunterladen: Stick in einen Rechner mit diesem System stecken, auf dem Ollama installiert ist, und dort „Modell mitnehmen" → kopieren. Die Modelldateien bleiben, nur der Kern kommt dazu. |
+| „Der Stick ist mit FAT32 formatiert und kann keine einzelne Datei über 4 GB aufnehmen" | Stick als exFAT formatieren — **das löscht alles darauf**, also vorher sichern (auch `data/`), danach Stick neu vorbereiten. |
 | Der Pfad wird nicht angenommen | „Erst ansehen" sagt in einem ganzen Satz, was mit dem getippten Pfad nicht stimmt — und schreibt dabei nichts. |
 | „Auf dem Stick läuft bereits …" | Ein zweiter Tab hat denselben Stick in Arbeit. Warten, bis er fertig ist; zwei gleichzeitige Vorgänge würden einander die halbfertigen Ordner wegräumen. |
 | Windows blockiert den Start | SmartScreen: *Weitere Informationen* → *Trotzdem ausführen*. |
@@ -278,9 +364,9 @@ Festplatte oder eine zweite Platte.
 | Was der fremde PC braucht | **Nichts.** Node liegt auf dem Stick. |
 | Wo deine Daten liegen | `<stick>/data` — und nur dort |
 | Wird das Heimatverzeichnis des PCs berührt? | Nein |
-| Braucht es Internet? | Nur einmal, für ein KI-Modell und für zusätzliche Laufzeiten |
+| Braucht es Internet? | Nur einmal, für zusätzliche Node-Laufzeiten — und für `ollama pull` auf dem Rechner, von dem das Modell kommt |
 | Brauche ich Synchronisation? | Nur, wenn ein PC einen eigenen Datenbestand hat |
 | Platzbedarf | ~120 MB je Betriebssystem plus deine Daten |
-| Kommt das KI-Modell mit? | **Nein.** Das Wissen reist mit, das Modell nicht. |
+| Kommt das KI-Modell mit? | **Nicht von selbst.** Unter „Modell mitnehmen" legst du Modell und Laufzeitkern dazu — der Kern gilt nur für sein Betriebssystem, und Neural OS kann keinen herunterladen. |
 | Wo steht das alles in der App? | Seitenleiste → **Stick** (oder `g` dann `t`) |
 | Wichtigste Maßnahme | **Verschlüsselung einschalten.** Ein Stick geht verloren. |
