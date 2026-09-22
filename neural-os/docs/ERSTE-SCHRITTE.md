@@ -25,19 +25,29 @@ WLAN, nicht über das Internet.
 > nichts davon zu tun — dort wird nichts installiert und nichts
 > heruntergeladen. Für das iPad ist Teil 3 zuständig.
 
-### 1.1 Node.js installieren
+### 1.1 Node.js holen — ohne Installation, ohne Administratorrechte
 
 Neural OS ist ein Programm, das Node.js ausführt — so wie ein Word-Dokument
-Word braucht. Node ist kostenlos und kommt von der offiziellen Quelle:
+Word braucht. Node ist kostenlos und kommt von der offiziellen Quelle.
 
-1. <https://nodejs.org> öffnen.
-2. Die Schaltfläche mit **LTS** nehmen (die linke, nicht „Current").
-3. Die heruntergeladene `.msi` doppelklicken, im Installationsprogramm alles
-   bestätigen. Nichts umstellen, nichts dazu anklicken.
+**Du musst dafür nichts installieren.** Auf vielen Schul- und Firmenrechnern
+darf man das gar nicht; der Installer bricht dann mit „Setup Wizard was
+interrupted" ab. Deshalb nehmen wir die Fassung, die einfach nur eine Datei
+ist:
 
-Das ist die einzige Installation in dieser ganzen Anleitung. **Jeder weitere
-Rechner, der später den Stick benutzt, braucht sie nicht** — auf dem Stick
-liegt Node mit drauf.
+1. <https://nodejs.org/en/download> öffnen.
+2. Den schwarzen Kasten in der Mitte ignorieren, egal was darin steht.
+3. Ganz nach unten scrollen zu „Oder holen Sie sich einen vorgefertigten
+   Node.js®" — dort muss **Windows** und **x64** stehen.
+4. Den grünen Knopf **„Standalone-Binärdatei (.zip)"** nehmen — **nicht** den
+   „Windows Installer (.msi)".
+5. Die heruntergeladene ZIP-Datei im Explorer öffnen. Darin liegt ein Ordner
+   `node-v24…-win-x64`, und darin eine Datei **`node.exe`**. Die brauchen wir
+   gleich — mehr nicht.
+
+> Wenn du auf einem Rechner bist, auf dem du installieren darfst, geht auch
+> der Installer (.msi, durchklicken, das Häkchen „Tools for Native Modules"
+> leer lassen). Nötig ist er nicht.
 
 ### 1.2 Neural OS auf den Windows-Rechner holen
 
@@ -50,26 +60,27 @@ liegt Node mit drauf.
    siehst (darin liegen `package.json`, `bin`, `src`, `web`). Dieser Ordner ist
    gemeint, wenn unten „der Programmordner" steht.
 
-### 1.3 Starten
+### 1.3 Starten — per Doppelklick
 
-1. Den Programmordner im Explorer öffnen.
-2. Oben in die **Adressleiste** klicken (dort wo der Pfad steht), das Wort
-   `cmd` eintippen und Eingabetaste drücken. Es öffnet sich ein schwarzes
-   Fenster, das schon im richtigen Ordner steht.
-3. Eintippen und Eingabetaste:
-
-   ```
-   npm start
-   ```
-
-4. Nach ein paar Sekunden steht dort eine Adresse, meist
-   `http://127.0.0.1:7777`. Die im Browser öffnen.
+1. Die **`node.exe`** aus Schritt 1.1 in den Programmordner kopieren — genau
+   dorthin, wo `Neural OS starten.bat` liegt.
+2. **`Neural OS starten.bat`** doppelklicken.
+3. Es öffnet sich ein schwarzes Fenster, kurz darauf der Browser mit deinem
+   System. Falls der Browser nicht von allein aufgeht: die Adresse aus dem
+   Fenster abtippen, meist `http://127.0.0.1:7777`.
 
 Das schwarze Fenster bleibt offen, solange Neural OS läuft. Schließen beendet
 das Programm; deine Daten bleiben natürlich da.
 
-> **Wenn `npm start` nicht gefunden wird:** Node war beim Öffnen des Fensters
-> noch nicht installiert. Fenster schließen, neu öffnen, nochmal.
+> **Wenn das Fenster „Node.js wurde gefunden, darf auf diesem Rechner aber
+> nicht laufen" sagt:** dann sperrt dein Rechner (Schule, Firma) Programme
+> außerhalb von „Programme". Dagegen hilft auf diesem Rechner nichts. Dann
+> läuft Neural OS auf einem anderen Rechner (Teil 5), und dieser hier ist der
+> Bildschirm dafür — genau wie das iPad in Teil 3.
+
+> **Wenn Windows beim Doppelklick warnt** („Der Computer wurde durch Windows
+> geschützt"): auf „Weitere Informationen" und dann „Trotzdem ausführen".
+> Das ist die normale Warnung für jede Datei, die nicht aus dem Store kommt.
 
 > **Mac:** Finder → Ordner → Rechtsklick → „Neues Terminal beim Ordner", dann
 > `npm start`. **Linux:** Terminal im Ordner öffnen, `npm start`.
@@ -82,8 +93,12 @@ funktionieren trotzdem vollständig.
 
 Für Antworten:
 
-1. <https://ollama.com/download> → Windows-Installer, durchklicken.
-2. Eingabeaufforderung öffnen und eintippen:
+1. <https://ollama.com/download> → Windows. Darfst du nichts installieren,
+   nimm statt des Installers die ZIP-Fassung (auf derselben Seite bzw. unter
+   „Releases" die Datei `ollama-windows-amd64.zip`), entpacke sie irgendwohin
+   und starte darin `ollama app.exe` — auch das braucht keinen Administrator.
+2. Eingabeaufforderung öffnen (Explorer → in den Ollama-Ordner → oben in die
+   Adressleiste `cmd` tippen) und eintippen:
 
    ```
    ollama pull llama3.2
@@ -254,6 +269,42 @@ denn ohne sie ist die Sicherung dann wertlos.
 
 ---
 
+## Teil 5 · Welches Gerät kann Neural OS ausführen — und welches nicht
+
+Neural OS braucht **ein** Gerät, auf dem das Programm läuft. Alle anderen
+Geräte sind Bildschirme dafür (über dein WLAN, wie in Teil 3). Es reicht also,
+wenn *irgendein* Rechner in deinem Haushalt es kann.
+
+| Gerät | Kann das Programm ausführen? | Kann Bildschirm sein? |
+|---|---|---|
+| Windows-Laptop, Programme dürfen laufen | **ja** (Teil 1, ohne Installation) | ja |
+| Windows-Laptop, Programme gesperrt (Schule/Firma) | nein | **ja**, im Browser |
+| MacBook | **ja** — auch ohne Administrator, siehe unten | ja |
+| iPad / iPhone | nein, iPadOS startet keine Programme | **ja** |
+| PlayStation 4 | **nein** | nur eingeschränkt |
+
+**Zur PlayStation, weil die Frage naheliegt:** ihr Browser kann Webseiten
+anzeigen, aber keine Programme ausführen und nichts von einem Stick starten.
+Dass sie dauerhaft an sein kann, hilft deshalb nicht — es gäbe nichts, was
+darauf laufen könnte. Als Bildschirm taugt sie nur bedingt, weil ihr Browser
+alt ist und die Oberfläche dort wahrscheinlich nicht vollständig funktioniert.
+
+**Warum es nicht „rein im Browser" geht:** Neural OS läuft absichtlich nicht
+bei einem Anbieter im Internet, sondern nur bei dir. Ein reines Browser-Angebot
+wäre entweder ein fremder Server (dann lägen deine Daten dort) oder ein
+Programm ohne Speicher und ohne Modell. Das Programm muss also auf einem Gerät
+laufen, das dir gehört — aber es muss dort nicht *installiert* werden. Genau
+dafür ist Teil 1 so gebaut.
+
+**MacBook ohne Administratorrechte:** auf <https://nodejs.org/en/download>
+unten „macOS" wählen und die **Standalone-Binärdatei (.tar.gz)** nehmen statt
+des Installers; entpacken, den Ordner neben `neural-os` legen, dann im
+Terminal im Ordner `neural-os`:
+
+```
+../node-v24*/bin/node bin/neural-os.js start --open
+```
+
 ## Was heute noch nicht geht
 
 Ehrlichkeitshalber, damit du nicht danach suchst:
@@ -262,6 +313,9 @@ Ehrlichkeitshalber, damit du nicht danach suchst:
   mit, aber die Antworten nicht: auf einem fremden Rechner ohne Ollama siehst du
   alles, bekommst aber keine Chat-Antwort.
 * **Das Design** ist noch nicht überarbeitet.
+* Der Doppelklick-Starter für Windows ist neu und konnte hier nur gelesen, nicht
+  auf einem echten Windows ausgeführt werden. Wenn er bei dir etwas anderes
+  sagt als oben beschrieben: Screenshot schicken.
 * **Die Fingerbedienung auf dem iPad** ist noch nicht fertig — rund die Hälfte
   der Knöpfe ist kleiner als das, was Apple für einen Finger empfiehlt.
 * Neural OS **auf** dem iPad ausführen geht nicht und wird nicht gehen. Es gibt

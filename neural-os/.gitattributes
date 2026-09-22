@@ -1,0 +1,4 @@
+# Batchdateien werden von cmd.exe zuverlaessig nur mit CRLF gelesen. Sie
+# liegen deshalb byte-genau so im Repo, wie sie beim Doppelklick gebraucht
+# werden - auch im ZIP, das GitHub ohne Zeilenende-Umwandlung packt.
+*.bat -text
