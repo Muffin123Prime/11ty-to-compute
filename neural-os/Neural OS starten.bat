@@ -32,34 +32,26 @@ if exist "%HIER%node.exe" (
   goto :probe
 )
 
-rem 2. Ein entpackter Node-Ordner neben dieser Datei oder eine Ebene hoeher.
-for /d %%D in ("%HIER%node-v*") do (
-  if exist "%%~fD\node.exe" (
-    set "NODE=%%~fD\node.exe"
-    set "WOHER=%%~fD"
-    goto :probe
-  )
-)
-for /d %%D in ("%HIER%..\node-v*") do (
-  if exist "%%~fD\node.exe" (
-    set "NODE=%%~fD\node.exe"
-    set "WOHER=%%~fD"
-    goto :probe
-  )
-)
-
-rem 3. Der entpackte Node-Ordner liegt noch im Download-Ordner.
-if defined USERPROFILE (
-  for /d %%D in ("%USERPROFILE%\Downloads\node-v*") do (
+rem 2. Ein entpackter Node-Ordner neben dieser Datei, eine Ebene hoeher oder
+rem    noch im Download-Ordner. "Alle extrahieren" legt unter Windows einen
+rem    Ordner mit dem Namen der ZIP an, und die ZIP enthaelt selbst noch einen
+rem    Ordner - die node.exe liegt dann ZWEI Ebenen tief. Beide Lagen pruefen.
+for %%B in ("%HIER%." "%HIER%.." "%USERPROFILE%\Downloads") do (
+  for /d %%D in ("%%~fB\node-v*") do (
     if exist "%%~fD\node.exe" (
       set "NODE=%%~fD\node.exe"
       set "WOHER=%%~fD"
       goto :probe
     )
+    if exist "%%~fD\%%~nxD\node.exe" (
+      set "NODE=%%~fD\%%~nxD\node.exe"
+      set "WOHER=%%~fD\%%~nxD"
+      goto :probe
+    )
   )
 )
 
-rem 4. Ein regulaer installiertes Node.js.
+rem 3. Ein regulaer installiertes Node.js.
 where node >nul 2>&1
 if not errorlevel 1 (
   set "NODE=node"
