@@ -585,7 +585,7 @@ function createPortableModels(deps = {}) {
       hinweise.push(
         'Auf diesem Rechner ist kein lokales Modell und kein Laufzeitkern zu finden. Zum Mitnehmen '
         + 'braucht es beides: installiere z. B. Ollama (ollama.com) und hole ein Modell mit '
-        + '"ollama pull llama3" - danach kann dieser Rechner es auf den Stick legen.',
+        + '"ollama pull llama3.2" - danach kann dieser Rechner es auf den Stick legen.',
       );
     } else if (!kerne.length) {
       hinweise.push(
@@ -594,7 +594,7 @@ function createPortableModels(deps = {}) {
       );
     } else if (!modelle.length) {
       hinweise.push(
-        'Ein Laufzeitkern ist da, aber kein Modell. Hole eines (z. B. "ollama pull llama3") - '
+        'Ein Laufzeitkern ist da, aber kein Modell. Hole eines (z. B. "ollama pull llama3.2") - '
         + 'der Kern allein beantwortet keine Frage.',
       );
     }

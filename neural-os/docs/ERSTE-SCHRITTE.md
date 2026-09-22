@@ -281,13 +281,14 @@ wenn *irgendein* Rechner in deinem Haushalt es kann.
 | Windows-Laptop, Programme gesperrt (Schule/Firma) | nein | **ja**, im Browser |
 | MacBook | **ja** — auch ohne Administrator, siehe unten | ja |
 | iPad / iPhone | nein, iPadOS startet keine Programme | **ja** |
-| PlayStation 4 | **nein** | nur eingeschränkt |
+| PlayStation 4 | **nein** | **nein** |
 
 **Zur PlayStation, weil die Frage naheliegt:** ihr Browser kann Webseiten
 anzeigen, aber keine Programme ausführen und nichts von einem Stick starten.
 Dass sie dauerhaft an sein kann, hilft deshalb nicht — es gäbe nichts, was
-darauf laufen könnte. Als Bildschirm taugt sie nur bedingt, weil ihr Browser
-alt ist und die Oberfläche dort wahrscheinlich nicht vollständig funktioniert.
+darauf laufen könnte. Und als Bildschirm fällt sie auch aus — nachgeprüft: ihr
+Browser ist zu alt für die Technik, mit der die Oberfläche gebaut ist (ES-Module,
+moderne CSS-Einheiten). Die Seite bliebe dort schlicht leer.
 
 **Warum es nicht „rein im Browser" geht:** Neural OS läuft absichtlich nicht
 bei einem Anbieter im Internet, sondern nur bei dir. Ein reines Browser-Angebot
