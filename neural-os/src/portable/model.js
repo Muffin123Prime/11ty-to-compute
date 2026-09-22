@@ -51,6 +51,18 @@
  *     gibt. Dieses Modul kopiert Dateien; es redet nie an der Stelle eines
  *     Modells.
  *
+ *  6. EIN LAUFZEITKERN IST EIN ORDNER, KEINE DATEI. Ollama besteht aus der
+ *     Programmdatei UND dem Ordner lib/ollama daneben (Runner und
+ *     Bibliotheken, je Rechenwerk ein Unterordner: cuda_v13, vulkan ...), und
+ *     es sucht diesen Ordner relativ zur eigenen Programmdatei. Wer nur die
+ *     ollama.exe kopiert, hat auf dem Stick ein Ollama, das startet, "serve"
+ *     sagt und dann kein einziges Modell rechnet -- das Modell ist da und
+ *     bleibt stumm. Deshalb sammelt `finden()` den ganzen Ordner ein, mit
+ *     seiner relativen Struktur, `kopieren()` legt ihn unter
+ *     models/kern/<plattform>/ genauso wieder ab, modelle.json nennt die
+ *     Programmdatei ausdruecklich ("programm"), und `aufDemStick()` meldet
+ *     einen Kern ohne lib/ als unvollstaendig statt als startklar.
+ *
  * Was dieses Modul NICHT tut: herunterladen. Es bringt auf den Stick, was auf
  * DIESEM Rechner schon liegt. Ein Modell aus dem Netz zu holen ist eine Sache
  * des Anbieters (ollama pull) und der Netz-Richtlinie, nicht dieser Datei.
@@ -236,6 +248,147 @@ function dateienSuchen(wurzel, { passt, tiefe = MAX_TIEFE, maxEintraege = MAX_EI
   return { treffer, abgeschnitten };
 }
 
+/* ------------------------------------------------ der Kern als Ordner */
+
+/** Wie die Programmdatei einer Art auf einem System heisst. */
+function programmNamen(art, aufOs) {
+  const basis = art === ART.ollama ? 'ollama' : 'llama-server';
+  return aufOs === 'win32' ? [`${basis}.exe`] : [basis];
+}
+
+/**
+ * Welche Art ein Programm ist -- am Namen, sonst null. Geraten wird nicht:
+ * ein Kern, den man mit der falschen Schnittstelle anspricht, antwortet mit
+ * 404, und das sieht von aussen aus wie "kein Modell da".
+ */
+function artVonProgramm(name) {
+  const n = String(name || '').toLowerCase().replace(/\.exe$/, '');
+  if (n === 'ollama') return ART.ollama;
+  if (n === 'llama-server') return ART.llamaCpp;
+  return null;
+}
+
+/** Eine Bibliothek, die neben einem llama-server liegt und zu ihm gehoert. */
+function istBibliothek(name) {
+  return /\.(dll|dylib)$/i.test(name) || /\.so(\.\d+)*$/i.test(name);
+}
+
+/**
+ * Wurzel eines Laufzeitkerns und der Pfad seiner Programmdatei relativ dazu.
+ *
+ * Zwei Ordnungen gibt es: die flache (ollama.exe + lib/ollama daneben, so
+ * entpackt das Windows-Archiv) und die des Tarballs (bin/ollama + lib/ollama
+ * eine Ebene hoeher). Im zweiten Fall ist die Wurzel der Ordner UEBER bin/,
+ * damit auf dem Stick bin/ und lib/ wieder Geschwister sind -- Ollama sucht
+ * lib/ genau so, relativ zur eigenen Programmdatei.
+ *
+ * Reine Pfadrechnung, absichtlich ohne Dateisystem: `pfadModul` darf
+ * path.win32 sein, damit Windows-Pfade dort geprueft werden koennen, wo kein
+ * Windows ist. Die eine Frage, die nicht aus dem Pfad folgt (gibt es
+ * ../lib/ollama?), beantwortet `existiert`.
+ */
+function kernWurzel(programm, { art = ART.ollama, pfadModul = path, existiert = fs.existsSync } = {}) {
+  const ordner = pfadModul.dirname(programm);
+  const name = pfadModul.basename(programm);
+  if (art === ART.ollama && pfadModul.basename(ordner).toLowerCase() === 'bin') {
+    const oben = pfadModul.dirname(ordner);
+    if (existiert(pfadModul.join(oben, 'lib', 'ollama'))) return { wurzel: oben, programmRel: `bin/${name}` };
+  }
+  return { wurzel: ordner, programmRel: name };
+}
+
+/** Relativer Pfad innerhalb eines Ordners, immer mit "/" -- so steht er in modelle.json. */
+function relImKern(wurzel, abs, pfadModul = path) {
+  return pfadModul.relative(wurzel, abs).split(pfadModul.sep).join('/');
+}
+
+/** Der Platz eines Kerns auf dem Stick, relativ zu models/. */
+function kernZiel(plattform, rel) {
+  return `kern/${plattform}/${rel}`;
+}
+
+/**
+ * Den ganzen Kern einsammeln: Programmdatei plus alles, was zu ihr gehoert.
+ *
+ * Ollama: lib/ollama/** neben der Programmdatei (bzw. neben bin/), rekursiv.
+ * Fehlt der Ordner, ist der Kern UNVOLLSTAENDIG -- so sieht eine lose
+ * kopierte ollama.exe aus, und so sieht der Stick aus, den der alte Kopierweg
+ * hinterliess. Das wird gesagt, nicht verschwiegen.
+ *
+ * llama-server: die Bibliotheken im selben Ordner (ggml-*.dll, libllama.so,
+ * mtmd ...). Ob er sie braucht, laesst sich dem Programm nicht ansehen --
+ * statisch gebaute gibt es --, deshalb gilt er ohne sie nicht als
+ * unvollstaendig; liegen welche da, reisen sie mit.
+ *
+ * @returns {null|{wurzel:string, programmRel:string, dateien:object[], bytes:number,
+ *                 vollstaendig:boolean, hinweis:string|null, abgeschnitten:boolean}}
+ */
+function kernLesen(programm, art) {
+  const st = statSicher(programm);
+  if (!st || !st.isFile()) return null;
+  const { wurzel, programmRel } = kernWurzel(programm, { art });
+  const dateien = [{ abs: programm, rel: programmRel, bytes: st.size, mode: st.mode & 0o777, art: 'programm' }];
+  let vollstaendig = true;
+  let hinweis = null;
+  let abgeschnitten = false;
+
+  if (art === ART.ollama) {
+    const lib = path.join(wurzel, 'lib', 'ollama');
+    const libSt = statSicher(lib);
+    if (libSt && libSt.isDirectory()) {
+      const gelesen = dateienSuchen(lib, { tiefe: MAX_TIEFE });
+      abgeschnitten = gelesen.abgeschnitten;
+      for (const d of gelesen.treffer) {
+        dateien.push({ abs: d.abs, rel: `lib/ollama/${d.rel}`, bytes: d.bytes, mode: d.mode, art: 'bibliothek' });
+      }
+    }
+    if (dateien.length === 1) {
+      vollstaendig = false;
+      hinweis = `Neben "${programm}" liegt kein Ordner lib/ollama. Ollama braucht ihn (Runner und Bibliotheken): `
+        + '"ollama serve" startet ohne ihn, rechnet aber kein Modell. Ist das eine lose kopierte Programmdatei, '
+        + 'nimm den ganzen entpackten Ollama-Ordner - er enthaelt lib/ollama.';
+    }
+  } else {
+    const { treffer } = dateienSuchen(wurzel, { tiefe: 0, passt: (name) => istBibliothek(name) });
+    for (const d of treffer) {
+      if (d.abs === programm) continue;
+      dateien.push({ abs: d.abs, rel: d.rel, bytes: d.bytes, mode: d.mode, art: 'bibliothek' });
+    }
+  }
+
+  return {
+    wurzel,
+    programmRel,
+    dateien,
+    bytes: dateien.reduce((s, d) => s + d.bytes, 0),
+    vollstaendig,
+    hinweis,
+    abgeschnitten,
+  };
+}
+
+/**
+ * Die Programmdateien in einem Kernordner auf dem Stick (models/kern/<plattform>/):
+ * direkt darin oder unter bin/. Erkannt am Namen, fuer jedes Betriebssystem --
+ * ein Stick traegt win-x64 und linux-x64 nebeneinander.
+ */
+function programmeImKernordner(ordner) {
+  const out = [];
+  for (const unter of ['', 'bin']) {
+    let eintraege = [];
+    try {
+      eintraege = fs.readdirSync(unter ? path.join(ordner, unter) : ordner, { withFileTypes: true });
+    } catch { continue; }
+    for (const e of eintraege) {
+      if (!artVonProgramm(e.name)) continue;
+      const abs = path.join(ordner, unter, e.name);
+      const st = statSicher(abs);
+      if (st && st.isFile()) out.push(abs);
+    }
+  }
+  return out;
+}
+
 /* ------------------------------------------------- Orte auf diesem Rechner */
 
 function pfadOrte(env, namen) {
@@ -244,6 +397,48 @@ function pfadOrte(env, namen) {
   for (const teil of String(roh).split(path.delimiter)) {
     if (!teil) continue;
     for (const name of namen) orte.push(path.join(teil, name));
+  }
+  return orte;
+}
+
+/**
+ * Ein entpacktes Archiv im Downloads-Ordner -- der Weg OHNE Installation.
+ *
+ * WARUM: der Besitzer dieses Sticks hat Ollama nicht installiert (dazu
+ * braeuchte es Administratorrechte), sondern ollama-windows-amd64.zip in
+ * Downloads entpackt und startet es von dort. Es steht damit weder im PATH
+ * noch unter %LOCALAPPDATA%\Programs -- "kein Laufzeitkern" waere die Luege
+ * eines Programms, das nur an den ueblichen Stellen nachgesehen hat.
+ *
+ * Zwei Tiefen: Downloads/ollama*\/ollama.exe, und eine Ebene tiefer, weil
+ * "Alle extrahieren" den Ordner aus dem Archiv noch einmal in einen
+ * gleichnamigen Ordner legt (Downloads/ollama-windows-amd64/ollama-windows-amd64/).
+ * Dazu jeweils bin/, fuer den Tarball unter Linux und macOS.
+ */
+function downloadsOrte(env, home, aufOs, praefix, namen) {
+  const wurzeln = einmalig([
+    aufOs === 'win32' && env.USERPROFILE ? path.join(env.USERPROFILE, 'Downloads') : null,
+    env.HOME ? path.join(env.HOME, 'Downloads') : null,
+    home ? path.join(home, 'Downloads') : null,
+  ]);
+  const orte = [];
+  const passt = (name) => name.toLowerCase().startsWith(praefix);
+  const kandidaten = (ordner) => {
+    for (const name of namen) orte.push(path.join(ordner, name), path.join(ordner, 'bin', name));
+  };
+  for (const downloads of wurzeln) {
+    let eintraege = [];
+    try { eintraege = fs.readdirSync(downloads, { withFileTypes: true }); } catch { continue; }
+    for (const e of eintraege) {
+      if (!e.isDirectory() || !passt(e.name)) continue;
+      const ordner = path.join(downloads, e.name);
+      kandidaten(ordner);
+      let unter = [];
+      try { unter = fs.readdirSync(ordner, { withFileTypes: true }); } catch { continue; }
+      for (const u of unter) {
+        if (u.isDirectory() && passt(u.name)) kandidaten(path.join(ordner, u.name));
+      }
+    }
   }
   return orte;
 }
@@ -265,6 +460,8 @@ function ollamaProgrammOrte(env, home, aufOs) {
     orte.push('/usr/local/bin/ollama', '/usr/bin/ollama', '/opt/ollama/bin/ollama');
   }
   if (home) orte.push(path.join(home, '.local', 'bin', namen[0]));
+  // Zuletzt, nicht zuerst: ein installiertes Ollama gewinnt gegen ein entpacktes.
+  orte.push(...downloadsOrte(env, home, aufOs, 'ollama', namen));
   return einmalig(orte);
 }
 
@@ -279,6 +476,8 @@ function llamaProgrammOrte(env, home, aufOs) {
     orte.push(path.join(home, 'llama.cpp', namen[0]));
     orte.push(path.join(home, 'llama.cpp', 'build', 'bin', namen[0]));
   }
+  // Die Archive von llama.cpp heissen "llama-b1234-bin-win-cuda-x64.zip".
+  orte.push(...downloadsOrte(env, home, aufOs, 'llama', namen));
   return einmalig(orte);
 }
 
@@ -509,6 +708,81 @@ function createPortableModels(deps = {}) {
 
   /* ------------------------------------------------------------- finden() */
 
+  /** Ein Laufzeitkern als Fund -- der ganze Ordner, siehe kernLesen(). */
+  function kernFund(programm, art) {
+    const gelesen = kernLesen(programm, art);
+    if (!gelesen) return null;
+    return {
+      id: `kern:${art}`,
+      art,
+      rolle: 'kern',
+      name: path.basename(programm),
+      pfad: programm,
+      ordner: gelesen.wurzel,
+      /** Relativ zur Wurzel des Kerns, mit "/": "ollama.exe" oder "bin/ollama". */
+      programm: gelesen.programmRel,
+      bytes: gelesen.bytes,
+      plattform: dieserRechner,
+      ausfuehrbar: istAusfuehrbar(programm, aufOs),
+      dateien: gelesen.dateien,
+      vollstaendig: gelesen.vollstaendig,
+      hinweis: gelesen.hinweis,
+      abgeschnitten: gelesen.abgeschnitten,
+    };
+  }
+
+  /**
+   * Der vom Menschen eingetippte Pfad -- zur Programmdatei oder zu ihrem Ordner.
+   *
+   * Er wird VOR allen Suchorten geprueft, denn wer ihn eintippt, weiss es
+   * besser als jede Liste ueblicher Orte. Stimmt er nicht, gibt es einen
+   * deutschen Satz und keinen Stack: ein Tippfehler in einem Pfad ist der
+   * Normalfall, kein Ausnahmezustand.
+   *
+   * @returns {null|{pfad:string, gefunden:boolean, kern:object|null, hinweis:string|null}}
+   */
+  function eingetipptenPfadPruefen(roh) {
+    if (roh === undefined || roh === null || String(roh).trim() === '') return null;
+    const pfad = path.resolve(String(roh).trim());
+    const out = { pfad, gefunden: false, kern: null, hinweis: null };
+    const st = statSicher(pfad);
+    if (!st) {
+      out.hinweis = `Unter "${pfad}" liegt nichts. Stimmt der Pfad - ein Tippfehler, ein anderer `
+        + 'Laufwerksbuchstabe, oder wurde der Ordner inzwischen verschoben?';
+      return out;
+    }
+    let programm = null;
+    if (st.isFile()) {
+      programm = pfad;
+    } else if (st.isDirectory()) {
+      const namen = [...programmNamen(ART.ollama, aufOs), ...programmNamen(ART.llamaCpp, aufOs)];
+      for (const name of namen) {
+        for (const kandidat of [path.join(pfad, name), path.join(pfad, 'bin', name)]) {
+          const ks = statSicher(kandidat);
+          if (ks && ks.isFile()) { programm = kandidat; break; }
+        }
+        if (programm) break;
+      }
+      if (!programm) {
+        out.hinweis = `In "${pfad}" liegt keine Programmdatei (${namen.join(', ')}) - auch nicht unter bin/. `
+          + 'Ist das der entpackte Ollama-Ordner, oder liegt die Programmdatei eine Ebene tiefer?';
+        return out;
+      }
+    } else {
+      out.hinweis = `"${pfad}" ist weder eine Datei noch ein Ordner.`;
+      return out;
+    }
+    const art = artVonProgramm(path.basename(programm));
+    if (!art) {
+      out.hinweis = `"${programm}" heisst weder ollama noch llama-server. Welche Schnittstelle dieses Programm `
+        + 'spricht, laesst sich nicht erraten - und ein Kern mit der falschen Schnittstelle antwortet gar nicht.';
+      return out;
+    }
+    out.kern = kernFund(programm, art);
+    out.gefunden = !!out.kern;
+    return out;
+  }
+
   /**
    * Was liegt auf DIESEM Rechner an Modellen und Laufzeitkernen?
    *
@@ -523,42 +797,26 @@ function createPortableModels(deps = {}) {
     const modelle = [];
     const speicherOrte = [];
 
-    // ---- Laufzeitkerne ----
-    for (const ort of ollamaProgrammOrte(env, home, aufOs)) {
-      const st = statSicher(ort);
-      if (!st || !st.isFile()) continue;
-      kerne.push({
-        id: `kern:${ART.ollama}`,
-        art: ART.ollama,
-        rolle: 'kern',
-        name: path.basename(ort),
-        pfad: ort,
-        bytes: st.size,
-        plattform: dieserRechner,
-        ausfuehrbar: istAusfuehrbar(ort, aufOs),
-        dateien: [{ abs: ort, rel: path.basename(ort), bytes: st.size, mode: st.mode & 0o777, art: 'programm' }],
-        vollstaendig: true,
-        hinweis: null,
-      });
-      break; // der erste Treffer ist der, den auch die Kommandozeile benutzt
+    // ---- Laufzeitkerne: erst der eingetippte Pfad, dann die Suchorte ----
+    const eingetippt = eingetipptenPfadPruefen(opts.pfad);
+    if (eingetippt) {
+      if (eingetippt.kern) kerne.push(eingetippt.kern);
+      if (eingetippt.hinweis) hinweise.push(eingetippt.hinweis);
     }
-    for (const ort of llamaProgrammOrte(env, home, aufOs)) {
-      const st = statSicher(ort);
-      if (!st || !st.isFile()) continue;
-      kerne.push({
-        id: `kern:${ART.llamaCpp}`,
-        art: ART.llamaCpp,
-        rolle: 'kern',
-        name: path.basename(ort),
-        pfad: ort,
-        bytes: st.size,
-        plattform: dieserRechner,
-        ausfuehrbar: istAusfuehrbar(ort, aufOs),
-        dateien: [{ abs: ort, rel: path.basename(ort), bytes: st.size, mode: st.mode & 0o777, art: 'programm' }],
-        vollstaendig: true,
-        hinweis: null,
-      });
-      break;
+    for (const art of [ART.ollama, ART.llamaCpp]) {
+      if (kerne.some((k) => k.art === art)) continue; // der eingetippte gewinnt
+      const orte = art === ART.ollama ? ollamaProgrammOrte(env, home, aufOs) : llamaProgrammOrte(env, home, aufOs);
+      for (const ort of orte) {
+        const kern = kernFund(ort, art);
+        if (!kern) continue;
+        kerne.push(kern);
+        break; // der erste Treffer ist der, den auch die Kommandozeile benutzt
+      }
+    }
+    for (const kern of kerne) {
+      if (kern.abgeschnitten) {
+        hinweise.push(`Unter "${kern.ordner}" liegen aussergewoehnlich viele Dateien; von lib/ wurde nur ein Teil gelesen.`);
+      }
     }
 
     // ---- Ollama-Speicher ----
@@ -604,8 +862,8 @@ function createPortableModels(deps = {}) {
     const ohneBit = kerne.filter((k) => !k.ausfuehrbar);
     for (const kern of ohneBit) {
       hinweise.push(
-        `"${kern.pfad}" traegt kein Ausfuehrbar-Bit. Auf dem Stick wird es dadurch nicht besser; `
-        + 'auf dem Zielrechner muss es dann von Hand gesetzt werden (chmod +x).',
+        `"${kern.pfad}" traegt kein Ausfuehrbar-Bit. Die Kopie auf dem Stick bekommt es gesetzt, soweit das `
+        + 'Dateisystem dort Rechte kennt; auf exFAT und FAT32 muss es der Zielrechner selbst setzen (chmod +x).',
       );
     }
 
@@ -617,6 +875,8 @@ function createPortableModels(deps = {}) {
       speicher: speicherOrte,
       bytes: modelle.reduce((s, m) => s + m.bytes, 0) + kerne.reduce((s, k) => s + k.bytes, 0),
       hinweise,
+      // Was aus dem eingetippten Pfad wurde -- ohne den Kern selbst, der steht in `kerne`.
+      eingetippt: eingetippt ? { pfad: eingetippt.pfad, gefunden: eingetippt.gefunden, hinweis: eingetippt.hinweis } : null,
     };
   }
 
@@ -686,13 +946,16 @@ function createPortableModels(deps = {}) {
       path: path.join(wurzel, l.target),
       mode: l.executable ? 0o755 : 0o644,
     }));
-    // Der beste Zeuge ist ein frueher kopierter Laufzeitkern: den hat dieses
-    // Modul selbst mit 0755 geschrieben.
-    const kernWurzel = path.join(modelsDirOf(wurzel), 'kern');
+    // Der beste Zeuge ist die Programmdatei eines frueher kopierten
+    // Laufzeitkerns: die hat dieses Modul selbst mit 0755 geschrieben. NUR
+    // sie -- fuer die Bibliotheken daneben haengt der Modus an der Quelle,
+    // und ein Ordner traegt 0755 auf jedem Dateisystem, waere also ein
+    // falscher Zeuge.
+    const kernOrdner = path.join(modelsDirOf(wurzel), 'kern');
     try {
-      for (const plattform of fs.readdirSync(kernWurzel)) {
-        for (const name of fs.readdirSync(path.join(kernWurzel, plattform))) {
-          liste.push({ path: path.join(kernWurzel, plattform, name), mode: 0o755 });
+      for (const plattform of fs.readdirSync(kernOrdner)) {
+        for (const programm of programmeImKernordner(path.join(kernOrdner, plattform))) {
+          liste.push({ path: programm, mode: 0o755 });
         }
       }
     } catch { /* noch kein Kern auf dem Stick */ }
@@ -783,7 +1046,11 @@ function createPortableModels(deps = {}) {
           uebersprungen.push({ ziel: zielRel, bytes: st.size, fund: fund.id, grund: 'liegt schon identisch auf dem Stick' });
           continue;
         }
-        const eintrag = { rel: zielRel, abs: datei.abs, size: st.size, mode: st.mode & 0o777, fund: fund.id, art: datei.art };
+        // Die Programmdatei bekommt das Ausfuehrbar-Bit auf jeden Fall: copyFiles()
+        // setzt 0755, wo die Quelle eines traegt -- und eine aus einem Archiv
+        // entpackte Datei traegt es nicht immer, obwohl sie ein Programm ist.
+        const modus = datei.art === 'programm' ? (st.mode & 0o777) | 0o111 : st.mode & 0o777;
+        const eintrag = { rel: zielRel, abs: datei.abs, size: st.size, mode: modus, fund: fund.id, art: datei.art };
         schonGeplant.add(zielRel);
         dateien.push(eintrag);
         if (!groesste || st.size > groesste.bytes) groesste = { ziel: zielRel, bytes: st.size, quelle: datei.abs };
@@ -877,6 +1144,8 @@ function createPortableModels(deps = {}) {
       auswahl: gewaehlt.map((f) => ({
         id: f.id, art: f.art, rolle: f.rolle, name: f.name,
         bytes: f.bytes, dateien: f.dateien.length, plattform: f.plattform || null,
+        // Nur ein Kern hat eine Programmdatei; relativ zu seiner Wurzel ("ollama.exe", "bin/ollama").
+        programm: f.rolle === 'kern' ? (f.programm || f.name) : null,
       })),
       dateien,
       anzahl: dateien.length,
@@ -1201,6 +1470,9 @@ function createPortableModels(deps = {}) {
       const dateien = plan.dateien.filter((d) => d.fund === auswahl.id).map((d) => ({
         ziel: d.rel,
         bytes: d.size,
+        // "programm", "bibliothek", "blob", "manifest", "gewichte": damit ein
+        // Leser die Programmdatei nicht unter den Bibliotheken suchen muss.
+        art: d.art || null,
         pruefsumme: summen.get(d.rel) || { algo: 'sha256', wert: null, herkunft: null, grund: 'Nicht berechnet.' },
       }));
       const uebersprungen = plan.uebersprungen.filter((u) => u.fund === auswahl.id);
@@ -1215,12 +1487,20 @@ function createPortableModels(deps = {}) {
         // einen Benutzer glauben machen, sein Modell passe nicht.
         plattform: auswahl.rolle === 'kern' ? (auswahl.plattform || dieserRechner) : null,
         bytes: auswahl.bytes,
+        // Der Vertrag mit dem Aufseher (src/models/local-runner.js): die
+        // Programmdatei steht ausdruecklich da, relativ zu models/. Ein Kern
+        // ist ein Ordner mit Dutzenden Dateien; wer die Programmdatei erraten
+        // muesste, startet im Zweifel eine Bibliothek.
+        programm: auswahl.rolle === 'kern'
+          ? kernZiel(auswahl.plattform || dieserRechner, auswahl.programm || auswahl.name)
+          : null,
         dateien: frueher && Array.isArray(frueher.dateien)
           ? zusammenfuehren(frueher.dateien, dateien)
           : dateien,
         zeitpunkt,
         start: startHinweis(auswahl),
       };
+      if (eintrag.programm === null) delete eintrag.programm;
       if (uebersprungen.length && !dateien.length) eintrag.hinweis = 'Lag bereits vollstaendig auf dem Stick.';
       nachId.set(eintrag.id, eintrag);
       neu.push(eintrag);
@@ -1249,15 +1529,16 @@ function createPortableModels(deps = {}) {
 
   /** Wie man das Ding vom Stick startet. Ein Satz, den man abtippen kann. */
   function startHinweis(auswahl) {
+    const programm = auswahl.rolle === 'kern'
+      ? `<Stick>/models/${kernZiel(auswahl.plattform || dieserRechner, auswahl.programm || auswahl.name)}`
+      : null;
     if (auswahl.rolle === 'kern' && auswahl.art === ART.ollama) {
-      return 'Ollama vom Stick: OLLAMA_MODELS="<Stick>/models/ollama" "<Stick>/models/kern/'
-        + `${auswahl.plattform || dieserRechner}/${auswahl.name}" serve - danach in Neural OS den Anbieter `
-        + 'http://127.0.0.1:11434 eintragen.';
+      return `Ollama vom Stick: OLLAMA_MODELS="<Stick>/models/ollama" "${programm}" serve - der Ordner lib/ `
+        + 'muss dabei neben der Programmdatei bleiben. Danach in Neural OS den Anbieter http://127.0.0.1:11434 eintragen.';
     }
     if (auswahl.rolle === 'kern' && auswahl.art === ART.llamaCpp) {
-      return `"<Stick>/models/kern/${auswahl.plattform || dieserRechner}/${auswahl.name}" -m `
-        + '"<Stick>/models/gguf/<modell>/<datei>.gguf" --port 8080 - danach in Neural OS den Anbieter '
-        + 'http://127.0.0.1:8080 eintragen.';
+      return `"${programm}" -m "<Stick>/models/gguf/<modell>/<datei>.gguf" --port 8080 - danach in Neural OS `
+        + 'den Anbieter http://127.0.0.1:8080 eintragen.';
     }
     if (auswahl.art === ART.ollama) {
       return `Wird von Ollama gefunden, sobald OLLAMA_MODELS auf "<Stick>/models/ollama" zeigt (Modellname: ${auswahl.name}).`;
@@ -1305,30 +1586,73 @@ function createPortableModels(deps = {}) {
       return out;
     }
 
-    // ---- Laufzeitkerne: models/kern/<plattform>/<datei> ----
-    const kernWurzel = path.join(ordner, 'kern');
+    // ---- die Beschreibung zuerst: sie nennt die Programmdatei jedes Kerns ----
+    const indexDatei = path.join(ordner, LAYOUT.modelsIndex);
+    if (fs.existsSync(indexDatei)) {
+      try {
+        const gelesen = JSON.parse(fs.readFileSync(indexDatei, 'utf8'));
+        out.beschreibung = gelesen && typeof gelesen === 'object' ? gelesen : null;
+      } catch {
+        out.warnungen.push(`Die Beschreibung "${LAYOUT.modelsIndex}" ist unlesbar. Was hier steht, wurde aus den Dateien selbst gelesen.`);
+      }
+    }
+
+    // ---- Laufzeitkerne: models/kern/<plattform>/ ist ein ORDNER je Kern ----
+    //
+    // Die Programmdatei kommt aus der Beschreibung ("programm"), sonst aus dem
+    // Namen (ollama, llama-server; direkt im Ordner oder unter bin/). Alles,
+    // was zu ihr gehoert (lib/ollama/**, Bibliotheken daneben), zaehlt zu
+    // ihrer Groesse -- und fehlt lib/, ist der Kern unvollstaendig.
+    const kernOrdner = path.join(ordner, 'kern');
     let kernPlattformen = [];
     try {
-      kernPlattformen = fs.readdirSync(kernWurzel, { withFileTypes: true })
+      kernPlattformen = fs.readdirSync(kernOrdner, { withFileTypes: true })
         .filter((e) => e.isDirectory()).map((e) => e.name);
     } catch { /* kein Kern auf dem Stick */ }
+    const beschriebeneKerne = (out.beschreibung && Array.isArray(out.beschreibung.eintraege) ? out.beschreibung.eintraege : [])
+      .filter((e) => e && e.rolle === 'kern' && typeof e.programm === 'string');
     for (const plattform of kernPlattformen) {
-      let eintraege = [];
-      try {
-        eintraege = fs.readdirSync(path.join(kernWurzel, plattform), { withFileTypes: true }).filter((e) => e.isFile());
-      } catch { continue; }
-      for (const eintrag of eintraege) {
-        const abs = path.join(kernWurzel, plattform, eintrag.name);
+      const plattformOrdner = path.join(kernOrdner, plattform);
+      const programme = [];
+      for (const e of beschriebeneKerne) {
+        const abs = path.resolve(ordner, e.programm);
+        // Nur innerhalb dieses Plattformordners -- eine Beschreibung, die auf
+        // /bin/sh zeigt, beschreibt keinen Kern.
+        const rel = path.relative(plattformOrdner, abs);
+        if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;
         const st = statSicher(abs);
-        if (!st) continue;
+        if (st && st.isFile()) programme.push({ abs, art: artVonProgramm(path.basename(abs)) || (e.art === ART.ollama ? ART.ollama : ART.llamaCpp) });
+      }
+      for (const abs of programmeImKernordner(plattformOrdner)) {
+        if (!programme.some((p) => p.abs === abs)) programme.push({ abs, art: artVonProgramm(path.basename(abs)) });
+      }
+      if (!programme.length) {
+        const { treffer } = dateienSuchen(plattformOrdner, { tiefe: 1 });
+        if (treffer.length) {
+          out.warnungen.push(
+            `Unter models/kern/${plattform}/ liegen ${treffer.length} Datei(en), aber keine Programmdatei `
+            + '(ollama oder llama-server, auch nicht unter bin/). Dieser Kern ist unvollstaendig - lege ihn noch einmal ab.',
+          );
+        }
+        continue;
+      }
+      for (const p of programme) {
+        const gelesen = kernLesen(p.abs, p.art);
+        if (!gelesen) continue;
         out.kerne.push({
-          art: /^ollama/i.test(eintrag.name) ? ART.ollama : ART.llamaCpp,
-          name: eintrag.name,
+          art: p.art,
+          name: path.basename(p.abs),
           plattform,
-          pfad: abs,
-          bytes: st.size,
-          ausfuehrbar: istAusfuehrbar(abs, aufOs),
+          pfad: p.abs,
+          /** Relativ zu models/, mit "/": so steht es in modelle.json. */
+          programm: relImKern(ordner, p.abs),
+          bytes: gelesen.bytes,
+          dateien: gelesen.dateien.length,
+          ausfuehrbar: istAusfuehrbar(p.abs, aufOs),
+          vollstaendig: gelesen.vollstaendig,
+          hinweis: gelesen.hinweis,
         });
+        if (!gelesen.vollstaendig && gelesen.hinweis) out.warnungen.push(gelesen.hinweis);
       }
     }
     out.plattformen = einmalig(out.kerne.map((k) => k.plattform));
@@ -1359,16 +1683,8 @@ function createPortableModels(deps = {}) {
     } catch { /* unlesbar; dann bleibt es bei 0, und der Rest sagt weiter die Wahrheit */ }
     out.vorhanden = out.modelle.length > 0 || out.kerne.length > 0;
 
-    // ---- die Beschreibung, falls vorhanden ----
-    const indexDatei = path.join(ordner, LAYOUT.modelsIndex);
-    if (fs.existsSync(indexDatei)) {
-      try {
-        const gelesen = JSON.parse(fs.readFileSync(indexDatei, 'utf8'));
-        out.beschreibung = gelesen && typeof gelesen === 'object' ? gelesen : null;
-      } catch {
-        out.warnungen.push(`Die Beschreibung "${LAYOUT.modelsIndex}" ist unlesbar. Was hier steht, wurde aus den Dateien selbst gelesen.`);
-      }
-    } else if (out.vorhanden) {
+    // ---- die Beschreibung: fehlt sie, wird sie nicht erfunden ----
+    if (!fs.existsSync(indexDatei) && out.vorhanden) {
       out.hinweise.push(
         `Es gibt keine Beschreibung "${LAYOUT.modelsIndex}". Was hier steht, wurde aus den Dateien selbst gelesen - `
         + 'Pruefsummen und Herkunft fehlen deshalb.',
@@ -1388,8 +1704,15 @@ function createPortableModels(deps = {}) {
     }
 
     // ---- der eine ehrliche Satz ----
-    out.passt = !!ziel.kannProgrammeStarten && out.modelle.length > 0
-      && out.kerne.some((k) => k.plattform === ziel.plattform);
+    //
+    // `passt` sagt, ob Plattform und Modell zusammenpassen; `startklar` sagt
+    // zusaetzlich, ob der passende Kern VOLLSTAENDIG ist. Beides getrennt,
+    // weil ein Kern ohne lib/ zur Plattform passt und trotzdem stumm bleibt --
+    // eine Oberflaeche, die nur `passt` liest, zeigt dann Gruen fuer etwas,
+    // das nicht antwortet. Sie soll `startklar` lesen.
+    const passende = out.kerne.filter((k) => k.plattform === ziel.plattform);
+    out.passt = !!ziel.kannProgrammeStarten && out.modelle.length > 0 && passende.length > 0;
+    out.startklar = out.passt && passende.some((k) => k.vollstaendig);
     out.satz = urteil(out, ziel);
     return out;
   }
@@ -1432,8 +1755,13 @@ function createPortableModels(deps = {}) {
         + 'Oeffnen kann sie nur ein Rechner, auf dem Ollama oder llama.cpp schon installiert ist.';
     }
     if (stand.passt) {
-      return `Auf dem Stick liegen ${stand.modelle.length} Modell(e) (${groesse}) und ein Laufzeitkern fuer `
+      const satz = `Auf dem Stick liegen ${stand.modelle.length} Modell(e) (${groesse}) und ein Laufzeitkern fuer `
         + `${ziel.plattform}. Dieser Rechner ist ${ziel.plattform} - das passt.`;
+      if (stand.startklar) return satz;
+      const unvollstaendig = stand.kerne.filter((k) => k.plattform === ziel.plattform && !k.vollstaendig);
+      return `${satz} Startklar ist er trotzdem nicht: neben ${unvollstaendig.map((k) => k.name).join(', ')} fehlt der `
+        + 'Ordner lib/ollama, ohne den Ollama kein Modell rechnet. Lege den Kern noch einmal ab - den ganzen '
+        + 'Ordner, nicht nur die Programmdatei.';
     }
     return `Der Laufzeitkern auf dem Stick ist fuer ${stand.plattformen.join(', ')}, dieser Rechner ist `
       + `${ziel.plattform}. Er startet hier nicht. Die Modelldateien selbst (${groesse}) passen auf jeden Rechner; `
@@ -1463,4 +1791,11 @@ module.exports = {
   ollamaModellname,
   ollamaModelleLesen,
   ggufModelleLesen,
+  // Die reinen Pfadfunktionen des Kern-Ordners -- mit path.win32 pruefbar,
+  // wo kein Windows ist:
+  kernWurzel,
+  relImKern,
+  kernZiel,
+  artVonProgramm,
+  kernLesen,
 };

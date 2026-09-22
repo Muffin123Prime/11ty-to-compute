@@ -39,6 +39,10 @@ const {
   ollamaModellname,
   plattformId,
   FAT_DATEIGRENZE,
+  kernWurzel,
+  relImKern,
+  kernZiel,
+  artVonProgramm,
 } = require('../src/portable/model');
 const stickMod = require('../src/portable/stick');
 const { createStick, LAYOUT, geschuetzterOrdner, humanBytes } = stickMod;
@@ -60,6 +64,15 @@ const STATIST_QUELLE = [
   "const fs = require('node:fs');",
   "const http = require('node:http');",
   "const path = require('node:path');",
+  // Genau wie das echte Ollama: der Ordner lib/ollama wird RELATIV ZUR EIGENEN
+  // PROGRAMMDATEI gesucht, nicht im Arbeitsverzeichnis. Fehlt er, stirbt der
+  // Statist mit Code 1 -- das echte Ollama startet zwar, rechnet dann aber kein
+  // Modell; dieser Statist macht die Luecke laut, damit der Test sie misst.
+  "const libOllama = path.join(__dirname, 'lib', 'ollama');",
+  "if (!fs.existsSync(path.join(libOllama, 'marker'))) {",
+  "  process.stderr.write('lib/ fehlt: neben ' + __filename + ' liegt kein Ordner lib/ollama\\n');",
+  '  process.exit(1);',
+  '}',
   'function modelle() {',
   "  const speicher = process.env.OLLAMA_MODELS || '';",
   "  const wurzel = path.join(speicher, 'manifests');",
@@ -102,18 +115,48 @@ const STATIST_QUELLE = [
   '  res.writeHead(404);',
   "  res.end('nein');",
   '});',
-  "server.listen(0, '127.0.0.1', () => {",
+  // Wie das echte Ollama: Adresse und Port kommen aus OLLAMA_HOST -- so
+  // weist der Aufseher (src/models/local-runner.js) dem Kern seinen Port zu.
+  "const host = /^(?:https?:\\/\\/)?([^:]+):(\\d+)$/.exec(process.env.OLLAMA_HOST || '');",
+  "server.listen(host ? Number(host[2]) : 0, host ? host[1] : '127.0.0.1', () => {",
   "  process.stdout.write('BEREIT ' + server.address().port + '\\n');",
   '});',
   '',
 ].join('\n');
 
-/** Legt den Statisten als ausfuehrbare Datei an -- wie ein installiertes Ollama. */
-function statistAnlegen(ordner, name) {
+/**
+ * Die Bibliotheken, die ein echtes Ollama neben seiner Programmdatei hat --
+ * verkleinert, aber mit derselben Ordnung: lib/ollama/ und darunter ein
+ * Ordner je Rechenwerk (auf dem Rechner des Besitzers: cuda_v13, vulkan).
+ * Der Marker ist die Datei, ohne die der Statist stirbt.
+ */
+const LIB_DATEIEN = [
+  { rel: 'lib/ollama/marker', bytes: 16 },
+  { rel: 'lib/ollama/ggml-base.dll', bytes: 3000 },
+  { rel: 'lib/ollama/ggml-cpu-x64.dll', bytes: 2500 },
+  { rel: 'lib/ollama/cuda_v13/ggml-cuda.dll', bytes: 7000 },
+  { rel: 'lib/ollama/vulkan/ggml-vulkan.dll', bytes: 4200 },
+];
+const LIB_BYTES = LIB_DATEIEN.reduce((s, d) => s + d.bytes, 0);
+
+/**
+ * Legt den Statisten als ausfuehrbare Datei an -- wie ein installiertes
+ * Ollama, also MIT seinem lib/-Ordner daneben. `mitLib: false` ist die lose
+ * kopierte Programmdatei: genau das, was der alte Kopierweg auf dem Stick
+ * hinterliess.
+ */
+function statistAnlegen(ordner, name, { mitLib = true } = {}) {
   fs.mkdirSync(ordner, { recursive: true });
   const datei = path.join(ordner, name);
   fs.writeFileSync(datei, STATIST_QUELLE);
   fs.chmodSync(datei, 0o755);
+  if (mitLib) {
+    for (const d of LIB_DATEIEN) {
+      const abs = path.join(ordner, ...d.rel.split('/'));
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, Buffer.alloc(d.bytes, 0x4c));
+    }
+  }
   return datei;
 }
 
@@ -495,6 +538,12 @@ test('Der ganze Weg: finden -> planen -> kopieren -> aufDemStick', async () => {
     if (process.platform !== 'win32') {
       assert.ok((fs.statSync(kernAufStick).mode & 0o111) !== 0, 'das Ausfuehrbar-Bit hat die Kopie ueberlebt');
     }
+    // Der Kern ist ein ORDNER: lib/ollama reist mit, in derselben Ordnung wie auf dem Quellrechner.
+    for (const d of LIB_DATEIEN) {
+      const aufStick = path.join(models, 'kern', plattformId(), ...d.rel.split('/'));
+      assert.ok(fs.existsSync(aufStick), `${d.rel} fehlt auf dem Stick`);
+      assert.equal(fs.statSync(aufStick).size, d.bytes);
+    }
 
     // Die Beschreibungsdatei sagt ohne Raten, was dort liegt.
     const beschreibung = JSON.parse(fs.readFileSync(path.join(models, LAYOUT.modelsIndex), 'utf8'));
@@ -510,14 +559,33 @@ test('Der ganze Weg: finden -> planen -> kopieren -> aufDemStick', async () => {
     assert.ok(eintragKern.start && /models\/kern/.test(eintragKern.start), 'es steht da, wie man ihn startet');
     assert.ok(!JSON.stringify(beschreibung).includes(heim.home),
       'der Pfad des Quellrechners (mit Benutzernamen) gehoert nicht auf einen Stick, der verloren gehen kann');
+    // Der Vertrag mit dem Aufseher: "programm" nennt die Programmdatei relativ zu models/,
+    // und "dateien" listet JEDE kopierte Datei, die Bibliotheken als solche markiert.
+    assert.equal(eintragKern.programm, `kern/${plattformId()}/${path.basename(kern)}`);
+    assert.equal(eintragKern.dateien.length, 1 + LIB_DATEIEN.length, 'jede Datei des Kerns steht in der Beschreibung');
+    assert.equal(eintragKern.dateien.filter((d) => d.art === 'programm').length, 1, 'genau eine Programmdatei');
+    for (const d of LIB_DATEIEN) {
+      const eintrag = eintragKern.dateien.find((e) => e.ziel === `kern/${plattformId()}/${d.rel}`);
+      assert.ok(eintrag, `${d.rel} fehlt in der Beschreibung`);
+      assert.equal(eintrag.art, 'bibliothek');
+      assert.equal(eintrag.bytes, d.bytes);
+    }
+    assert.equal(eintragModell.programm, undefined, 'Gewichte haben keine Programmdatei');
 
-    // Und die Selbstauskunft des Sticks.
+    // Und die Selbstauskunft des Sticks: ein Kern als Ordner, vollstaendig, startklar.
     const stand = w.aufDemStick(stick.home);
     assert.equal(stand.vorhanden, true);
     assert.equal(stand.passt, true, stand.satz);
+    assert.equal(stand.startklar, true, stand.satz);
     assert.ok(stand.modelle.some((m) => m.name === 'mini:8b'));
     assert.deepEqual(stand.plattformen, [plattformId()]);
     assert.match(stand.satz, /passt/);
+    assert.equal(stand.kerne.length, 1, 'die Bibliotheken sind KEINE eigenen Kerne');
+    assert.equal(stand.kerne[0].programm, `kern/${plattformId()}/${path.basename(kern)}`);
+    assert.equal(stand.kerne[0].vollstaendig, true);
+    assert.equal(stand.kerne[0].bytes, fs.statSync(kern).size + LIB_BYTES, 'die Groesse des Kerns auf dem Stick ist die des Ordners');
+    assert.equal(stand.kerne[0].dateien, 1 + LIB_DATEIEN.length);
+    assert.ok(!stand.satz.includes('Startklar ist er trotzdem nicht'));
   } finally {
     heim.cleanup();
     stick.cleanup();
@@ -880,6 +948,301 @@ test('Ohne Pfad zum Stick wird gefragt, nicht geraten', () => {
   const w = createPortableModels({ home: null, env: {} });
   assert.throws(() => w.planen({ ziel: '' }), (err) => err instanceof ValidationError && /Pfad zum Stick/.test(err.message));
   assert.ok(humanBytes(FAT_DATEIGRENZE).length > 0);
+});
+
+/* ==================================================================== 10 */
+/*
+ * Der Kern ist ein ORDNER. Die Tests 4 und 5 oben haben das lange nicht
+ * gemerkt: der alte Statist brauchte kein lib/, und so fiel nicht auf, dass
+ * nur die Programmdatei kopiert wurde. Seit der Statist wie das echte Ollama
+ * neben sich lib/ollama verlangt, misst Test 5 den Unterschied -- und die
+ * Tests hier messen die Einzelteile.
+ */
+
+test('Die Groesse eines Laufzeitkerns ist die Summe aller Dateien unter lib/, nicht die der Programmdatei', () => {
+  const heim = tempHome('nos-kern-groesse');
+  const stick = tempHome('nos-kern-groesse-stick');
+  try {
+    const { kern } = rechnerAufbauen(heim.home, { mitGguf: false });
+    const w = werkzeug(heim.home);
+    const befund = w.finden();
+    const fund = befund.kerne.find((k) => k.art === 'ollama');
+    assert.ok(fund, 'kein Ollama-Kern gefunden');
+
+    const programmBytes = fs.statSync(kern).size;
+    assert.equal(fund.bytes, programmBytes + LIB_BYTES, 'Programmdatei plus alles unter lib/ollama');
+    assert.ok(fund.bytes > programmBytes, 'die alte Zahl (nur die Programmdatei) waere zu klein');
+    assert.equal(fund.dateien.length, 1 + LIB_DATEIEN.length, 'jede Datei unter lib/ ist einzeln aufgefuehrt');
+    assert.equal(fund.programm, path.basename(kern), 'die Programmdatei, relativ zur Wurzel des Kerns');
+    assert.equal(fund.ordner, path.dirname(kern));
+    assert.equal(fund.vollstaendig, true);
+    assert.equal(fund.hinweis, null);
+    for (const d of LIB_DATEIEN) {
+      const eintrag = fund.dateien.find((e) => e.rel === d.rel);
+      assert.ok(eintrag, `${d.rel} fehlt in der Dateiliste des Kerns`);
+      assert.equal(eintrag.art, 'bibliothek');
+      assert.equal(eintrag.bytes, d.bytes);
+    }
+    assert.equal(fund.dateien.filter((e) => e.art === 'programm').length, 1);
+
+    // planen() rechnet mit derselben Summe; die groesste Datei zaehlt fuer FAT32.
+    const plan = w.planen({ ziel: stick.home, auswahl: [fund.id], befund });
+    assert.equal(plan.kannLosgehen, true, JSON.stringify(plan.hindernisse));
+    assert.equal(plan.bytes, programmBytes + LIB_BYTES);
+    assert.equal(plan.anzahl, 1 + LIB_DATEIEN.length);
+    const groesste = Math.max(programmBytes, ...LIB_DATEIEN.map((d) => d.bytes));
+    assert.equal(plan.groessteDatei.bytes, groesste, 'FAT32 fragt nach der groessten EINZELNEN Datei');
+    assert.ok(plan.dateien.every((d) => d.rel.startsWith(`kern/${plattformId()}/`)), 'alles unter kern/<plattform>/');
+    const programm = plan.dateien.find((d) => d.art === 'programm');
+    assert.equal(programm.rel, `kern/${plattformId()}/${path.basename(kern)}`);
+    assert.notEqual(programm.mode & 0o111, 0, 'die Programmdatei bekommt das Ausfuehrbar-Bit');
+    assert.equal(plan.auswahl[0].programm, path.basename(kern));
+  } finally {
+    heim.cleanup();
+    stick.cleanup();
+  }
+});
+
+test('Ein entpacktes Ollama in Downloads wird gefunden -- auch eine Ebene tiefer, wie "Alle extrahieren" es anlegt', () => {
+  const zweiEbenen = tempHome('nos-kern-downloads-zwei');
+  const tarball = tempHome('nos-kern-downloads-tar');
+  const windows = tempHome('nos-kern-downloads-win');
+  try {
+    // 1. Zwei Ebenen: Downloads/ollama-windows-amd64/ollama-windows-amd64/ollama
+    const tief = statistAnlegen(path.join(zweiEbenen.home, 'Downloads', 'ollama-windows-amd64', 'ollama-windows-amd64'), 'ollama');
+    const b1 = createPortableModels({
+      home: zweiEbenen.home,
+      env: { PATH: path.join(zweiEbenen.home, 'nichts'), HOME: zweiEbenen.home },
+    }).finden();
+    const k1 = b1.kerne.find((k) => k.art === 'ollama');
+    assert.ok(k1, `zwei Ebenen tief nicht gefunden: ${JSON.stringify(b1.hinweise)}`);
+    assert.equal(k1.pfad, tief);
+    assert.equal(k1.vollstaendig, true);
+
+    // 2. Eine Ebene, Tarball-Ordnung: Downloads/ollama-linux-amd64/bin/ollama + lib/ollama daneben.
+    const wurzel = path.join(tarball.home, 'Downloads', 'ollama-linux-amd64');
+    const binOllama = statistAnlegen(path.join(wurzel, 'bin'), 'ollama', { mitLib: false });
+    for (const d of LIB_DATEIEN) {
+      const abs = path.join(wurzel, ...d.rel.split('/'));
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, Buffer.alloc(d.bytes, 0x54));
+    }
+    const b2 = createPortableModels({ home: tarball.home, env: { PATH: '' } }).finden();
+    const k2 = b2.kerne.find((k) => k.art === 'ollama');
+    assert.ok(k2, 'der Tarball unter bin/ wurde nicht gefunden');
+    assert.equal(k2.pfad, binOllama);
+    assert.equal(k2.ordner, wurzel, 'die Wurzel ist der Ordner UEBER bin/');
+    assert.equal(k2.programm, 'bin/ollama');
+    assert.equal(k2.vollstaendig, true, k2.hinweis);
+    assert.equal(k2.bytes, fs.statSync(binOllama).size + LIB_BYTES);
+    assert.ok(k2.dateien.some((d) => d.rel === 'lib/ollama/cuda_v13/ggml-cuda.dll'), 'lib/ neben bin/ reist mit');
+    // Auf dem Stick landet dieselbe Ordnung: bin/ und lib/ als Geschwister.
+    assert.equal(kernZiel(k2.plattform, k2.programm), `kern/${plattformId()}/bin/ollama`);
+
+    // 3. Windows, wie beim Besitzer: %USERPROFILE%\Downloads\ollama-windows-amd64\ollama.exe, nicht im PATH.
+    const exe = statistAnlegen(path.join(windows.home, 'Downloads', 'ollama-windows-amd64'), 'ollama.exe');
+    const b3 = createPortableModels({
+      home: null,
+      env: { PATH: '', USERPROFILE: windows.home },
+      plattform: { os: 'win32', arch: 'x64' },
+    }).finden();
+    const k3 = b3.kerne.find((k) => k.art === 'ollama');
+    assert.ok(k3, `ollama.exe in Downloads nicht gefunden: ${JSON.stringify(b3.hinweise)}`);
+    assert.equal(k3.pfad, exe);
+    assert.equal(k3.plattform, 'win-x64');
+    assert.equal(k3.programm, 'ollama.exe');
+    assert.equal(k3.ausfuehrbar, true, 'unter Windows entscheidet die Endung');
+    assert.equal(k3.bytes, fs.statSync(exe).size + LIB_BYTES);
+    assert.ok(!b3.hinweise.some((h) => /kein Laufzeitkern/.test(h)), 'die Ansicht darf nicht "kein Laufzeitkern" sagen');
+  } finally {
+    zweiEbenen.cleanup();
+    tarball.cleanup();
+    windows.cleanup();
+  }
+});
+
+test('Ein eingetippter Pfad zaehlt vor allen Suchorten -- Datei oder Ordner; ein falscher gibt einen Satz, keinen Stack', () => {
+  const heim = tempHome('nos-kern-pfad');
+  try {
+    rechnerAufbauen(heim.home, { mitGguf: false }); // Statist im PATH
+    const anderswo = path.join(heim.home, 'irgendwo', 'ollama-entpackt');
+    const eigener = statistAnlegen(anderswo, 'ollama');
+    const w = werkzeug(heim.home);
+
+    // Als Datei.
+    const alsDatei = w.finden({ pfad: eigener });
+    assert.equal(alsDatei.kerne.filter((k) => k.art === 'ollama').length, 1, 'ein Kern je Art, der eingetippte');
+    assert.equal(alsDatei.kerne[0].pfad, eigener, 'der eingetippte gewinnt gegen den im PATH');
+    assert.equal(alsDatei.kerne[0].vollstaendig, true);
+    assert.deepEqual(alsDatei.eingetippt, { pfad: eigener, gefunden: true, hinweis: null });
+
+    // Als Ordner.
+    const alsOrdner = w.finden({ pfad: anderswo });
+    assert.equal(alsOrdner.kerne[0].pfad, eigener);
+    assert.equal(alsOrdner.eingetippt.gefunden, true);
+
+    // Ein Pfad, den es nicht gibt: Satz statt Stack, und die Suche laeuft trotzdem.
+    const falsch = path.join(heim.home, 'gibt', 'es', 'nicht');
+    const daneben = w.finden({ pfad: falsch });
+    assert.equal(daneben.eingetippt.gefunden, false);
+    assert.match(daneben.eingetippt.hinweis, /liegt nichts/);
+    assert.match(daneben.eingetippt.hinweis, /Tippfehler/);
+    assert.ok(daneben.hinweise.includes(daneben.eingetippt.hinweis), 'der Satz steht auch bei den Hinweisen');
+    assert.equal(daneben.kerne[0].pfad, path.join(heim.home, 'bin', 'ollama'), 'ohne brauchbaren Pfad gilt der Suchort');
+
+    // Ein Ordner ohne Programmdatei, und eine Datei, die kein bekanntes Programm ist.
+    const leer = path.join(heim.home, 'leer');
+    fs.mkdirSync(leer, { recursive: true });
+    assert.match(w.finden({ pfad: leer }).eingetippt.hinweis, /keine Programmdatei/);
+    const notiz = path.join(heim.home, 'notiz.txt');
+    fs.writeFileSync(notiz, 'nichts');
+    assert.match(w.finden({ pfad: notiz }).eingetippt.hinweis, /weder ollama noch llama-server/);
+
+    // Ohne Pfad: nichts davon.
+    assert.equal(w.finden().eingetippt, null);
+    assert.equal(w.finden({ pfad: '   ' }).eingetippt, null);
+  } finally {
+    heim.cleanup();
+  }
+});
+
+test('Ein Kern ohne lib/ wird als unvollstaendig gemeldet -- und der Beweis, dass er auf dem Stick stumm bliebe', async () => {
+  const heim = tempHome('nos-kern-ohne-lib');
+  const stick = tempHome('nos-kern-ohne-lib-stick');
+  let laeuft = null;
+  try {
+    // Auf dem Rechner: eine lose kopierte Programmdatei, sonst nichts.
+    ollamaSpeicherAnlegen(path.join(heim.home, '.ollama', 'models'));
+    const lose = statistAnlegen(path.join(heim.home, 'bin'), 'ollama', { mitLib: false });
+    const w = werkzeug(heim.home);
+    const befund = w.finden();
+    const fund = befund.kerne.find((k) => k.art === 'ollama');
+    assert.ok(fund);
+    assert.equal(fund.pfad, lose);
+    assert.equal(fund.vollstaendig, false, 'ohne lib/ollama ist ein Ollama unvollstaendig');
+    assert.match(fund.hinweis, /lib\/ollama/);
+    assert.match(fund.hinweis, /rechnet aber kein Modell/);
+    assert.ok(befund.hinweise.includes(fund.hinweis), 'der Hinweis steht im Befund');
+    assert.equal(fund.bytes, fs.statSync(lose).size);
+
+    // planen() nennt es als Hindernis -- als Warnung, nicht als Stopp: wer es
+    // trotzdem will (ein aelteres Ollama ohne lib/), darf.
+    const mini = befund.modelle.find((m) => m.name === 'mini:8b');
+    const plan = w.planen({ ziel: stick.home, auswahl: [mini.id, fund.id], befund });
+    const hindernis = plan.hindernisse.find((h) => h.code === 'QUELLE_UNVOLLSTAENDIG');
+    assert.ok(hindernis, JSON.stringify(plan.hindernisse));
+    assert.equal(hindernis.schwere, 'warnung');
+    assert.match(hindernis.satz, /lib\/ollama/);
+    assert.equal(plan.kannLosgehen, true);
+
+    // Auf dem Stick genau das, was der ALTE Kopierweg hinterliess: Modell da,
+    // Programmdatei da, lib/ fehlt.
+    await w.kopieren(stick.home, { auswahl: [mini.id], befund });
+    const models = path.join(stick.home, LAYOUT.models);
+    const kernAufStick = path.join(models, 'kern', plattformId(), 'ollama');
+    fs.mkdirSync(path.dirname(kernAufStick), { recursive: true });
+    fs.copyFileSync(lose, kernAufStick);
+    fs.chmodSync(kernAufStick, 0o755);
+
+    const stand = w.aufDemStick(stick.home);
+    assert.equal(stand.vorhanden, true);
+    assert.equal(stand.kerne.length, 1);
+    assert.equal(stand.kerne[0].vollstaendig, false, 'der Stick meldet den Kern als unvollstaendig');
+    assert.match(stand.kerne[0].hinweis, /lib\/ollama/);
+    assert.equal(stand.passt, true, 'die Plattform passt trotzdem - das ist eine andere Frage');
+    assert.equal(stand.startklar, false, 'aber startklar ist er nicht');
+    assert.match(stand.satz, /Startklar ist er trotzdem nicht/);
+    assert.match(stand.satz, /lib\/ollama/);
+    assert.match(stand.satz, /den ganzen Ordner/);
+    assert.ok(stand.warnungen.some((s) => /lib\/ollama/.test(s)), JSON.stringify(stand.warnungen));
+
+    // Und die Messung dazu: gestartet vom Stick stirbt er, statt zu antworten.
+    await assert.rejects(
+      () => statistStarten(kernAufStick, { OLLAMA_MODELS: path.join(models, 'ollama') }).then((l) => { laeuft = l; }),
+      (err) => /lib\/ fehlt/.test(err.message) && /endete mit 1/.test(err.message),
+    );
+  } finally {
+    if (laeuft) await laeuft.stop();
+    heim.cleanup();
+    stick.cleanup();
+  }
+});
+
+test('Die Pfadrechnung des Kern-Ordners stimmt auch fuer Windows-Pfade (path.win32)', () => {
+  const w = path.win32;
+  // Wie beim Besitzer: flach entpackt in Downloads.
+  const exe = 'C:\\Users\\User\\Downloads\\ollama-windows-amd64\\ollama.exe';
+  const flach = kernWurzel(exe, { pfadModul: w, existiert: () => false });
+  assert.deepEqual(flach, { wurzel: 'C:\\Users\\User\\Downloads\\ollama-windows-amd64', programmRel: 'ollama.exe' });
+  assert.equal(kernZiel('win-x64', flach.programmRel), 'kern/win-x64/ollama.exe');
+  assert.equal(
+    relImKern(flach.wurzel, 'C:\\Users\\User\\Downloads\\ollama-windows-amd64\\lib\\ollama\\cuda_v13\\ggml-cuda.dll', w),
+    'lib/ollama/cuda_v13/ggml-cuda.dll',
+    'relative Ziele tragen immer "/", nie "\\"',
+  );
+  assert.equal(kernZiel('win-x64', 'lib/ollama/vulkan/ggml-vulkan.dll'), 'kern/win-x64/lib/ollama/vulkan/ggml-vulkan.dll');
+
+  // Tarball-Ordnung: bin\ollama.exe mit ..\lib\ollama -> Wurzel ist der Ordner ueber bin\.
+  const gefragt = [];
+  const tar = kernWurzel('D:\\ollama\\bin\\ollama.exe', {
+    pfadModul: w,
+    existiert: (p) => { gefragt.push(p); return p === 'D:\\ollama\\lib\\ollama'; },
+  });
+  assert.deepEqual(tar, { wurzel: 'D:\\ollama', programmRel: 'bin/ollama.exe' });
+  assert.deepEqual(gefragt, ['D:\\ollama\\lib\\ollama'], 'genau diese eine Frage ans Dateisystem');
+  assert.equal(kernZiel('win-x64', tar.programmRel), 'kern/win-x64/bin/ollama.exe');
+
+  // bin\ ohne ..\lib\ollama ist einfach ein Ordner namens bin: flach.
+  assert.deepEqual(kernWurzel('D:\\ollama\\bin\\ollama.exe', { pfadModul: w, existiert: () => false }),
+    { wurzel: 'D:\\ollama\\bin', programmRel: 'ollama.exe' });
+  // llama-server kennt keine bin/-Ordnung.
+  assert.deepEqual(kernWurzel('D:\\llama\\bin\\llama-server.exe', { pfadModul: w, art: 'llama.cpp', existiert: () => true }),
+    { wurzel: 'D:\\llama\\bin', programmRel: 'llama-server.exe' });
+
+  // Die Programmdatei auf dem Stick, relativ zu models\ -- so steht sie in modelle.json.
+  assert.equal(relImKern('E:\\models', 'E:\\models\\kern\\win-x64\\ollama.exe', w), 'kern/win-x64/ollama.exe');
+  assert.equal(relImKern('E:\\models', 'E:\\models\\kern\\linux-x64\\bin\\ollama', w), 'kern/linux-x64/bin/ollama');
+
+  assert.equal(artVonProgramm('OLLAMA.EXE'), 'ollama');
+  assert.equal(artVonProgramm('llama-server.exe'), 'llama.cpp');
+  assert.equal(artVonProgramm('ggml-base.dll'), null, 'eine Bibliothek ist kein Programm');
+});
+
+test('Der Aufseher des Produkts startet den Kern vom Stick anhand von "programm" in modelle.json', async () => {
+  // src/models/local-runner.js ist die andere Seite des Vertrags. Hier wird
+  // nichts an ihm geaendert -- nur gemessen, dass er mit dem, was dieses
+  // Modul schreibt, den Kern vom Stick hochfaehrt und die Schnittstelle
+  // antwortet. Vorher nannte modelle.json nur eine Dateiliste; mit Dutzenden
+  // Bibliotheken darin muesste er die Programmdatei erraten.
+  const { createLocalRunner, ZUSTAND } = require('../src/models/local-runner');
+  const heim = tempHome('nos-kern-aufseher');
+  const stick = tempHome('nos-kern-aufseher-stick');
+  let runner = null;
+  try {
+    rechnerAufbauen(heim.home, { mitGguf: false });
+    const w = werkzeug(heim.home);
+    const befund = w.finden();
+    await w.kopieren(stick.home, {
+      auswahl: [befund.modelle.find((m) => m.name === 'mini:8b').id, befund.kerne[0].id],
+      befund,
+    });
+
+    runner = createLocalRunner({ stickRoot: stick.home, logger: null });
+    await runner.starten({ timeoutMs: 15000 });
+    const zustand = await runner.bereit();
+    assert.equal(zustand.zustand, ZUSTAND.laeuft, `${zustand.grund}\n${(zustand.ausgabe || []).join('\n')}`);
+    assert.equal(zustand.programm, path.join(stick.home, LAYOUT.models, 'kern', plattformId(), 'ollama'),
+      'gestartet wurde die Programmdatei, keine Bibliothek');
+    assert.equal(zustand.art, 'ollama');
+    const antwort = await fetch(`${zustand.baseUrl}/api/tags`);
+    assert.equal(antwort.status, 200);
+    const tags = await antwort.json();
+    assert.ok(tags.models.some((m) => m.name === 'mini:8b'), JSON.stringify(tags));
+  } finally {
+    if (runner) await runner.stoppen();
+    heim.cleanup();
+    stick.cleanup();
+  }
 });
 
 module.exports = { name: 'portable-model', tests: drain() };

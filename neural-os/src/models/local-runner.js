@@ -8,20 +8,44 @@ const { spawn } = require('node:child_process');
 const { ValidationError, asNeuralError } = require('../kernel/errors');
 
 /**
- * Aufseher fuer einen Laufzeitkern, der auf dem Datentraeger mitliegt.
+ * Aufseher fuer einen Laufzeitkern -- vom Datentraeger oder von diesem Rechner.
  *
  * Warum es diese Datei gibt
  * -------------------------
  * Ein Modell auf dem Stick nuetzt nichts, wenn es niemand startet. Auf einem
  * fremden Rechner ist weder Ollama installiert noch darf etwas installiert
- * werden; was der Stick mitbringt, muss der Stick selbst hochfahren. Dieses
- * Modul ist genau dieser Teil -- und nichts sonst: es spricht keine
+ * werden; was der Stick mitbringt, muss der Stick selbst hochfahren. Und auf
+ * dem eigenen Rechner liegt Ollama oft nur ausgepackt im Download-Ordner --
+ * nicht installiert, nicht im PATH --, und auch das soll beim Hochfahren
+ * einfach mitlaufen, statt dass ein Terminalfenster offen bleiben muss.
+ * Dieses Modul ist genau dieser Teil -- und nichts sonst: es spricht keine
  * Modellschnittstelle, es kennt kein Prompt, es erfindet keine Antwort. Es
  * startet einen fremden Prozess, MISST, ob dessen Schnittstelle antwortet,
  * und raeumt ihn wieder ab.
  *
  * Die Entscheidungen, die hier festgehalten sind und nicht anderswo
  * -----------------------------------------------------------------
+ * - **Ein Laufzeitkern ist ein ORDNER, keine Datei.** Ollama findet seine
+ *   Bibliotheken (lib/ollama/**) relativ zur eigenen Programmdatei, nicht
+ *   ueber das Arbeitsverzeichnis. Auf dem Stick liegt deshalb der ganze Ordner
+ *   unter models/kern/<plattform>/ in genau der Struktur, die er auf dem
+ *   Quellrechner hatte, und `modelle.json` zeigt mit "programm" auf die
+ *   Programmdatei darin (auch unter bin/). Fehlt "programm" (aeltere Sticks),
+ *   wird die Programmdatei aus der Dateiliste bestimmt -- ohne Raten: eine
+ *   .dll unter lib/ ist kein Programm, und im Zweifel sagt der Satz das.
+ * - **Zwei Herkuenfte, EINE Zusage.** Der Kern kommt vom Stick (Beschreibungs-
+ *   datei) oder aus der Konfiguration dieses Rechners (config.models.kern).
+ *   Der Stick hat Vorrang, weil er der Grund fuer dieses Modul ist; die
+ *   Konfiguration greift, wenn auf dem Stick nichts liegt oder das Gefundene
+ *   hier nicht startet (falsche Plattform). `zustand()` sagt immer, WOHER der
+ *   laufende Kern kam -- die Oberflaeche muss "Modell vom Stick" und "Modell
+ *   von diesem Rechner" unterscheiden koennen, und ein Modell, das still aus
+ *   der falschen Quelle antwortet, ist der Fehler, den niemand bemerkt.
+ * - **Ohne modellOrdner kein OLLAMA_MODELS.** Ein Ollama aus der Konfiguration
+ *   ohne eigenen Modellordner nimmt seinen eigenen Speicher (~/.ollama/models)
+ *   -- genau dort liegt, was der Besitzer mit "ollama pull" geholt hat. Ein
+ *   erfundener Pfad wuerde ein leeres Ollama starten. Vom Stick dagegen wird
+ *   OLLAMA_MODELS IMMER gesetzt (siehe unten, "nur vom Datentraeger").
  * - **Der Port wird gesucht, nicht angenommen.** 11434 (Ollama) und 8080
  *   (llama-server) sind auf einem fremden Rechner regelmaessig belegt -- von
  *   einer anderen Anwendung oder von einem Ollama, das dort schon laeuft. Ein
@@ -46,17 +70,27 @@ const { ValidationError, asNeuralError } = require('../kernel/errors');
  *   Zustand `startet` -- nicht `laeuft`. Ein Chat, der auf eine Adresse
  *   zeigt, hinter der noch nichts ist, faellt sonst mit "Verbindung
  *   verweigert" auf, und niemand weiss warum.
- * - **Ein Kern, der stirbt, hinterlaesst einen Satz.** Fehlendes
- *   Ausfuehrbar-Bit (exFAT kennt keine Dateirechte), falsche Plattform, zu
- *   wenig RAM: das sind die drei haeufigen Faelle, und sie sehen in einem
- *   nackten Fehlercode alle gleich aus. Deshalb werden die letzten Zeilen der
- *   Fehlerausgabe des Kindprozesses mitgefuehrt und mit ausgegeben.
+ * - **Ein Kern, der stirbt, hinterlaesst einen Satz -- und einen Rat.**
+ *   Fehlendes Ausfuehrbar-Bit (exFAT kennt keine Dateirechte), falsche
+ *   Plattform, zu wenig RAM, fehlendes lib/: das sind die haeufigen Faelle,
+ *   und sie sehen in einem nackten Fehlercode alle gleich aus. Deshalb werden
+ *   die letzten Zeilen der Fehlerausgabe des Kindprozesses mitgefuehrt und
+ *   mit ausgegeben -- und wenn die Beschreibungsdatei Dateien nennt, die auf
+ *   dem Stick fehlen, steht dabei, was zu tun ist: das Modell auf dem
+ *   Quellrechner noch einmal mitnehmen. Unter Windows stirbt ein Programm
+ *   ohne seine DLLs OHNE eine Zeile Ausgabe, nur mit dem Code 0xC0000135;
+ *   auch der wird uebersetzt.
  * - **Kein verwaister Kindprozess.** Ein llama-server, den niemand mehr
  *   kennt, haelt mehrere Gigabyte fest, bis der Rechner neu startet. Deshalb
  *   haengt zusaetzlich zum geordneten `stoppen()` eine Notbremse an
  *   `process.on('exit')`, die auch beim Absturz noch SIGKILL schickt. Gegen
  *   ein SIGKILL auf den Elternprozess selbst hilft nichts -- das steht so im
  *   Bericht und wird nicht schoengeredet.
+ * - **Keine Shell dazwischen.** Gestartet wird die Programmdatei selbst, mit
+ *   einer Argumentliste. Eine Shell wuerde Pfade mit Leerzeichen zerlegen
+ *   (C:\Users\Max Muster\Downloads\...) und unter Windows ein Konsolenfenster
+ *   aufreissen; `windowsHide` gilt nur ohne Shell. Unter Windows muss die
+ *   Programmdatei deshalb eine .exe sein -- eine .bat braeuchte cmd.exe.
  * - **Die Beschreibungsdatei wird defensiv gelesen.** `models/modelle.json`
  *   legt ein anderer Teil des Systems an. Statt auf eine Gestalt zu wetten,
  *   werden mehrere uebliche Feldnamen akzeptiert; was nicht verstanden wird,
@@ -65,7 +99,9 @@ const { ValidationError, asNeuralError } = require('../kernel/errors');
  * - **Nur vom Datentraeger.** Der Programmpfad aus der Beschreibungsdatei
  *   muss innerhalb der Stick-Wurzel liegen. Eine Beschreibungsdatei, die auf
  *   `/bin/sh` zeigt, ist kein Modell, sondern ein Angriff auf den Rechner,
- *   in dem der Stick steckt.
+ *   in dem der Stick steckt. Fuer die Konfiguration dieses Rechners gilt das
+ *   nicht -- die hat der Besitzer selbst geschrieben --, aber auch dort nur
+ *   ein absoluter Pfad zu einer vorhandenen Datei, nie eine Suche im PATH.
  */
 
 /** Relativer Ort der Beschreibungsdatei auf dem Datentraeger. */
@@ -80,6 +116,18 @@ const ZUSTAND = {
   startet: 'startet',
   laeuft: 'laeuft',
   gescheitert: 'gescheitert',
+};
+
+/** Woher ein Kern kommt. Genau zwei Moeglichkeiten. */
+const QUELLE = {
+  stick: 'stick',
+  konfiguration: 'konfiguration',
+};
+
+/** Der Satz zur Herkunft, den die Oberflaeche zeigen darf. */
+const HERKUNFT = {
+  [QUELLE.stick]: 'Modell vom Stick',
+  [QUELLE.konfiguration]: 'Modell von diesem Rechner',
 };
 
 /** Immer diese Adresse. Siehe Kopfkommentar. */
@@ -99,13 +147,25 @@ const AUSGABE_BYTES = 16 * 1024;
 /** Wie oft ein neuer Port versucht wird, wenn der gewaehlte inzwischen belegt ist. */
 const PORT_VERSUCHE = 3;
 
+/** So viele fehlende Dateien werden im Satz beim Namen genannt. */
+const FEHLENDE_BEISPIELE = 4;
+
 /** Bereich der Netzschleuse fuer alles, was dieses Modul tut. */
 const SCOPE = 'stick:modell';
+
+/**
+ * Windows-Beendigungscodes, die ohne eine Zeile Ausgabe kommen.
+ * Node meldet sie als vorzeichenlose 32-Bit-Zahl, manche Umgebungen als
+ * negative -- beide Schreibweisen stehen hier.
+ */
+const WIN_DLL_FEHLT = new Set([0xC0000135, 0xC0000135 - 0x100000000]); // STATUS_DLL_NOT_FOUND
+const WIN_FALSCHES_ABBILD = new Set([0xC000007B, 0xC000007B - 0x100000000]); // STATUS_INVALID_IMAGE_FORMAT
 
 /* --------------------------------------------------------- Feldnamen ---- */
 
 const FELD_PROGRAMM = ['programm', 'binary', 'bin', 'exe', 'executable', 'command', 'cmd', 'server', 'runner', 'kernPfad'];
 const FELD_MODELL = ['modell', 'model', 'modellDatei', 'modelFile', 'gguf', 'gewichte', 'weights', 'modelPath', 'modellPfad'];
+const FELD_MODELL_ORDNER = ['modellOrdner', 'modellordner', 'modelsDir', 'modelDir', 'modellSpeicher', 'speicher', 'ollamaModels'];
 const FELD_ARGS = ['args', 'argumente', 'arguments', 'argv', 'optionen', 'options', 'flags'];
 const FELD_ART = ['kern', 'art', 'kind', 'engine', 'laufzeit', 'runtime', 'typ', 'type', 'backend', 'schnittstelle'];
 // `name` vor `id`: src/portable/model.js vergibt ids wie "kern:llama.cpp",
@@ -113,6 +173,9 @@ const FELD_ART = ['kern', 'art', 'kind', 'engine', 'laufzeit', 'runtime', 'typ',
 const FELD_NAME = ['name', 'bezeichnung', 'titel', 'label', 'id'];
 const FELD_PLATTFORM = ['plattform', 'platform', 'os', 'betriebssystem', 'plattformen', 'platforms'];
 const FELD_LISTE = ['modelle', 'models', 'eintraege', 'einträge', 'entries', 'items', 'kerne', 'runtimes', 'liste'];
+
+/** Programmdateien, die dieses Modul kennt -- ohne Endung. */
+const BEKANNTE_KERNE = ['ollama', 'llama-server'];
 
 function nullLogger() {
   return { error() {}, warn() {}, info() {}, debug() {} };
@@ -137,7 +200,10 @@ function feld(obj, namen) {
  * das sieht von aussen aus wie "kein Modell da".
  */
 function artErkennen(rohwert, programmpfad) {
-  const quellen = [rohwert, programmpfad ? path.basename(programmpfad) : null];
+  // Der Dateiname genuegt: "ollama.exe" und "ollama" sind dasselbe Programm,
+  // egal welcher Pfadtrenner davor steht.
+  const dateiname = typeof programmpfad === 'string' ? programmpfad.split(/[\\/]/).pop() : null;
+  const quellen = [rohwert, dateiname];
   for (const quelle of quellen) {
     if (typeof quelle !== 'string' || !quelle) continue;
     // Trenner weg, bevor verglichen wird: "LM Studio", "lm-studio" und
@@ -163,9 +229,62 @@ function plattformPasst(rohwert, plattform, arch) {
     if (!w || w === '*' || w === 'alle' || w === 'any') return true;
     if (eigene.some((e) => e && w === String(e).toLowerCase())) return true;
     // "win-x64" gegen plattform "win32": der Stick benutzt Nodes dist-Namen.
-    if (plattform === 'win32' && (w === 'win' || w === 'win-x64' || w === 'win-arm64') && w.includes(arch === 'x64' ? 'x64' : arch)) return true;
+    if (plattform === 'win32' && (w === 'win' || w === `win-${arch}` || w === `win_${arch}`)) return true;
   }
   return false;
+}
+
+/**
+ * Darf diese Datei als Laufzeitkern gestartet werden?
+ *
+ * Unter Windows nur eine .exe: alles andere (.bat, .cmd, .ps1) braucht eine
+ * Shell, und eine Shell gibt es hier nicht (siehe Kopfkommentar). Anderswo
+ * entscheidet das Ausfuehrbar-Bit beim Start selbst -- das sagt dann EACCES.
+ */
+function istProgrammDatei(pfad, plattform) {
+  if (typeof pfad !== 'string' || !pfad) return false;
+  if (plattform === 'win32') return /\.exe$/i.test(pfad);
+  return true;
+}
+
+/**
+ * Die Programmdatei aus einer Dateiliste bestimmen -- fuer Sticks, deren
+ * Beschreibung noch kein "programm" traegt, oder deren Eintrag den ganzen
+ * Ordner listet (ollama.exe plus lib/ollama/**).
+ *
+ * Reine Funktion ueber relative Ziele unter models/ (Trenner egal). Was
+ * unter lib/ liegt, ist eine Bibliothek; was wie eine Bibliothek heisst,
+ * ebenfalls. Was uebrig bleibt, wird geordnet: bekannte Namen zuerst, flache
+ * Lage (kern/<plattform>/<name> oder .../bin/<name>) vor tiefer. Es wird
+ * eine REIHENFOLGE geliefert, kein Urteil -- ob die Datei existiert, prueft
+ * der Aufrufer, und existiert keine, sagt er das.
+ */
+function programmAusDateien(ziele, { plattform = process.platform } = {}) {
+  const bewertet = [];
+  for (const roh of Array.isArray(ziele) ? ziele : []) {
+    if (typeof roh !== 'string' || !roh.trim()) continue;
+    const teile = roh.replace(/\\/g, '/').split('/').filter((t) => t && t !== '.');
+    if (!teile.length) continue;
+    const name = teile[teile.length - 1];
+    // Ab kern/<plattform>/ zaehlt die Lage; davor steht nur der Ort auf dem Stick.
+    const rest = teile[0] === 'kern' && teile.length >= 3 ? teile.slice(2) : teile;
+    const ordner = rest.slice(0, -1);
+    if (ordner.some((s) => /^lib(64)?$/i.test(s))) continue;
+    if (plattform === 'win32') {
+      if (!/\.exe$/i.test(name)) continue;
+    } else if (/\.(dll|so(\.\d+)*|dylib|a|lib|exe|json|txt|md|gguf|h|py|sh|bat|cmd|ps1)$/i.test(name)) {
+      continue;
+    }
+    const stamm = name.replace(/\.exe$/i, '').toLowerCase();
+    let punkte = 0;
+    if (BEKANNTE_KERNE.includes(stamm)) punkte += 10;
+    else if (/llama|ollama/.test(stamm)) punkte += 5;
+    if (ordner.length === 0) punkte += 3;
+    else if (ordner.length === 1 && /^bin$/i.test(ordner[0])) punkte += 2;
+    bewertet.push({ ziel: roh, punkte, reihe: bewertet.length });
+  }
+  bewertet.sort((a, b) => b.punkte - a.punkte || a.reihe - b.reihe);
+  return bewertet.map((b) => b.ziel);
 }
 
 /** Die Liste der Eintraege aus einer Datei, deren Gestalt wir nicht festlegen. */
@@ -193,21 +312,155 @@ function alsArgumente(rohwert) {
 
 /**
  * Loest einen Pfad aus der Beschreibungsdatei auf und haelt ihn im Stick.
+ *
+ * `p` ist das Pfadmodul -- voreingestellt das des laufenden Systems. Es ist
+ * einspeisbar, damit die Windows-Logik (Laufwerksbuchstaben, Backslashes,
+ * "anderes Laufwerk ist auch draussen") auf einem Linux-Rechner mit
+ * path.win32 gemessen werden kann, statt nur behauptet.
  * @returns {{pfad:string}|{fehler:string}}
  */
-function pfadImStick(rohwert, basis, wurzel, was) {
+function pfadImStick(rohwert, basis, wurzel, was, p = path) {
   if (typeof rohwert !== 'string' || !rohwert.trim()) {
     return { fehler: `Für ${was} steht in ${BESCHREIBUNG} kein Pfad.` };
   }
-  const aufgeloest = path.resolve(basis, rohwert.trim());
-  const relativ = path.relative(wurzel, aufgeloest);
-  if (relativ === '' || relativ.startsWith('..') || path.isAbsolute(relativ)) {
+  const aufgeloest = p.resolve(basis, rohwert.trim());
+  const relativ = p.relative(wurzel, aufgeloest);
+  if (relativ === '' || relativ.startsWith('..') || p.isAbsolute(relativ)) {
     return {
       fehler: `${was} zeigt mit "${rohwert}" aus dem Datenträger hinaus (${aufgeloest}). `
         + 'Neural OS startet nur Programme, die auf dem Datenträger selbst liegen.',
     };
   }
   return { pfad: aufgeloest };
+}
+
+/**
+ * Der Kern aus der Konfiguration dieses Rechners (config.models.kern).
+ *
+ * Vertrag: { programm: "<absoluter Pfad zur Programmdatei>",
+ *            modellOrdner: "<absoluter Pfad>" | null }.
+ * Angenommen wird ausserdem der ORDNER der Programmdatei als `programm` --
+ * ein Mensch, der "C:\Users\User\Downloads\ollama-windows-amd64" eintippt,
+ * meint erkennbar die ollama.exe darin. Mehr Grosszuegigkeit gibt es nicht:
+ * kein relativer Pfad, keine PATH-Suche, keine Shell.
+ *
+ * Reine Funktion: Dateisystem und Pfadmodul kommen von aussen, damit die
+ * Windows-Faelle hier auf Linux messbar sind.
+ *
+ * @returns {{eintrag:object}|{fehler:string}|{fehlt:true}}
+ */
+function kernAusKonfiguration(roh, {
+  plattform = process.platform,
+  p = path,
+  istDatei = (x) => { try { return fs.statSync(x).isFile(); } catch { return false; } },
+  istOrdner = (x) => { try { return fs.statSync(x).isDirectory(); } catch { return false; } },
+} = {}) {
+  if (!roh || typeof roh !== 'object') return { fehlt: true };
+  const wo = 'in der Konfiguration (models.kern)';
+  const programmRoh = feld(roh, FELD_PROGRAMM);
+  if (typeof programmRoh !== 'string' || !programmRoh.trim()) {
+    return {
+      fehler: `${wo} steht kein "programm" — erwartet wird der absolute Pfad zur Programmdatei des Laufzeitkerns, `
+        + 'z. B. C:\\Users\\<Name>\\Downloads\\ollama-windows-amd64\\ollama.exe oder /home/<name>/ollama/bin/ollama.',
+    };
+  }
+  let programm = programmRoh.trim();
+  if (!p.isAbsolute(programm)) {
+    return {
+      fehler: `"${programm}" ${wo} ist kein absoluter Pfad. Neural OS sucht nicht im PATH und startet keine Shell — `
+        + 'es muss genau wissen, welche Datei gemeint ist.',
+    };
+  }
+  programm = p.normalize(programm);
+
+  if (istOrdner(programm)) {
+    // Der Ordner des Kerns: die bekannten Programmdateien darin probieren,
+    // auch unter bin/ (so packt das Linux-Tarball von Ollama aus).
+    const namen = BEKANNTE_KERNE.map((n) => (plattform === 'win32' ? `${n}.exe` : n));
+    const orte = [];
+    for (const n of namen) orte.push(p.join(programm, n), p.join(programm, 'bin', n));
+    const treffer = orte.find((o) => istDatei(o));
+    if (!treffer) {
+      return {
+        fehler: `${programm} ${wo} ist ein Ordner, aber darin liegt keine Programmdatei `
+          + `(${namen.join(' oder ')}, auch nicht unter bin/).`,
+      };
+    }
+    programm = treffer;
+  } else if (!istDatei(programm)) {
+    if (plattform === 'win32' && !/\.exe$/i.test(programm) && istDatei(`${programm}.exe`)) {
+      programm = `${programm}.exe`; // Endung vergessen -- die Datei ist eindeutig
+    } else {
+      return {
+        fehler: `Die Programmdatei ${wo} gibt es nicht: ${programm}. Prüfe den Pfad in models.kern.programm — `
+          + 'Tippfehler, verschoben, oder der Download-Ordner wurde aufgeräumt?',
+      };
+    }
+  }
+  if (!istProgrammDatei(programm, plattform)) {
+    return {
+      fehler: `Unter Windows startet Neural OS nur eine .exe-Datei als Laufzeitkern, nicht "${p.basename(programm)}" `
+        + '(eine .bat oder .cmd bräuchte eine Shell, und die gibt es hier absichtlich nicht).',
+    };
+  }
+
+  const art = artErkennen(feld(roh, FELD_ART), programm);
+  if (!art) {
+    return {
+      fehler: `Bei "${p.basename(programm)}" ${wo} ist nicht erkennbar, welche Schnittstelle der Kern spricht. `
+        + 'Nenne sie mit "art": "ollama" oder "llama.cpp".',
+    };
+  }
+
+  let modellOrdner = null;
+  const ordnerRoh = feld(roh, FELD_MODELL_ORDNER);
+  if (typeof ordnerRoh === 'string' && ordnerRoh.trim()) {
+    modellOrdner = p.normalize(ordnerRoh.trim());
+    if (!p.isAbsolute(modellOrdner)) {
+      return { fehler: `Der Modellordner "${ordnerRoh}" ${wo} ist kein absoluter Pfad.` };
+    }
+    if (!istOrdner(modellOrdner)) {
+      return {
+        fehler: `Den Modellordner ${wo} gibt es nicht: ${modellOrdner}. Lass models.kern.modellOrdner leer (null), `
+          + 'dann nimmt Ollama seinen eigenen Speicher (~/.ollama/models bzw. %USERPROFILE%\\.ollama\\models).',
+      };
+    }
+  } else if (ordnerRoh !== undefined && ordnerRoh !== null) {
+    return { fehler: `Der Modellordner ${wo} muss ein Pfad oder null sein.` };
+  }
+
+  let modell = null;
+  if (art !== 'ollama') {
+    // llama-server oeffnet EINE Datei; ohne sie laeuft er und kann nichts.
+    const modellRoh = feld(roh, FELD_MODELL);
+    if (typeof modellRoh !== 'string' || !modellRoh.trim()) {
+      return {
+        fehler: `"${p.basename(programm)}" ${wo} braucht eine Modelldatei: models.kern.modell = "<absoluter Pfad>.gguf".`,
+      };
+    }
+    modell = p.normalize(modellRoh.trim());
+    if (!p.isAbsolute(modell)) return { fehler: `Die Modelldatei "${modellRoh}" ${wo} ist kein absoluter Pfad.` };
+    if (!istDatei(modell)) return { fehler: `Die Modelldatei ${wo} gibt es nicht: ${modell}.` };
+  }
+
+  return {
+    eintrag: {
+      name: p.basename(programm),
+      art,
+      programm,
+      ordner: p.dirname(programm),
+      modell,
+      modellOrdner,
+      args: alsArgumente(feld(roh, FELD_ARGS)),
+      umgebung: roh.env && typeof roh.env === 'object' ? roh.env : null,
+      modellName: art === 'ollama'
+        ? (modellOrdner ? `Ollama-Speicher ${modellOrdner}` : 'Ollama-Speicher dieses Rechners')
+        : p.basename(modell),
+      quelle: QUELLE.konfiguration,
+      dateienGesamt: null,
+      dateienFehlend: [],
+    },
+  };
 }
 
 /** Freier Port auf 127.0.0.1, vom Betriebssystem vergeben. */
@@ -225,21 +478,36 @@ function freierPort() {
 }
 
 /**
+ * Sieht die Fehlerausgabe so aus, als vermisse der Kern Dateien neben sich?
+ *
+ * Zwei Bedingungen in EINER Zeile: etwas, das nach Bibliothek aussieht
+ * (lib/, .dll, .so, ggml, runner), und etwas, das nach Fehlen aussieht.
+ * "not found" allein reicht nicht -- das schreibt auch ein Modell, das
+ * einen Modellnamen nicht kennt.
+ */
+function bibliothekFehltVermutlich(zeilen) {
+  const ding = /\blib(64)?[\\/]|\.dll\b|\.so\b|\.so\.\d|\.dylib\b|shared (object|library)|\bggml|\brunner\b|\blibrar(y|ies)\b|bibliothek/i;
+  const fehlt = /not found|no such file|cannot (open|load|find|locate)|could not|couldn't|unable to|failed to (load|open|find)|missing|\bfehlt|nicht gefunden|kann nicht|konnte nicht|0xc0000135/i;
+  return (zeilen || []).some((z) => ding.test(z) && fehlt.test(z));
+}
+
+/**
  * Der deutsche Satz zu einem Startfehler.
  *
  * Ohne diese Uebersetzung steht auf dem Bildschirm "spawn EACCES" -- ein
  * Mensch mit einem USB-Stick in der Hand kann damit nichts anfangen, obwohl
  * der Fehler in 30 Sekunden behebbar ist.
  */
-function startFehlerSatz(err, programm) {
+function startFehlerSatz(err, programm, quelle = QUELLE.stick) {
   const code = err && err.code;
+  const woSteht = quelle === QUELLE.konfiguration ? 'In der Konfiguration (models.kern) steht er' : `In ${BESCHREIBUNG} steht er`;
   if (code === 'EACCES' || code === 'EPERM') {
     return `Der Laufzeitkern ${programm} darf nicht ausgeführt werden (${code}). `
       + 'Auf einem Stick mit exFAT oder FAT32 gibt es kein Ausführbar-Bit, das ein Kopiervorgang erhalten könnte. '
       + `Abhilfe unter Linux/macOS: chmod +x "${programm}" — oder den Ordner einmal auf die Festplatte kopieren und von dort starten.`;
   }
   if (code === 'ENOENT') {
-    return `Den Laufzeitkern ${programm} gibt es nicht (ENOENT). In ${BESCHREIBUNG} steht er, auf dem Datenträger liegt er nicht.`;
+    return `Den Laufzeitkern ${programm} gibt es nicht (ENOENT). ${woSteht}, auf der Platte liegt er nicht.`;
   }
   if (code === 'ENOEXEC') {
     return `Der Laufzeitkern ${programm} ist kein Programm für diesen Rechner (ENOEXEC) — `
@@ -251,36 +519,80 @@ function startFehlerSatz(err, programm) {
   return `Der Laufzeitkern ${programm} ließ sich nicht starten: ${(err && err.message) || String(err)}`;
 }
 
+/**
+ * Was zu tun ist, wenn der Kern gleich nach dem Start stirbt.
+ *
+ * Drei Quellen, in dieser Reihenfolge: (1) die Beschreibungsdatei nennt
+ * Dateien, die auf dem Stick fehlen -- das ist Gewissheit, kein Verdacht;
+ * (2) der Windows-Beendigungscode fuer "DLL nicht gefunden"; (3) die
+ * Fehlerausgabe klingt nach fehlender Bibliothek. Gibt es keine der drei,
+ * gibt es auch keinen Rat -- ein erfundener Rat schickt jemanden auf die
+ * falsche Faehrte.
+ */
+function ratZumTod({ eintrag, code, ausgabe }) {
+  const fehlend = (eintrag && eintrag.dateienFehlend) || [];
+  const gesamt = eintrag && eintrag.dateienGesamt;
+  if (fehlend.length) {
+    const beispiele = fehlend.slice(0, FEHLENDE_BEISPIELE).join(', ') + (fehlend.length > FEHLENDE_BEISPIELE ? ', …' : '');
+    return `Auf dem Datenträger fehlen ${fehlend.length}${gesamt ? ` von ${gesamt}` : ''} Dateien, die laut ${BESCHREIBUNG} `
+      + `zu diesem Kern gehören (${beispiele}). Der Kopiervorgang war offenbar unvollständig — nimm das Modell `
+      + 'auf dem Quellrechner noch einmal mit ("Modell mitnehmen"), damit der ganze Ordner samt lib/ auf dem Stick liegt.';
+  }
+  if (WIN_DLL_FEHLT.has(code) || bibliothekFehltVermutlich(ausgabe)) {
+    const vermutung = WIN_DLL_FEHLT.has(code)
+      ? 'Windows meldet 0xC0000135: eine DLL, die das Programm braucht, wurde nicht gefunden.'
+      : 'Der Kern vermisst offenbar Dateien, die neben ihm liegen müssen (lib/ …).';
+    return eintrag && eintrag.quelle === QUELLE.konfiguration
+      ? `${vermutung} Prüfe, ob neben ${eintrag.programm} der Ordner lib/ liegt — so, wie er ausgepackt wurde.`
+      : `${vermutung} Ein Laufzeitkern ist ein ganzer Ordner, nicht eine Datei: nimm das Modell auf dem Quellrechner `
+        + 'noch einmal mit, dann kommt lib/ mit auf den Stick.';
+  }
+  if (WIN_FALSCHES_ABBILD.has(code)) {
+    return 'Windows meldet 0xC000007B: die Programmdatei passt nicht zu diesem Windows (32 Bit gegen 64 Bit, oder ARM gegen x64).';
+  }
+  return '';
+}
+
 /** Der Satz zu einem Kern, der startete und gleich wieder starb. */
-function todesSatz({ code, signal, programm, ausgabe }) {
+function todesSatz({ code, signal, programm, ausgabe, rat }) {
   const kopf = signal
     ? `Der Laufzeitkern ${programm} wurde gleich nach dem Start durch ${signal} beendet.`
     : `Der Laufzeitkern ${programm} hat sich gleich nach dem Start mit Code ${code} beendet.`;
   const hinweis = code === 137 || signal === 'SIGKILL'
     ? ' Code 137/SIGKILL heißt in aller Regel: der Arbeitsspeicher hat nicht gereicht.'
     : '';
+  const tun = rat ? `\nWas zu tun ist: ${rat}` : '';
   const letzte = ausgabe && ausgabe.length
     ? `\nLetzte Zeilen seiner Fehlerausgabe:\n${ausgabe.map((z) => `  | ${z}`).join('\n')}`
     : '\nEr hat nichts ausgegeben, woraus sich der Grund ablesen ließe.';
-  return kopf + hinweis + letzte;
+  return kopf + hinweis + tun + letzte;
 }
 
 /* ------------------------------------------------------------- Aufseher -- */
 
 /**
  * @param {object} deps
- * @param {string} deps.stickRoot   Wurzel des Datentraegers (dort liegt models/)
+ * @param {string} [deps.stickRoot] Wurzel des Datentraegers (dort liegt models/)
+ * @param {object} [deps.kern]      config.models.kern dieses Rechners:
+ *                                  { programm: "<absoluter Pfad>", modellOrdner: "<absoluter Pfad>"|null }
+ *                                  Mindestens eines von stickRoot/kern muss gesetzt sein.
  * @param {object} [deps.gate]      Netzschleuse; die Bereitschaftsmessung laeuft durch sie
  * @param {Function} [deps.logger]
  * @param {object} [deps.audit]
  * @param {string} [deps.plattform] nur fuer Tests
  * @param {string} [deps.arch]      nur fuer Tests
  */
-function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } = {}) {
-  if (typeof stickRoot !== 'string' || !stickRoot.trim()) {
-    throw new ValidationError('Der Aufseher für den Laufzeitkern braucht die Wurzel des Datenträgers.');
+function createLocalRunner({ stickRoot, kern, gate, logger, audit, plattform, arch } = {}) {
+  const hatStick = typeof stickRoot === 'string' && !!stickRoot.trim();
+  const hatKonfiguration = !!kern && typeof kern === 'object';
+  if (!hatStick && !hatKonfiguration) {
+    throw new ValidationError(
+      'Der Aufseher für den Laufzeitkern braucht die Wurzel des Datenträgers (stickRoot) oder einen Kern aus der '
+      + 'Konfiguration (kern: { programm, modellOrdner }) — sonst gibt es nichts, was er starten könnte.',
+    );
   }
-  const wurzel = path.resolve(stickRoot);
+  const wurzel = hatStick ? path.resolve(stickRoot) : null;
+  const konfiguriert = hatKonfiguration ? kern : null;
   const log = typeof logger === 'function' ? logger('stick-modell') : nullLogger();
   const dieseP = plattform || process.platform;
   const dieseA = arch || process.arch;
@@ -289,7 +601,9 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
   let kind = null;
   let zustandName = ZUSTAND.fehlt;
   let grund = null;
+  let hinweis = null; // z. B. warum der Stick uebergangen wurde
   let gewaehlt = null; // der gelesene Eintrag
+  let quelle = null; // QUELLE.* des gewaehlten Eintrags
   let port = null;
   let baseUrl = null;
   let seit = null;
@@ -327,7 +641,7 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
     grund = satz;
     log.error(satz.split('\n')[0]);
     if (audit && typeof audit.write === 'function') {
-      audit.write('stick.modell.gescheitert', { grund: satz.slice(0, 500) });
+      audit.write('stick.modell.gescheitert', { grund: satz.slice(0, 500), quelle: quelle || null });
     }
     return zustand();
   }
@@ -339,6 +653,9 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
    * @returns {{eintrag:object}|{fehlt:true, grund:string}|{fehler:string}}
    */
   function beschreibungLesen() {
+    if (!wurzel) {
+      return { fehlt: true, grund: 'Neural OS läuft nicht von einem Datenträger — es gibt keine Beschreibungsdatei, die zu lesen wäre.' };
+    }
     const datei = path.join(wurzel, BESCHREIBUNG);
     let roh;
     try {
@@ -425,16 +742,30 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
         continue;
       }
 
+      // Vollstaendigkeit: ein Kern ist ein Ordner, und die Beschreibung nennt
+      // jede kopierte Datei. Was davon fehlt, wird hier gezaehlt -- nicht als
+      // Grund, den Start zu verweigern (die Programmdatei ist da, und ob der
+      // Kern die fehlende Datei braucht, weiss nur er), sondern als Wissen
+      // fuer den Satz, falls er stirbt.
+      const vollstaendigkeit = fehlendeDateien(eintrag, basis);
+      if (vollstaendigkeit.fehlend.length) {
+        log.warn(`"${name}": ${vollstaendigkeit.fehlend.length} von ${vollstaendigkeit.gesamt} beschriebenen Dateien fehlen auf dem Datenträger (z. B. ${vollstaendigkeit.fehlend[0]}).`);
+      }
+
       return {
         eintrag: {
           name,
           art,
           programm: p.pfad,
+          ordner: path.dirname(p.pfad),
           modell: gefunden.modell || null,
           modellOrdner: gefunden.ordner || null,
           args: alsArgumente(feld(eintrag, FELD_ARGS)),
           umgebung: eintrag.env && typeof eintrag.env === 'object' ? eintrag.env : null,
           modellName: gefunden.modellName || name,
+          quelle: QUELLE.stick,
+          dateienGesamt: vollstaendigkeit.gesamt,
+          dateienFehlend: vollstaendigkeit.fehlend,
         },
       };
     }
@@ -446,6 +777,50 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
       fehler: `In ${BESCHREIBUNG} steht kein Laufzeitkern, der hier benutzbar wäre:\n`
         + verworfen.map((z) => `  - ${z}`).join('\n'),
     };
+  }
+
+  /**
+   * Der Kern aus config.models.kern -- derselbe Rueckgabewert wie
+   * beschreibungLesen(), damit der Aufrufer beide gleich behandelt.
+   */
+  function konfigurationLesen() {
+    if (!konfiguriert) return { fehlt: true, grund: 'In der Konfiguration (models.kern) ist kein Laufzeitkern eingetragen.' };
+    return kernAusKonfiguration(konfiguriert, { plattform: dieseP });
+  }
+
+  /**
+   * Welcher Kern wird gestartet? Stick zuerst, Konfiguration danach.
+   *
+   * Der Stick gewinnt, wenn er einen brauchbaren Kern hat. Hat er eine
+   * Beschreibung, aber nichts Brauchbares (falsche Plattform, kaputte
+   * Kopie), greift die Konfiguration -- und der Grund vom Stick bleibt als
+   * Hinweis stehen, damit niemand glaubt, das Modell komme vom Stick.
+   * @returns {{eintrag:object}|{fehlt:true, grund:string}|{fehler:string}}
+   */
+  function kernWaehlen() {
+    hinweis = null;
+    let vomStick = null;
+    if (wurzel) {
+      vomStick = beschreibungLesen();
+      if (vomStick.eintrag) return vomStick;
+      if (!konfiguriert) return vomStick;
+      if (vomStick.fehler) {
+        // In einer Zeile, damit die Oberflaeche ihn neben den Zustand stellen
+        // kann -- aber VOLLSTAENDIG: der eigentliche Grund ("fuer win-x64
+        // gebaut") steht in der Aufzaehlung, nicht in der Ueberschrift.
+        const einzeilig = vomStick.fehler.split('\n').map((z) => z.trim()).filter(Boolean).join(' ');
+        hinweis = `Der Kern vom Stick wurde nicht benutzt: ${einzeilig}`;
+        log.warn(hinweis);
+      }
+    }
+    const ausKonfiguration = konfigurationLesen();
+    if (ausKonfiguration.eintrag) return ausKonfiguration;
+    if (ausKonfiguration.fehler) {
+      // Beide Quellen unbrauchbar: beide Gruende, sonst sucht jemand am falschen Ort.
+      const stickGrund = vomStick && vomStick.fehler ? `\nUnd vom Stick: ${vomStick.fehler}` : '';
+      return { fehler: ausKonfiguration.fehler + stickGrund };
+    }
+    return vomStick && vomStick.fehlt ? vomStick : ausKonfiguration;
   }
 
   /**
@@ -465,36 +840,74 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
     return feld(eintrag, FELD_PROGRAMM) !== undefined ? 'kern' : 'gewichte';
   }
 
-  /** Alle Dateien eines Eintrags als Pfade unter models/, in Dateireihenfolge. */
-  function dateienVon(eintrag, nurArt) {
+  /**
+   * Alle Dateien eines Eintrags als Pfade unter models/, in Dateireihenfolge.
+   * `nurArt` laesst Dateien OHNE Markierung durch (aeltere Listen);
+   * `nurMarkiert` verlangt die Markierung ausdruecklich.
+   */
+  function dateienVon(eintrag, nurArt, { nurMarkiert = false } = {}) {
     const roh = feld(eintrag, ['dateien', 'files']);
     if (!Array.isArray(roh)) return [];
     return roh
       .filter((d) => d && typeof d === 'object' && typeof (d.ziel || d.pfad || d.path) === 'string')
-      .filter((d) => !nurArt || !d.art || d.art === nurArt)
+      .filter((d) => !nurArt || d.art === nurArt || (!nurMarkiert && !d.art))
       .map((d) => String(d.ziel || d.pfad || d.path));
+  }
+
+  /** Welche der beschriebenen Dateien eines Eintrags liegen NICHT auf dem Stick? */
+  function fehlendeDateien(eintrag, basis) {
+    const ziele = dateienVon(eintrag);
+    const fehlend = [];
+    for (const ziel of ziele) {
+      const p = pfadImStick(ziel, basis, wurzel, 'eine Datei');
+      if (p.fehler) { fehlend.push(ziel); continue; }
+      if (!fs.existsSync(p.pfad)) fehlend.push(ziel);
+    }
+    return { gesamt: ziele.length, fehlend };
   }
 
   /**
    * Der Pfad des Programms.
    *
-   * Zwei Schreibweisen, beide echt: die von `src/portable/model.js`
-   * geschriebene (`dateien: [{ziel: "kern/linux-x64/llama-server"}]`) und die
+   * Drei Schreibweisen, alle echt: die des Vertrags (`"programm":
+   * "kern/win-x64/ollama.exe"`, relativ zu models/), die aeltere von
+   * `src/portable/model.js` (nur `dateien: [{ziel: …}]`, EINE Datei) und die
    * kurze, die ein Mensch von Hand hinschreibt (`"programm": "llama-server"`).
+   * Steht "programm" da, ist es die Wahrheit -- fehlt die Datei, ist die Kopie
+   * kaputt, und es wird nicht auf eine andere ausgewichen.
    */
   function programmPfad(eintrag, name, basis) {
-    const kandidaten = [];
     const kurz = feld(eintrag, FELD_PROGRAMM);
-    if (typeof kurz === 'string') kandidaten.push(kurz);
-    kandidaten.push(...dateienVon(eintrag, 'programm'));
-    if (!kandidaten.length) kandidaten.push(...dateienVon(eintrag));
+    if (typeof kurz === 'string') {
+      const p = pfadImStick(kurz, basis, wurzel, `"${name}"`);
+      if (p.fehler) return p;
+      if (!istProgrammDatei(p.pfad, dieseP)) {
+        return { fehler: `"${name}" nennt mit "${kurz}" keine .exe-Datei — unter Windows startet Neural OS nur eine .exe als Laufzeitkern.` };
+      }
+      if (!fs.existsSync(p.pfad)) {
+        return {
+          fehler: `"${name}" verweist auf ${p.pfad} — diese Datei liegt nicht auf dem Datenträger. `
+            + 'Der Kopiervorgang war vermutlich unvollständig: nimm das Modell auf dem Quellrechner noch einmal mit.',
+        };
+      }
+      return p;
+    }
+
+    // Ohne "programm": erst, was die Dateiliste selbst als Programm markiert
+    // (art: "programm" -- so schreibt es src/portable/model.js), dann die
+    // Ordnung nach Namen und Lage fuer Listen ohne Markierung.
+    const markiert = dateienVon(eintrag, 'programm', { nurMarkiert: true });
+    const kandidaten = markiert.length ? markiert : programmAusDateien(dateienVon(eintrag), { plattform: dieseP });
     if (!kandidaten.length) {
+      const alle = dateienVon(eintrag);
       return {
-        fehler: `Bei "${name}" steht nicht, welches Programm gestartet werden soll `
-          + '(erwartet: "programm"/"bin"/"exe" oder eine Liste "dateien" mit "ziel").',
+        fehler: alle.length
+          ? `Bei "${name}" steht nicht, welches Programm gestartet werden soll: "programm" fehlt, und unter den `
+            + `${alle.length} beschriebenen Dateien ist keine, die wie eine Programmdatei aussieht.`
+          : `Bei "${name}" steht nicht, welches Programm gestartet werden soll `
+            + '(erwartet: "programm"/"bin"/"exe" oder eine Liste "dateien" mit "ziel").',
       };
     }
-    // Mehrere Dateien: die ausfuehrbare ist die ohne Endung bzw. die erste.
     // Geraten wird dabei nichts -- existiert keine davon, sagt der Satz das.
     const fehlend = [];
     for (const kandidat of kandidaten) {
@@ -609,8 +1022,10 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
       // OLLAMA_HOST -- und zwar auch dann, wenn schon ein anderes Ollama auf
       // 11434 laeuft. Unser Wert steht nach dem aus der Datei, gewinnt also.
       env.OLLAMA_HOST = `${HOST}:${gewaehlterPort}`;
-      // Und er liest NUR vom Datentraeger. Ohne diese Zeile griffe ein
-      // mitgebrachtes Ollama auf den Modellspeicher des fremden Rechners zu.
+      // Vom Stick liest er NUR vom Datentraeger (modellOrdner ist dort immer
+      // gesetzt). Aus der Konfiguration OHNE modellOrdner bleibt OLLAMA_MODELS
+      // unangetastet: dann nimmt Ollama seinen eigenen Speicher -- dort liegt,
+      // was der Besitzer mit "ollama pull" geholt hat.
       if (eintrag.modellOrdner) env.OLLAMA_MODELS = eintrag.modellOrdner;
       if (!args.length) args.push('serve');
       return { args, env };
@@ -652,7 +1067,7 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
         method: 'GET',
         headers: { accept: 'application/json' },
         scope: SCOPE,
-        purpose: 'Antwortet der Laufzeitkern vom Datenträger schon?',
+        purpose: 'Antwortet der Laufzeitkern schon?',
         timeoutMs,
       });
       return res && typeof res.status === 'number' ? res.status : 0;
@@ -688,9 +1103,9 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
         if (status >= 200 && status < 400) {
           zustandName = ZUSTAND.laeuft;
           grund = null;
-          log.info(`Laufzeitkern vom Datenträger ist bereit: ${eintrag.name} auf ${baseUrl}`);
+          log.info(`Laufzeitkern ist bereit (${HERKUNFT[eintrag.quelle]}): ${eintrag.name} auf ${baseUrl}`);
           if (audit && typeof audit.write === 'function') {
-            audit.write('stick.modell.bereit', { name: eintrag.name, art: eintrag.art, port, pid: kind && kind.pid });
+            audit.write('stick.modell.bereit', { name: eintrag.name, art: eintrag.art, quelle: eintrag.quelle, port, pid: kind && kind.pid });
           }
           return zustand();
         }
@@ -719,7 +1134,8 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
   function notbremseAnbringen(pid) {
     // Nur SIGKILL, und nur synchron: in einem 'exit'-Horcher laeuft nichts
     // Asynchrones mehr. Ein Kern, der 4 GB haelt, ist der groessere Schaden
-    // als ein Kern, der nicht geordnet beenden durfte.
+    // als ein Kern, der nicht geordnet beenden durfte. Unter Windows ist das
+    // TerminateProcess -- dasselbe, was kill() dort immer tut.
     if (!pid) return; // spawn ist gescheitert; es gibt nichts abzuraeumen
     notbremse = () => {
       try { process.kill(pid, 'SIGKILL'); } catch { /* schon weg */ }
@@ -740,16 +1156,25 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
     let prozess;
     try {
       prozess = spawn(eintrag.programm, args, {
-        cwd: path.dirname(eintrag.programm),
+        // Der Ordner der Programmdatei. Ollama findet lib/ollama zwar ueber
+        // den eigenen Dateipfad, nicht hierueber -- aber ein Kern, der
+        // relativ zum Arbeitsverzeichnis sucht, findet so ebenfalls seinen
+        // Ordner, und ein Kern, der Protokolle schreibt, schreibt sie zu sich
+        // und nicht in den Ordner, aus dem Neural OS zufaellig gestartet wurde.
+        cwd: eintrag.ordner || path.dirname(eintrag.programm),
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
         // Bewusst NICHT detached: der Kern soll in derselben Prozessgruppe
         // haengen, damit ein Strg-C im Terminal ihn mitnimmt.
         detached: false,
+        // Keine Shell: Pfade mit Leerzeichen bleiben ganz, und windowsHide
+        // wirkt nur ohne sie -- sonst steht auf dem fremden Rechner ein
+        // schwarzes Konsolenfenster neben dem Browser.
+        shell: false,
         windowsHide: true,
       });
     } catch (err) {
-      return startFehlerSatz(err, eintrag.programm);
+      return startFehlerSatz(err, eintrag.programm, eintrag.quelle);
     }
     kind = prozess;
     ausgabe = [];
@@ -763,7 +1188,7 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
   }
 
   /**
-   * Startet den mitgelieferten Kern.
+   * Startet den Kern -- vom Stick oder aus der Konfiguration.
    *
    * Wirft nie: eine Anwendung, die wegen eines fehlenden Modells nicht
    * hochfährt, ist schlimmer als eine Anwendung ohne Modell.
@@ -778,7 +1203,7 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
     if (kind) return zustand();
     const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0 ? Number(opts.timeoutMs) : START_TIMEOUT_MS;
 
-    const gelesen = beschreibungLesen();
+    const gelesen = kernWaehlen();
     if (gelesen.fehlt) {
       zustandName = ZUSTAND.fehlt;
       grund = gelesen.grund;
@@ -787,6 +1212,20 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
     }
     if (gelesen.fehler) return scheitern(gelesen.fehler);
     gewaehlt = gelesen.eintrag;
+    quelle = gewaehlt.quelle;
+
+    // Ein Kern, dem Dateien fehlen, wird trotzdem gestartet -- ob er sie
+    // braucht, weiss nur er. Aber das echte Ollama STARTET ohne lib/ollama und
+    // rechnet dann bloss kein Modell: ein gruener Haken ohne diesen Satz waere
+    // die Luege, die niemand bemerkt, bis der Chat schweigt.
+    if (gewaehlt.dateienFehlend.length) {
+      const f = gewaehlt.dateienFehlend;
+      const beispiele = f.slice(0, FEHLENDE_BEISPIELE).join(', ') + (f.length > FEHLENDE_BEISPIELE ? ', …' : '');
+      const unvollstaendig = `Auf dem Datenträger fehlen ${f.length} von ${gewaehlt.dateienGesamt} Dateien dieses Kerns `
+        + `(${beispiele}). Er wird trotzdem gestartet, kann ohne lib/ aber vermutlich kein Modell rechnen — nimm das `
+        + 'Modell auf dem Quellrechner noch einmal mit, damit der ganze Ordner auf dem Stick liegt.';
+      hinweis = hinweis ? `${hinweis} ${unvollstaendig}` : unvollstaendig;
+    }
 
     let letzterSatz = null;
     for (let versuch = 0; versuch < PORT_VERSUCHE; versuch++) {
@@ -818,7 +1257,7 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
           ausgabeAbschliessen();
           notbremseLoesen();
           kind = null;
-          frueherTod = { art: 'spawn', satz: startFehlerSatz(err, gewaehlt.programm) };
+          frueherTod = { art: 'spawn', satz: startFehlerSatz(err, gewaehlt.programm, gewaehlt.quelle) };
           scheitern(frueherTod.satz);
           resolve(frueherTod);
         });
@@ -832,7 +1271,13 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
               art: 'exit',
               code,
               signal,
-              satz: todesSatz({ code, signal, programm: gewaehlt.programm, ausgabe }),
+              satz: todesSatz({
+                code,
+                signal,
+                programm: gewaehlt.programm,
+                ausgabe,
+                rat: ratZumTod({ eintrag: gewaehlt, code, ausgabe }),
+              }),
             };
             scheitern(frueherTod.satz);
           }
@@ -855,9 +1300,11 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
       }
       if (kurzTot) return zustand();
 
-      log.info(`Laufzeitkern vom Datenträger gestartet: ${gewaehlt.name} (PID ${prozess.pid}) auf ${baseUrl}`);
+      log.info(`Laufzeitkern gestartet (${HERKUNFT[quelle]}): ${gewaehlt.name} (PID ${prozess.pid}) auf ${baseUrl}`);
       if (audit && typeof audit.write === 'function') {
-        audit.write('stick.modell.start', { name: gewaehlt.name, art: gewaehlt.art, programm: gewaehlt.programm, port, pid: prozess.pid });
+        audit.write('stick.modell.start', {
+          name: gewaehlt.name, art: gewaehlt.art, quelle, programm: gewaehlt.programm, port, pid: prozess.pid,
+        });
       }
       const url = bereitschaftsAdresse(gewaehlt.art, baseUrl);
       bereitVersprechen = aufBereitschaftWarten(gewaehlt, url, timeoutMs)
@@ -886,6 +1333,10 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
 
   /**
    * SIGTERM, nach Frist SIGKILL. Wirft nie.
+   *
+   * Unter Windows kennt ein Prozess keine Signale: `kill()` ist dort in
+   * beiden Schritten TerminateProcess, der Kern stirbt also sofort und ohne
+   * Aufraeumen -- die Frist vergeht dort nicht, sie ist nur nicht noetig.
    * @param {{fristMs?:number}} [opts]
    */
   async function stoppen(opts = {}) {
@@ -893,7 +1344,7 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
     const prozess = kind;
     if (!prozess) {
       notbremseLoesen();
-      return { gestoppt: false, grund: 'Es lief kein Laufzeitkern vom Datenträger.' };
+      return { gestoppt: false, grund: 'Es lief kein Laufzeitkern.' };
     }
     kind = null; // ab hier ist sein 'exit' kein Scheitern mehr, sondern erwartet
     const pid = prozess.pid;
@@ -924,13 +1375,13 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
     const wirklichWeg = !!ergebnis || !lebt(pid);
     zustandName = ZUSTAND.fehlt;
     grund = wirklichWeg
-      ? 'Der Laufzeitkern vom Datenträger wurde beim Beenden abgeräumt.'
+      ? `Der Laufzeitkern (${HERKUNFT[quelle] || 'Laufzeitkern'}) wurde beim Beenden abgeräumt.`
       : `Der Laufzeitkern (PID ${pid}) ließ sich auch mit SIGKILL nicht beenden.`;
     baseUrl = null;
     port = null;
     bereitVersprechen = null;
     if (audit && typeof audit.write === 'function') {
-      audit.write('stick.modell.stopp', { pid, hart, weg: wirklichWeg });
+      audit.write('stick.modell.stopp', { pid, hart, weg: wirklichWeg, quelle });
     }
     if (!wirklichWeg) log.error(grund);
     return { gestoppt: wirklichWeg, hart, pid, code: ergebnis && ergebnis.code, signal: ergebnis && ergebnis.signal };
@@ -954,35 +1405,50 @@ function createLocalRunner({ stickRoot, gate, logger, audit, plattform, arch } =
    *   'laeuft'          — Prozess da UND Schnittstelle hat geantwortet
    *   'startet'         — Prozess da, Schnittstelle noch stumm
    *   'gescheitert'     — mit Grund (und, wenn vorhanden, seiner Fehlerausgabe)
-   *   'nicht-vorhanden' — kein Kern auf dem Datenträger (kein Fehler)
+   *   'nicht-vorhanden' — kein Kern auf dem Datenträger und keiner konfiguriert (kein Fehler)
+   *
+   * Dazu die Herkunft: `quelle` ('stick' | 'konfiguration') und `vomStick`.
+   * Bevor ein Kern gewaehlt ist, steht hier die Quelle, die zuerst befragt
+   * wird -- der Stick, wenn es einen gibt. `herkunft` ist der Satz dazu, den
+   * die Oberflaeche unveraendert zeigen darf.
    */
   function zustand() {
+    const q = quelle || (wurzel ? QUELLE.stick : QUELLE.konfiguration);
     return {
       zustand: zustandName,
       grund,
+      hinweis,
       name: gewaehlt ? gewaehlt.name : null,
       art: gewaehlt ? gewaehlt.art : null,
       modellName: gewaehlt ? gewaehlt.modellName : null,
       programm: gewaehlt ? gewaehlt.programm : null,
+      modellOrdner: gewaehlt ? gewaehlt.modellOrdner : null,
       baseUrl,
       port,
       pid: kind ? kind.pid : null,
       seit,
       wurzel,
-      vomStick: true,
+      quelle: q,
+      vomStick: q === QUELLE.stick,
+      herkunft: HERKUNFT[q],
+      vollstaendig: gewaehlt && gewaehlt.dateienGesamt ? gewaehlt.dateienFehlend.length === 0 : null,
+      fehlendeDateien: gewaehlt ? gewaehlt.dateienFehlend.slice(0, 50) : [],
       ausgabe: ausgabe.slice(-AUSGABE_ZEILEN),
     };
   }
 
   return {
     beschreibungLesen,
+    konfigurationLesen,
+    kernWaehlen,
     starten,
     bereit,
     stoppen,
     zustand,
-    /** Liegt auf diesem Datenträger überhaupt eine Beschreibungsdatei? */
+    /** Gibt es ueberhaupt etwas, das gestartet werden koennte (Beschreibungsdatei oder Konfiguration)? */
     vorhanden() {
-      return fs.existsSync(path.join(wurzel, BESCHREIBUNG));
+      if (wurzel && fs.existsSync(path.join(wurzel, BESCHREIBUNG))) return true;
+      return !!konfiguriert;
     },
   };
 }
@@ -991,6 +1457,22 @@ module.exports = {
   createLocalRunner,
   BESCHREIBUNG,
   ZUSTAND,
+  QUELLE,
+  HERKUNFT,
   /** Nur für Tests: hier stecken die Entscheidungen, die schiefgehen können. */
-  __internals: { artErkennen, plattformPasst, alsListe, alsArgumente, pfadImStick, startFehlerSatz, freierPort },
+  __internals: {
+    artErkennen,
+    plattformPasst,
+    alsListe,
+    alsArgumente,
+    pfadImStick,
+    startFehlerSatz,
+    freierPort,
+    istProgrammDatei,
+    programmAusDateien,
+    kernAusKonfiguration,
+    bibliothekFehltVermutlich,
+    ratZumTod,
+    todesSatz,
+  },
 };
