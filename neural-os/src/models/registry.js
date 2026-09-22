@@ -52,6 +52,8 @@ const INSTALL_HINT = [
   'So richtest du ein lokales Modell ein:',
   '',
   '  1. Ollama installieren:  https://ollama.com/download',
+  '     Ohne Installationsrecht: die ZIP-Fassung (ollama-windows-amd64.zip bzw.',
+  '     ollama-darwin.tgz aus den GitHub-Releases) entpacken und "ollama serve" starten.',
   '  2. Einmalig ein Modell laden (nur dafür brauchst du kurz Internet):',
   '       ollama pull llama3.2     ~2 GB   – läuft auf fast jedem Rechner',
   '       ollama pull qwen2.5:7b   ~4,7 GB – deutlich stärker, ab 16 GB RAM',

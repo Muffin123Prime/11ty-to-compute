@@ -1982,7 +1982,12 @@ function createChatView(container, ctx) {
           h('li', null,
             text('Installieren – unter Linux: '),
             h('code.md-inline-code', null, text('curl -fsSL https://ollama.com/install.sh | sh')),
-            text(' · unter macOS oder Windows das Installationsprogramm von ollama.com. Dieser Schritt braucht einmalig Internet.')),
+            text(' · unter macOS oder Windows das Installationsprogramm von ollama.com. '
+              + 'Darfst du nichts installieren: Ollama gibt es auch als ZIP ohne Installer ('),
+            h('code.md-inline-code', null, text('ollama-windows-amd64.zip')),
+            text(' bei den GitHub-Releases von ollama) – entpacken und darin '),
+            h('code.md-inline-code', null, text('ollama.exe serve')),
+            text(' starten, ganz ohne Administrator. Dieser Schritt braucht einmalig Internet.')),
           h('li', null,
             text('Ein Modell laden: '),
             h('code.md-inline-code', null, text('ollama pull llama3.2')),
