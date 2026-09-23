@@ -25,17 +25,22 @@ const { findPlaywright, findChromium } = require('./lib/browser');
 const OUT = path.join(__dirname, '..', 'web', 'icons');
 
 /**
- * Die Bildmarke der Anwendung, identisch mit ICONS.brand in web/app.js:
- * drei Knoten und die Kanten dazwischen. Sie steht hier ein zweites Mal, weil
- * dieses Werkzeug ohne Browser laeuft und web/app.js ein ES-Modul ist. Aendert
- * sich die Marke dort, gehoert sie hier nachgezogen -- ein Test wacht darueber.
+ * Die Bildmarke der Anwendung, identisch mit ICONS.brand in web/app.js: eine
+ * Umlaufbahn und ein Knoten in ihrer Mitte, der ueber den Rand hinaus eine
+ * Verbindung haelt. Sie steht hier ein zweites Mal, weil dieses Werkzeug ohne
+ * Browser-Module laeuft und web/app.js ein ES-Modul ist. Aendert sich die
+ * Marke dort, gehoert sie hier nachgezogen -- ein Test wacht darueber.
+ *
+ * Die beiden Knoten sind gefuellt (fill="currentColor"); deshalb setzt die
+ * Seite unten `color` auf die Strichfarbe.
  */
-const MARK = '<circle cx="10" cy="4.6" r="2.1"/><circle cx="4.6" cy="14.4" r="2.1"/>'
-  + '<circle cx="15.4" cy="14.4" r="2.1"/><path d="M8.5 6.3 5.8 12.4M11.5 6.3l2.7 6.1M6.7 14.4h6.6"/>';
+const MARK = '<path d="M16.2 7.1A6.8 6.8 0 1 1 12.9 3.8"/><path d="M11.6 8.4 13.6 6.4"/>'
+  + '<circle cx="14.8" cy="5.2" r="1.5" fill="currentColor" stroke="none"/>'
+  + '<circle cx="10" cy="10" r="2.2" fill="currentColor" stroke="none"/>';
 
-/** Warmes, fast schwarzes Feld mit heller Marke -- ruhig, und auf jedem Hintergrund lesbar. */
-const GRUND = '#17161c';
-const STRICH = '#f3f1ec';
+/** Der Grund der Oberflaeche (--surface) mit der hellen Marke (--fg). */
+const GRUND = '#101112';
+const STRICH = '#eeeef0';
 
 /**
  * `padding` ist der Anteil des Randes. Ein gewoehnliches Symbol bekommt wenig,
@@ -59,7 +64,7 @@ function seite({ groesse, padding, rund }) {
     html,body{margin:0;padding:0;background:transparent}
     .feld{width:${groesse}px;height:${groesse}px;background:${GRUND};border-radius:${radius};
           display:flex;align-items:center;justify-content:center}
-    svg{width:${innen}px;height:${innen}px;margin:${0}px ${0}px}
+    svg{width:${innen}px;height:${innen}px;color:${STRICH}}
   </style><div class="feld"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
     fill="none" stroke="${STRICH}" stroke-width="1.5" stroke-linecap="round"
     >${MARK}</svg></div><!-- Rand ${rand} -->`;

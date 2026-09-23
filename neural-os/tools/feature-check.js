@@ -204,13 +204,48 @@ async function checkWiring(app) {
     return `${gezaehlt} Routen geprüft`;
   });
 
-  await check('Jede Ansicht in der Seitenleiste hat ihre Datei', async () => {
-    const appjs = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const web = path.join(__dirname, '..', 'web');
+  const appjs = fs.readFileSync(path.join(web, 'app.js'), 'utf8');
+
+  await check('Jede Ansicht der Schale hat ihre Datei', async () => {
     const ids = [...appjs.matchAll(/\{ id: '([a-z]+)', title:/g)].map((m) => m[1]);
     assert(ids.length >= 10, `nur ${ids.length} Ansichten gefunden — stimmt das Muster noch?`);
-    const fehlend = ids.filter((id) => !fs.existsSync(path.join(__dirname, '..', 'web', 'views', `${id}.js`)));
+    const fehlend = ids.filter((id) => !fs.existsSync(path.join(web, 'views', `${id}.js`)));
     assert(!fehlend.length, `ohne Datei: ${fehlend.join(', ')}`);
     return `${ids.length} Ansichten`;
+  });
+
+  // Die Leiste nach der Vorlage des Nutzers (docs/vorlage/app.png): genau
+  // diese acht Eintraege, in dieser Reihenfolge. Netzwerk, Stick und
+  // Sicherung sind Adressen ohne eigenen Eintrag.
+  await check('Die Leiste hat die acht Einträge der Vorlage', async () => {
+    const leiste = [...appjs.matchAll(/\{ id: '([a-z]+)', title: '([^']+)'[^\n]*nav: true/g)].map((m) => m[2]);
+    const soll = ['Neuer Chat', 'Kalender', 'Notizen', 'Projekte', 'Agenten', 'Gehirn', 'Werkstatt', 'Einstellungen'];
+    assert(JSON.stringify(leiste) === JSON.stringify(soll), `gefunden: ${leiste.join(', ')}`);
+    return leiste.join(' · ');
+  });
+
+  // Weggefallen auf Wunsch des Nutzers. Eine Datei, die noch daliegt, waere
+  // eine Ansicht, die niemand erreicht, die aber mitgepflegt werden muss.
+  await check('Heute, Vorschläge, Automatik, Zeitachse, Abgleich und die Suchseite sind weg', async () => {
+    const weg = ['today', 'assist', 'automation', 'timeline', 'sync', 'search'];
+    const noch = weg.filter((id) => fs.existsSync(path.join(web, 'views', `${id}.js`))
+      || new RegExp(`\\{ id: '${id}',`).test(appjs));
+    assert(!noch.length, `noch da: ${noch.join(', ')}`);
+    return `${weg.length} Ansichten entfernt, ihr Unterbau in src/ bleibt`;
+  });
+
+  // Die rechte Spalte: vier Kacheln, jede ein Modul mit mount(el, ctx).
+  await check('Jede Kachel der rechten Spalte hat ihr Modul mit mount()', async () => {
+    const kacheln = [...appjs.matchAll(/\{ kachel: '([a-z]+)'/g)].map((m) => m[1]);
+    assert(JSON.stringify(kacheln) === JSON.stringify(['agenten', 'kalender', 'notizen', 'gehirn']),
+      `Kacheln in web/app.js: ${kacheln.join(', ') || 'keine'}`);
+    const kaputt = kacheln.filter((id) => {
+      const datei = path.join(web, 'widgets', `${id}.js`);
+      return !fs.existsSync(datei) || !/export\s+(async\s+)?function\s+mount\s*\(|export\s+default\s*\{[\s\S]*mount/.test(fs.readFileSync(datei, 'utf8'));
+    });
+    assert(!kaputt.length, `ohne Datei oder ohne mount(): ${kaputt.join(', ')}`);
+    return kacheln.join(' · ');
   });
 }
 

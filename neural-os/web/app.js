@@ -1,65 +1,79 @@
 /**
- * app.js -- the application shell: router, state, live events, chrome.
+ * app.js -- die Schale: Leiste, mittlere Karte, rechte Spalte, Router,
+ * Zustand, Live-Ereignisse, Befehlspalette.
  *
- * What this file owns, and why it is built the way it is:
+ * Vorlage ist docs/vorlage/app.png. Was diese Datei besitzt, und warum sie so
+ * gebaut ist:
  *
- * - **The truth indicator.** The header shows network mode, model status and
- *   vault state, and every one of those values comes from `/api/status`.
- *   When the status cannot be read, the indicator says "unbekannt" rather
- *   than keeping the last comfortable answer on screen. An indicator that
- *   guesses is worse than none: it teaches the user to trust a guess.
- * - **Views are independent and may be missing.** Each view lives in its own
- *   module and is imported on demand from a fixed allow-list (never from the
- *   URL hash directly). A module that fails to load produces an error panel
- *   with a retry, never a blank page -- these modules are built separately and
- *   any of them can be absent in a partial installation.
- * - **One event stream.** All live updates come from the server bus over a
- *   single SSE connection with since-seq replay. There is no second code path
- *   that updates the screen without a real server event behind it, which is
- *   what keeps the UI from drifting away from what actually happened.
- * - **No inline script anywhere.** The server sends `script-src 'self'`, so
- *   even the theme bootstrap has to happen here rather than in index.html.
- *   The cost is a few milliseconds of default theme before the stored
- *   preference applies; the benefit is that the CSP needs no exception.
+ * - **Drei Spalten, zwei davon einklappbar.** Links die Leiste mit den
+ *   Bereichen und den letzten Chats, in der Mitte die Karte mit der Ansicht,
+ *   rechts vier Kacheln. Der Nutzer wollte woertlich "die Seiten wegklappen
+ *   und ausklappen koennen" -- eingeklappt bleibt nur der Chat. Der Zustand
+ *   wird je Bildschirmklasse gemerkt (breit / mittel); unter 1000 px sind
+ *   die Seiten Schubladen ueber dem Chat und starten immer zu.
+ * - **Der Status unten links sagt nur, was gemessen ist.** Netzmodus aus
+ *   `/api/status`, Claude aus `/api/claude`. Ist etwas davon nicht abrufbar,
+ *   steht "unbekannt" da und nicht die letzte bequeme Antwort.
+ * - **Ansichten und Kacheln sind unabhaengig und duerfen fehlen.** Beide
+ *   werden nach Bedarf aus einer festen Liste importiert (nie direkt aus der
+ *   Adresse). Ein Modul, das nicht laedt, ergibt eine Fehlerflaeche mit
+ *   "Erneut versuchen" -- nie eine leere Seite.
+ * - **Ein Ereignisstrom.** Alle Live-Aenderungen kommen ueber eine einzige
+ *   SSE-Verbindung mit Wiederaufnahme ab `since`. Es gibt keinen zweiten
+ *   Weg, der den Bildschirm ohne ein echtes Server-Ereignis veraendert.
+ * - **Kein Inline-Skript.** Der Server sendet `script-src 'self'`; auch die
+ *   Darstellung wird deshalb hier gesetzt und nicht in index.html.
  */
 
-import { h, text, clear, on, list, icon, cx, frag, timeAgo, formatNumber, debounce, snippet } from './lib/dom.js';
+import { h, text, clear, on, list, icon, cx, frag, timeAgo, formatNumber, formatDate, debounce, snippet } from './lib/dom.js';
 import { api, ApiError } from './lib/api.js';
 
-const APP_VERSION = '1';
+const APP_VERSION = '2';
 const STORAGE = {
   theme: 'neural-os:theme',
-  onboarding: 'neural-os:onboarding',
-  lastRoute: 'neural-os:last-route',
   chat: 'neural-os:active-chat',
+  // Eingeklappt oder offen, je Bildschirmklasse: wer auf dem Laptop die
+  // rechte Spalte zuklappt, will sie deshalb nicht auch auf dem iPad zu haben.
+  seiten: 'neural-os:seiten',
 };
 
 /* ------------------------------------------------------------------ */
-/* Iconography: inline SVG bodies, 20x20, currentColor, no asset files. */
+/* Symbole: 20x20, currentColor, als Text im Quelltext, keine Dateien.  */
 /* ------------------------------------------------------------------ */
 
 const ICONS = {
-  brand: '<circle cx="10" cy="4.6" r="2.1"/><circle cx="4.6" cy="14.4" r="2.1"/><circle cx="15.4" cy="14.4" r="2.1"/><path d="M8.5 6.3 5.8 12.4M11.5 6.3l2.7 6.1M6.7 14.4h6.6"/>',
-  chat: '<rect x="2.5" y="3.5" width="15" height="10.5" rx="3.2"/><path d="M6.6 14v3.2L10.3 14"/>',
-  notes: '<rect x="4" y="2.5" width="12" height="15" rx="2.6"/><path d="M7 6.6h6M7 10h6M7 13.4h3.6"/>',
-  projects: '<path d="M2.6 6.4a2 2 0 0 1 2-2h2.7l1.6 2h6.5a2 2 0 0 1 2 2v5.4a2 2 0 0 1-2 2h-10.8a2 2 0 0 1-2-2z"/>',
-  graph: '<circle cx="4.6" cy="14.4" r="1.9"/><circle cx="10" cy="4.4" r="1.9"/><circle cx="15.4" cy="12.8" r="1.9"/><path d="M5.6 12.7 9 6.1M11.3 5.9l3.2 5.2M6.4 14.8l7.1-1.5"/>',
-  agents: '<rect x="3.6" y="6.4" width="12.8" height="9.6" rx="3"/><path d="M10 2.8v3.6M7.6 10.8h.01M12.4 10.8h.01M7.8 13.6h4.4"/>',
+  // Das Zeichen der App: eine Umlaufbahn (das System) und ein Knoten in ihrer
+  // Mitte, der ueber den Rand hinaus eine Verbindung haelt (das Neuron). Es
+  // steht auch in tools/make-icons.js (MARK) und im Favicon in index.html --
+  // ein Test in test/server.test.js wacht darueber, dass es dasselbe bleibt.
+  brand: '<path d="M16.2 7.1A6.8 6.8 0 1 1 12.9 3.8"/><path d="M11.6 8.4 13.6 6.4"/><circle cx="14.8" cy="5.2" r="1.5" fill="currentColor" stroke="none"/><circle cx="10" cy="10" r="2.2" fill="currentColor" stroke="none"/>',
+  chat: '<path d="M4.2 4h11.6A1.7 1.7 0 0 1 17.5 5.7v7.1a1.7 1.7 0 0 1-1.7 1.7H9.4L6 17.2v-2.7H4.2a1.7 1.7 0 0 1-1.7-1.7V5.7A1.7 1.7 0 0 1 4.2 4z"/><path d="M6.4 8h7.2M6.4 10.9h4.6"/>',
+  calendar: '<rect x="3" y="4.2" width="14" height="13" rx="2.4"/><path d="M3 8.4h14M6.8 2.6v3.2M13.2 2.6v3.2"/>',
+  notes: '<path d="M5.4 2.7h5.9l3.9 3.9v9.1a1.6 1.6 0 0 1-1.6 1.6H5.4a1.6 1.6 0 0 1-1.6-1.6V4.3a1.6 1.6 0 0 1 1.6-1.6z"/><path d="M11.1 2.9v3.9h3.9M6.8 10.4h6.4M6.8 13.4h4.2"/>',
+  projects: '<path d="M2.6 6a1.8 1.8 0 0 1 1.8-1.8h3.1l1.8 2h6.3a1.8 1.8 0 0 1 1.8 1.8v6.6a1.8 1.8 0 0 1-1.8 1.8H4.4a1.8 1.8 0 0 1-1.8-1.8z"/><path d="M2.6 8.6h14.8"/>',
+  agents: '<circle cx="10" cy="5.6" r="2.6"/><circle cx="5.4" cy="14" r="2.6"/><circle cx="14.6" cy="14" r="2.6"/>',
+  // Das Gehirn als Gehirn, nicht als Netz aus Punkten: so heisst der Bereich.
+  graph: '<path d="M9.4 3.6a2.6 2.6 0 0 0-4.5 1.2 2.7 2.7 0 0 0-1.8 4 2.8 2.8 0 0 0 .6 4.5 2.7 2.7 0 0 0 3.2 2.9 2.4 2.4 0 0 0 2.5 1.1z"/><path d="M10.6 3.6a2.6 2.6 0 0 1 4.5 1.2 2.7 2.7 0 0 1 1.8 4 2.8 2.8 0 0 1-.6 4.5 2.7 2.7 0 0 1-3.2 2.9 2.4 2.4 0 0 1-2.5 1.1z"/><path d="M10 3.3v14M6.6 7.6h1.6M13.4 11.6h-1.6M6.9 12.6l1.3-1"/>',
+  workshop: '<path d="M12.9 3a3.9 3.9 0 0 0-4.6 5l-5 5a1.7 1.7 0 0 0 2.4 2.4l5-5a3.9 3.9 0 0 0 5-4.6l-2.2 2.2-2.1-.5-.5-2.1z"/>',
+  settings: '<circle cx="10" cy="10" r="2.5"/><path d="M8.6 2.8h2.8l.4 1.9 1.5.8 1.8-.7 1.4 2.4-1.4 1.3v1.7l1.4 1.3-1.4 2.4-1.8-.7-1.5.8-.4 1.9H8.6l-.4-1.9-1.5-.8-1.8.7-1.4-2.4 1.4-1.3V9.3L3.5 8l1.4-2.4 1.8.7 1.5-.8z"/>',
   network: '<path d="M10 2.4 16 4.7v4.8c0 3.3-2.4 6.2-6 7.4-3.6-1.2-6-4.1-6-7.4V4.7z"/><path d="m7.5 9.9 1.8 1.8 3.3-3.5"/>',
+  cloud: '<path d="M6.2 15.6h8.1a3.3 3.3 0 0 0 .4-6.6 4.7 4.7 0 0 0-9-.9 3.8 3.8 0 0 0 .5 7.5z"/>',
+  cloudOff: '<path d="M6.2 15.6h8.1a3.3 3.3 0 0 0 .4-6.6 4.7 4.7 0 0 0-9-.9 3.8 3.8 0 0 0 .5 7.5z"/><path d="M3.4 3.4l13.2 13.2"/>',
+  collapse: '<path d="M9.6 5.6 5.2 10l4.4 4.4M14.8 5.6 10.4 10l4.4 4.4"/>',
+  expand: '<path d="M5.2 5.6 9.6 10l-4.4 4.4M10.4 5.6 14.8 10l-4.4 4.4"/>',
+  panelLeft: '<rect x="2.8" y="3.6" width="14.4" height="12.8" rx="2.6"/><path d="M7.8 3.6v12.8"/>',
+  panelRight: '<rect x="2.8" y="3.6" width="14.4" height="12.8" rx="2.6"/><path d="M12.2 3.6v12.8"/>',
   search: '<circle cx="8.8" cy="8.8" r="5.2"/><path d="m12.7 12.7 4 4"/>',
-  settings: '<path d="M2.8 6.4h5.4M13.2 6.4h4M2.8 13.6h3.4M11.2 13.6h6"/><circle cx="10.6" cy="6.4" r="2.2"/><circle cx="8.6" cy="13.6" r="2.2"/>',
-  timeline: '<path d="M2.5 10h15"/><circle cx="6" cy="10" r="1.9"/><circle cx="11.4" cy="10" r="1.9"/><circle cx="16" cy="10" r="1.4"/><path d="M6 5.4v2.7M11.4 11.9v2.7"/>',
-  workshop: '<path d="M7.6 3.4 4 7l2.6 2.6"/><path d="M12.4 3.4 16 7l-2.6 2.6"/><path d="M11.2 3.2 8.8 16.8"/><rect x="3.6" y="12.4" width="12.8" height="4.4" rx="1.4"/>',
-  // Eine aufgehende Sonne ueber dem Horizont. "Heute" ist eine Tageszeit,
-  // keine Taetigkeit -- und ein Kalenderblatt waere ein Termin, was es nicht ist.
-  today: '<path d="M2.6 14.6h14.8"/><path d="M5.4 14.6a4.6 4.6 0 0 1 9.2 0"/><path d="M10 3.4v2M4.2 5.8l1.4 1.4M15.8 5.8l-1.4 1.4"/>',
-  // Ein Posteingang, keine Gluehbirne: dieser Bereich ist eine Liste von
-  // Vorschlaegen, ueber die jemand entscheidet -- nicht ein Geistesblitz.
-  assist: '<path d="M4.4 3.4h11.2l2 7.6v3.6a2 2 0 0 1-2 2H4.4a2 2 0 0 1-2-2v-3.6z"/><path d="M2.4 11h4.2l1.2 2h4.4l1.2-2h4.2"/>',
-  // Eine Uhr. Was hier laeuft, laeuft nach der Zeit oder auf ein Ereignis --
-  // beides ist "wann", nicht "wie clever".
-  automation: '<circle cx="10" cy="10" r="7.2"/><path d="M10 5.4V10l3.2 1.9"/>',
-  sync: '<rect x="2.5" y="4" width="7" height="12" rx="1.8"/><rect x="12" y="6.5" width="5.5" height="9" rx="1.6"/><path d="M10.4 8.6h1.1M10.4 11.4h1.1"/>',
+  // Fuer den Chat und die Kacheln: dieselbe Linie, dieselbe Staerke.
+  clip: '<path d="M14.6 9.2 9.4 14.4a3.3 3.3 0 0 1-4.7-4.7l5.6-5.6a2.2 2.2 0 0 1 3.1 3.1l-5.4 5.4a1.1 1.1 0 0 1-1.6-1.6l4.9-4.9"/>',
+  send: '<path d="M10 15.6V4.6M5.4 9.2 10 4.6l4.6 4.6"/>',
+  list: '<path d="M7.6 5.6h9M7.6 10h9M7.6 14.4h9"/><path d="M3.6 5.6h.01M3.6 10h.01M3.6 14.4h.01" stroke-width="2.2"/>',
+  question: '<path d="M10 16.6a6.6 6.6 0 1 0-5.9-3.6L3.2 16.8l3.8-.9A6.6 6.6 0 0 0 10 16.6z"/>',
+  checkCircle: '<circle cx="10" cy="10" r="7.4"/><path d="m6.8 10.2 2.2 2.2 4.2-4.6"/>',
+  globe: '<circle cx="10" cy="10" r="7.2"/><path d="M2.8 10h14.4M10 2.8c2 2 2.9 4.4 2.9 7.2s-.9 5.2-2.9 7.2c-2-2-2.9-4.4-2.9-7.2s.9-5.2 2.9-7.2z"/>',
+  clipboard: '<rect x="4.2" y="3.6" width="11.6" height="13.8" rx="2"/><path d="M7.6 3.6V2.8h4.8v.8M7.2 8.6h5.6M7.2 11.4h5.6M7.2 14.2h3.4"/>',
+  pen: '<path d="M12.8 3.8a1.9 1.9 0 0 1 2.7 2.7l-8.6 8.6-3.6.9.9-3.6z"/><path d="m11.4 5.2 2.7 2.7"/>',
+  clock: '<circle cx="10" cy="10" r="7.2"/><path d="M10 5.4V10l3.2 1.9"/>',
   sun: '<circle cx="10" cy="10" r="3.4"/><path d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M15.8 4.2l-1.5 1.5M5.7 14.3l-1.5 1.5"/>',
   moon: '<path d="M16.2 11.6A6.7 6.7 0 0 1 8.4 3.8a6.7 6.7 0 1 0 7.8 7.8z"/>',
   system: '<rect x="2.4" y="3.8" width="15.2" height="10.4" rx="2.2"/><path d="M7 17.2h6"/>',
@@ -69,74 +83,90 @@ const ICONS = {
   alert: '<path d="M10 3.2 17.5 16.4h-15z"/><path d="M10 8.2v3.5M10 13.9h.01"/>',
   info: '<circle cx="10" cy="10" r="7.4"/><path d="M10 9.2v4.4M10 6.5h.01"/>',
   refresh: '<path d="M16.6 10a6.6 6.6 0 1 1-2.1-4.8"/><path d="M16.9 3v3.7h-3.7"/>',
-  model: '<path d="m10 2.6 1.8 4.7 4.7 1.8-4.7 1.8L10 15.6l-1.8-4.7-4.7-1.8 4.7-1.8z"/>',
   lock: '<rect x="4.4" y="8.6" width="11.2" height="8" rx="2.6"/><path d="M7 8.6V6.3a3 3 0 0 1 6 0v2.3"/>',
   unlock: '<rect x="4.4" y="8.6" width="11.2" height="8" rx="2.6"/><path d="M7 8.6V6.3a3 3 0 0 1 5.7-1.3"/>',
   plus: '<path d="M10 4.2v11.6M4.2 10h11.6"/>',
   arrow: '<path d="M3.8 10h11.4M11 5.8l4.2 4.2-4.2 4.2"/>',
   more: '<circle cx="4.6" cy="10" r="1.25"/><circle cx="10" cy="10" r="1.25"/><circle cx="15.4" cy="10" r="1.25"/>',
   keyboard: '<rect x="2.4" y="5" width="15.2" height="10" rx="2.4"/><path d="M5.6 8.2h.01M8.4 8.2h.01M11.2 8.2h.01M14 8.2h.01M6.6 11.6h6.8"/>',
-  home: '<path d="M3.4 9 10 3.4 16.6 9v6.8a1.6 1.6 0 0 1-1.6 1.6H5a1.6 1.6 0 0 1-1.6-1.6z"/>',
-  // Ein USB-Stick: Gehaeuse mit Kontaktstueck. Kein Koffer und kein Pfeil --
-  // der Bereich handelt von DIESEM Gegenstand, den man in der Hand haelt.
+  // Ein USB-Stick: Gehaeuse mit Kontaktstueck -- der Bereich handelt von
+  // DIESEM Gegenstand, den man in der Hand haelt.
   stick: '<rect x="6.6" y="6.2" width="6.8" height="11.2" rx="1.6"/>'
     + '<path d="M8.4 6.2V3.4a1.6 1.6 0 0 1 1.6-1.6h0a1.6 1.6 0 0 1 1.6 1.6v2.8"/>'
     + '<path d="M8.8 10.2h2.4M8.8 12.8h2.4"/>',
-  // Ein Tresor mit Buegel. Kein Wolkensymbol und kein Pfeil nach unten: es
-  // geht um Verwahren an einem Ort, den man selbst in der Hand hat, nicht um
-  // Hochladen und nicht um Herunterladen.
+  // Ein Tresor mit Buegel: Verwahren an einem Ort, den man selbst in der
+  // Hand hat -- nicht Hochladen, nicht Herunterladen.
   backup: '<rect x="3" y="7.6" width="14" height="9.2" rx="2.2"/>'
     + '<path d="M6.4 7.6V5.4a3.6 3.6 0 0 1 7.2 0v2.2"/>'
     + '<circle cx="10" cy="12" r="1.5"/>',
 };
 
 /**
- * The navigation table.
+ * Die Bereiche.
  *
- * Titles and icons are declared here rather than read from the view modules,
- * because the sidebar has to be complete and correct before any view module is
- * loaded -- and it has to stay complete when one of them cannot be loaded at
- * all. When a module does load and carries its own `title`/`icon`, those win.
- */
-/**
- * Die Bereiche, in der Reihenfolge der Seitenleiste.
- *
- * `group` teilt die dreizehn Eintraege in drei ruhige Bloecke: womit man
- * arbeitet, was einem Arbeit abnimmt, und was das System ueber sich selbst
- * sagt. Eine Liste aus dreizehn gleichwertigen Symbolen zwingt einen jedes
- * Mal, sie ganz zu lesen; drei Bloecke à vier bis sechs kann man ansehen.
- * Die Trennlinien sind reine Optik -- jeder Bereich bleibt ueber `g` + Taste
- * und ueber die Befehlspalette gleich erreichbar.
- *
- * `primary` ist etwas anderes und bleibt: es entscheidet, was auf einem
- * schmalen Bildschirm in der unteren Leiste ueberlebt.
+ * `nav` entscheidet, was in der Leiste steht -- genau die acht Eintraege der
+ * Vorlage, in ihrer Reihenfolge. Netzwerk, Stick und Sicherung bleiben als
+ * Adresse, Tastenkuerzel und Paletten-Eintrag erreichbar; der Status unten
+ * links fuehrt ins Netzwerk, die Einstellungen zu Stick und Sicherung.
+ * `parent` markiert fuer diese drei den Eintrag, unter dem man sie findet.
+ * `head` ist der Kopf der mittleren Karte, solange die Ansicht keinen eigenen
+ * setzt (ctx.setTitle).
  */
 const VIEWS = [
-  { id: 'today', title: 'Heute', icon: ICONS.today, key: 'h', primary: true, group: 'arbeiten', keywords: 'start morgen fällig übersicht tagesbeginn was ist los' },
-  { id: 'chat', title: 'Chat', icon: ICONS.chat, key: 'c', primary: true, group: 'arbeiten', keywords: 'unterhaltung modell fragen gespräch' },
-  { id: 'notes', title: 'Notizen', icon: ICONS.notes, key: 'n', primary: true, group: 'arbeiten', keywords: 'note texte wissen schreiben' },
-  { id: 'projects', title: 'Projekte', icon: ICONS.projects, key: 'p', primary: false, group: 'arbeiten', keywords: 'aufgaben tasks vorhaben' },
-  { id: 'graph', title: 'Gehirn', icon: ICONS.graph, key: 'g', primary: true, group: 'arbeiten', keywords: 'graph netz verknüpfungen karte' },
-  { id: 'agents', title: 'Agenten', icon: ICONS.agents, key: 'a', primary: true, group: 'helfer', keywords: 'automatik werkzeuge läufe runs' },
-  { id: 'assist', title: 'Vorschläge', icon: ICONS.assist, key: 'v', primary: true, group: 'helfer', keywords: 'hinweise dubletten waisen aufgaben schlagwörter aufräumen posteingang' },
-  { id: 'automation', title: 'Automatik', icon: ICONS.automation, key: 'u', primary: false, group: 'helfer', keywords: 'zeitplan auslöser trigger regelmäßig von allein wiederkehrend' },
-  { id: 'network', title: 'Netzwerk', icon: ICONS.network, key: 'w', primary: false, group: 'system', keywords: 'internet schleuse gate freigaben audit' },
-  { id: 'timeline', title: 'Zeitachse', icon: ICONS.timeline, key: 'z', primary: false, group: 'system', keywords: 'verlauf chronik historie wann zeit' },
-  { id: 'sync', title: 'Abgleich', icon: ICONS.sync, key: 'y', primary: false, group: 'system', keywords: 'synchronisation geräte partner peer konflikte' },
-  { id: 'stick', title: 'Stick', icon: ICONS.stick, key: 't', primary: false, group: 'system', keywords: 'usb portabel mitnehmen unterwegs laufzeit fremder rechner reisen tragbar' },
-  { id: 'workshop', title: 'Werkstatt', icon: ICONS.workshop, key: 'e', primary: false, group: 'system', keywords: 'erweiterungen module code einfügen ändern plugin anpassen' },
-  { id: 'search', title: 'Suche', icon: ICONS.search, key: 'f', primary: false, group: 'system', keywords: 'finden volltext' },
-  // Eigener Bereich und nicht laenger ein Abschnitt in den Einstellungen: was
-  // man im Notfall braucht, darf nicht erst gefunden werden muessen.
-  { id: 'backup', title: 'Sicherung', icon: ICONS.backup, key: 'b', primary: false, group: 'system', keywords: 'export import backup wiederherstellen notfall datenverlust umzug neues gerät retten kopie' },
-  { id: 'settings', title: 'Einstellungen', icon: ICONS.settings, key: 's', primary: true, group: 'system', keywords: 'konfiguration tresor modelle darstellung' },
+  { id: 'chat', title: 'Neuer Chat', head: 'Neuer Chat', icon: ICONS.chat, key: 'c', nav: true, keywords: 'chat unterhaltung fragen gespräch claude ki neu' },
+  { id: 'kalender', title: 'Kalender', icon: ICONS.calendar, key: 'k', nav: true, keywords: 'termine datum uhrzeit woche tag heute' },
+  { id: 'notes', title: 'Notizen', icon: ICONS.notes, key: 'n', nav: true, keywords: 'note texte wissen schreiben post-it' },
+  { id: 'projects', title: 'Projekte', icon: ICONS.projects, key: 'p', nav: true, keywords: 'aufgaben tasks vorhaben' },
+  { id: 'agents', title: 'Agenten', icon: ICONS.agents, key: 'a', nav: true, keywords: 'helfer hintergrund läufe runs arbeitet' },
+  { id: 'graph', title: 'Gehirn', icon: ICONS.graph, key: 'g', nav: true, keywords: 'graph netz verknüpfungen karte gedächtnis wissen' },
+  { id: 'workshop', title: 'Werkstatt', icon: ICONS.workshop, key: 'w', nav: true, keywords: 'erweiterungen module code einfügen ändern plugin anpassen' },
+  { id: 'settings', title: 'Einstellungen', icon: ICONS.settings, key: 'e', nav: true, keywords: 'konfiguration tresor pin claude schlüssel darstellung' },
+  { id: 'network', title: 'Netzwerk', icon: ICONS.network, key: 'i', nav: false, parent: 'settings', keywords: 'internet online offline schleuse gate freigaben protokoll' },
+  { id: 'stick', title: 'Stick', icon: ICONS.stick, key: 't', nav: false, parent: 'settings', keywords: 'usb portabel mitnehmen unterwegs laufzeit fremder rechner' },
+  { id: 'backup', title: 'Sicherung', icon: ICONS.backup, key: 'b', nav: false, parent: 'settings', keywords: 'export import backup wiederherstellen notfall kopie' },
 ];
 
 const VIEW_IDS = new Set(VIEWS.map((v) => v.id));
 const DEFAULT_VIEW = 'chat';
 
+/**
+ * Ansichten, die es nicht mehr gibt (Entscheidung des Nutzers: Heute,
+ * Vorschlaege, Automatik, Zeitachse, Abgleich). Eine alte Adresse aus einem
+ * Lesezeichen fuehrt in den Chat statt auf "Diesen Bereich gibt es nicht".
+ * `search` ist keine Ansicht mehr, sondern die Befehlspalette (Strg+K).
+ */
+const ENTFALLEN = new Set(['today', 'assist', 'automation', 'timeline', 'sync']);
+
+/**
+ * Die Kacheln der rechten Spalte, von oben nach unten. Jede ist ein eigenes
+ * Modul web/widgets/<kachel>.js mit
+ *   export function mount(el, ctx) { ...; return { unmount() {} } }
+ * Die Schale legt das leere <section class="tile"> an und haengt es ein;
+ * alles darin gehoert dem Modul.
+ */
+const TILES = [
+  { kachel: 'agenten', title: 'Agenten aktiv', icon: ICONS.agents, href: '#/agents' },
+  { kachel: 'kalender', title: 'Kalender', icon: ICONS.calendar, href: '#/kalender' },
+  { kachel: 'notizen', title: 'Notizen', icon: ICONS.notes, href: '#/notes' },
+  { kachel: 'gehirn', title: 'Gehirn', icon: ICONS.graph, href: '#/graph', grow: true },
+];
+
+/**
+ * Bildschirmklassen. Dieselben Grenzen stehen in web/app.css, Abschnitt 12.
+ * breit  >= 1280: Leiste und Spalte offen
+ * mittel 1000-1279 (iPad quer 1180): Leiste offen, Spalte zu
+ * schmal < 1000 (iPad hoch, Telefon): beide als Schublade, zu
+ */
+const MEDIA_SCHMAL = '(max-width: 999px)';
+const MEDIA_MITTEL = '(max-width: 1279px)';
+const SEITEN_VORGABE = {
+  breit: { links: true, rechts: true },
+  mittel: { links: true, rechts: false },
+  schmal: { links: false, rechts: false },
+};
+
 /* ------------------------------------------------------------------ */
-/* Reactive state container (contract section 13)                      */
+/* Reaktiver Zustand (Vertrag, Abschnitt 13)                           */
 /* ------------------------------------------------------------------ */
 
 export function createState(initial = {}) {
@@ -162,7 +192,7 @@ export function createState(initial = {}) {
     },
     set(key, value) {
       const previous = values.get(key);
-      // Objects are replaced wholesale, so identity is a sound change test.
+      // Objekte werden als Ganzes ersetzt, also ist Identitaet ein guter Test.
       if (Object.is(previous, value)) return value;
       values.set(key, value);
       emit(key, value);
@@ -187,13 +217,13 @@ export function createState(initial = {}) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Routing                                                             */
+/* Adressen                                                            */
 /* ------------------------------------------------------------------ */
 
 /**
  * `#/graph?focus=note_x` -> `{view:'graph', segments:[], params:{focus:'note_x'}}`
- * The second path segment is offered as `params.id`, so `#/chat/chat_123`
- * and `#/chat?id=chat_123` are the same route.
+ * Der zweite Pfadteil wird als `params.id` angeboten: `#/chat/chat_123` und
+ * `#/chat?id=chat_123` sind dieselbe Adresse.
  */
 export function parseRoute(rawHash) {
   const raw = String(rawHash || '').replace(/^#/, '').trim();
@@ -204,19 +234,29 @@ export function parseRoute(rawHash) {
   try {
     for (const [key, value] of new URLSearchParams(queryPart)) params[key] = value;
   } catch {
-    /* a hand-edited hash is not worth a crash */
+    /* eine von Hand verbogene Adresse ist keinen Absturz wert */
   }
   if (segments[1] && params.id === undefined) params.id = segments[1];
-  const hash = `#/${segments.join('/')}${queryPart ? `?${queryPart}` : ''}`;
+  const hash = `#/${segments.length ? segments.join('/') : DEFAULT_VIEW}${queryPart ? `?${queryPart}` : ''}`;
   return { view, segments: segments.slice(1), params, hash, known: VIEW_IDS.has(view) };
 }
 
-function routeHash(route) {
-  return route.hash;
+/**
+ * Der Kopf einer Kachel, fuer alle vier gleich gebaut: Symbol, Titel,
+ * optional eine Zahl ("Agenten aktiv 3") und rechts eine leise Randnotiz
+ * ("Automatisch erkannt", "Heute, 23. Sept."). Mit `href` wird der ganze
+ * Kopf zum Link in den Bereich.
+ */
+export function tileHead({ icon: markup, title, count, meta, href } = {}) {
+  return h(href ? 'a.tile__head' : 'header.tile__head', href ? { href } : null,
+    markup ? h('span.tile__icon', { 'aria-hidden': 'true' }, icon(markup)) : null,
+    h('h2.tile__title', null, text(title || '')),
+    count !== undefined && count !== null ? h('span.tile__count', null, text(String(count))) : null,
+    meta ? h('span.tile__meta', null, text(meta)) : null);
 }
 
 /* ------------------------------------------------------------------ */
-/* Shell                                                               */
+/* Die Schale                                                          */
 /* ------------------------------------------------------------------ */
 
 function createShell() {
@@ -227,27 +267,33 @@ function createShell() {
     network: null,
     models: null,
     vault: null,
+    claude: null,
     approvals: [],
+    recentChats: [],
     theme: readTheme(),
     connected: false,
     activeChatId: readStored(STORAGE.chat, null),
     route: parseRoute(window.location.hash),
+    seiten: null,
     ready: false,
   });
 
   const busListeners = new Map();
   const dom = {};
   const viewCache = new Map();
+  const tiles = new Map();
+  let tilesMounted = false;
   let mountToken = 0;
   let currentView = null;
+  let renderedRoute = null;
   let eventStream = null;
 
   /* ---------------------------------------------------------------- */
-  /* Live server events                                                */
+  /* Live-Ereignisse vom Server                                        */
   /* ---------------------------------------------------------------- */
 
   const bus = {
-    /** @returns {() => void} unsubscribe */
+    /** @returns {() => void} abmelden */
     on(name, fn) {
       if (!busListeners.has(name)) busListeners.set(name, new Set());
       busListeners.get(name).add(fn);
@@ -273,7 +319,7 @@ function createShell() {
   }
 
   /* ---------------------------------------------------------------- */
-  /* Status: the single source of the header's claims                  */
+  /* Status: die einzige Quelle fuer das, was unten links steht        */
   /* ---------------------------------------------------------------- */
 
   async function refreshStatus() {
@@ -285,10 +331,11 @@ function createShell() {
       state.set('network', status && status.network ? status.network : null);
       state.set('models', status && status.models ? status.models : null);
       state.set('vault', status && status.vault ? status.vault : null);
+      await refreshClaude(status);
       return status;
     } catch (err) {
-      // Keep the payload for debugging but mark it stale: from this moment on
-      // the header stops claiming a network mode it can no longer verify.
+      // Ab jetzt behauptet der Status keinen Netzmodus mehr, den er nicht
+      // pruefen kann.
       state.set('statusStale', true);
       state.set('statusError', err instanceof ApiError ? err.message : String(err));
       renderChrome();
@@ -296,16 +343,40 @@ function createShell() {
     }
   }
 
+  /**
+   * Claude ist die KI dieser Anwendung; ob sie verbunden ist, gehoert in den
+   * Status. Die Route kommt aus dem Bereich Claude-Unterbau
+   * (GET /api/claude -> { verbunden, modell, schluesselVorhanden }). Fehlt
+   * sie, ist die Antwort "nicht bekannt" -- nicht "verbunden".
+   */
+  let claudeRouteFehlt = false;
+
+  async function refreshClaude(status) {
+    if (status && status.claude && typeof status.claude === 'object') {
+      state.set('claude', { bekannt: true, ...status.claude });
+      return;
+    }
+    // Offline ist Claude ohnehin nicht erreichbar; der Status sagt dann
+    // "Offline", und gefragt wird gar nicht erst. Antwortet der Server mit
+    // 404, kennt er die Route nicht -- dann wird bis zum Neuladen nicht
+    // wieder gefragt, statt jede Minute denselben Fehler zu erzeugen.
+    const mode = status && status.network ? status.network.mode : null;
+    if (mode !== 'online' || claudeRouteFehlt) {
+      state.set('claude', { bekannt: false });
+      return;
+    }
+    try {
+      const claude = await api.get('/claude', { timeoutMs: 6000 });
+      state.set('claude', claude && typeof claude === 'object' ? { bekannt: true, ...claude } : { bekannt: false });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) claudeRouteFehlt = true;
+      state.set('claude', { bekannt: false });
+    }
+  }
+
   const refreshStatusSoon = debounce(() => {
     refreshStatus();
   }, 500);
-
-  // Record events arrive in bursts (a streaming answer writes many messages).
-  // The header only shows counts, so it can lag behind by a couple of seconds
-  // instead of firing a status request per stored record.
-  const refreshStatusLater = debounce(() => {
-    refreshStatus();
-  }, 2500);
 
   async function refreshApprovals() {
     try {
@@ -317,8 +388,8 @@ function createShell() {
         return !status || status === 'pending';
       }));
     } catch (err) {
-      // Approvals are optional (the agent subsystem may not be loaded). An
-      // empty list is the honest answer here: nothing is known to be pending.
+      // Freigaben sind optional. Eine leere Liste ist hier die ehrliche
+      // Antwort: es ist nichts bekannt, das wartet.
       if (!(err instanceof ApiError) || err.status !== 503) console.warn('[neural-os] Freigaben nicht abrufbar:', err && err.message);
       state.set('approvals', []);
     }
@@ -328,30 +399,51 @@ function createShell() {
     refreshApprovals();
   }, 300);
 
+  /* --------------------------- letzte Chats ------------------------- */
+
+  async function refreshRecent() {
+    try {
+      const result = await api.get('/chats', { query: { limit: 12, sort: 'updatedAt', order: 'desc' }, timeoutMs: 8000 });
+      const items = (Array.isArray(result) ? result : (result && Array.isArray(result.items) ? result.items : []))
+        .filter((row) => row && row.id && !row.deletedAt);
+      state.set('recentChats', items);
+    } catch (err) {
+      // Die Liste bleibt, wie sie war; sie ist eine Abkuerzung, keine Wahrheit.
+      console.warn('[neural-os] Letzte Chats nicht abrufbar:', err && err.message);
+    }
+  }
+
+  const refreshRecentSoon = debounce(() => {
+    refreshRecent();
+  }, 700);
+
   function handleServerEvent(event) {
     dispatchBus(event);
     const type = event.type || '';
+    const payload = event.payload || {};
 
-    if (type === 'models.changed') {
-      if (event.payload) state.set('models', event.payload);
+    // Nicht jedes network.*-Ereignis: jeder einzelne Zugriff nach draussen
+    // (jede Claude-Anfrage) meldet sich als network.allow. Den Status aendert
+    // nur ein Wechsel des Modus.
+    if (type === 'models.changed' || type === 'config.changed' || type.startsWith('vault.')
+      || type === 'network.mode' || type.startsWith('claude')) {
       refreshStatusSoon();
-    } else if (type === 'config.changed' || type.startsWith('vault.') || type.startsWith('network.')) {
-      refreshStatusSoon();
-    } else if (type.startsWith('record.') || type.startsWith('edge.')) {
-      refreshStatusLater();
-    } else if (type.startsWith('approval.')) {
+    }
+    if (type.startsWith('record.') && (payload.type === 'chat' || (payload.record && payload.record.type === 'chat'))) {
+      refreshRecentSoon();
+    }
+    if (type === 'chat.created') refreshRecentSoon();
+    if (type.startsWith('approval.')) {
       refreshApprovalsSoon();
       if (type === 'approval.requested') {
-        const summary = event.payload && event.payload.record && event.payload.record.data
-          ? event.payload.record.data.summary
-          : null;
+        const summary = payload.record && payload.record.data ? payload.record.data.summary : null;
         toast(summary ? `Freigabe erbeten: ${summary}` : 'Ein Agent bittet um eine Freigabe.', 'info', {
           action: { label: 'Ansehen', run: () => navigate('#/agents') },
           timeout: 12000,
         });
       }
     } else if (type === 'run.failed') {
-      const message = event.payload && event.payload.error && event.payload.error.message;
+      const message = payload.error && payload.error.message;
       toast(message ? `Agentenlauf fehlgeschlagen: ${message}` : 'Ein Agentenlauf ist fehlgeschlagen.', 'error');
     }
 
@@ -367,9 +459,10 @@ function createShell() {
         state.set('connected', connected);
         state.set('connectionInfo', { state: connState, ...info });
         if (connected) {
-          // A reconnect may have missed a config change; re-read the truth.
+          // Nach einer Unterbrechung kann eine Aenderung verpasst sein.
           refreshStatus();
           refreshApprovals();
+          refreshRecent();
         }
         renderChrome();
       },
@@ -377,79 +470,236 @@ function createShell() {
   }
 
   /* ---------------------------------------------------------------- */
-  /* Chrome: rail, header, indicators                                  */
+  /* Seiten ein- und ausklappen                                        */
   /* ---------------------------------------------------------------- */
+
+  function currentMode() {
+    try {
+      if (window.matchMedia(MEDIA_SCHMAL).matches) return 'schmal';
+      if (window.matchMedia(MEDIA_MITTEL).matches) return 'mittel';
+    } catch {
+      /* ohne matchMedia gilt die breite Aufteilung */
+    }
+    return 'breit';
+  }
+
+  /** Gemerkter Zustand dieser Bildschirmklasse, sonst die Vorgabe. */
+  function storedSides(mode) {
+    const fallback = { ...SEITEN_VORGABE[mode] };
+    // Schmal wird nie gemerkt: eine Schublade, die beim Laden offen ist,
+    // deckt den Chat zu, bevor man ihn gesehen hat.
+    if (mode === 'schmal') return fallback;
+    try {
+      const all = JSON.parse(readStored(STORAGE.seiten, '{}')) || {};
+      const saved = all[mode] || {};
+      return {
+        links: typeof saved.links === 'boolean' ? saved.links : fallback.links,
+        rechts: typeof saved.rechts === 'boolean' ? saved.rechts : fallback.rechts,
+      };
+    } catch {
+      return fallback;
+    }
+  }
+
+  function rememberSides(mode, sides) {
+    if (mode === 'schmal') return;
+    let all = {};
+    try {
+      all = JSON.parse(readStored(STORAGE.seiten, '{}')) || {};
+    } catch {
+      all = {};
+    }
+    all[mode] = { links: sides.links, rechts: sides.rechts };
+    writeStored(STORAGE.seiten, JSON.stringify(all));
+  }
+
+  function applySides() {
+    const sides = state.get('seiten');
+    if (!sides || !dom.shell) return;
+    dom.shell.dataset.links = sides.links ? 'offen' : 'zu';
+    dom.shell.dataset.rechts = sides.rechts ? 'offen' : 'zu';
+    dom.shell.dataset.modus = sides.modus;
+
+    const leftLabel = sides.links ? 'Seitenleiste einklappen' : 'Seitenleiste ausklappen';
+    for (const button of [dom.collapseLeft, dom.expandLeft]) {
+      if (!button) continue;
+      button.setAttribute('aria-expanded', sides.links ? 'true' : 'false');
+    }
+    if (dom.collapseLeft) dom.collapseLeft.title = leftLabel;
+    if (dom.toggleRight) {
+      const rightLabel = sides.rechts ? 'Übersicht einklappen' : 'Übersicht ausklappen';
+      dom.toggleRight.setAttribute('aria-expanded', sides.rechts ? 'true' : 'false');
+      dom.toggleRight.setAttribute('aria-label', rightLabel);
+      dom.toggleRight.title = rightLabel;
+    }
+    // Die Kacheln werden erst geladen, wenn die Spalte zum ersten Mal zu
+    // sehen ist -- auf dem iPad hochkant vielleicht nie.
+    if (sides.rechts) mountTiles();
+  }
+
+  /**
+   * @param {'links'|'rechts'} side
+   * @param {boolean} open
+   * @param {{fokus?:boolean}} [opts]
+   */
+  function setSide(side, open, opts = {}) {
+    const current = state.get('seiten') || { ...storedSides(currentMode()), modus: currentMode() };
+    if (current[side] === open) return;
+    const next = { ...current, [side]: open };
+    // In der Schublade liegt immer nur eine Seite ueber dem Chat.
+    if (next.modus === 'schmal' && open) next[side === 'links' ? 'rechts' : 'links'] = false;
+    state.set('seiten', next);
+    rememberSides(next.modus, next);
+    applySides();
+
+    if (opts.fokus) {
+      // Der Knopf, der gerade gedrueckt wurde, verschwindet mit seiner Seite.
+      // Der Fokus geht zu dem Knopf, der sie wieder oeffnet -- sonst landet
+      // er auf <body>, und ein Tastaturnutzer ist verloren.
+      if (side === 'links' && !open && dom.expandLeft) dom.expandLeft.focus();
+      else if (side === 'links' && open && dom.collapseLeft) dom.collapseLeft.focus();
+    }
+  }
+
+  function toggleSide(side) {
+    const sides = state.get('seiten');
+    setSide(side, !(sides && sides[side]), { fokus: side === 'links' });
+  }
+
+  function closeDrawers() {
+    const sides = state.get('seiten');
+    if (!sides || sides.modus !== 'schmal') return false;
+    if (!sides.links && !sides.rechts) return false;
+    state.set('seiten', { ...sides, links: false, rechts: false });
+    applySides();
+    return true;
+  }
+
+  function onModeChange() {
+    const mode = currentMode();
+    const sides = state.get('seiten');
+    if (sides && sides.modus === mode) return;
+    state.set('seiten', { ...storedSides(mode), modus: mode });
+    applySides();
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Die Leiste                                                        */
+  /* ---------------------------------------------------------------- */
+
+  /** "Neuer Chat": kein leerer Datensatz auf Vorrat, nur eine leere Seite. */
+  function startNewChat(event) {
+    if (event) event.preventDefault();
+    state.set('activeChatId', null);
+    removeStored(STORAGE.chat);
+    navigate('#/chat');
+  }
 
   function buildRail() {
     const rail = dom.rail;
     clear(rail);
-    rail.setAttribute('aria-label', 'Hauptbereiche');
 
     const brand = h('a.rail__brand', {
       href: '#/chat',
-      'aria-label': 'Neural OS – Startseite',
-      title: 'Neural OS',
-    }, icon(ICONS.brand, { class: 'rail__brand-mark' }));
-    rail.appendChild(brand);
+      'aria-label': 'Neural OS – neuer Chat',
+      onClick: startNewChat,
+    },
+    icon(ICONS.brand, { class: 'rail__brand-mark' }),
+    h('span.rail__wordmark', { 'aria-hidden': 'true' }, text('Neural OS')));
+
+    dom.collapseLeft = h('button.icon-button.rail__collapse', {
+      type: 'button',
+      'aria-label': 'Seitenleiste einklappen',
+      'aria-controls': 'rail',
+      onClick: () => setSide('links', false, { fokus: true }),
+    }, icon(ICONS.collapse));
 
     const nav = h('div.rail__items', { role: 'list' });
     dom.navLinks = new Map();
-    let lastGroup = null;
     for (const view of VIEWS) {
-      // Rein dekorativ und deshalb aria-hidden: die Gruppen sind eine
-      // Lesehilfe, keine Navigationsebene, und ein Screenreader soll nicht
-      // dreizehn Eintraege in drei Listen zerlegt vorfinden.
-      if (lastGroup !== null && view.group !== lastGroup) {
-        nav.appendChild(h('span.rail__divider', { 'aria-hidden': 'true' }));
-      }
-      lastGroup = view.group || null;
+      if (!view.nav) continue;
       const badge = h('span.rail__badge', { hidden: true });
       const link = h('a.rail__item', {
         href: `#/${view.id}`,
         role: 'listitem',
         'data-view': view.id,
         title: `${view.title} (g dann ${view.key})`,
+        onClick: view.id === 'chat' ? startNewChat : null,
       },
-      h('span.rail__icon', null, icon(view.icon), badge),
-      h('span.rail__label', null, text(view.title)));
-      if (!view.primary) link.classList.add('rail__item--secondary');
+      h('span.rail__icon', null, icon(view.icon)),
+      h('span.rail__label', null, text(view.title)),
+      badge);
       dom.navLinks.set(view.id, { link, badge, view });
       nav.appendChild(link);
     }
-    rail.appendChild(nav);
 
-    const more = h('button.rail__item.rail__item--more', {
+    dom.chatList = h('ul.rail__chats');
+    dom.recent = h('section.rail__recent', { 'aria-label': 'Letzte Chats', hidden: true },
+      h('h2.rail__recent-title', null, text('Zuletzt')),
+      dom.chatList);
+
+    dom.statusButton = h('button.rail__status', {
       type: 'button',
-      title: 'Befehlspalette öffnen (Strg/Cmd + K)',
-      onClick: () => palette.open(),
-    },
-    h('span.rail__icon', null, icon(ICONS.more)),
-    h('span.rail__label', null, text('Mehr')));
-    rail.appendChild(more);
+      onClick: () => {
+        if (!state.get('connected') && state.get('ready') && eventStream) {
+          eventStream.retryNow();
+          refreshStatus();
+          return;
+        }
+        navigate('#/network');
+      },
+    });
+
+    rail.appendChild(h('div.rail__inner', null,
+      h('div.rail__head', null, brand, dom.collapseLeft),
+      nav,
+      dom.recent,
+      h('div.rail__foot', null, dom.statusButton)));
   }
+
+  function renderRecent() {
+    if (!dom.chatList) return;
+    const items = state.get('recentChats') || [];
+    const route = state.get('route');
+    const activeId = route && route.view === 'chat' ? route.params.id : null;
+    dom.recent.hidden = items.length === 0;
+    list(dom.chatList, items, (row) => row.id, (row, existing) => {
+      const title = chatTitle(row);
+      const href = `#/chat?id=${encodeURIComponent(row.id)}`;
+      const node = existing || h('li', null, h('a.rail__chat', { href }, h('span')));
+      const link = node.firstChild;
+      const label = link.firstChild;
+      if (label.textContent !== title) {
+        clear(label);
+        label.appendChild(text(title));
+      }
+      link.title = title;
+      link.classList.toggle('is-active', row.id === activeId);
+      if (row.id === activeId) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+      return node;
+    });
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Kopf der mittleren Karte                                          */
+  /* ---------------------------------------------------------------- */
 
   function buildTopbar() {
     const bar = dom.topbar;
     clear(bar);
 
-    dom.routeTitle = h('h1.topbar__title', null, text('Neural OS'));
-    const left = h('div.topbar__left', null, dom.routeTitle);
+    dom.expandLeft = h('button.icon-button.topbar__expand', {
+      type: 'button',
+      'aria-label': 'Seitenleiste ausklappen',
+      title: 'Seitenleiste ausklappen',
+      'aria-controls': 'rail',
+      onClick: () => setSide('links', true, { fokus: true }),
+    }, icon(ICONS.expand));
 
-    dom.netChip = h('button.chip.chip--net', {
-      type: 'button',
-      'data-net': 'unknown',
-      onClick: () => navigate('#/network'),
-    });
-    dom.modelChip = h('button.chip', {
-      type: 'button',
-      'data-model': 'unknown',
-      onClick: () => navigate('#/settings'),
-    });
-    dom.vaultChip = h('button.chip', {
-      type: 'button',
-      'data-vault': 'unknown',
-      onClick: () => navigate('#/settings'),
-    });
+    dom.routeTitle = h('h1.topbar__title', null, text('Neural OS'));
+    dom.headSlot = h('div.topbar__slot');
+
     dom.connChip = h('button.chip.chip--warn', {
       type: 'button',
       hidden: true,
@@ -459,74 +709,127 @@ function createShell() {
       },
     });
 
-    dom.searchButton = h('button.topbar__search', {
+    dom.searchButton = h('button.icon-button', {
       type: 'button',
+      'aria-label': 'Suchen und Befehle (Strg K)',
+      title: `Suchen und Befehle (${isMac() ? '⌘K' : 'Strg K'})`,
       onClick: () => palette.open(),
-      'aria-label': 'Befehlspalette und Suche öffnen',
-    },
-    icon(ICONS.search),
-    h('span.topbar__search-label', null, text('Suchen oder Befehl …')),
-    h('kbd.kbd', null, text(isMac() ? '⌘K' : 'Strg K')));
+    }, icon(ICONS.search));
 
-    dom.themeButton = h('button.icon-button', {
+    dom.toggleRight = h('button.icon-button.topbar__toggle', {
       type: 'button',
-      onClick: () => cycleTheme(),
-    });
+      'aria-controls': 'aside',
+      onClick: () => toggleSide('rechts'),
+    }, icon(ICONS.panelRight));
 
-    const right = h('div.topbar__right', null,
-      dom.connChip,
-      dom.netChip,
-      dom.modelChip,
-      dom.vaultChip,
-      h('span.topbar__sep', { 'aria-hidden': 'true' }),
-      dom.themeButton,
-      h('button.icon-button', {
-        type: 'button',
-        'aria-label': 'Tastenkürzel anzeigen',
-        title: 'Tastenkürzel (?)',
-        onClick: () => showShortcuts(),
-      }, icon(ICONS.keyboard)));
-
-    bar.append(left, dom.searchButton, right);
-    renderChrome();
+    bar.append(dom.expandLeft, dom.routeTitle, dom.headSlot,
+      h('div.topbar__right', null, dom.connChip, dom.searchButton, dom.toggleRight));
   }
 
-  /** Everything the header claims, recomputed from state. Never from a wish. */
+  function setStageTitle(value) {
+    const title = String(value || '').trim() || 'Neural OS';
+    if (!dom.routeTitle) return;
+    if (dom.routeTitle.textContent !== title) {
+      clear(dom.routeTitle);
+      dom.routeTitle.appendChild(text(title));
+    }
+    document.title = title === 'Neural OS' ? 'Neural OS' : `${title} · Neural OS`;
+  }
+
+  function setHeadActions(nodes) {
+    if (!dom.headSlot) return;
+    clear(dom.headSlot);
+    for (const node of nodes.flat()) {
+      if (node instanceof Node) dom.headSlot.appendChild(node);
+    }
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Rechte Spalte                                                     */
+  /* ---------------------------------------------------------------- */
+
+  function buildAside() {
+    const aside = dom.aside;
+    clear(aside);
+    const inner = h('div.aside__inner');
+    for (const tile of TILES) {
+      const el = h('section.tile', {
+        'data-tile': tile.kachel,
+        'aria-label': tile.title,
+        class: tile.grow ? 'tile--grow' : '',
+      });
+      tiles.set(tile.kachel, { ...tile, el, handle: null });
+      inner.appendChild(el);
+    }
+    aside.appendChild(inner);
+  }
+
+  function mountTiles() {
+    if (tilesMounted) return;
+    tilesMounted = true;
+    for (const entry of tiles.values()) mountTile(entry);
+  }
+
+  async function mountTile(entry) {
+    try {
+      // Die Kennung kommt aus der festen Liste oben, nie aus einer Eingabe.
+      const mod = await import(`./widgets/${entry.kachel}.js`);
+      const mount = mod && (mod.mount || (mod.default && mod.default.mount));
+      if (typeof mount !== 'function') throw new Error(`widgets/${entry.kachel}.js hat keine mount()-Funktion.`);
+      clear(entry.el);
+      entry.handle = (await mount(entry.el, makeTileContext(entry))) || null;
+    } catch (err) {
+      console.warn(`[neural-os] Kachel "${entry.kachel}" nicht verfügbar:`, err && err.message);
+      clear(entry.el);
+      entry.el.append(
+        tileHead({ icon: entry.icon, title: entry.title, href: entry.href }),
+        h('p.tile__empty', null, text('Diese Kachel konnte nicht geladen werden.')));
+    }
+  }
+
+  function makeTileContext(entry) {
+    return {
+      ...baseContext(),
+      kachel: entry.kachel,
+      get route() {
+        return state.get('route');
+      },
+    };
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Was die Schale anzeigt, immer aus dem Zustand neu berechnet        */
+  /* ---------------------------------------------------------------- */
+
   function renderChrome() {
-    if (!dom.netChip) return;
-    const status = state.get('status');
-    const stale = state.get('statusStale') !== false;
-
-    const net = describeNetwork(status, stale);
-    setChip(dom.netChip, net.label, net.hint, ICONS.network);
-    dom.netChip.dataset.net = net.key;
-
-    const model = describeModels(status, stale);
-    setChip(dom.modelChip, model.label, model.hint, ICONS.model);
-    dom.modelChip.dataset.model = model.key;
-
-    const vault = describeVault(status, stale);
-    setChip(dom.vaultChip, vault.label, vault.hint, vault.key === 'locked' ? ICONS.lock : ICONS.unlock);
-    dom.vaultChip.dataset.vault = vault.key;
+    if (!dom.statusButton) return;
+    const info = describeStatus({
+      status: state.get('status'),
+      stale: state.get('statusStale') !== false,
+      connected: state.get('connected'),
+      ready: state.get('ready'),
+      claude: state.get('claude'),
+    });
+    clear(dom.statusButton);
+    dom.statusButton.dataset.status = info.key;
+    dom.statusButton.append(
+      h('span.rail__status-icon', { 'aria-hidden': 'true' }, icon(info.offline ? ICONS.cloudOff : ICONS.cloud)),
+      h('span', { class: cx('dot', info.dot ? `dot--${info.dot}` : '') }),
+      h('span.rail__status-label', null, text(info.label)));
+    dom.statusButton.title = info.hint;
+    dom.statusButton.setAttribute('aria-label', `${info.label}. ${info.hint}`);
 
     const connected = state.get('connected');
-    const info = state.get('connectionInfo') || {};
+    const connInfo = state.get('connectionInfo') || {};
     const showConn = !connected && state.get('ready');
     dom.connChip.hidden = !showConn;
     if (showConn) {
-      const label = info.state === 'reconnecting' && info.delay
-        ? `Verbindung unterbrochen – neuer Versuch in ${Math.max(1, Math.round(info.delay / 1000))} s`
-        : 'Verbindung unterbrochen';
-      setChip(dom.connChip, label, 'Die Live-Verbindung zum lokalen Server ist abgerissen. Klicken, um es sofort erneut zu versuchen.', ICONS.alert);
-    }
-
-    if (dom.themeButton) {
-      const theme = state.get('theme');
-      clear(dom.themeButton);
-      dom.themeButton.appendChild(icon(theme === 'dark' ? ICONS.moon : theme === 'light' ? ICONS.sun : ICONS.system));
-      const label = theme === 'dark' ? 'Dunkel' : theme === 'light' ? 'Hell' : 'Systemvorgabe';
-      dom.themeButton.title = `Darstellung: ${label} (klicken zum Wechseln)`;
-      dom.themeButton.setAttribute('aria-label', `Darstellung: ${label}. Klicken zum Wechseln.`);
+      clear(dom.connChip);
+      const label = connInfo.state === 'reconnecting' && connInfo.delay
+        ? `Getrennt – neuer Versuch in ${Math.max(1, Math.round(connInfo.delay / 1000))} s`
+        : 'Verbindung getrennt';
+      dom.connChip.append(icon(ICONS.alert), h('span.chip__label', null, text(label)));
+      dom.connChip.title = 'Die Live-Verbindung zum eigenen Server ist abgerissen. Antippen versucht es sofort erneut.';
     }
 
     const approvals = state.get('approvals') || [];
@@ -543,38 +846,39 @@ function createShell() {
     }
   }
 
-  function setChip(node, label, hint, iconMarkup) {
-    clear(node);
-    node.appendChild(icon(iconMarkup));
-    node.appendChild(h('span.chip__label', null, text(label)));
-    node.title = hint;
-    node.setAttribute('aria-label', `${label}. ${hint}`);
-  }
-
   function markActiveRoute(route) {
     if (!dom.navLinks) return;
+    const view = VIEWS.find((v) => v.id === route.view);
+    const navId = view ? (view.parent || view.id) : null;
     for (const [id, entry] of dom.navLinks) {
-      const active = id === route.view;
+      // "Neuer Chat" leuchtet nur, solange es wirklich ein neuer ist; ein
+      // offener Chat ist in "Zuletzt" markiert, wie bei Claude.
+      const active = id === navId && !(id === 'chat' && route.params.id);
       entry.link.classList.toggle('is-active', active);
       if (active) entry.link.setAttribute('aria-current', 'page');
       else entry.link.removeAttribute('aria-current');
     }
+    renderRecent();
+  }
+
+  function defaultTitleFor(route) {
     const view = VIEWS.find((v) => v.id === route.view);
-    if (dom.routeTitle) {
-      clear(dom.routeTitle);
-      dom.routeTitle.appendChild(text(view ? view.title : 'Nicht gefunden'));
+    if (!view) return 'Nicht gefunden';
+    if (view.id === 'chat' && route.params.id) {
+      const known = (state.get('recentChats') || []).find((row) => row.id === route.params.id);
+      return known ? chatTitle(known) : 'Chat';
     }
-    document.title = view ? `${view.title} · Neural OS` : 'Neural OS';
+    return view.head || view.title;
   }
 
   /* ---------------------------------------------------------------- */
-  /* View loading                                                      */
+  /* Ansichten laden                                                   */
   /* ---------------------------------------------------------------- */
 
   async function loadView(id) {
     if (!VIEW_IDS.has(id)) throw new ApiError('NOT_FOUND', `Unbekannter Bereich "${id}".`, { status: 404 });
     if (!viewCache.has(id)) {
-      // The id comes from the allow-list above, never straight from the hash.
+      // Die Kennung stammt aus der Liste oben, nie direkt aus der Adresse.
       const promise = import(`./views/${id}.js`).then((mod) => {
         const view = mod && (mod.default || mod.view);
         if (!view || typeof view.mount !== 'function') {
@@ -583,7 +887,7 @@ function createShell() {
         return view;
       });
       viewCache.set(id, promise);
-      promise.catch(() => viewCache.delete(id)); // a failed load must stay retryable
+      promise.catch(() => viewCache.delete(id)); // ein Fehlschlag muss wiederholbar bleiben
     }
     return viewCache.get(id);
   }
@@ -603,7 +907,13 @@ function createShell() {
 
   async function renderRoute(route) {
     const token = ++mountToken;
+    renderedRoute = route;
+    // Auf schmalen Bildschirmen geht die Schublade nach jeder Wahl zu --
+    // auch wenn die Adresse dieselbe blieb ("Neuer Chat" im Chat).
+    closeDrawers();
     markActiveRoute(route);
+    setStageTitle(defaultTitleFor(route));
+    setHeadActions([]);
     await unmountCurrent();
     if (token !== mountToken) return;
 
@@ -617,8 +927,8 @@ function createShell() {
       return;
     }
 
-    // Only show a spinner if loading actually takes a moment; a flash of
-    // "Lädt …" on a cached module looks broken rather than fast.
+    // Ein Kreisel nur, wenn das Laden wirklich dauert: ein kurzes "Lädt …"
+    // bei einem schon geladenen Modul sieht kaputt aus, nicht schnell.
     const spinnerTimer = setTimeout(() => {
       if (token === mountToken && !container.firstChild) container.appendChild(renderLoading(route));
     }, 140);
@@ -637,19 +947,9 @@ function createShell() {
     if (token !== mountToken) return;
 
     clear(container);
-    const entry = dom.navLinks && dom.navLinks.get(route.view);
-    if (entry && view.title && typeof view.title === 'string') {
-      // The module's own label wins once it is actually here.
-      const labelNode = entry.link.querySelector('.rail__label');
-      if (labelNode && labelNode.textContent !== view.title) {
-        clear(labelNode);
-        labelNode.appendChild(text(view.title));
-      }
-    }
-
     try {
       currentView = view;
-      await view.mount(container, makeContext(route));
+      await view.mount(container, makeContext(route, token));
     } catch (err) {
       if (token !== mountToken) return;
       currentView = null;
@@ -669,7 +969,7 @@ function createShell() {
       h('h2.view-state__title', null, text('Diesen Bereich gibt es nicht')),
       h('p.view-state__text', null, text(`Die Adresse „${route.hash}“ gehört zu keinem Bereich dieser Anwendung.`)),
       h('div.view-state__actions', null,
-        h('button.btn.btn--primary', { type: 'button', onClick: () => navigate(`#/${DEFAULT_VIEW}`) }, text('Zum Chat'))));
+        h('button.btn.btn--primary', { type: 'button', onClick: () => startNewChat() }, text('Zum Chat'))));
   }
 
   function renderViewError(route, err, phase) {
@@ -680,7 +980,7 @@ function createShell() {
       h('h2.view-state__title', null, text(`${label} ist nicht verfügbar`)),
       h('p.view-state__text', null, text(phase === 'load'
         ? `Das Modul „views/${route.view}.js“ konnte nicht geladen werden. In dieser Installation fehlt dieser Teil der Oberfläche oder er enthält einen Fehler.`
-        : `Beim Aufbau der Ansicht ist ein Fehler aufgetreten. Die übrigen Bereiche funktionieren weiter.`)),
+        : 'Beim Aufbau der Ansicht ist ein Fehler aufgetreten. Die übrigen Bereiche funktionieren weiter.')),
       h('pre.view-state__detail', null, text(message)),
       h('div.view-state__actions', null,
         h('button.btn.btn--primary', {
@@ -690,7 +990,7 @@ function createShell() {
             renderRoute(state.get('route'));
           },
         }, text('Erneut versuchen')),
-        h('button.btn', { type: 'button', onClick: () => navigate(`#/${DEFAULT_VIEW}`) }, text('Zum Chat'))));
+        h('button.btn', { type: 'button', onClick: () => startNewChat() }, text('Zum Chat'))));
   }
 
   function labelFor(id) {
@@ -699,10 +999,10 @@ function createShell() {
   }
 
   /* ---------------------------------------------------------------- */
-  /* Context handed to every view (contract section 13)                */
+  /* Was jede Ansicht und jede Kachel bekommt (Vertrag, Abschnitt 13)  */
   /* ---------------------------------------------------------------- */
 
-  function makeContext(route) {
+  function baseContext() {
     return {
       api,
       ApiError,
@@ -715,15 +1015,41 @@ function createShell() {
       cx,
       frag,
       timeAgo,
+      formatDate,
+      formatNumber,
       snippet,
       state,
       bus,
       navigate,
       toast,
       confirm: confirmDialog,
-      route,
       icons: ICONS,
+      tileHead,
+      shell: {
+        /** @param {'links'|'rechts'} side */
+        isOpen: (side) => !!(state.get('seiten') || {})[side],
+        open: (side) => setSide(side, true),
+        close: (side) => setSide(side, false),
+        toggle: (side) => toggleSide(side),
+        newChat: () => startNewChat(),
+      },
       version: APP_VERSION,
+    };
+  }
+
+  function makeContext(route, token) {
+    // Nur die Ansicht, die gerade dran ist, darf den Kopf beschriften. Eine,
+    // die nach dem Wegnavigieren noch eine Antwort bekommt, nicht mehr.
+    const current = () => token === mountToken;
+    return {
+      ...baseContext(),
+      route,
+      setTitle: (value) => {
+        if (current()) setStageTitle(value);
+      },
+      setHeadActions: (...nodes) => {
+        if (current()) setHeadActions(nodes);
+      },
     };
   }
 
@@ -732,36 +1058,67 @@ function createShell() {
   /* ---------------------------------------------------------------- */
 
   function navigate(target) {
-    const next = parseRoute(String(target || '').startsWith('#') ? target : `#${target}`);
-    const hash = routeHash(next);
-    if (window.location.hash === hash) {
-      // Same address, explicit request: re-render rather than doing nothing.
+    const raw = String(target || '');
+    const next = parseRoute(raw.startsWith('#') ? raw : `#${raw.startsWith('/') ? raw : `/${raw}`}`);
+    if (window.location.hash === next.hash) {
+      // Dieselbe Adresse, ausdruecklich gewuenscht: neu aufbauen statt nichts tun.
       state.set('route', next);
       renderRoute(next);
       return;
     }
-    window.location.hash = hash;
+    window.location.hash = next.hash;
+  }
+
+  /**
+   * Alte und besondere Adressen, bevor irgendetwas gezeichnet wird.
+   * @returns {boolean} true, wenn die Adresse erledigt ist
+   */
+  function divert(route) {
+    if (ENTFALLEN.has(route.view)) {
+      // replaceState statt location.replace: kein zweites hashchange, also
+      // genau ein Aufbau, und die alte Adresse bleibt nicht im Verlauf.
+      history.replaceState(null, '', `${window.location.pathname}${window.location.search}#/${DEFAULT_VIEW}`);
+      const home = parseRoute(`#/${DEFAULT_VIEW}`);
+      state.set('route', home);
+      renderRoute(home);
+      return true;
+    }
+    if (route.view === 'search') {
+      // Suchen ist die Befehlspalette. Wer (etwa ueber ein Schlagwort in einer
+      // Notiz) hierher kommt, bleibt, wo er war, und bekommt die Palette mit
+      // dem Suchbegriff.
+      const back = renderedRoute ? renderedRoute.hash : `#/${DEFAULT_VIEW}`;
+      history.replaceState(null, '', `${window.location.pathname}${window.location.search}${back}`);
+      if (!renderedRoute) {
+        const home = parseRoute(back);
+        state.set('route', home);
+        renderRoute(home);
+      }
+      palette.open(route.params.q || '');
+      return true;
+    }
+    return false;
   }
 
   function onHashChange() {
     const route = parseRoute(window.location.hash);
+    if (divert(route)) return;
     state.set('route', route);
     if (route.params.id && route.view === 'chat') {
       state.set('activeChatId', route.params.id);
       writeStored(STORAGE.chat, route.params.id);
     }
-    writeStored(STORAGE.lastRoute, route.hash);
     renderRoute(route);
   }
 
   /* ---------------------------------------------------------------- */
-  /* Toasts                                                            */
+  /* Meldungen                                                         */
   /* ---------------------------------------------------------------- */
 
   const toasts = [];
 
   /**
-   * @param {string} message German, user-facing
+   * @param {string} message deutsch, fuer Menschen
    * @param {'info'|'success'|'error'} [kind]
    * @param {{timeout?:number, action?:{label:string, run:Function}}} [opts]
    */
@@ -798,7 +1155,6 @@ function createShell() {
       const index = toasts.indexOf(node);
       if (index !== -1) toasts.splice(index, 1);
       node.classList.add('toast--leaving');
-      // Remove after the (short) transition, and unconditionally afterwards.
       setTimeout(() => node.remove(), 180);
     }
 
@@ -813,7 +1169,7 @@ function createShell() {
   }
 
   /* ---------------------------------------------------------------- */
-  /* Overlays: modal dialog, command palette, onboarding               */
+  /* Ueberlagerungen: Dialog, Befehlspalette, Schnellerfassung         */
   /* ---------------------------------------------------------------- */
 
   const overlayStack = [];
@@ -857,32 +1213,21 @@ function createShell() {
     return entry;
   }
 
-  /* ---------------------------------------------------------------- */
-  /* Schnellerfassung                                                  */
-  /* ---------------------------------------------------------------- */
-
   /**
-   * Was in der Eingabe steht, und was daraus wird.
-   *
-   * Reine Funktion, damit sie prüfbar ist, ohne ein Fenster zu öffnen.
-   *
-   * Die erkannten Merker sind ABSICHTLICH dieselben, die auch die Vorschläge
-   * in einer Notiz finden (`- [ ]`, `TODO:`, `Offen:` — siehe
-   * src/assist/detectors.js). Zwei Stellen, die aus demselben Text
-   * Verschiedenes machen, wären ein Vokabular, das man zweimal lernen muss.
-   *
-   * Geraten wird nichts: ohne Merker entsteht eine Notiz, nie eine Aufgabe.
+   * Was in der Schnellerfassung steht, und was daraus wird. Rein, damit sie
+   * pruefbar ist, ohne ein Fenster zu oeffnen. Geraten wird nichts: ohne
+   * Merker (`- [ ]`, `TODO:`, `Offen:`) entsteht eine Notiz, nie eine Aufgabe.
    */
   function parseQuickCapture(raw) {
-    const text = String(raw || '').replace(/\r\n/g, '\n');
-    const trimmed = text.trim();
+    const value = String(raw || '').replace(/\r\n/g, '\n');
+    const trimmed = value.trim();
     if (!trimmed) return null;
 
     const taskMarker = /^(?:[-*+]\s*\[\s*\]\s*|todo\s*:?\s+|@todo\s+|offen\s*:\s*|zu\s+tun\s*:\s*)/i;
     const isTask = taskMarker.test(trimmed);
     const body = isTask ? trimmed.replace(taskMarker, '') : trimmed;
 
-    // Schlagwörter werden gelesen, aber NICHT aus dem Text entfernt: wer
+    // Schlagwoerter werden gelesen, aber NICHT aus dem Text entfernt: wer
     // "#kaffee" schreibt, meint es meistens auch als Wort im Satz.
     const tags = [];
     for (const match of body.matchAll(/(?:^|\s)#([\p{L}\p{N}_-]{2,40})/gu)) {
@@ -895,14 +1240,11 @@ function createShell() {
     const rest = lines.slice(1).join('\n').trim();
 
     if (isTask) {
-      // Aufgaben tragen im Datenmodell keine Schlagwörter (siehe
-      // src/store/schema.js). Ein erkanntes `#wort` bleibt deshalb einfach im
-      // Text stehen -- und die Vorschau sagt das, statt ein Schlagwort zu
-      // versprechen, das nirgends ankommt.
+      // Aufgaben tragen im Datenmodell keine Schlagwoerter
+      // (src/store/schema.js); ein #wort bleibt im Text, und die Vorschau
+      // sagt das.
       return { kind: 'task', title: first.slice(0, 500), body: rest, tags: [], erkannteWorte: tags };
     }
-    // Eine einzelne Zeile ist ein Titel. Mehrere Zeilen: die erste ist der
-    // Titel, der Rest der Text -- so, wie eine Notiz ohnehin aufgebaut ist.
     return {
       kind: 'note',
       title: (first || 'Notiz').slice(0, 500),
@@ -912,16 +1254,8 @@ function createShell() {
   }
 
   /**
-   * Eine Zeile, von überall aus.
-   *
-   * Der Grund, warum es das gibt: die Hürde zum Aufschreiben ist der
-   * Bereichswechsel. Wer erst zu "Notizen" navigieren, dort "Neue Notiz"
-   * drücken und warten muss, bis ein Editor geladen ist, schreibt den
-   * Gedanken nicht auf.
-   *
-   * Ehrliche Grenze, die auch in docs/IDEEN.md steht: ein systemweites
-   * Tastenkürzel geht aus dem Browser heraus nicht. Das hier wirkt, solange
-   * ein Fenster von Neural OS offen ist -- mehr verspricht es nicht.
+   * Eine Zeile, von ueberall aus (Strg+Umschalt+N). Die Huerde zum
+   * Aufschreiben ist der Bereichswechsel -- also gibt es keinen.
    */
   function openQuickCapture() {
     if (quickCaptureOpen) return;
@@ -973,10 +1307,7 @@ function createShell() {
           field.value = '';
           describe();
           clear(status);
-          // Kein Zurücknehmen-Knopf hier, sondern der Hinweis, wo es steht:
-          // dieses Fenster ist für den nächsten Gedanken da, nicht für eine
-          // Verwaltungsoberfläche.
-          status.appendChild(text(`${art} angelegt. Zurücknehmen geht unter Zeitachse → Letzte Änderungen.`));
+          status.appendChild(text(`${art} angelegt.`));
           field.focus();
         } else {
           entry.close(null);
@@ -996,9 +1327,8 @@ function createShell() {
     on(field, 'keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
-        // Strg+Enter: speichern und offen bleiben -- für mehrere Gedanken
-        // hintereinander, was der häufigste Fall ist, wenn man gerade etwas
-        // im Kopf hat.
+        // Strg+Enter: speichern und offen bleiben -- fuer mehrere Gedanken
+        // hintereinander.
         save(event.metaKey || event.ctrlKey);
       }
     });
@@ -1019,7 +1349,6 @@ function createShell() {
     field.focus();
   }
 
-  /** Kurzform eines Titels für die Vorschau, ohne ihn zu verstümmeln. */
   function snippetTitle(value) {
     const s = String(value || '');
     return s.length > 60 ? `${s.slice(0, 60)}…` : s;
@@ -1095,10 +1424,14 @@ function createShell() {
     });
   }
 
-  /* ----------------------------- palette ---------------------------- */
+  /* ----------------------------- Palette ---------------------------- */
 
   const palette = createPalette();
 
+  /**
+   * Die Befehlspalette ist zugleich die Suche (Strg+K oder /). Sie findet
+   * Bereiche, Aktionen und -- ab zwei Zeichen -- Notizen, Chats, Projekte.
+   */
   function createPalette() {
     let entry = null;
     let items = [];
@@ -1110,7 +1443,16 @@ function createShell() {
     function baseItems() {
       const status = state.get('status');
       const vaultState = status && status.vault ? (status.vault.state || status.vault.encryption) : null;
+      const sides = state.get('seiten') || {};
       const actions = [
+        {
+          id: 'act:new-chat',
+          group: 'Aktionen',
+          label: 'Neuer Chat',
+          hint: 'Leere Seite, die erste Nachricht legt den Chat an',
+          icon: ICONS.chat,
+          run: () => startNewChat(),
+        },
         {
           id: 'act:quick',
           group: 'Aktionen',
@@ -1123,8 +1465,7 @@ function createShell() {
           id: 'act:new-note',
           group: 'Aktionen',
           label: 'Neue Notiz anlegen',
-          hint: 'Legt eine leere Notiz an und öffnet sie',
-          icon: ICONS.plus,
+          icon: ICONS.notes,
           run: async () => {
             const record = await api.post('/records', { type: 'note', data: { title: 'Neue Notiz', body: '' } });
             const id = record && (record.id || (record.record && record.record.id));
@@ -1133,33 +1474,18 @@ function createShell() {
           },
         },
         {
-          id: 'act:new-chat',
+          id: 'act:left',
           group: 'Aktionen',
-          label: 'Neuen Chat beginnen',
-          hint: 'Ein neues Gespräch mit dem lokalen Modell',
-          icon: ICONS.chat,
-          run: async () => {
-            const record = await api.post('/chats', {});
-            const id = record && (record.id || (record.record && record.record.id));
-            if (id) {
-              state.set('activeChatId', id);
-              writeStored(STORAGE.chat, id);
-            }
-            navigate(id ? `#/chat?id=${encodeURIComponent(id)}` : '#/chat');
-          },
+          label: sides.links ? 'Seitenleiste einklappen' : 'Seitenleiste ausklappen',
+          icon: ICONS.panelLeft,
+          run: () => toggleSide('links'),
         },
         {
-          id: 'act:models-refresh',
+          id: 'act:right',
           group: 'Aktionen',
-          label: 'Modelle neu suchen',
-          hint: 'Fragt alle eingetragenen Modell-Backends erneut ab',
-          icon: ICONS.refresh,
-          run: async () => {
-            const result = await api.post('/models/refresh', {}, { timeoutMs: 20000 });
-            await refreshStatus();
-            const count = countModels(result) || countModels(state.get('models'));
-            toast(count ? `${formatNumber(count)} Modell(e) gefunden.` : 'Kein Modell gefunden.', count ? 'success' : 'info');
-          },
+          label: sides.rechts ? 'Übersicht rechts einklappen' : 'Übersicht rechts ausklappen',
+          icon: ICONS.panelRight,
+          run: () => toggleSide('rechts'),
         },
         {
           id: 'act:graph-rescan',
@@ -1178,7 +1504,7 @@ function createShell() {
           group: 'Aktionen',
           label: 'Sicherung exportieren',
           hint: 'Schreibt einen vollständigen Export in den Exportordner',
-          icon: ICONS.arrow,
+          icon: ICONS.backup,
           run: async () => {
             const result = await api.post('/backup/export', { format: 'both', includeFiles: true }, { timeoutMs: 120000 });
             toast(result && result.dir ? `Sicherung geschrieben nach ${result.dir}` : 'Sicherung geschrieben.', 'success', { timeout: 12000 });
@@ -1187,16 +1513,9 @@ function createShell() {
         {
           id: 'act:theme',
           group: 'Aktionen',
-          label: 'Darstellung wechseln (hell / dunkel / System)',
-          icon: ICONS.sun,
+          label: 'Darstellung wechseln (dunkel / hell / System)',
+          icon: ICONS.moon,
           run: () => cycleTheme(),
-        },
-        {
-          id: 'act:onboarding',
-          group: 'Aktionen',
-          label: 'Willkommenshinweise erneut anzeigen',
-          icon: ICONS.info,
-          run: () => showOnboarding(true),
         },
         {
           id: 'act:shortcuts',
@@ -1215,7 +1534,7 @@ function createShell() {
       ];
 
       if (vaultState === 'unlocked') {
-        actions.unshift({
+        actions.push({
           id: 'act:lock',
           group: 'Aktionen',
           label: 'Tresor sperren',
@@ -1231,14 +1550,23 @@ function createShell() {
       const navigation = VIEWS.map((view) => ({
         id: `nav:${view.id}`,
         group: 'Bereiche',
-        label: view.title,
+        label: view.id === 'chat' ? 'Chat' : view.title,
         hint: `g dann ${view.key}`,
         icon: view.icon,
         keywords: `${view.id} ${view.keywords}`,
-        run: () => navigate(`#/${view.id}`),
+        run: () => (view.id === 'chat' ? startNewChat() : navigate(`#/${view.id}`)),
       }));
 
-      return [...navigation, ...actions];
+      const chats = (state.get('recentChats') || []).slice(0, 6).map((row) => ({
+        id: `chat:${row.id}`,
+        group: 'Letzte Chats',
+        label: chatTitle(row),
+        hint: row.updatedAt ? timeAgo(row.updatedAt) : '',
+        icon: ICONS.chat,
+        run: () => navigate(`#/chat?id=${encodeURIComponent(row.id)}`),
+      }));
+
+      return [...navigation, ...chats, ...actions];
     }
 
     function score(item, query) {
@@ -1246,7 +1574,7 @@ function createShell() {
       const haystack = `${item.label} ${item.hint || ''} ${item.keywords || ''}`.toLowerCase();
       const needle = query.toLowerCase();
       if (haystack.includes(needle)) return 10 - haystack.indexOf(needle) / 100;
-      // Loose subsequence match, so "eins" still finds "Einstellungen".
+      // Lose Teilfolge, damit "eins" noch "Einstellungen" findet.
       let index = 0;
       for (const char of needle) {
         index = haystack.indexOf(char, index);
@@ -1257,23 +1585,18 @@ function createShell() {
     }
 
     function render(query) {
-      const candidates = baseItems()
+      const scored = baseItems()
         .map((item) => ({ item, s: score(item, query) }))
         .filter((x) => x.s > 0)
-        .sort((a, b) => b.s - a.s)
-        .map((x) => x.item);
-
-      const extra = [];
-      if (query.trim().length >= 2) {
-        extra.push({
-          id: 'search:all',
-          group: 'Suche',
-          label: `Alles durchsuchen nach „${query.trim()}“`,
-          icon: ICONS.search,
-          run: () => navigate(`#/search?q=${encodeURIComponent(query.trim())}`),
-        });
-      }
-      items = [...extra, ...candidates, ...(state.get('paletteResults') || [])];
+        .sort((a, b) => b.s - a.s);
+      // Reihenfolge: ein Bereich oder Befehl, dessen Name das Getippte
+      // enthaelt ("eins" -> Einstellungen), dann die Treffer aus dem Tresor,
+      // dann alles nur lose Passende. So fuehrt Strg+K, Wort, Enter dorthin,
+      // wo man hinwollte, und Suchen bleibt trotzdem ein Tastendruck.
+      const stark = scored.filter((x) => query && x.s >= 9).map((x) => x.item);
+      const lose = scored.filter((x) => !query || x.s < 9)
+        .map((x) => (query ? { ...x.item, group: 'Weitere' } : x.item));
+      items = [...stark, ...(state.get('paletteResults') || []), ...lose];
       active = 0;
       paint();
     }
@@ -1333,12 +1656,14 @@ function createShell() {
         return;
       }
       try {
-        const result = await api.get('/search', { query: { q: query.trim(), limit: 6 }, timeoutMs: 8000 });
+        const result = await api.get('/search', { query: { q: query.trim(), limit: 8 }, timeoutMs: 8000 });
         if (token !== searchToken) return;
         const rows = (result && Array.isArray(result.items) ? result.items : []).map((row) => {
           const record = row && row.record ? row.record : row;
           const data = (record && record.data) || {};
-          const label = data.title || data.name || data.text || record.id;
+          // Eine Nachricht hat keinen Titel; ihr Anfang sagt mehr als ihre Kennung.
+          const inhalt = String(data.content || data.text || '').replace(/\s+/g, ' ').trim();
+          const label = data.title || data.name || (inhalt ? inhalt.slice(0, 90) : '') || recordTypeLabel(record.type) || record.id;
           return {
             id: `hit:${record.id}`,
             group: 'Treffer',
@@ -1374,18 +1699,25 @@ function createShell() {
 
     function open(initialQuery = '') {
       if (entry) {
-        if (input) input.select();
+        if (input) {
+          if (initialQuery) {
+            input.value = initialQuery;
+            render(initialQuery);
+            runSearch(initialQuery);
+          }
+          input.select();
+        }
         return;
       }
       input = h('input.palette__input', {
         type: 'text',
         autofocus: true,
         value: initialQuery,
-        placeholder: 'Bereich, Aktion oder Suchbegriff …',
+        placeholder: 'Suchen – Notizen, Chats, Bereiche, Befehle …',
         role: 'combobox',
         'aria-expanded': 'true',
         'aria-controls': 'palette-list',
-        'aria-label': 'Befehlspalette',
+        'aria-label': 'Suchen und Befehle',
         autocomplete: 'off',
         spellcheck: 'false',
         onInput: (event) => {
@@ -1419,13 +1751,13 @@ function createShell() {
 
       const node = h('div.palette', null,
         h('div.palette__head', null,
-          h('span.palette__head-icon', { 'aria-hidden': 'true' }, icon(ICONS.command)),
+          h('span.palette__head-icon', { 'aria-hidden': 'true' }, icon(ICONS.search)),
           input,
           h('kbd.kbd', null, text('Esc'))),
         listNode,
         h('div.palette__foot', null,
-          h('span', null, text('↑ ↓ bewegen · ↵ ausführen · Esc schließen')),
-          h('span', null, text('Alles bleibt auf diesem Gerät'))));
+          h('span', null, text('↑ ↓ bewegen · ↵ öffnen · Esc schließen')),
+          h('span', null, text(`${isMac() ? '⌘K' : 'Strg K'} öffnet die Suche überall`))));
 
       entry = openOverlay({
         node,
@@ -1442,90 +1774,17 @@ function createShell() {
     return { open, close, get isOpen() { return !!entry; } };
   }
 
-  /* --------------------------- onboarding --------------------------- */
-
-  function showOnboarding(force = false) {
-    if (!force && readStored(STORAGE.onboarding, null) === APP_VERSION) return;
-    const status = state.get('status');
-    const home = (status && (status.home || (status.paths && status.paths.home) || (status.vault && status.vault.home))) || null;
-    const modelInfo = describeModels(status, state.get('statusStale') !== false);
-    const net = describeNetwork(status, state.get('statusStale') !== false);
-    const titleId = 'onboarding-title';
-
-    const missing = [];
-    if (modelInfo.key === 'none') {
-      missing.push(h('li', null,
-        h('strong', null, text('Es ist kein Modell installiert.')),
-        text(' Chat und Agenten brauchen ein lokales Modell. Mit Internetzugang einmalig:'),
-        h('pre.code', null, text('ollama pull llama3.2')),
-        text('Ollama lauscht danach auf 127.0.0.1:11434 und wird automatisch gefunden. Ab dann läuft der Chat ohne Internet.')));
-    }
-    if (modelInfo.key === 'unknown') {
-      missing.push(h('li', null, text('Der Modellstatus ist gerade nicht abrufbar. Die Kopfzeile zeigt deshalb „unbekannt“ statt einer Vermutung.')));
-    }
-    if (status && status.sharing && status.sharing.enabled) {
-      missing.push(h('li', null, text('Die Freigabe im lokalen Netz ist aktiv. Andere Geräte in deinem Netzwerk können diese Anwendung mit einem Token erreichen.')));
-    }
-
-    const node = h('div.onboarding', null,
-      h('div.onboarding__mark', { 'aria-hidden': 'true' }, icon(ICONS.brand)),
-      h('h2.onboarding__title', { id: titleId }, text('Willkommen in Neural OS')),
-      h('p.onboarding__lead', null, text(
-        'Dies ist dein eigenes System. Notizen, Gespräche, Aufgaben und Verknüpfungen liegen auf diesem Gerät '
-        + '– nicht in einem Konto, nicht auf einem Server, der jemand anderem gehört.',
-      )),
-      h('dl.onboarding__facts', null,
-        h('div.onboarding__fact', null,
-          h('dt', null, text('Wo deine Daten liegen')),
-          h('dd', null, text(home ? home : 'Im Datenverzeichnis dieser Installation, standardmäßig ~/.neural-os'))),
-        h('div.onboarding__fact', null,
-          h('dt', null, text('Netzzugang')),
-          h('dd', null, text(`${net.label} – ${net.hint}`))),
-        h('div.onboarding__fact', null,
-          h('dt', null, text('Modell')),
-          h('dd', null, text(modelInfo.hint)))),
-      missing.length
-        ? h('div.onboarding__missing', null,
-          h('h3', null, text('Was jetzt noch fehlt')),
-          h('ul', null, ...missing))
-        : h('p.onboarding__text', null, text('Es fehlt nichts: ein Modell ist erreichbar, der Tresor ist geöffnet. Viel Spaß.')),
-      h('p.onboarding__text.onboarding__text--muted', null, text(
-        'Die Kopfzeile zeigt dauerhaft, ob gerade etwas dieses Gerät verlassen darf. '
-        + 'Unter „Netzwerk“ steht jede einzelne Verbindung, die versucht wurde – auch die erlaubten.',
-      )),
-      h('div.onboarding__actions', null,
-        h('button.btn.btn--primary', {
-          type: 'button',
-          autofocus: true,
-          onClick: () => {
-            writeStored(STORAGE.onboarding, APP_VERSION);
-            entry.close(null);
-          },
-        }, text('Los geht’s')),
-        h('button.btn', {
-          type: 'button',
-          onClick: () => {
-            writeStored(STORAGE.onboarding, APP_VERSION);
-            entry.close(null);
-            navigate('#/settings');
-          },
-        }, text('Zu den Einstellungen'))));
-
-    const entry = openOverlay({ node, labelledBy: titleId, closeOnBackdrop: false });
-    entry.panel.classList.add('overlay__panel--wide');
-  }
-
-  /* --------------------------- shortcuts ---------------------------- */
+  /* --------------------------- Tastenkuerzel ------------------------ */
 
   function showShortcuts() {
     const mod = isMac() ? '⌘' : 'Strg';
     const rows = [
-      [`${mod} K`, 'Befehlspalette öffnen'],
-      ['/', 'Suche öffnen'],
+      [`${mod} K`, 'Suchen und Befehle'],
+      ['/', 'Suchen'],
       ['?', 'Diese Übersicht'],
-      ['Esc', 'Overlay schließen'],
-      ['Strg Umschalt N', 'Schnell festhalten – eine Zeile, von überall aus'],
-      ...VIEWS.map((v) => [`g ${v.key}`, `Zu ${v.title}`]),
+      ['Esc', 'Schließen'],
+      [`${mod} Umschalt N`, 'Schnell festhalten – eine Zeile, von überall aus'],
+      ...VIEWS.map((v) => [`g ${v.key}`, `Zu ${v.id === 'chat' ? 'einem neuen Chat' : v.title}`]),
     ];
     const titleId = 'shortcuts-title';
     const node = h('div.dialog', null,
@@ -1540,7 +1799,7 @@ function createShell() {
   }
 
   /* ---------------------------------------------------------------- */
-  /* Keyboard                                                          */
+  /* Tastatur                                                          */
   /* ---------------------------------------------------------------- */
 
   let pendingGo = null;
@@ -1558,10 +1817,8 @@ function createShell() {
       else palette.open();
       return;
     }
-    // Schnellerfassung. Strg/Cmd + Umschalt + N, und zwar absichtlich auch
-    // waehrend man tippt: der ganze Sinn ist, den Gedanken loszuwerden, ohne
-    // vorher irgendwohin zu wechseln. Ein Tastenkuerzel, das erst wirkt, wenn
-    // man das Textfeld verlaesst, waere genau das, was es verhindern soll.
+    // Absichtlich auch waehrend man tippt: der Sinn ist, den Gedanken
+    // loszuwerden, ohne vorher irgendwohin zu wechseln.
     if ((event.key === 'n' || event.key === 'N') && (event.metaKey || event.ctrlKey) && event.shiftKey) {
       event.preventDefault();
       openQuickCapture();
@@ -1573,6 +1830,7 @@ function createShell() {
         pendingGo = null;
       }
       if (closeTopOverlay()) event.preventDefault();
+      else if (closeDrawers()) event.preventDefault();
       return;
     }
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -1584,13 +1842,15 @@ function createShell() {
       pendingGo = null;
       if (target) {
         event.preventDefault();
-        navigate(`#/${target.id}`);
+        if (target.id === 'chat') startNewChat();
+        else navigate(`#/${target.id}`);
       }
       return;
     }
 
     if (event.key === 'g') {
-      // Two-key sequence, so single letters stay free for the views themselves.
+      // Zwei Tasten nacheinander, damit einzelne Buchstaben den Ansichten
+      // gehoeren.
       pendingGo = { timer: setTimeout(() => { pendingGo = null; }, 1400) };
       return;
     }
@@ -1606,37 +1866,45 @@ function createShell() {
   }
 
   /* ---------------------------------------------------------------- */
-  /* Theme                                                             */
+  /* Darstellung                                                       */
   /* ---------------------------------------------------------------- */
 
+  /** Dunkel ohne Attribut, hell und "System" ueber data-theme (app.css). */
   function applyTheme(theme) {
     const root = document.documentElement;
-    if (theme === 'light' || theme === 'dark') {
-      root.setAttribute('data-theme', theme);
-      root.style.colorScheme = theme;
-    } else {
-      root.removeAttribute('data-theme');
-      root.style.colorScheme = 'light dark';
+    root.setAttribute('data-theme', theme === 'light' || theme === 'system' ? theme : 'dark');
+    let dark = theme !== 'light';
+    if (theme === 'system') {
+      try {
+        dark = !window.matchMedia('(prefers-color-scheme: light)').matches;
+      } catch {
+        dark = true;
+      }
     }
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', dark ? '#090a0a' : '#eeeff2');
   }
 
   function cycleTheme() {
-    const order = ['system', 'light', 'dark'];
+    const order = ['dark', 'light', 'system'];
     const next = order[(order.indexOf(state.get('theme')) + 1) % order.length];
     state.set('theme', next);
   }
 
   /* ---------------------------------------------------------------- */
-  /* Boot                                                              */
+  /* Start                                                             */
   /* ---------------------------------------------------------------- */
 
   async function start() {
+    dom.shell = document.getElementById('shell');
     dom.topbar = document.getElementById('topbar');
     dom.rail = document.getElementById('rail');
+    dom.aside = document.getElementById('aside');
     dom.view = document.getElementById('view');
+    dom.scrim = document.getElementById('scrim');
     dom.toasts = document.getElementById('toasts');
     dom.overlays = document.getElementById('overlays');
-    if (!dom.topbar || !dom.rail || !dom.view) {
+    if (!dom.shell || !dom.topbar || !dom.rail || !dom.view || !dom.aside) {
       throw new Error('Das Grundgerüst der Seite fehlt (index.html wurde nicht vollständig geladen).');
     }
 
@@ -1644,50 +1912,81 @@ function createShell() {
     state.on('theme', (theme) => {
       applyTheme(theme);
       writeStored(STORAGE.theme, theme);
-      renderChrome();
     });
 
-    // Following the system preference means re-rendering when it changes.
     try {
-      const media = window.matchMedia('(prefers-color-scheme: dark)');
+      const media = window.matchMedia('(prefers-color-scheme: light)');
       const onChange = () => {
         if (state.get('theme') === 'system') applyTheme('system');
       };
       if (typeof media.addEventListener === 'function') media.addEventListener('change', onChange);
-      else if (typeof media.addListener === 'function') media.addListener(onChange);
     } catch {
-      /* matchMedia missing: the CSS media query still does the right thing */
+      /* ohne matchMedia tut die CSS-Regel das Richtige */
     }
 
     buildRail();
     buildTopbar();
+    buildAside();
 
-    for (const key of ['status', 'statusStale', 'connected', 'approvals']) {
+    const mode = currentMode();
+    state.set('seiten', { ...storedSides(mode), modus: mode });
+    applySides();
+    // Erst jetzt, mit dem gemerkten Zustand an seinem Platz, darf sich
+    // etwas bewegen.
+    requestAnimationFrame(() => requestAnimationFrame(() => dom.shell.classList.remove('is-booting')));
+
+    try {
+      for (const query of [MEDIA_SCHMAL, MEDIA_MITTEL]) {
+        const media = window.matchMedia(query);
+        if (typeof media.addEventListener === 'function') media.addEventListener('change', onModeChange);
+      }
+    } catch {
+      /* ohne matchMedia bleibt die Aufteilung, wie sie ist */
+    }
+    if (dom.scrim) on(dom.scrim, 'click', () => closeDrawers());
+
+    for (const key of ['status', 'statusStale', 'connected', 'approvals', 'claude']) {
       state.on(key, () => renderChrome());
     }
+    state.on('recentChats', () => {
+      renderRecent();
+      // Der Kopf eines offenen Chats kennt seinen Titel erst, wenn die Liste da ist.
+      const route = state.get('route');
+      if (route && route.view === 'chat' && route.params.id && dom.routeTitle.textContent === 'Chat') {
+        setStageTitle(defaultTitleFor(route));
+      }
+    });
 
-    // Set the initial address BEFORE listening, so the first render happens
-    // once rather than twice (hashchange would otherwise re-enter renderRoute).
-    if (!window.location.hash || window.location.hash === '#') {
-      const last = readStored(STORAGE.lastRoute, null);
-      window.location.replace(`${window.location.pathname}${window.location.search}${last || `#/${DEFAULT_VIEW}`}`);
+    // Ohne Adresse beginnt die Anwendung im Chat -- immer, nicht dort, wo
+    // man zuletzt war: "Starten antippen, laeuft" heisst, man kann sofort
+    // schreiben.
+    if (!window.location.hash || window.location.hash === '#' || window.location.hash === '#/') {
+      history.replaceState(null, '', `${window.location.pathname}${window.location.search}#/${DEFAULT_VIEW}`);
     }
 
     on(window, 'hashchange', onHashChange);
     on(document, 'keydown', onKeyDown);
 
     const route = parseRoute(window.location.hash);
-    state.set('route', route);
-    renderRoute(route);
+    if (!divert(route)) {
+      state.set('route', route);
+      renderRoute(route);
+    }
 
+    renderChrome();
     startEventStream();
+    refreshRecent();
     await refreshStatus();
     refreshApprovals();
     state.set('ready', true);
     renderChrome();
 
-    // Onboarding waits for the first status, so it can name what is missing.
-    showOnboarding(false);
+    // Der Claude-Zustand kann sich aendern, ohne dass hier ein Ereignis
+    // ankommt (ein Schluessel laeuft ab). Einmal pro Minute nachsehen,
+    // solange das Fenster sichtbar ist, kostet nichts.
+    setInterval(() => {
+      if (document.visibilityState === 'visible') refreshStatus();
+    }, 60000);
 
     registerServiceWorker(toast);
 
@@ -1705,6 +2004,12 @@ function createShell() {
     confirm: confirmDialog,
     palette,
     refreshStatus,
+    seiten: {
+      isOpen: (side) => !!(state.get('seiten') || {})[side],
+      open: (side) => setSide(side, true),
+      close: (side) => setSide(side, false),
+      toggle: (side) => toggleSide(side),
+    },
     get route() {
       return state.get('route');
     },
@@ -1712,131 +2017,111 @@ function createShell() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Status interpretation -- shared by header, onboarding and palette   */
+/* Der Status unten links                                              */
 /* ------------------------------------------------------------------ */
 
 /**
- * The network indicator. Its whole value lies in never being optimistic:
- * without a fresh `/api/status` it reports "unbekannt", because claiming
- * "Offline" without evidence would be exactly the kind of comfortable lie
- * this application exists to avoid.
+ * Was unten links steht. Nie optimistisch: ohne frischen `/api/status` steht
+ * da "Status unbekannt", und "Online verbunden" nur, wenn der Netzmodus
+ * online ist UND Claude sich als verbunden meldet. Ein gruener Punkt, der
+ * eine Verbindung behauptet, die niemand geprueft hat, waere genau die Art
+ * bequemer Luege, die diese Anwendung nicht erzaehlen soll.
+ *
+ * @returns {{key:string, label:string, hint:string, dot:string|null, offline:boolean}}
  */
-export function describeNetwork(status, stale) {
+export function describeStatus({ status, stale, connected, ready, claude }) {
+  if (ready && !connected) {
+    return {
+      key: 'getrennt',
+      label: 'Server getrennt',
+      hint: 'Die Verbindung zum eigenen Server ist abgerissen. Antippen versucht es sofort erneut.',
+      dot: 'danger',
+      offline: true,
+    };
+  }
   const mode = status && status.network ? status.network.mode : null;
   if (stale || !mode) {
     return {
-      key: 'unknown',
-      label: 'Netz unbekannt',
+      key: 'unbekannt',
+      label: 'Status unbekannt',
       hint: 'Der Serverstatus ist gerade nicht abrufbar. Es wird kein Netzzustand behauptet.',
+      dot: null,
+      offline: false,
     };
   }
-  const strict = status.network.strictAllowlist !== false;
   if (mode === 'offline') {
-    return { key: 'offline', label: 'Offline', hint: 'Nur dieses Gerät. Ein lokales Modell auf 127.0.0.1 gilt nicht als Netzzugriff und läuft weiter.' };
+    return {
+      key: 'offline',
+      label: 'Offline',
+      hint: 'Nichts verlässt dieses Gerät. Claude und die Websuche brauchen Internet.',
+      dot: null,
+      offline: true,
+    };
   }
   if (mode === 'lan') {
-    return { key: 'lan', label: 'LAN', hint: 'Dieses Gerät und dein lokales Netzwerk. Kein öffentliches Internet.' };
+    return {
+      key: 'lan',
+      label: 'Nur lokales Netz',
+      hint: 'Dieses Gerät und dein lokales Netzwerk, kein Internet. Claude ist so nicht erreichbar.',
+      dot: 'warn',
+      offline: true,
+    };
   }
   if (mode === 'online') {
+    const c = claude || { bekannt: false };
+    if (c.bekannt && c.verbunden === true) {
+      return {
+        key: 'online',
+        label: 'Online verbunden',
+        hint: `Internet erlaubt, Claude ist verbunden${c.modell ? ` (${c.modell})` : ''}.`,
+        dot: 'ok',
+        offline: false,
+      };
+    }
+    if (c.bekannt && c.schluesselVorhanden === false) {
+      return {
+        key: 'ohne-claude',
+        label: 'Online · Claude fehlt',
+        hint: 'Internet erlaubt, aber es ist noch kein Claude-Schlüssel hinterlegt. Das geht in den Einstellungen.',
+        dot: 'warn',
+        offline: false,
+      };
+    }
+    if (c.bekannt) {
+      return {
+        key: 'claude-getrennt',
+        label: 'Online · Claude getrennt',
+        hint: 'Internet erlaubt, Claude antwortet gerade nicht.',
+        dot: 'warn',
+        offline: false,
+      };
+    }
     return {
-      key: 'online',
+      key: 'online-ungeprueft',
       label: 'Online',
-      hint: strict
-        ? 'Öffentliches Internet erlaubt, begrenzt auf die freigegebenen Hosts.'
-        : 'Öffentliches Internet erlaubt – ohne Allowlist-Begrenzung.',
+      hint: 'Internet ist erlaubt. Ob Claude erreichbar ist, meldet dieser Server nicht.',
+      dot: 'ok',
+      offline: false,
     };
   }
-  return { key: 'unknown', label: `Netz: ${mode}`, hint: 'Unbekannter Netzmodus. Prüfe die Konfiguration.' };
+  return { key: 'unbekannt', label: `Netz: ${mode}`, hint: 'Unbekannter Netzmodus. Prüfe die Konfiguration.', dot: null, offline: false };
 }
 
-export function countModels(models) {
-  if (!models) return 0;
-  if (Number.isFinite(models.count)) return models.count;
-  const providers = Array.isArray(models.providers) ? models.providers : [];
-  let total = 0;
-  for (const provider of providers) {
-    if (Array.isArray(provider.models)) total += provider.models.length;
-  }
-  return total;
-}
+/* ------------------------------------------------------------------ */
+/* Kleinigkeiten                                                       */
+/* ------------------------------------------------------------------ */
 
-export function describeModels(status, stale) {
-  const models = status ? status.models : null;
-  if (stale || !models) {
-    return { key: 'unknown', label: 'Modell unbekannt', hint: 'Der Modellstatus ist gerade nicht abrufbar.' };
-  }
-  const count = countModels(models);
-  const available = models.available === true || count > 0;
-  if (!available) {
-    return {
-      key: 'none',
-      label: 'Kein Modell',
-      hint: 'Kein lokales Modell erreichbar. Mit „ollama pull llama3.2“ installierst du eines; danach funktioniert der Chat ohne Internet.',
-    };
-  }
-  const preferred = models.default || models.active || null;
-  const name = preferred && (preferred.model || preferred.id || preferred.name);
-  const providers = (Array.isArray(models.providers) ? models.providers : []).filter((p) => p.available);
-  const via = providers.length ? providers.map((p) => p.id || p.kind).join(', ') : null;
-  const remote = providers.filter((p) => !isLoopbackUrl(p.baseUrl));
-  const where = remote.length
-    ? `Läuft NICHT auf diesem Gerät: ${remote.map((p) => hostOf(p.baseUrl)).join(', ')}.`
-    : 'Läuft auf diesem Gerät.';
-  return {
-    key: 'ok',
-    label: name ? String(name) : `${count} Modell${count === 1 ? '' : 'e'}`,
-    hint: `${count} Modell${count === 1 ? '' : 'e'} verfügbar${via ? ` über ${via}` : ''}. ${where}`,
-  };
-}
-
-/**
- * Is this model backend really on this machine?
- *
- * The header used to state "Läuft lokal." unconditionally, which was a claim
- * the interface had never checked: a backend configured on a LAN address or a
- * remote API would have carried the same reassurance. Anything that is not
- * provably loopback is reported as not local -- if this cannot tell, it says
- * the less comfortable thing, because the comfortable one is what a user would
- * rely on.
- */
-function isLoopbackUrl(baseUrl) {
-  const host = hostOf(baseUrl);
-  if (!host) return false;
-  if (host === 'localhost' || host.endsWith('.localhost')) return true;
-  if (host === '::1' || host === '[::1]') return true;
-  if (/^127\./.test(host)) return true;
-  return false;
-}
-
-function hostOf(baseUrl) {
-  try {
-    return new URL(String(baseUrl)).hostname.toLowerCase();
-  } catch {
-    return '';
-  }
-}
-
-export function describeVault(status, stale) {
-  const vault = status ? status.vault : null;
-  const vaultState = vault ? (vault.state || vault.encryption) : null;
-  if (stale || !vaultState) {
-    return { key: 'unknown', label: 'Tresor unbekannt', hint: 'Der Zustand des Tresors ist gerade nicht abrufbar.' };
-  }
-  const records = vault.records ?? (vault.counts ? Object.values(vault.counts).reduce((a, b) => a + (Number(b) || 0), 0) : null);
-  const suffix = Number.isFinite(records) ? ` ${formatNumber(records)} Einträge.` : '';
-  if (vaultState === 'locked') {
-    return { key: 'locked', label: 'Tresor gesperrt', hint: `Die Daten sind verschlüsselt und nicht lesbar, bis du entsperrst.${suffix}` };
-  }
-  if (vaultState === 'unlocked') {
-    return { key: 'unlocked', label: 'Tresor offen', hint: `Verschlüsselt auf der Festplatte, für diese Sitzung entsperrt.${suffix}` };
-  }
-  return { key: 'plain', label: 'Unverschlüsselt', hint: `Der Tresor ist nicht verschlüsselt. In den Einstellungen kannst du das ändern.${suffix}` };
+function chatTitle(record) {
+  const data = (record && record.data) || {};
+  const title = String(data.title || '').trim();
+  return title || 'Chat ohne Titel';
 }
 
 function recordTypeLabel(type) {
   const labels = {
     note: 'Notiz', chat: 'Chat', message: 'Nachricht', project: 'Projekt', task: 'Aufgabe',
     agent: 'Agent', run: 'Lauf', file: 'Datei', entity: 'Begriff', memory: 'Erinnerung', edge: 'Verknüpfung',
+    event: 'Termin',
   };
   return labels[type] || type || '';
 }
@@ -1845,7 +2130,7 @@ function iconForType(type) {
   const map = {
     note: ICONS.notes, chat: ICONS.chat, message: ICONS.chat, project: ICONS.projects,
     task: ICONS.projects, agent: ICONS.agents, run: ICONS.agents, file: ICONS.notes,
-    entity: ICONS.graph, memory: ICONS.graph,
+    entity: ICONS.graph, memory: ICONS.graph, event: ICONS.calendar,
   };
   return map[type] || ICONS.search;
 }
@@ -1860,19 +2145,16 @@ function targetForRecord(record) {
     case 'task': return `#/projects?id=${id}`;
     case 'agent':
     case 'run': return `#/agents?id=${id}`;
+    case 'event': return `#/kalender?id=${id}`;
     default: return `#/graph?focus=${id}`;
   }
 }
-
-/* ------------------------------------------------------------------ */
-/* Small utilities                                                     */
-/* ------------------------------------------------------------------ */
 
 function isMac() {
   return /mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent || '');
 }
 
-/** localStorage can throw (private mode, disabled storage): never let it break boot. */
+/** localStorage kann werfen (privates Fenster, abgeschalteter Speicher). */
 function readStored(key, fallback) {
   try {
     const value = window.localStorage.getItem(key);
@@ -1886,23 +2168,28 @@ function writeStored(key, value) {
   try {
     window.localStorage.setItem(key, value);
   } catch {
-    /* storage unavailable: the preference simply does not survive a reload */
+    /* ohne Speicher ueberlebt die Vorliebe nur den Neustart nicht */
   }
 }
 
+function removeStored(key) {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    /* siehe oben */
+  }
+}
+
+/** Dunkel ist die Voreinstellung; hell und "System" nur, wenn gewaehlt. */
 function readTheme() {
-  const value = readStored(STORAGE.theme, 'system');
-  return ['light', 'dark', 'system'].includes(value) ? value : 'system';
+  const value = readStored(STORAGE.theme, 'dark');
+  return ['light', 'dark', 'system'].includes(value) ? value : 'dark';
 }
 
 /**
- * The service worker only caches the shell so the interface opens instantly
- * and still opens when the server is down. It is optional: a browser without
- * it (or a page served over file://) loses nothing but that head start.
- *
- * An update is never forced on a running session -- half of one build and half
- * of another is a genuinely confusing failure mode. The new worker waits, the
- * user is offered a reload once, and takes it when it suits them.
+ * Der Service Worker legt nur die Schale in den Zwischenspeicher, damit sie
+ * sofort aufgeht. Ein Update wird einer laufenden Sitzung nie aufgezwungen:
+ * die neue Fassung wartet, und es gibt einmal das Angebot "Neu laden".
  */
 function registerServiceWorker(notify) {
   if (!('serviceWorker' in navigator)) return;
@@ -1941,7 +2228,7 @@ function registerServiceWorker(notify) {
 const shell = createShell();
 
 shell.start().catch((err) => {
-  // The shell itself failed. Say so in plain German instead of a white page.
+  // Die Schale selbst ist gescheitert. Das auf Deutsch sagen statt einer weissen Seite.
   console.error('[neural-os] Start fehlgeschlagen:', err);
   const container = document.getElementById('view') || document.body;
   clear(container);
@@ -1952,8 +2239,8 @@ shell.start().catch((err) => {
       h('button.btn.btn--primary', { type: 'button', onClick: () => window.location.reload() }, text('Neu laden')))));
 });
 
-// A single read-only handle for debugging from the browser console. Nothing in
-// the application reads it; it exists so a user can inspect what the UI knows.
+// Ein Griff zum Nachsehen aus der Browser-Konsole. Nichts in der Anwendung
+// liest ihn; er ist da, damit man sehen kann, was die Oberflaeche weiss.
 window.__neuralOS = shell;
 
 export default shell;

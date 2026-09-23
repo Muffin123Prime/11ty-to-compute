@@ -65,12 +65,13 @@ const OUT = (() => {
   return i >= 0 && args[i + 1] ? path.resolve(args[i + 1]) : path.resolve(process.cwd(), 'screenshots');
 })();
 const VIEWS = [
-  ['today', 'heute'], ['chat', 'chat'], ['notes', 'notizen'], ['projects', 'projekte'],
-  ['graph', 'gehirn'], ['agents', 'agenten'], ['assist', 'vorschlaege'],
-  ['automation', 'automatik'], ['network', 'netz'], ['timeline', 'zeitachse'], ['sync', 'abgleich'],
-  ['stick', 'stick'], ['workshop', 'werkstatt'], ['search', 'suche'],
-  ['backup', 'sicherung'], ['settings', 'einstellungen'],
+  ['chat', 'chat'], ['kalender', 'kalender'], ['notes', 'notizen'], ['projects', 'projekte'],
+  ['agents', 'agenten'], ['graph', 'gehirn'], ['workshop', 'werkstatt'], ['settings', 'einstellungen'],
+  ['network', 'netz'], ['stick', 'stick'], ['backup', 'sicherung'],
 ];
+
+/** Hell ist eine Wahl, keine Systemvorgabe: dunkel ist die Voreinstellung. */
+const THEMA = 'neural-os:theme';
 
 let n = 0;
 const gemacht = [];
@@ -107,11 +108,6 @@ async function los(page, base, view, warten = 1000) {
   await page.waitForTimeout(warten);
 }
 
-async function weg(page) {
-  const w = page.getByRole('button', { name: /Los geht/ });
-  if (await w.count()) { await w.first().click(); await page.waitForTimeout(400); }
-}
-
 (async () => {
   fs.rmSync(OUT, { recursive: true, force: true });
   fs.mkdirSync(OUT, { recursive: true });
@@ -133,21 +129,70 @@ async function weg(page) {
   const browser = await pw.launch(chromium ? { executablePath: chromium } : {});
 
   const konsole = [];
-  const mach = async (theme) => {
-    const c = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: theme });
+  const mach = async (theme, opts = {}) => {
+    const c = await browser.newContext({
+      viewport: { width: opts.breite || 1440, height: opts.hoehe || 900 },
+      colorScheme: theme,
+      hasTouch: !!opts.finger,
+    });
+    await c.addInitScript(([k, t]) => { try { localStorage.setItem(k, t); } catch { /* egal */ } }, [THEMA, theme]);
     const p = await c.newPage();
     p.on('pageerror', (e) => konsole.push(`${theme}: ${e.message.slice(0, 100)}`));
     p.on('console', (m) => { if (m.type() === 'error') konsole.push(`${theme}: ${m.text().slice(0, 100)}`); });
     return { c, p };
   };
 
-  /* ================================================= 0 · Der erste Start */
+  /* ============================================ 0 · Die Schale selbst */
+  //
+  // Nach docs/vorlage/app.png: Leiste, Chat, rechte Spalte -- und was der
+  // Nutzer woertlich wollte: die Seiten weg- und wieder ausklappen.
+  {
+    const { c, p } = await mach('dark');
+    await los(p, base, 'chat', 1600);
+    await step('Schale: Leiste und Spalte offen', async () => { await shot(p, 'schale-offen-dunkel'); });
+    await step('Schale: Leiste eingeklappt', async () => {
+      await klick(p, /^Seitenleiste einklappen$/, { warten: 600 });
+      await shot(p, 'schale-leiste-zu-dunkel');
+    });
+    await step('Schale: beide eingeklappt, nur der Chat', async () => {
+      await klick(p, /^Übersicht einklappen$/, { warten: 600 });
+      await shot(p, 'schale-nur-chat-dunkel');
+      await klick(p, /^Seitenleiste ausklappen$/, { warten: 300 });
+      await klick(p, /^Übersicht ausklappen$/, { warten: 600 });
+    });
+    await step('Schale: offener Chat aus „Zuletzt“', async () => {
+      const link = p.locator('.rail__chat').first();
+      await link.waitFor({ state: 'visible', timeout: 4000 });
+      await link.click();
+      await p.waitForTimeout(1200);
+      await shot(p, 'schale-chat-aus-zuletzt-dunkel');
+    });
+    await c.close();
+  }
   {
     const { c, p } = await mach('light');
-    await los(p, base, 'today', 1200);
-    await step('Willkommensdialog', async () => {
-      await p.getByRole('button', { name: /Los geht/ }).first().waitFor({ timeout: 5000 });
-      await shot(p, 'willkommen-erster-start-hell');
+    await los(p, base, 'chat', 1600);
+    await step('Schale: hell', async () => { await shot(p, 'schale-offen-hell'); });
+    await c.close();
+  }
+  {
+    // Das iPad des Nutzers, quer: Leiste und Chat, die Spalte zu.
+    const { c, p } = await mach('dark', { breite: 1180, hoehe: 820, finger: true });
+    await los(p, base, 'chat', 1600);
+    await step('iPad quer', async () => { await shot(p, 'ipad-quer-1180-dunkel'); });
+    await step('iPad quer: Spalte ausgeklappt', async () => {
+      await klick(p, /^Übersicht ausklappen$/, { warten: 700 });
+      await shot(p, 'ipad-quer-1180-spalte-offen-dunkel');
+    });
+    await c.close();
+  }
+  {
+    const { c, p } = await mach('dark', { breite: 820, hoehe: 1180, finger: true });
+    await los(p, base, 'chat', 1600);
+    await step('iPad hoch', async () => { await shot(p, 'ipad-hoch-820-dunkel'); });
+    await step('iPad hoch: Leiste als Schublade', async () => {
+      await klick(p, /^Seitenleiste ausklappen$/, { warten: 700 });
+      await shot(p, 'ipad-hoch-820-schublade-dunkel');
     });
     await c.close();
   }
@@ -156,8 +201,7 @@ async function weg(page) {
   for (const theme of ['light', 'dark']) {
     const suffix = theme === 'dark' ? 'dunkel' : 'hell';
     const { c, p } = await mach(theme);
-    await los(p, base, 'today', 1000);
-    await weg(p);
+    await los(p, base, 'chat', 1000);
     for (const [view, name] of VIEWS) {
       await los(p, base, view, view === 'graph' ? 2600 : 1200);
       await step(`Ansicht ${view} (${suffix})`, async () => { await shot(p, `${name}-${suffix}`); });
@@ -168,8 +212,7 @@ async function weg(page) {
   /* ======================================= 2 · Tastatur: Palette, Erfassung */
   {
     const { c, p } = await mach('dark');
-    await los(p, base, 'today', 1000);
-    await weg(p);
+    await los(p, base, 'chat', 1000);
     await step('Befehlspalette', async () => {
       await p.keyboard.press('Control+k');
       await p.waitForTimeout(600);
@@ -180,12 +223,20 @@ async function weg(page) {
       await p.keyboard.press('Escape');
       await p.waitForTimeout(400);
     });
+    // Suchen ist die Palette: dieselbe Adresse, die ein Schlagwort in einer
+    // Notiz aufruft.
+    await step('Suche: Treffer', async () => {
+      await p.evaluate(() => { window.location.hash = '#/search?q=mahlgrad druck'; });
+      await p.waitForTimeout(1600);
+      await shot(p, 'suche-treffer-dunkel');
+      await p.keyboard.press('Escape');
+      await p.waitForTimeout(400);
+    });
     await c.close();
   }
   {
     const { c, p } = await mach('light');
     await los(p, base, 'notes', 1200);
-    await weg(p);
     await step('Schnell festhalten', async () => {
       await p.keyboard.press('Control+Shift+n');
       await p.waitForTimeout(700);
@@ -203,7 +254,6 @@ async function weg(page) {
   {
     const { c, p } = await mach('light');
     await los(p, base, 'notes', 1400);
-    await weg(p);
     await step('Notiz geöffnet', async () => {
       await klick(p, /Espresso in der Praxis/, { warten: 900 });
       await shot(p, 'notiz-geteilt-hell');
@@ -227,7 +277,6 @@ async function weg(page) {
   {
     const { c, p } = await mach('dark');
     await los(p, base, 'graph', 3000);
-    await weg(p);
     await step('Gehirn: Knoten gewählt', async () => {
       const box = await p.locator('canvas').first().boundingBox();
       await p.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
@@ -251,33 +300,20 @@ async function weg(page) {
   }
 
   /* ====================================================== 5 · Chat */
+  //
+  // Der Chat wird vom Bereich Chat-Oberflaeche neu gebaut; hier steht nur,
+  // was die Schale zum Chat beitraegt: der leere Anfang und ein Chat aus
+  // "Zuletzt". Die Offline-KI (Ollama) und der Vergleich zweier Modelle sind
+  // auf Wunsch des Nutzers gestrichen und werden nicht mehr fotografiert.
   {
     const { c, p } = await mach('dark');
     await los(p, base, 'chat', 1600);
-    await weg(p);
     await step('Chat: Verlauf', async () => {
-      await klick(p, /Über Mahlgrad und Druck/, { warten: 1200 });
+      const link = p.locator('.rail__chat', { hasText: 'Über Mahlgrad und Druck' }).first();
+      await link.waitFor({ state: 'visible', timeout: 4000 });
+      await link.click();
+      await p.waitForTimeout(1200);
       await shot(p, 'chat-verlauf-dunkel');
-    });
-    await step('Chat: kein Modell, ehrlich gesagt', async () => {
-      await klick(p, /Beetplanung 2027/, { warten: 1200 });
-      await shot(p, 'chat-kein-modell-dunkel');
-    });
-    await step('Chat: Internetzugang wird gefragt', async () => {
-      await klick(p, /^Online$/, { warten: 1200 });
-      await shot(p, 'chat-internet-nachfrage-dunkel');
-      await klick(p, /^Abbrechen$/, { warten: 900 });
-    });
-    await step('Chat: zwei Modelle', async () => {
-      await klick(p, /Zwei Modelle/, { warten: 1200 });
-      await shot(p, 'chat-zwei-modelle-dunkel');
-      await klick(p, /Zwei Modelle/, { warten: 800 });
-    });
-    await step('Chat: Kontext anheften', async () => {
-      await klick(p, /Kontext anheften/, { warten: 1400 });
-      await shot(p, 'chat-kontext-anheften-dunkel');
-      await p.keyboard.press('Escape');
-      await p.waitForTimeout(500);
     });
     await c.close();
   }
@@ -286,7 +322,6 @@ async function weg(page) {
   {
     const { c, p } = await mach('light');
     await los(p, base, 'agents', 1600);
-    await weg(p);
     await step('Agent: Grunddaten', async () => {
       await klick(p, /Wissensgärtner/, { warten: 1200 });
       await shot(p, 'agent-wissensgaertner-hell');
@@ -321,66 +356,10 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ================================================= 7 · Vorschläge */
-  {
-    const { c, p } = await mach('light');
-    await los(p, base, 'assist', 1600);
-    await weg(p);
-    await step('Vorschläge: Liste', async () => { await shot(p, 'vorschlaege-liste-hell'); });
-    const chip = async (muster) => {
-      const r = p.getByRole('radio', { name: muster }).first();
-      await r.waitFor({ state: 'visible', timeout: 4000 });
-      await r.click();
-      await p.waitForTimeout(900);
-    };
-    await step('Vorschläge: nur Doppelte', async () => {
-      await chip(/Doppelt/);
-      await shot(p, 'vorschlaege-doppelt-hell');
-    });
-    await step('Vorschläge: nur verwaist', async () => {
-      await chip(/Verwaist/);
-      await shot(p, 'vorschlaege-verwaist-hell');
-    });
-    await step('Vorschläge: nur Wiedervorlage', async () => {
-      await chip(/Wiedervorlage/);
-      await shot(p, 'vorschlaege-wiedervorlage-hell');
-    });
-    await c.close();
-  }
-
-  /* ================================================== 8 · Automatik */
-  {
-    const { c, p } = await mach('dark');
-    await los(p, base, 'automation', 1500);
-    await weg(p);
-    await step('Automatik: Zeitpläne', async () => { await shot(p, 'automatik-zeitplaene-dunkel'); });
-    await step('Automatik: ein Zeitplan im Detail', async () => {
-      const traf = await p.evaluate(() => {
-        const h = [...document.querySelectorAll('h2,h3,h4')].find((x) => /Wochenputz/.test(x.textContent));
-        if (!h) return false;
-        h.scrollIntoView({ block: 'center' });
-        return true;
-      });
-      if (!traf) throw new Error('Zeitplan „Wochenputz“ nicht gefunden');
-      await p.waitForTimeout(700);
-      await shot(p, 'automatik-zeitplan-detail-dunkel');
-    });
-    await step('Automatik: Auslöser', async () => {
-      await p.evaluate(() => {
-        const h = [...document.querySelectorAll('h2,h3')].find((x) => /Auslöser/.test(x.textContent));
-        if (h) h.scrollIntoView({ block: 'center' });
-      });
-      await p.waitForTimeout(600);
-      await shot(p, 'automatik-ausloeser-dunkel');
-    });
-    await c.close();
-  }
-
-  /* ====================================================== 9 · Netz */
+  /* ====================================================== 7 · Netz */
   {
     const { c, p } = await mach('light');
     await los(p, base, 'network', 1500);
-    await weg(p);
     await step('Netz: offline', async () => { await shot(p, 'netz-offline-hell'); });
     await step('Netz: Ziel prüfen', async () => {
       const feld = p.locator('input[type="text"], input:not([type])').first();
@@ -407,49 +386,10 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ================================================== 10 · Zeitachse */
-  {
-    const { c, p } = await mach('dark');
-    await los(p, base, 'timeline', 1800);
-    await weg(p);
-    await step('Zeitachse: Woche', async () => {
-      await klick(p, /^Woche$/, { warten: 1200 });
-      await shot(p, 'zeitachse-woche-dunkel');
-    });
-    await step('Zeitachse: Jahr', async () => {
-      await klick(p, /^Jahr$/, { warten: 1400 });
-      await shot(p, 'zeitachse-jahr-dunkel');
-    });
-    await step('Zeitachse: letzte Änderungen', async () => {
-      await klick(p, /Letzte Änderungen/, { warten: 1400 });
-      await shot(p, 'zeitachse-letzte-aenderungen-dunkel');
-    });
-    await c.close();
-  }
-
-  /* ==================================================== 11 · Suche */
-  {
-    const { c, p } = await mach('light');
-    await los(p, base, 'search', 1300);
-    await weg(p);
-    await step('Suche: Treffer', async () => {
-      const feld = p.locator('input').first();
-      await feld.fill('mahlgrad druck');
-      await p.waitForTimeout(1600);
-      await shot(p, 'suche-treffer-hell');
-    });
-    await step('Suche: nur Notizen', async () => {
-      await klick(p, /^Notizen$/, { warten: 1200 });
-      await shot(p, 'suche-nur-notizen-hell');
-    });
-    await c.close();
-  }
-
-  /* =============================================== 12 · Einstellungen */
+  /* ================================================ 8 · Einstellungen */
   {
     const { c, p } = await mach('light');
     await los(p, base, 'settings', 1600);
-    await weg(p);
     for (const [ueberschrift, name] of [
       ['Tresor', 'einstellungen-tresor-hell'],
       ['Verschlüsselung', 'einstellungen-verschluesselung-hell'],
@@ -473,11 +413,10 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ================================================= 13 · Projekte */
+  /* ================================================== 9 · Projekte */
   {
     const { c, p } = await mach('dark');
     await los(p, base, 'projects', 1500);
-    await weg(p);
     await step('Projekt: Detail', async () => {
       await klick(p, /Küche einrichten/, { warten: 1200 });
       await shot(p, 'projekt-detail-dunkel');
@@ -485,11 +424,10 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ================================================= 14 · Werkstatt */
+  /* ================================================= 10 · Werkstatt */
   {
     const { c, p } = await mach('dark');
     await los(p, base, 'workshop', 1800);
-    await weg(p);
     await step('Werkstatt: Vorlagen-Auswahl', async () => {
       await klick(p, /^Vorlagen$/, { warten: 1400 });
       await shot(p, 'werkstatt-vorlagen-dunkel');
@@ -520,26 +458,18 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ========================================== 14b · Einzelne Zustaende */
+  /* =========================================== 11 · Einzelne Zustaende */
   {
     const { c, p } = await mach('light');
-    await los(p, base, 'today', 1400);
-    await weg(p);
+    await los(p, base, 'chat', 1400);
     await step('Tastenkürzel', async () => {
-      await p.locator('button[aria-label="Tastenkürzel anzeigen"]').first().click();
+      await p.locator('main').click({ position: { x: 5, y: 5 } }).catch(() => {});
+      await p.keyboard.press('Shift+?');
       await p.waitForTimeout(800);
+      if (!(await p.getByRole('heading', { name: 'Tastenkürzel' }).count())) throw new Error('„?“ öffnet die Übersicht nicht');
       await shot(p, 'tastenkuerzel-hell');
       await p.keyboard.press('Escape');
       await p.waitForTimeout(400);
-    });
-    await step('Heute: unterer Teil', async () => {
-      await p.evaluate(() => {
-        const el = document.scrollingElement || document.documentElement;
-        const main = document.querySelector('main');
-        (main && main.scrollHeight > main.clientHeight ? main : el).scrollBy(0, 900);
-      });
-      await p.waitForTimeout(700);
-      await shot(p, 'heute-unten-hell');
     });
     await step('Netz: Freigabe erteilen', async () => {
       await los(p, base, 'network', 1500);
@@ -559,43 +489,16 @@ async function weg(page) {
       await p.waitForTimeout(600);
       await shot(p, 'netz-freigabe-erteilen-hell');
     });
-    await step('Stick: Modell mitnehmen', async () => {
-      // Der Abschnitt steht unten im Bereich; geknipst wird, was er auf DIESEM
-      // Rechner sagt -- ohne Ollama also der Befund samt Anleitung, nicht ein
-      // gestelltes Bild mit einem Modell, das es hier nicht gibt.
-      await los(p, base, 'stick', 1800);
-      const traf = await p.evaluate(() => {
-        const kopf = [...document.querySelectorAll('.card__head strong')].find((x) => x.textContent.trim() === 'Modell mitnehmen');
-        if (!kopf) return false;
-        kopf.closest('section').scrollIntoView({ block: 'start' });
-        return true;
-      });
-      if (!traf) throw new Error('Der Abschnitt „Modell mitnehmen“ ist nicht da');
-      await p.waitForTimeout(700);
-      await shot(p, 'stick-modell-mitnehmen-hell');
-    });
-    await step('Abgleich: Partnergerät hinzufügen', async () => {
-      await los(p, base, 'sync', 1400);
-      await klick(p, /Partnergerät hinzufügen/, { warten: 1200 });
-      await shot(p, 'abgleich-partnergeraet-hell');
-      await p.keyboard.press('Escape');
-      await p.waitForTimeout(400);
-    });
     await step('Notiz: im Gehirn zeigen', async () => {
       await los(p, base, 'notes', 1500);
       await klick(p, /Beetplanung/, { warten: 1000 });
       await klick(p, /Im Gehirn zeigen/, { warten: 2800 });
       await shot(p, 'notiz-im-gehirn-hell');
     });
-    await step('Zeitachse: Inspektor', async () => {
-      await los(p, base, 'timeline', 1800);
-      await klick(p, /^Inspektor$/, { warten: 1200 });
-      await shot(p, 'zeitachse-inspektor-hell');
-    });
     await c.close();
   }
 
-  /* ============================================== 14c · Sicherung */
+  /* =============================================== 12 · Sicherung */
   //
   // Die Sicherung ist der Grund, aus dem jemand dieses Programm ueberhaupt
   // einem Dienst vorzieht -- und war bis vor kurzem auf keinem einzigen der
@@ -609,7 +512,6 @@ async function weg(page) {
     // eigenen Liste fehlt, waere eine Anleitung zum Missverstaendnis.
     const exportOrdner = path.join(home, 'exports');
     await los(p, base, 'backup', 1400);
-    await weg(p);
     await step('Sicherung: noch nie gesichert', async () => {
       await shot(p, 'sicherung-noch-keine-hell');
     });
@@ -642,24 +544,20 @@ async function weg(page) {
     await c.close();
   }
 
-  /* ============================================= 14d · Sicherung, dunkel */
+  /* ============================================== 13 · Sicherung, dunkel */
   {
     const { c, p } = await mach('dark');
     await los(p, base, 'backup', 1400);
-    await weg(p);
     await step('Sicherung: dunkel', async () => { await shot(p, 'sicherung-zustand-dunkel'); });
     await c.close();
   }
 
-  /* =============================================== 15 · Schmales Fenster */
+  /* =============================================== 14 · Schmales Fenster */
   {
-    const c = await browser.newContext({ viewport: { width: 1024, height: 768 }, colorScheme: 'light' });
-    const p = await c.newPage();
-    await los(p, base, 'today', 1200);
-    await weg(p);
-    for (const [view, name] of [['today', 'heute'], ['notes', 'notizen'], ['graph', 'gehirn']]) {
+    const { c, p } = await mach('dark', { breite: 1024, hoehe: 768 });
+    for (const [view, name] of [['chat', 'chat'], ['notes', 'notizen'], ['graph', 'gehirn']]) {
       await los(p, base, view, view === 'graph' ? 2600 : 1200);
-      await step(`Schmal: ${view}`, async () => { await shot(p, `schmal-1024-${name}-hell`); });
+      await step(`Schmal: ${view}`, async () => { await shot(p, `schmal-1024-${name}-dunkel`); });
     }
     await c.close();
   }

@@ -37,10 +37,22 @@ const path = require('node:path');
 const G = '\u001b[32m'; const R = '\u001b[31m'; const Y = '\u001b[33m';
 const D = '\u001b[2m'; const B = '\u001b[1m'; const X = '\u001b[0m';
 
+/**
+ * Die Ansichten der neuen Schale (web/app.js, VIEWS). Heute, Vorschlaege,
+ * Automatik, Zeitachse, Abgleich und die Suchseite gibt es nicht mehr
+ * (Entscheidung des Nutzers); dass ihre alten Adressen in den Chat fuehren,
+ * prueft Abschnitt 4.
+ */
 const ALL_VIEWS = [
-  'today', 'chat', 'notes', 'projects', 'graph', 'agents', 'assist',
-  'automation', 'network', 'timeline', 'sync', 'stick', 'workshop', 'search', 'backup', 'settings',
+  'chat', 'kalender', 'notes', 'projects', 'agents', 'graph', 'workshop', 'settings',
+  'network', 'stick', 'backup',
 ];
+
+/** Die Eintraege der Leiste, in der Reihenfolge der Vorlage (docs/vorlage/app.png). */
+const LEISTE = ['Neuer Chat', 'Kalender', 'Notizen', 'Projekte', 'Agenten', 'Gehirn', 'Werkstatt', 'Einstellungen'];
+
+/** Die Kacheln der rechten Spalte, von oben nach unten. */
+const KACHELN = ['agenten', 'kalender', 'notizen', 'gehirn'];
 
 let failed = 0;
 let unclear = 0;
@@ -107,10 +119,18 @@ async function main() {
   const browser = await pw.launch(chromium ? { executablePath: chromium } : {});
 
   try {
+    /* ------------------------------------------ 0. Nur echte Marken benutzen */
+    console.log(`\n${B}0 · Ansichten und Kacheln benutzen nur Marken, die es gibt${X}`);
+    pruefeMarken();
+
     /* ---------------------------------------- 1. Jede Ansicht, hell + dunkel */
     console.log(`\n${B}1 · Jede Ansicht lädt, hell und dunkel${X}`);
+    // Die Darstellung wird ueber den gemerkten Wert gesetzt, nicht ueber die
+    // Systemvorgabe: dunkel ist die Voreinstellung der Anwendung und folgt
+    // dem System gar nicht -- "hell" hiesse sonst, zweimal dunkel zu pruefen.
     for (const theme of ['light', 'dark']) {
       const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, colorScheme: theme });
+      await context.addInitScript((t) => { try { localStorage.setItem('neural-os:theme', t); } catch { /* egal */ } }, theme);
       const problems = [];
       for (const view of ALL_VIEWS) {
         const page = await context.newPage();
@@ -124,13 +144,18 @@ async function main() {
           await page.waitForTimeout(500);
           const info = await page.evaluate(() => {
             const main = document.querySelector('main') || document.body;
+            const bg = getComputedStyle(document.body).backgroundColor.match(/\d+/g) || [];
             return {
               chars: (main.innerText || '').trim().length,
               overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
               canvas: !!main.querySelector('canvas'),
+              hell: Number(bg[0]) > 128,
             };
           });
           if (errors.length) problems.push(`${view}: ${errors[0].slice(0, 120)}`);
+          // Wirkt die Wahl wirklich? Ein heller Durchlauf auf dunklem Grund
+          // haette sonst zweimal dasselbe geprueft.
+          else if (info.hell !== (theme === 'light')) problems.push(`${view}: Grund ist nicht ${theme === 'light' ? 'hell' : 'dunkel'}`);
           // Eine Leinwand hat naturgemäß wenig Text; das ist kein leerer Bildschirm.
           else if (info.chars < 40 && !info.canvas) problems.push(`${view}: fast leer (${info.chars} Zeichen)`);
           else if (info.overflow) problems.push(`${view}: waagerechter Scrollbalken`);
@@ -170,160 +195,30 @@ async function main() {
 
     if (onlyViews) return;
 
-    /* ------------------------------ 4. Klicken, und im Tresor nachsehen */
-    console.log(`\n${B}4 · Ein Klick muss bis in den Tresor wirken${X}`);
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    /* ------------------------------------------- 4. Die Schale selbst */
+    console.log(`\n${B}4 · Die Schale: Leiste, Kopf, rechte Spalte, einklappen${X}`);
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     const errors = [];
+    let claudeFehlt = false;
     page.on('pageerror', (e) => errors.push(e.message));
-    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-
-    await page.goto(`${base}/#/assist`, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(600);
-    await dismissWelcome(page);
-
-    const tasksBefore = store.count('task');
-    await page.getByRole('button', { name: /^Prüfen/ }).first().click();
-    await page.waitForTimeout(2000);
-    const cards = await page.locator('article').count();
-    check(cards > 0, '„Prüfen" erzeugt sichtbare Vorschläge', `${cards} Karten`);
-
-    if (await page.getByRole('button', { name: /^Übernehmen/ }).count()) {
-      const taskCard = page.locator('article', { hasText: 'Aufgabe' }).first();
-      const target = (await taskCard.count()) ? taskCard : page.locator('article').first();
-      await target.getByRole('button', { name: /^Übernehmen/ }).first().click();
-      await page.waitForTimeout(1500);
-      const accepted = store.all('suggestion').filter((x) => x.data.status === 'accepted').length;
-      check(accepted > 0, '„Übernehmen" setzt den Vorschlag im Tresor auf übernommen', `${accepted}`);
-      check(store.count('task') >= tasksBefore, 'und der Tresor hat sich wirklich verändert',
-        `${tasksBefore} → ${store.count('task')} Aufgaben`);
-      const shown = await page.locator('body').innerText();
-      check(/übernommen|angelegt|verknüpft/i.test(shown), 'Die Oberfläche sagt, was wirklich passiert ist');
-    } else {
-      hmm('„Übernehmen" ist anklickbar', 'kein Vorschlag mit ausführbarer Aktion entstanden');
-    }
-
-    if (await page.getByRole('button', { name: /^Verwerfen/ }).count()) {
-      await page.getByRole('button', { name: /^Verwerfen/ }).first().click();
-      await page.waitForTimeout(1200);
-      check(store.all('suggestion').some((x) => x.data.status === 'dismissed'),
-        '„Verwerfen" wirkt ebenfalls bis in den Tresor');
-    }
-
-    /* ------------------------------ 5. Nichts läuft, was niemand einschaltete */
-    console.log(`\n${B}5 · Automatik fragt, bevor etwas von allein läuft${X}`);
-    await page.goto(`${base}/#/automation`, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(900);
-    check(/Nichts läuft von allein/.test(await page.locator('body').innerText()),
-      'Der Normalzustand steht groß und zuerst da');
-
-    const agent = store.all('agent')[0];
-    if (!agent || !app.scheduler) {
-      hmm('Ein Zeitplan lässt sich schalten', 'kein Agent oder kein Zeitgeber vorhanden');
-    } else {
-      const plan = app.scheduler.create({
-        agentId: agent.id, goal: 'Rückblick schreiben', every: 'daily', atHour: 7,
-      });
-      await page.reload({ waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(1000);
-      check(/Rückblick schreiben/.test(await page.locator('body').innerText()),
-        'Ein angelegter Zeitplan erscheint in der Ansicht');
-
-      const sw = page.locator('[role=switch]').first();
-      if (!(await sw.count())) {
-        bad('Ein Schalter ist auffindbar');
-      } else {
-        await sw.click();
-        await page.waitForTimeout(600);
-        const confirmBtn = page.getByRole('button', { name: /^Einschalten$/ });
-        check(await confirmBtn.count() > 0, 'Einschalten fragt vorher nach');
-        check(/von allein/.test(await page.locator('body').innerText()),
-          'und sagt dabei, was ab dann ohne dich passiert');
-        if (await confirmBtn.count()) {
-          await confirmBtn.first().click();
-          await page.waitForTimeout(1400);
-        }
-        check(store.get(plan.id).data.enabled === true,
-          'Erst nach der Bestätigung steht es wirklich im Tresor');
-        const after = await page.locator('body').innerText();
-        check(!/Nichts läuft von allein/.test(after) && /Läuft von allein/.test(after),
-          'Ein eingeschalteter Plan ist unverwechselbar markiert');
-        await sw.click();
-        await page.waitForTimeout(1400);
-        check(store.get(plan.id).data.enabled === false,
-          'Zurück in den sicheren Zustand geht mit einem Klick, ohne Rückfrage');
+    page.on('console', (m) => {
+      if (m.type() !== 'error') return;
+      // GET /api/claude kommt aus dem Bereich Claude-Unterbau (Vertrag 5).
+      // Solange es die Route nicht gibt, fragt die Schale im Online-Modus
+      // einmal, bekommt 404 und sagt danach nur "Online", nie "verbunden".
+      // Das ist ein bekannter, benannter Zustand und kein Fehler der
+      // Oberflaeche -- er steht unten als eigene, offene Zeile.
+      const ort = m.location && m.location();
+      if (ort && /\/api\/claude$/.test(ort.url || '')) {
+        claudeFehlt = true;
+        return;
       }
-      app.scheduler.remove(plan.id);
-    }
-
-    /* --------------------------- 5. Das Zurueck ist auffindbar und wirkt */
-    console.log(`\n${B}6 · Rückgängig ist auffindbar und wirkt${X}`);
-    const opfer = store.create('note', { title: 'Wird geändert', body: 'Original' });
-    // Eine Aenderung, die ein Agent gemacht hat -- der Fall, fuer den das
-    // Ganze existiert.
-    const { withActor } = require('../src/kernel/actor');
-    await withActor({ kind: 'agent', runId: 'run_uipruefung', agentId: 'agent_uipruefung' }, async () => {
-      store.update(opfer.id, { body: 'Vom Agenten geändert' });
+      errors.push(m.text());
     });
-    await store.flush();
+    await pruefeSchale(page, base, store, app);
 
-    await page.goto(`${base}/#/timeline`, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(900);
-    await dismissWelcome(page);
-    await page.waitForTimeout(400);
-
-    const tab = page.getByRole('button', { name: /Letzte Änderungen/ });
-    if (!(await tab.count())) {
-      bad('„Letzte Änderungen" ist in der Zeitachse erreichbar');
-    } else {
-      await tab.first().click();
-      await page.waitForTimeout(1200);
-      const text = await page.locator('body').innerText();
-      check(/Wird geändert/.test(text), 'Die Änderung steht in der Liste');
-      check(/Agent|agent/.test(text), 'Und es ist erkennbar, dass ein Agent sie gemacht hat');
-
-      const zurueck = page.getByRole('button', { name: /^Zurücknehmen|^Rückgängig/ });
-      if (!(await zurueck.count())) {
-        hmm('Ein Zurücknehmen-Knopf ist da', 'keiner gefunden — vielleicht anders beschriftet');
-      } else {
-        await zurueck.first().click();
-        await page.waitForTimeout(1400);
-        const jetzt = store.get(opfer.id).data.body;
-        check(jetzt === 'Original', 'Ein Klick darauf stellt den alten Stand wirklich her',
-          `im Tresor steht: ${JSON.stringify(jetzt)}`);
-      }
-    }
-
-    /* --------------------------- 6. Heute: abhaken wirkt im Tresor */
-    console.log(`\n${B}7 · „Heute" zeigt Tatsachen und lässt handeln${X}`);
-    const gestern = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-    const faellig = store.create('task', { title: 'Mühle entkalken', due: gestern, priority: 1 });
-    const { withActor: alsAgent } = require('../src/kernel/actor');
-    const meine = store.create('note', { title: 'Meine Notiz', body: 'Von mir' });
-    await alsAgent({ kind: 'agent', runId: 'run_nacht', agentId: 'agent_nacht' }, async () => {
-      store.update(meine.id, { body: 'Vom Nachtlauf ergänzt' });
-    });
-    await store.flush();
-
-    await page.goto(`${base}/#/today`, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(900);
-    await dismissWelcome(page);
-    await page.waitForTimeout(600);
-    const heuteText = await page.locator('main').innerText();
-    check(/überfällig/i.test(heuteText), 'Überfälliges wird als solches benannt');
-    check(/Ohne dich/i.test(heuteText) && /Meine Notiz/.test(heuteText),
-      'Was ohne dich lief, steht als eigener Block da');
-
-    // Ueber das aria-label, nicht ueber eine Klasse: so prueft der Test
-    // zugleich, dass der Knopf fuer einen Screenreader beschriftet ist.
-    const haken = page.getByRole('button', { name: /Mühle entkalken.*abhaken/ });
-    if (await haken.count()) await haken.first().click();
-    else bad('Der Abhak-Knopf trägt eine verständliche Beschriftung');
-    await page.waitForTimeout(1400);
-    check(store.get(faellig.id).data.status === 'done', 'Eine Aufgabe lässt sich von hier aus abhaken',
-      `im Tresor: ${store.get(faellig.id).data.status}`);
-
-    /* ------------------------ 7. Schnellerfassung von ueberall aus */
-    console.log(`\n${B}8 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
+    /* ------------------------ 5. Schnellerfassung von ueberall aus */
+    console.log(`\n${B}5 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
     // Absichtlich aus dem Gehirn heraus: der ganze Sinn ist, dass man nicht
     // erst irgendwohin navigieren muss.
     await page.goto(`${base}/#/graph`, { waitUntil: 'domcontentloaded' });
@@ -349,8 +244,8 @@ async function main() {
         neu ? JSON.stringify(neu.data.tags) : 'Notiz nicht gefunden');
     }
 
-    /* --------------- 8. Beobachtete Ordner: erst ansehen, dann aufnehmen */
-    console.log(`\n${B}9 · Ein beobachteter Ordner nimmt erst auf, wenn er eingeschaltet ist${X}`);
+    /* --------------- 6. Beobachtete Ordner: erst ansehen, dann aufnehmen */
+    console.log(`\n${B}6 · Ein beobachteter Ordner nimmt erst auf, wenn er eingeschaltet ist${X}`);
     const eingang = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-eingang-'));
     fs.writeFileSync(path.join(eingang, 'notiz.md'), '# Espresso\n\nNeun bar, 93 Grad.\n');
     fs.writeFileSync(path.join(eingang, 'liste.txt'), 'Bohnen\nFilter\n');
@@ -408,20 +303,26 @@ async function main() {
       fs.rmSync(eingang, { recursive: true, force: true });
     }
 
-    /* ------------------------------- 9. Der Modellvergleich ist da */
-    console.log(`\n${B}10 · Zwei Modelle nebeneinander${X}`);
+    /* ------------------------------- 7. Ein Chat, ehrlich ohne KI */
+    console.log(`\n${B}7 · Ein offener Chat sagt ohne KI, warum nichts kommt${X}`);
     const probe = store.create('chat', { title: 'Probe' });
     await store.flush();
     await page.goto(`${base}/#/chat?id=${probe.id}`, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(1500);
     const chatText = await page.locator('main').innerText();
-    check(/Zwei Modelle|[Vv]ergleich/.test(chatText), 'Der Vergleich ist im Chat auffindbar');
-    // Ohne Modell muss der Chat ehrlich sein statt leer.
-    check(/kein lokales Modell|Kein Modell/i.test(chatText),
-      'Ohne Modell sagt der Chat warum, statt leer zu bleiben');
+    // Die Offline-KI ist gestrichen; die KI ist Claude. Ohne Schluessel (so
+    // laeuft diese Pruefung) muss der Chat das sagen, statt leer zu bleiben.
+    // Das Muster nimmt beide Fassungen, bis der Chat neu gebaut ist.
+    check(/Claude|Schlüssel|kein lokales Modell|Kein Modell/i.test(chatText),
+      'Ohne KI sagt der Chat warum, statt leer zu bleiben', chatText.replace(/\s+/g, ' ').slice(0, 90));
+    check((await page.locator('.topbar__title').innerText()).trim() !== 'Neuer Chat',
+      'Der Kopf zeigt bei einem offenen Chat nicht „Neuer Chat“',
+      (await page.locator('.topbar__title').innerText()).trim());
+    check(await page.locator('.rail__chat.is-active', { hasText: 'Probe' }).count() === 1,
+      'und der Chat ist in „Zuletzt“ markiert');
 
-    /* ------------------- 10. Zweiter Blick: belegbar vs. nicht belegbar */
-    console.log(`\n${B}11 · Der zweite Blick trennt Belegbares von Nichtbelegbarem${X}`);
+    /* -------------------- 8. Zweiter Blick: belegbar vs. nicht belegbar */
+    console.log(`\n${B}8 · Der zweite Blick trennt Belegbares von Nichtbelegbarem${X}`);
     const langerText = 'Der Mahlgrad entscheidet über den Widerstand im Sieb. Ist er zu fein, steigt '
       + 'der Druck und der Espresso läuft nur tropfenweise; ist er zu grob, rauscht das Wasser durch '
       + 'und die Crema bleibt dünn. Die Brühtemperatur liegt bei rund 93 Grad, bei dunklen Röstungen '
@@ -452,8 +353,8 @@ async function main() {
     check(await page.getByRole('button', { name: /Zweiter Blick/ }).count() === 0,
       'An einer kurzen Notiz gibt es ihn gar nicht erst');
 
-    /* ---------------- 11. Sichern: der Knopf muss einen Ordner hinterlassen */
-    console.log(`\n${B}12 · „Jetzt sichern" legt wirklich einen Ordner an${X}`);
+    /* ----------------- 9. Sichern: der Knopf muss einen Ordner hinterlassen */
+    console.log(`\n${B}9 · „Jetzt sichern" legt wirklich einen Ordner an${X}`);
     // Der Punkt dieser Pruefung: eine gruene Meldung beweist gar nichts. Eine
     // Sicherung ist erst dann eine, wenn danach Dateien auf der Platte liegen,
     // die man wieder einlesen kann. Deshalb wird hier nach dem Klick im
@@ -541,6 +442,9 @@ async function main() {
 
     check(errors.length === 0, 'Keine Konsolenfehler während all dessen',
       errors.slice(0, 2).join(' | ').slice(0, 200));
+    if (claudeFehlt) {
+      hmm('GET /api/claude antwortet', 'die Route fehlt noch (Bereich Claude-Unterbau) – der Status sagt deshalb „Online“, nie „verbunden“');
+    }
     await page.close();
   } finally {
     await browser.close().catch(() => {});
@@ -555,6 +459,217 @@ async function main() {
     + (unclear ? ` · ${Y}${unclear} nicht prüfbar${X}` : ''));
   console.log('');
   process.exit(failed ? 1 : 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* Marken                                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Eine Ansicht, die `var(--surface-5)` schreibt, obwohl es die Marke nicht
+ * gibt, rendert still ohne Farbe -- genau der "erfundene CSS-Name", mit dem
+ * dieses Werkzeug einmal angefangen hat. Das laesst sich ohne Browser pruefen:
+ * jede var(--…) ohne Ersatzwert in web/** muss irgendwo definiert sein, in
+ * web/app.css oder von der Datei selbst.
+ */
+function pruefeMarken() {
+  const web = path.join(__dirname, '..', 'web');
+  const dateien = [path.join(web, 'app.js')];
+  for (const ordner of ['views', 'widgets', 'lib']) {
+    const voll = path.join(web, ordner);
+    if (!fs.existsSync(voll)) continue;
+    for (const name of fs.readdirSync(voll)) if (name.endsWith('.js')) dateien.push(path.join(voll, name));
+  }
+  const definiert = new Set();
+  const lies = (datei) => fs.readFileSync(datei, 'utf8');
+  for (const m of lies(path.join(web, 'app.css')).matchAll(/(--[a-z0-9-]+)\s*:/g)) definiert.add(m[1]);
+  for (const datei of dateien) {
+    const src = lies(datei);
+    // Eigene Marken einer Ansicht, im CSS-Text oder per setProperty('--x').
+    for (const m of src.matchAll(/(--[a-z0-9-]+)\s*:/g)) definiert.add(m[1]);
+    for (const m of src.matchAll(/['"](--[a-z0-9-]+)['"]/g)) definiert.add(m[1]);
+  }
+  const fehlend = new Set();
+  let benutzt = 0;
+  for (const datei of dateien) {
+    for (const m of lies(datei).matchAll(/var\((--[a-z0-9-]+)\s*([,)])/g)) {
+      benutzt++;
+      if (m[2] === ',') continue; // mit Ersatzwert: faellt nicht still aus
+      if (!definiert.has(m[1])) fehlend.add(`${path.relative(web, datei)}: ${m[1]}`);
+    }
+  }
+  check(!fehlend.size, 'Jede var(--…) in web/** ist auch definiert',
+    fehlend.size ? [...fehlend].slice(0, 6).join(' · ') : `${benutzt} Verwendungen in ${dateien.length} Dateien`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Die Schale                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Die Schale nach docs/vorlage/app.png -- und was der Nutzer woertlich wollte:
+ * "die Seiten wegklappen und ausklappen koennen", eingeklappt bleibt nur der
+ * Chat, und der Zustand bleibt. Geprueft wird am Zustand des Dokuments und an
+ * gemessenen Breiten, nicht an einem Bild.
+ */
+async function pruefeSchale(page, base, store) {
+  const warte = (ms) => page.waitForTimeout(ms);
+  const zustand = () => page.evaluate(() => {
+    const shell = document.querySelector('.shell');
+    const rail = document.querySelector('.rail');
+    const aside = document.querySelector('.aside');
+    const stage = document.querySelector('.stage');
+    const aktiv = document.activeElement;
+    return {
+      links: shell.dataset.links,
+      rechts: shell.dataset.rechts,
+      leisteSichtbar: getComputedStyle(rail).visibility !== 'hidden' && rail.getBoundingClientRect().width > 100,
+      spalteSichtbar: getComputedStyle(aside).visibility !== 'hidden' && aside.getBoundingClientRect().width > 100,
+      chatBreite: Math.round(stage.getBoundingClientRect().width),
+      fensterBreite: window.innerWidth,
+      fokus: aktiv ? (aktiv.getAttribute('aria-label') || aktiv.textContent || '').trim() : '',
+    };
+  });
+
+  // Sauber anfangen: nichts Gemerktes aus einem frueheren Lauf.
+  await page.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+  await page.evaluate(() => { try { localStorage.removeItem('neural-os:seiten'); } catch { /* egal */ } });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await warte(1000);
+  await dismissWelcome(page);
+
+  /* --- die Leiste, wie in der Vorlage --- */
+  const eintraege = (await page.locator('.rail__item .rail__label').allInnerTexts()).map((t) => t.trim());
+  check(JSON.stringify(eintraege) === JSON.stringify(LEISTE),
+    'Die Leiste hat genau die Einträge der Vorlage, in ihrer Reihenfolge', eintraege.join(' · '));
+  const marke = (await page.locator('.rail__wordmark').innerText()).replace(/\s+/g, ' ').trim().toUpperCase();
+  check(marke === 'NEURAL OS' && await page.locator('.rail__brand svg').count() === 1,
+    'Oben steht das eigene Zeichen mit der Wortmarke NEURAL OS', marke);
+  check(await page.locator('.rail__item.is-active', { hasText: 'Neuer Chat' }).count() === 1,
+    '„Neuer Chat“ ist beim Start der aktive Eintrag');
+  check((await page.locator('.topbar__title').innerText()).trim() === 'Neuer Chat',
+    'Der Kopf der mittleren Karte sagt „Neuer Chat“');
+  const alteChips = await page.locator('.chip--net, [data-model], [data-vault]').count();
+  check(alteChips === 0, 'Die alte Kopfleiste mit Offline / Kein Modell / Unverschlüsselt ist weg', `${alteChips} gefunden`);
+
+  /* --- der Status unten links sagt die Wahrheit --- */
+  const anzeige = async () => (await page.locator('.rail__status').innerText()).replace(/\s+/g, ' ').trim();
+  const modus = await page.evaluate(async () => (await (await fetch('/api/status')).json()).network.mode);
+  const vorher = await anzeige();
+  check(modus === 'offline' && vorher === 'Offline',
+    'Unten links steht der Netzzustand, den /api/status meldet', `Server: ${modus} · Anzeige: ${vorher}`);
+  const umschalten = (mode) => page.evaluate(async (m) => {
+    const res = await fetch('/api/network', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'x-neural-os': '1' },
+      body: JSON.stringify({ mode: m }),
+    });
+    return res.status;
+  }, mode);
+  const gesetzt = await umschalten('online');
+  await warte(1600);
+  const online = await anzeige();
+  // Ohne Claude-Schluessel darf dort "Online" stehen, aber nie "verbunden".
+  check(gesetzt === 200 && /^Online/.test(online) && !/verbunden/i.test(online),
+    'Online geschaltet folgt die Anzeige live – und behauptet ohne Claude keine Verbindung',
+    `HTTP ${gesetzt} → ${online}`);
+  await umschalten('offline');
+  await warte(1600);
+  check(await anzeige() === 'Offline', 'Zurück auf offline steht dort wieder „Offline“', await anzeige());
+  await page.locator('.rail__status').click();
+  await warte(700);
+  check(page.url().includes('#/network'), 'Ein Klick auf den Status führt ins Netzwerk', page.url().split('#')[1]);
+
+  /* --- die rechte Spalte --- */
+  await page.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+  await warte(1200);
+  const kacheln = await page.locator('.aside .tile').evaluateAll((els) => els.map((e) => ({
+    id: e.dataset.tile,
+    titel: ((e.querySelector('.tile__title') || {}).textContent || '').trim(),
+  })));
+  check(JSON.stringify(kacheln.map((k) => k.id)) === JSON.stringify(KACHELN) && kacheln.every((k) => k.titel),
+    'Rechts stehen die vier Kacheln, jede eingehängt und mit Kopf', kacheln.map((k) => k.titel || `${k.id}: leer`).join(' · '));
+
+  /* --- einklappen, ausklappen, merken --- */
+  const offen = await zustand();
+  check(offen.links === 'offen' && offen.rechts === 'offen' && offen.leisteSichtbar && offen.spalteSichtbar,
+    'Bei 1440 px sind Leiste und rechte Spalte offen', `Chat ${offen.chatBreite} px breit`);
+  await page.getByRole('button', { name: 'Seitenleiste einklappen' }).click();
+  await warte(500);
+  const ohneLeiste = await zustand();
+  check(ohneLeiste.links === 'zu' && !ohneLeiste.leisteSichtbar && ohneLeiste.chatBreite > offen.chatBreite + 200,
+    'Die Leiste klappt weg, der Chat wird breiter', `${offen.chatBreite} → ${ohneLeiste.chatBreite} px`);
+  check(ohneLeiste.fokus === 'Seitenleiste ausklappen',
+    'Der Fokus landet auf dem Knopf, der sie zurückholt', ohneLeiste.fokus || '(nirgends)');
+  await page.getByRole('button', { name: 'Übersicht einklappen' }).click();
+  await warte(500);
+  const nurChat = await zustand();
+  check(nurChat.rechts === 'zu' && !nurChat.spalteSichtbar && nurChat.chatBreite >= nurChat.fensterBreite - 48,
+    'Beide Seiten eingeklappt: nur der Chat bleibt', `Chat ${nurChat.chatBreite} von ${nurChat.fensterBreite} px`);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await warte(900);
+  const gemerkt = await zustand();
+  check(gemerkt.links === 'zu' && gemerkt.rechts === 'zu', 'Nach dem Neuladen bleibt es so – der Zustand ist gemerkt',
+    `Leiste ${gemerkt.links}, Spalte ${gemerkt.rechts}`);
+  await page.getByRole('button', { name: 'Seitenleiste ausklappen' }).click();
+  await page.getByRole('button', { name: 'Übersicht ausklappen' }).click();
+  await warte(500);
+  const wieder = await zustand();
+  check(wieder.links === 'offen' && wieder.rechts === 'offen' && wieder.leisteSichtbar && wieder.spalteSichtbar,
+    'Und beide lassen sich wieder ausklappen');
+
+  /* --- die letzten Chats, live --- */
+  const neu = store.create('chat', { title: 'Reiseplanung Herbst' });
+  await store.flush();
+  await warte(2000);
+  const eintrag = page.locator('.rail__chat', { hasText: 'Reiseplanung Herbst' });
+  check(await eintrag.count() === 1, 'Ein neuer Chat erscheint ohne Neuladen unter „Zuletzt“');
+  if (await eintrag.count()) {
+    await eintrag.first().click();
+    await warte(900);
+    check(page.url().endsWith(`#/chat?id=${neu.id}`) && (await page.locator('.topbar__title').innerText()).trim() === 'Reiseplanung Herbst',
+      'Ein Klick öffnet ihn, und der Kopf trägt seinen Titel', (await page.locator('.topbar__title').innerText()).trim());
+    await page.locator('.rail__item', { hasText: 'Neuer Chat' }).click();
+    await warte(900);
+    check(page.url().endsWith('#/chat') && (await page.locator('.topbar__title').innerText()).trim() === 'Neuer Chat',
+      '„Neuer Chat“ führt zurück auf die leere Seite', page.url().split('#')[1]);
+  }
+
+  /* --- Suchen ist die Befehlspalette --- */
+  await page.goto(`${base}/#/notes`, { waitUntil: 'domcontentloaded' });
+  await warte(900);
+  await page.evaluate(() => { window.location.hash = '#/search?q=entkalken'; });
+  await warte(1400);
+  const suche = await page.evaluate(() => ({
+    offen: !!document.querySelector('.palette__input'),
+    wert: (document.querySelector('.palette__input') || {}).value,
+    hash: window.location.hash,
+    treffer: [...document.querySelectorAll('.palette__item .palette__label')].map((x) => x.textContent),
+  }));
+  check(suche.offen && suche.wert === 'entkalken' && suche.hash.startsWith('#/notes'),
+    'Eine Suchadresse (#/search?q=…) öffnet die Suche über der Ansicht, statt die Seite zu wechseln',
+    `${suche.hash} · „${suche.wert}“`);
+  check(suche.treffer.some((t) => /entkalken/i.test(t)), 'und findet, was im Tresor steht', suche.treffer.slice(0, 3).join(' · '));
+  await page.keyboard.press('Escape');
+  await warte(300);
+  await page.keyboard.press('Control+k');
+  await warte(400);
+  await page.keyboard.type('eins');
+  await warte(300);
+  await page.keyboard.press('Enter');
+  await warte(900);
+  check(page.url().includes('#/settings'), 'Strg+K, „eins“, Enter führt in die Einstellungen', page.url().split('#')[1]);
+
+  /* --- alte Adressen --- */
+  const falsch = [];
+  for (const alt of ['today', 'assist', 'automation', 'timeline', 'sync']) {
+    await page.goto(`${base}/#/${alt}`, { waitUntil: 'domcontentloaded' });
+    await warte(700);
+    const hash = await page.evaluate(() => window.location.hash);
+    if (hash !== '#/chat') falsch.push(`${alt} → ${hash}`);
+  }
+  check(!falsch.length, 'Alte Adressen (Heute, Vorschläge, Automatik, Zeitachse, Abgleich) führen in den Chat',
+    falsch.join(' · ') || '5 von 5');
 }
 
 /* ------------------------------------------------------------------ */
@@ -577,15 +692,21 @@ async function main() {
  *     als Hinweis, dass es weitergeht.
  *
  * `hasTouch` ist deshalb nicht Beiwerk, sondern der Kern: nur damit meldet
- * der Browser `(pointer: coarse)`, und nur dann greifen die Regeln aus
- * Abschnitt 9 (die Schiene wird zur unteren Leiste) und 11 (Fingermasse)
- * von web/app.css. Beide Groessen sind echte Geraete: iPad im Querformat
- * (1024×768) und iPad Air im Hochformat (820×1180). Ein 1366×700-Laptop mit
- * Maus wird absichtlich NICHT so geprueft -- dort soll sich nichts aendern.
+ * der Browser `(pointer: coarse)`, und nur dann greifen die Fingermasse aus
+ * Abschnitt 13 von web/app.css. Die Aufteilung (Abschnitt 12 und
+ * SEITEN_VORGABE in web/app.js) haengt dagegen an der Breite: quer Leiste und
+ * Chat, hochkant nur der Chat mit den Seiten als Schublade. Alle Groessen sind
+ * echte Geraete: iPad Air quer (1180×820, das Geraet des Nutzers), ein
+ * aelteres iPad quer (1024×768) und iPad Air hochkant (820×1180). Ein Laptop
+ * mit Maus wird absichtlich NICHT so geprueft -- dort soll sich nichts aendern.
  */
 const IPAD_GROESSEN = [
-  ['Querformat', 1024, 768],
-  ['Hochformat', 820, 1180],
+  // Das iPad des Nutzers, quer: Leiste und Chat, die rechte Spalte zu.
+  ['Querformat', 1180, 820, { links: 'offen', rechts: 'zu' }],
+  // Aeltere iPads quer: dieselbe mittlere Klasse.
+  ['Querformat klein', 1024, 768, { links: 'offen', rechts: 'zu' }],
+  // Hochkant ist fuer Seiten kein Platz: nur der Chat, die Seiten als Schublade.
+  ['Hochformat', 820, 1180, { links: 'zu', rechts: 'zu' }],
 ];
 
 /**
@@ -594,40 +715,66 @@ const IPAD_GROESSEN = [
  * unter 44 px landet, ist ein Rückfall in denselben Zustand.
  */
 const IPAD_VOKABULAR = '.btn, .chip, .input, .select, .textarea, .icon-button,'
-  + ' .segmented__option, .topbar__search, .rail__item, .rail__brand,'
-  + ' .list__row, .palette__item, .toast__action, .toast__close, .skip-link';
+  + ' .segmented__option, .rail__item, .rail__brand, .rail__chat, .rail__status,'
+  + ' a.tile__head, .list__row, .palette__item, .toast__action, .toast__close, .skip-link';
 
 /**
  * Die Schwelle für alles Übrige.
  *
  * Sie ist bewusst nicht null. Was übrig bleibt, sind Knöpfe, die
  * Ansichtsmodule mit eigenen Klassen bauen und selbst auf feste Maße setzen
- * (gemessen: 10× .searchv__chip, 8× .tlv__type, 7× label.setv__perm,
- * 3× .notesv__link, .todayv__note, .notesv__tag-remove, dazu Wiki-Links im
- * Fließtext, die als Textzeile gar nicht 44 px hoch sein können). Die liegen
- * in web/views/** und nicht in der Hand von web/app.css. Die Zahl ist der
- * gemessene Rest (35 quer, 33 hoch) plus etwas Luft -- nicht mehr, sonst
- * deckt sie beim nächsten Mal einen echten Rückfall zu.
+ * (gemessen mit der neuen Schale: 7× label.setv__perm, 3× .notesv__link,
+ * 2× a.md-wiki, .notesv__tag-remove, dazu Wiki-Links im Fließtext, die als
+ * Textzeile gar nicht 44 px hoch sein können). Die liegen in web/views/** und
+ * nicht in der Hand von web/app.css. Die Zahl ist der gemessene Rest (15 quer,
+ * 13 hoch) plus etwas Luft -- nicht mehr, sonst deckt sie beim nächsten Mal
+ * einen echten Rückfall zu. Vor der neuen Schale lag der Rest bei 35, mit
+ * Heute, Zeitachse und Suche (10× .searchv__chip, 8× .tlv__type).
  *
- * Dieselbe Messung am Ausgangsstand, bevor Abschnitt 9 und 11 in
- * web/app.css entstanden: 361 im Querformat und 342 im Hochformat, davon
- * 299 bzw. 282 aus dem Vokabular von web/app.css selbst. Diese Schwelle wäre
- * also rot gewesen -- und genau dafür steht sie hier.
+ * Dieselbe Messung am Ausgangsstand, bevor es Fingermasse in web/app.css
+ * gab: 361 im Querformat und 342 im Hochformat. Diese Schwelle wäre also rot
+ * gewesen -- und genau dafür steht sie hier.
  */
-const IPAD_SCHWELLE = 40;
+const IPAD_SCHWELLE = 20;
 
 async function pruefeIPad(browser, base) {
-  for (const [lage, breite, hoehe] of IPAD_GROESSEN) {
+  for (const [lage, breite, hoehe, erwartet] of IPAD_GROESSEN) {
     const context = await browser.newContext({
       viewport: { width: breite, height: hoehe },
       hasTouch: true,
       deviceScaleFactor: 2,
     });
     const page = await context.newPage();
-    await page.goto(`${base}/#/today`, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(500);
+    await page.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(700);
     await dismissWelcome(page);
-    await page.waitForTimeout(300);
+
+    // Die Aufteilung, die der Nutzer fuer dieses Geraet beschrieben hat.
+    const seiten = await page.evaluate(() => {
+      const shell = document.querySelector('.shell');
+      return { links: shell && shell.dataset.links, rechts: shell && shell.dataset.rechts };
+    });
+    check(seiten.links === erwartet.links && seiten.rechts === erwartet.rechts,
+      `${lage} ${breite}×${hoehe}: Leiste ${erwartet.links}, rechte Spalte ${erwartet.rechts}`,
+      `gefunden: Leiste ${seiten.links}, Spalte ${seiten.rechts}`);
+    if (erwartet.links === 'zu') {
+      // Hochkant: die Leiste kommt als Schublade und geht nach der Wahl zu.
+      await page.getByRole('button', { name: 'Seitenleiste ausklappen' }).first().tap();
+      await page.waitForTimeout(450);
+      const offen = await page.evaluate(() => {
+        const r = document.querySelector('.rail').getBoundingClientRect();
+        return document.querySelector('.shell').dataset.links === 'offen' && r.left >= -1 && r.width > 200;
+      });
+      check(offen, `${lage}: Antippen klappt die Leiste als Schublade auf`);
+      await page.locator('.rail__item', { hasText: 'Notizen' }).first().tap();
+      await page.waitForTimeout(700);
+      const danach = await page.evaluate(() => ({
+        links: document.querySelector('.shell').dataset.links,
+        hash: window.location.hash,
+      }));
+      check(danach.links === 'zu' && danach.hash.startsWith('#/notes'),
+        `${lage}: nach der Wahl eines Bereichs geht sie wieder zu`, JSON.stringify(danach));
+    }
 
     const klein = [];
     const vokabel = [];
@@ -638,7 +785,7 @@ async function pruefeIPad(browser, base) {
 
     for (const view of ALL_VIEWS) {
       await page.goto(`${base}/#/${view}`, { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(view === 'graph' || view === 'timeline' ? 1600 : 500);
+      await page.waitForTimeout(view === 'graph' ? 1600 : 500);
       let m;
       try {
         m = await page.evaluate(messeTippziele, IPAD_VOKABULAR);

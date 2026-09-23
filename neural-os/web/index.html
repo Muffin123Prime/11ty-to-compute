@@ -4,25 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Neural OS</title>
-  <meta name="description" content="Persönliches, offline-first KI-System: Chat, Wissensgraph und Agenten auf dem eigenen Gerät.">
-  <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#f7f7f8" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0c0d10" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="Deine eigene, private KI – vom USB-Stick, mit allem, was sie über dich weiß.">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#090a0a">
   <meta name="referrer" content="no-referrer">
 
   <!--
     Every byte this page loads comes from this server. No font service, no CDN,
     no analytics, no favicon request to a third party - the icon below is an
     inline data URI, which the server's CSP (img-src 'self' data: blob:) allows.
+    It carries the same mark as ICONS.brand in app.js.
 
     There is deliberately NO inline <script> anywhere in this file: the server
     sends `script-src 'self'`, and the whole point of that header is that it
-    needs no exception. The cost is that the stored theme is applied a few
-    milliseconds after first paint; `color-scheme` plus the prefers-color-scheme
-    rules in app.css make that first paint match the system theme, so the
-    transition is invisible unless the stored choice contradicts the system.
+    needs no exception. The cost is that a stored light theme is applied a few
+    milliseconds after first paint. Dark is the default, and the bare :root in
+    app.css is dark, so the usual first paint is already the right one.
   -->
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23111' stroke-width='1.6' stroke-linecap='round'%3E%3Ccircle cx='10' cy='4.6' r='2.1'/%3E%3Ccircle cx='4.6' cy='14.4' r='2.1'/%3E%3Ccircle cx='15.4' cy='14.4' r='2.1'/%3E%3Cpath d='M8.5 6.3 5.8 12.4M11.5 6.3l2.7 6.1M6.7 14.4h6.6'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' rx='5' fill='%23101112'/%3E%3Cg fill='none' stroke='%23eeeef0' stroke-width='1.5' stroke-linecap='round'%3E%3Cpath d='M16.2 7.1A6.8 6.8 0 1 1 12.9 3.8'/%3E%3Cpath d='M11.6 8.4 13.6 6.4'/%3E%3C/g%3E%3Ccircle cx='14.8' cy='5.2' r='1.5' fill='%23eeeef0'/%3E%3Ccircle cx='10' cy='10' r='2.2' fill='%23eeeef0'/%3E%3C/svg%3E">
   <!--
     Zum Home-Bildschirm hinzufuegen, auf iPad und iPhone.
 
@@ -48,22 +47,32 @@
 <body>
   <a class="skip-link" href="#view">Zum Inhalt springen</a>
 
-  <div class="shell">
-    <!-- Filled by app.js. The static skeleton keeps the first paint stable. -->
+  <!--
+    Die Schale nach docs/vorlage/app.png: links die Leiste, in der Mitte die
+    grosse Karte mit Kopf und Ansicht, rechts die Spalte mit den Kacheln.
+    app.js fuellt Leiste, Kopf und Spalte. Bis dahin steht hier das Geruest,
+    damit das erste Bild schon die richtige Aufteilung hat. `is-booting`
+    haelt die Einklapp-Bewegung an, bis der gemerkte Zustand gesetzt ist.
+  -->
+  <div class="shell is-booting" id="shell" data-links="offen" data-rechts="offen">
     <nav class="rail" id="rail" aria-label="Hauptbereiche"></nav>
 
-    <header class="topbar" id="topbar">
-      <div class="topbar__left">
+    <section class="stage" id="stage">
+      <header class="topbar" id="topbar">
         <h1 class="topbar__title">Neural OS</h1>
-      </div>
-    </header>
+      </header>
 
-    <main class="main" id="view" tabindex="-1" role="main">
-      <div class="view-state">
-        <div class="spinner" aria-hidden="true"></div>
-        <p class="view-state__text">Oberfläche wird geladen …</p>
-      </div>
-    </main>
+      <main class="main" id="view" tabindex="-1" role="main">
+        <div class="view-state">
+          <div class="spinner" aria-hidden="true"></div>
+          <p class="view-state__text">Wird geladen …</p>
+        </div>
+      </main>
+    </section>
+
+    <aside class="aside" id="aside" aria-label="Übersicht"></aside>
+
+    <div class="shell__scrim" id="scrim" aria-hidden="true"></div>
   </div>
 
   <div class="toasts" id="toasts" role="region" aria-label="Meldungen" aria-live="polite"></div>
