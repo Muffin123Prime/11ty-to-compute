@@ -792,10 +792,14 @@ mark {
   border-radius: var(--r-2);
 }
 
-a.tile__head:hover .tile__title {
-  text-decoration: underline;
-  text-decoration-color: var(--border-strong);
-  text-underline-offset: 3px;
+/* Nur mit einer echten Maus: auf dem iPad bleibt :hover nach dem Antippen
+   haengen, und ein unterstrichener Titel saehe dort wie ein Fehler aus. */
+@media (hover: hover) {
+  a.tile__head:hover .tile__title {
+    text-decoration: underline;
+    text-decoration-color: var(--border-strong);
+    text-underline-offset: 3px;
+  }
 }
 
 .tile__icon {

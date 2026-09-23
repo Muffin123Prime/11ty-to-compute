@@ -213,15 +213,33 @@ async function createApp(opts = {}) {
     }
   }
 
-  // --- models --------------------------------------------------------------
+  // --- Claude ---------------------------------------------------------------
+  //
+  // Die KI von Neural OS ist Claude (Anthropic); ein lokales Modell gibt es
+  // nicht mehr. Claude sitzt NACH der Schleuse, weil jeder Aufruf durch sie
+  // geht, und nach dem Tresor, weil der Schlüssel darin liegt.
+  // `konfigSpeichern` wird erst beim Aufruf aufgelöst: `app` gibt es hier
+  // noch nicht, gebraucht wird es erst, wenn jemand Claude verbindet.
+  // `opts.claudeBasis` ist allein für Tests (ein Statist auf 127.0.0.1).
+  const claudeMod = tryRequire('./models/claude');
+  const claude = claudeMod
+    ? optional(failures, 'claude', () => claudeMod.createClaude({
+      paths, config, gate, bus, vaultCrypto, logger,
+      basis: opts.claudeBasis,
+      konfigSpeichern: (patch) => app.saveConfig(patch),
+    }))
+    : null;
+
+  // Der kleine gemeinsame Vertrag für alle, die "ein Modell" brauchen
+  // (Agenten, zweiter Blick, Vergleich, Erweiterungen) -- jetzt um Claude.
   const registryMod = tryRequire('./models/registry');
   const registry = registryMod
-    ? optional(failures, 'registry', () => registryMod.createRegistry({ config, gate, bus, logger }))
+    ? optional(failures, 'registry', () => registryMod.createRegistry({ config, gate, bus, logger, claude }))
     : null;
 
   const chatMod = tryRequire('./models/chat');
-  const chat = chatMod && registry
-    ? optional(failures, 'chat', () => chatMod.createChatService({ store, registry, gate, bus, graph, config, logger }))
+  const chat = chatMod && claude
+    ? optional(failures, 'chat', () => chatMod.createChatService({ store, claude, gate, bus, graph, config, logger }))
     : null;
 
   // --- Modellvergleich -------------------------------------------------------
@@ -319,52 +337,14 @@ async function createApp(opts = {}) {
     }))
     : null;
 
-  // --- semantic search ------------------------------------------------------
-  // Optional in the strongest sense: it needs a second model (an embedding
-  // model) that most people will not have installed. Everything else keeps
-  // working without it, and the search falls back to BM25 -- but the UI is told
-  // which one it got, because silently answering a different question than the
-  // one asked is the kind of dishonesty this system exists to avoid.
-  const vectorsMod = tryRequire('./store/vectors');
-  const vectors = vectorsMod
-    ? optional(failures, 'vectors', () => vectorsMod.createVectorStore({ paths, vaultCrypto, logger }))
-    : null;
-
-  const embeddingsMod = tryRequire('./models/embeddings');
-  const embeddings = embeddingsMod && registry && vectors
-    ? optional(failures, 'embeddings', () => embeddingsMod.createEmbeddings({
-      registry, gate, config, store, bus, logger, vectors,
-    }))
-    : null;
-
-  // Keep the semantic index in step with the data, the same way derived links
-  // are kept in step: as a consequence of the write, never as a separate thing
-  // the user has to remember to run.
+  // --- semantische Suche: entfallen ------------------------------------------
   //
-  // `suspendIndexing` exists for bulk writes (a restore, an import). Without
-  // it a 5000-record import means 5000 model calls and 5000 full index writes,
-  // which is slower than the import itself and pointless: one reindexAll()
-  // afterwards produces the same result.
-  let indexingSuspended = 0;
-  if (embeddings && typeof embeddings.indexRecord === 'function') {
-    const reindex = (evt) => {
-      if (indexingSuspended > 0) return;
-      const record = evt && evt.payload && evt.payload.record;
-      if (!record || record.type === 'edge' || record.type === 'message') return;
-      Promise.resolve(embeddings.indexRecord(record)).catch((err) => {
-        // An unreachable embedding model must not turn every save into an error.
-        log.debug(`Einbettung für ${record.id} nicht aktualisiert: ${err && err.message}`);
-      });
-    };
-    bus.on('record.created', reindex);
-    bus.on('record.updated', reindex);
-    bus.on('record.deleted', (evt) => {
-      const id = evt && evt.payload && evt.payload.id;
-      if (id && typeof embeddings.removeRecord === 'function') {
-        Promise.resolve(embeddings.removeRecord(id)).catch(() => {});
-      }
-    });
-  }
+  // Sie brauchte ein lokales Einbettungsmodell (Ollama). Claude berechnet
+  // keine Einbettungen, und ein zweiter Online-Dienst nur dafür wäre genau
+  // der Schnickschnack, den es nicht geben soll. Die Suche ist Volltext;
+  // `ctx.embeddings` bleibt null, und /api/search sagt das ehrlich.
+  const vectors = null;
+  const embeddings = null;
 
   // --- file text extraction -------------------------------------------------
   const extract = tryRequire('./store/extract');
@@ -465,29 +445,10 @@ async function createApp(opts = {}) {
   // Browser nicht einmal erfahren, DASS er von einem Stick laeuft.
   const portable = pathsMod.portableInfo(paths.home);
 
-  // --- Laufzeitkern vom Datentraeger -----------------------------------------
-  //
-  // NUR im portablen Betrieb. Auf einer gewoehnlichen Installation entsteht
-  // dieses Objekt gar nicht erst: dort gibt es keinen Stick, auf dem ein Kern
-  // liegen koennte, und ein Aufseher ueber nichts waere eine Zeile im
-  // Selbstbericht, die jeden Leser in die Irre fuehrt.
-  //
-  // Hier wird NICHTS gestartet -- der Bau eines app-Objekts darf keinen
-  // fremden Prozess erzeugen, sonst startet `doctor` ein 4-GB-Modell, nur weil
-  // jemand nach dem Zustand gefragt hat. Das Starten steht in `listen()`,
-  // genau wie bei watcher/scheduler/triggers.
-  const runnerMod = tryRequire('./models/local-runner');
-  const localRunner = runnerMod && portable
-    ? optional(failures, 'stick-modell', () => runnerMod.createLocalRunner({
-      stickRoot: portable.root, gate, logger, audit,
-    }))
-    : null;
-
   const app = {
     version: VERSION,
     paths,
     portable,
-    localRunner,
     config,
     bus,
     audit,
@@ -497,6 +458,7 @@ async function createApp(opts = {}) {
     hardening,
     vaultCrypto,
     graph,
+    claude,
     registry,
     chat,
     approvals,
@@ -523,17 +485,15 @@ async function createApp(opts = {}) {
     /**
      * Einen Massenschreibvorgang ausführen: Import, Wiederherstellung.
      *
-     * Drei Dinge werden dabei ausgesetzt, aus drei verschiedenen Gründen:
+     * Zwei Dinge werden dabei ausgesetzt, aus zwei verschiedenen Gründen
+     * (die Einbettungen, früher ein drittes, gibt es nicht mehr):
      *
-     * - **Die Einbettungen.** 50 000 Sätze wären 50 000 Modellaufrufe und
-     *   50 000 Indexschreibvorgänge -- langsamer als der Import selbst und
-     *   sinnlos, weil ein `reindexAll()` danach dasselbe Ergebnis liefert.
      * - **Das Änderungsjournal.** Es ist begrenzt (2000 Einträge). Ein Import
      *   würde es vollständig füllen und damit genau das verdrängen, wofür es
      *   da ist: deine letzten echten Änderungen. Und „einen einzelnen Satz aus
      *   einem Import zurücknehmen" bedeutet ohnehin nichts -- wer einen Import
      *   rückgängig machen will, spielt die vorige Sicherung ein.
-     * - **Die Ableitung der Verknüpfungen.** Anders als die beiden oberen ist
+     * - **Die Ableitung der Verknüpfungen.** Anders als das Journal ist
      *   das keine Frage der Kosten, sondern der Richtigkeit: die Ableitung
      *   hört am Bus mit und legt zu jedem eingespielten Satz eigene Kanten an
      *   -- zusätzlich zu den Kanten, die derselbe Import gerade aus der
@@ -553,7 +513,6 @@ async function createApp(opts = {}) {
     async bulkWrite(fn, opts = {}) {
       const kannAbleiten = !!(graph && typeof graph.scanAll === 'function');
       const willAbleiten = opts.rederive !== false;
-      indexingSuspended++;
       if (willAbleiten) derivationSuspended++;
       let ergebnis;
       try {
@@ -561,7 +520,6 @@ async function createApp(opts = {}) {
           ? await history.suspend(fn)
           : await fn();
       } finally {
-        indexingSuspended = Math.max(0, indexingSuspended - 1);
         if (willAbleiten) derivationSuspended = Math.max(0, derivationSuspended - 1);
       }
       // Erst wenn der äußerste Massenschreibvorgang fertig ist: ein
@@ -626,28 +584,22 @@ async function createApp(opts = {}) {
         backup: !!backup,
         auth: !!auth,
         stick: !!stick,
-        // Bewusst NICHT in dieser Liste: sie zaehlt Teilsysteme auf, die auf
-        // jeder Installation geladen sein sollten, und ein `false` darin ist
-        // ein Fehlstart. Der Aufseher ueber den Laufzeitkern fehlt auf einer
-        // gewoehnlichen Installation aber voellig zu Recht -- dort gibt es
-        // keinen Datentraeger, auf dem ein Kern liegen koennte. Seine
-        // Auskunft steht darum weiter unten unter `stickModell`, mit allen
-        // vier Zustaenden statt einem irrefuehrenden Ja/Nein.
+        claude: !!claude,
         extraction: !!extract,
         sync: !!sync,
         modules: !!modules,
-        vectors: !!vectors,
-        embeddings: !!embeddings,
       };
-      let semantic = { available: false, reason: 'Semantische Suche nicht geladen' };
-      if (embeddings && typeof embeddings.available === 'function') {
+      // Der Zustand von Claude, wie GET /api/claude ihn zeigt -- ohne Netz.
+      let claudeZustand = null;
+      if (claude) {
         try {
-          const state = await embeddings.available();
-          semantic = state && state.ok
-            ? { available: true, model: state.model, dim: state.dim, indexed: vectors ? vectors.size() : 0 }
-            : { available: false, reason: (state && state.reason) || 'Kein Einbettungsmodell erreichbar' };
+          const z = claude.zustand();
+          claudeZustand = {
+            verbunden: z.verbunden, modell: z.modell, schluesselVorhanden: z.schluesselVorhanden,
+            gesperrt: z.gesperrt, grund: z.grund, grundCode: z.grundCode, netz: z.netz,
+          };
         } catch (err) {
-          semantic = { available: false, reason: asNeuralError(err).message };
+          claudeZustand = { verbunden: false, grund: asNeuralError(err).message };
         }
       }
       let models = { available: false, providers: [], reason: 'model registry unavailable' };
@@ -659,11 +611,7 @@ async function createApp(opts = {}) {
             available: providers.some((p) => p.available),
             providers: providers.map((p) => ({
               id: p.id, baseUrl: p.baseUrl, available: p.available,
-              // Ohne diese beiden Felder steht hier dreimal "127.0.0.1" und
-              // die einzige Frage, die ein Stick-Besitzer wirklich hat --
-              // laeuft die KI aus meiner Tasche oder aus diesem fremden
-              // Rechner? -- bleibt unbeantwortet.
-              quelle: p.quelle || 'geraet', vomStick: !!p.vomStick,
+              quelle: p.quelle || 'fern', vomStick: false,
               models: (p.models || []).map((m) => m.id), error: p.error || null,
             })),
           };
@@ -676,16 +624,14 @@ async function createApp(opts = {}) {
         node: process.version,
         home: paths.home,
         portable: pathsMod.describePortable(portable),
-        // null heisst: dieser Lauf bringt keinen eigenen Laufzeitkern mit
-        // (gewoehnliche Installation). Sonst steht hier einer der vier
-        // Zustaende aus models/local-runner.js -- mit Grund, wenn er
-        // gescheitert ist, samt der letzten Zeilen seiner Fehlerausgabe.
-        stickModell: localRunner && typeof localRunner.zustand === 'function' ? localRunner.zustand() : null,
+        claude: claudeZustand,
         network: { mode: config.network.mode, hardened: !!hardening, strictAllowlist: config.network.strictAllowlist },
         vault: { ...(store.stats ? store.stats() : {}), encryption: vaultCrypto ? vaultCrypto.state : 'unavailable' },
         subsystems,
         models,
-        semantic,
+        // Die semantische Suche ist entfallen (siehe oben); der Schlüssel
+        // bleibt, damit ältere Leser dieses Berichts eine Antwort bekommen.
+        semantic: { available: false, reason: 'Entfallen: die Suche arbeitet mit Volltext.' },
         automation: {
           scheduler: scheduler && typeof scheduler.status === 'function' ? scheduler.status() : null,
           triggers: triggers && typeof triggers.status === 'function' ? triggers.status() : null,
@@ -761,84 +707,7 @@ async function createApp(opts = {}) {
           log.error(`Ordnerbeobachtung konnte nicht gestartet werden: ${err && err.message}`);
         }
       }
-      // Zuletzt: der mitgelieferte Laufzeitkern. Er darf nichts aufhalten,
-      // also wird hier weder auf seine Bereitschaft gewartet noch geworfen.
-      await app.startLocalRunner(opts.modellTimeoutMs ? { timeoutMs: opts.modellTimeoutMs } : {});
       return created;
-    },
-
-    /**
-     * Startet den Laufzeitkern vom Stick und meldet ihn als ganz gewoehnlichen
-     * lokalen Anbieter an.
-     *
-     * Getrennt von `listen()`, damit ein Test den Vorgang einzeln messen kann,
-     * ohne einen HTTP-Server zu brauchen.
-     *
-     * Was hier NICHT passiert: warten. Ein Modell von einem USB-2-Stick laedt
-     * auch mal eine Minute; solange darf der Browser nicht vor einer leeren
-     * Seite sitzen. Der Anbieter ist trotzdem sofort angemeldet -- als
-     * "noch nicht geprueft", nicht als "erreichbar" -- und der Chat sagt bis
-     * dahin ehrlich, dass der Kern noch startet.
-     *
-     * @param {{timeoutMs?:number, warten?:boolean}} [opts]
-     */
-    async startLocalRunner(opts = {}) {
-      if (!localRunner || typeof localRunner.starten !== 'function') return null;
-      let zustand;
-      try {
-        zustand = await localRunner.starten(opts);
-      } catch (err) {
-        // starten() ist darauf ausgelegt, nicht zu werfen. Falls es doch
-        // einmal tut, faehrt die Anwendung trotzdem hoch -- und sagt es.
-        const e = asNeuralError(err);
-        failures.push({ subsystem: 'stick-modell', reason: e.message, code: e.code });
-        log.error(`Laufzeitkern vom Stick: ${e.message}`);
-        return null;
-      }
-
-      if (zustand.zustand === 'nicht-vorhanden') {
-        // Ein Stick ohne Modell ist der Normalfall, kein Fehler.
-        log.debug(zustand.grund || 'Kein Laufzeitkern auf dem Datenträger.');
-        return zustand;
-      }
-
-      if (zustand.zustand === 'gescheitert') {
-        failures.push({ subsystem: 'stick-modell', reason: zustand.grund });
-        audit.write('stick.modell.fehler', { grund: String(zustand.grund || '').slice(0, 500) });
-        return zustand;
-      }
-
-      if (registry && typeof registry.anbieterAnmelden === 'function' && zustand.baseUrl) {
-        try {
-          registry.anbieterAnmelden({
-            id: 'stick',
-            kind: zustand.art,
-            baseUrl: zustand.baseUrl,
-            quelle: 'stick',
-            label: `${zustand.modellName || zustand.name} (vom Stick)`,
-            hinweis: 'Dieses Modell liegt auf dem Datenträger, von dem Neural OS gerade läuft, '
-              + 'und wurde beim Start von dort hochgefahren. Beim ersten Mal dauert das, bis das Modell im Arbeitsspeicher ist.',
-          });
-        } catch (err) {
-          failures.push({ subsystem: 'stick-modell', reason: asNeuralError(err).message });
-          log.error(`Der Kern vom Stick läuft, ließ sich aber nicht als Anbieter anmelden: ${err && err.message}`);
-          return zustand;
-        }
-        // Sobald gemessen ist, dass er antwortet, einmal richtig suchen --
-        // dann steht im Schnappschuss, welches Modell er wirklich anbietet,
-        // statt einer Vermutung aus dem Dateinamen.
-        Promise.resolve(localRunner.bereit()).then((fertig) => {
-          if (fertig && fertig.zustand === 'laeuft' && registry && typeof registry.refresh === 'function') {
-            return registry.refresh({ timeoutMs: 4000 });
-          }
-          if (fertig && fertig.zustand === 'gescheitert') {
-            failures.push({ subsystem: 'stick-modell', reason: fertig.grund });
-            log.error(`Laufzeitkern vom Stick: ${String(fertig.grund || '').split('\n')[0]}`);
-          }
-          return null;
-        }).catch((err) => log.warn(`Nachlauf des Stick-Modells: ${err && err.message}`));
-      }
-      return zustand;
     },
 
     async close() {
@@ -854,19 +723,9 @@ async function createApp(opts = {}) {
         ['server', () => app.server && app.server.close()],
         ['modules', () => modules && modules.disposeAll && modules.disposeAll()],
         ['runtime', () => runtime && runtime.abortAll && runtime.abortAll()],
-        // Nach `runtime`, damit ein laufender Modellaufruf erst abgebrochen
-        // wird und der Kern nicht mitten im Satz wegstirbt -- und vor
-        // `store`, weil das Abraeumen selbst noch ins Pruefprotokoll gehoert.
-        // Ein verwaister llama-server haelt mehrere Gigabyte fest, bis der
-        // fremde Rechner neu startet; das ist der Schaden, den diese Zeile
-        // verhindert. Die zweite Sicherung dagegen haengt im Aufseher selbst
-        // an process.on('exit') -- fuer den Fall, dass close() nie laeuft.
-        ['stick-modell', async () => {
-          if (!localRunner || typeof localRunner.stoppen !== 'function') return;
-          if (registry && typeof registry.anbieterAbmelden === 'function') registry.anbieterAbmelden('stick');
-          await localRunner.stoppen();
-        }],
-        ['vectors', () => vectors && vectors.close && vectors.close()],
+        // Laufende Claude-Antworten abbrechen, bevor der Speicher schließt:
+        // der Teiltext wird dann noch als "abgebrochen" gespeichert.
+        ['chat', () => chat && chat.abortAll && chat.abortAll()],
         ['store', () => store.close()],
       ]) {
         try {
@@ -918,47 +777,27 @@ async function seedIfEmpty(app) {
   const welcome = app.store.create('note', {
     title: 'Willkommen in Neural OS',
     body: [
-      'Dies ist dein eigenes System. Alles, was du hier schreibst, liegt auf diesem Gerät',
-      `unter \`${app.paths.home}\`. Nichts davon wird irgendwohin gesendet.`,
+      'Dies ist deine eigene KI. Alles, was du hier schreibst, liegt auf diesem Stick',
+      `unter \`${app.paths.home}\`.`,
       '',
-      '## Die drei Netzstufen',
+      '## Wie es funktioniert',
       '',
-      '- **Offline** (Standard): nur dieses Gerät. Ein lokales Modell auf `127.0.0.1` gilt',
-      '  ausdrücklich nicht als Netzwerkzugriff und funktioniert weiter.',
-      '- **LAN**: zusätzlich dein eigenes Netzwerk, etwa ein Modellserver auf einem',
-      '  stärkeren Rechner.',
-      '- **Online**: öffentliches Internet, standardmäßig zusätzlich per Allowlist begrenzt.',
-      '',
-      'Unter #Netzwerk siehst du jede einzelne Verbindung, die versucht wurde — auch die',
-      'erlaubten. Ein Protokoll, das nur Blockaden zeigt, würde nichts beweisen.',
+      '- **Chatten**: Die KI ist Claude. Sie antwortet, sucht im Internet und legt',
+      '  Termine, Notizen und Projekte selbst an, wenn du sie im Gespräch nennst.',
+      '- **Gedächtnis**: Was du über dich erzählst, merkt sie sich – und weiß es beim',
+      '  nächsten Mal noch.',
+      '- **Rückgängig**: Alles, was die KI anlegt, lässt sich zurücknehmen.',
       '',
       '## Erste Schritte',
       '',
-      '1. Ein lokales Modell installieren: [[Lokales Modell einrichten]]',
-      '2. Eine Notiz anlegen und mit `[[Doppelklammern]]` auf eine andere verweisen.',
-      '3. Das Ergebnis unter #Gehirn ansehen — die Verknüpfung ist dort sofort sichtbar.',
+      '1. Claude verbinden: [[Claude verbinden]]',
+      '2. Oben auf „Online“ schalten.',
+      '3. Einfach losschreiben.',
       '',
-      '## Was dir Arbeit abnimmt — auch ganz ohne Modell',
+      '## Und ohne Internet?',
       '',
-      'Unter **Vorschläge** drückst du auf „Prüfen". Das System sieht sich deine',
-      'Einträge an und findet Dubletten, verwaiste Notizen, Merker wie `- [ ]` im',
-      'Text und Verweise, zu denen es noch keine Notiz gibt. **Geschehen tut davon',
-      'nichts, bis du auf „Übernehmen" drückst** — und davor steht in klarem Deutsch,',
-      'was genau passieren wird. Ein verworfener Vorschlag kommt nie wieder.',
-      '',
-      'Unter **Automatik** kannst du einen Agenten nach der Uhr laufen lassen oder',
-      'auf ein Ereignis reagieren. Beides ist ab Werk aus und bleibt aus, bis du es',
-      'einschaltest. Ganz oben steht dort immer, was gerade gilt.',
-      '',
-      'Beides braucht kein KI-Modell und keine Internetverbindung.',
-      '',
-      '## Und wenn etwas schiefgeht',
-      '',
-      'Unter **Zeitachse → Letzte Änderungen** steht jede Änderung mit dem Zustand',
-      'davor — und mit der Antwort auf die Frage, die man zuerst stellt: *war ich',
-      'das oder ein Agent?* Ein Filter zeigt dir nur das, was **ohne dich** passiert',
-      'ist. Zurücknehmen geht von dort aus; wurde der Eintrag seitdem wieder',
-      'geändert, wird abgelehnt statt still überschrieben.',
+      'Notizen, Kalender, Projekte und die Suche funktionieren weiter. Nur die KI',
+      'antwortet dann nicht – und sagt das auch, statt etwas zu erfinden.',
       '',
       '#willkommen #anleitung',
     ].join('\n'),
@@ -967,37 +806,22 @@ async function seedIfEmpty(app) {
   });
 
   const setup = app.store.create('note', {
-    title: 'Lokales Modell einrichten',
+    title: 'Claude verbinden',
     body: [
-      'Neural OS enthält bewusst kein KI-Modell. Ein Modell sind je nach Größe 2–20 GB;',
-      'das gehört nicht in ein Programmverzeichnis, und du sollst selbst wählen können.',
+      'Neural OS benutzt Claude von Anthropic. Dafür braucht es einmal einen Schlüssel.',
       '',
-      '## Ollama (empfohlen)',
+      '1. Auf **console.anthropic.com** anmelden und unter „API Keys“ einen Schlüssel erzeugen.',
+      '2. In Neural OS unter **Einstellungen → Claude** auf „Claude verbinden“ tippen und',
+      '   den Schlüssel einfügen. Er wird sofort mit einer kleinen Anfrage geprüft.',
+      '3. Der Schlüssel liegt danach im Tresor auf dem Stick, nicht in einer offenen',
+      '   Datei. Ist eine PIN eingerichtet, ist er damit geschützt.',
       '',
-      '```',
-      '# einmalig, mit Internet:',
-      'ollama pull llama3.2        # ~2 GB, läuft auf fast allem',
-      'ollama pull qwen2.5:7b      # ~4,7 GB, deutlich stärker, ab 16 GB RAM',
-      '```',
+      'Jede Antwort kostet bei Anthropic ein wenig Geld. Unter Einstellungen → Claude',
+      'steht eine Schätzung, wie viel bisher verbraucht wurde.',
       '',
-      'Ollama lauscht auf `127.0.0.1:11434`. Neural OS findet es von allein.',
-      'Ab diesem Moment funktioniert der Chat vollständig ohne Internet.',
-      '',
-      '## Alternativen',
-      '',
-      'llama.cpp (`llama-server`, Port 8080) und LM Studio (Port 1234) werden ebenfalls',
-      'automatisch erkannt. Beide sprechen das OpenAI-kompatible Protokoll.',
-      '',
-      '## Was realistisch zu erwarten ist',
-      '',
-      'Ein 7B-Modell ist stark beim Zusammenfassen, Umformulieren, Strukturieren und',
-      'Verschlagworten. Es ist schwach bei langen Beweisketten und komplexem Code.',
-      'Für solche Aufgaben gibt es den kontrollierten Online-Modus — bewusst,',
-      'pro Chat oder pro Anfrage.',
-      '',
-      '#anleitung #modelle',
+      '#anleitung',
     ].join('\n'),
-    tags: ['anleitung', 'modelle'],
+    tags: ['anleitung'],
   });
 
   app.store.edges.add({
@@ -1024,7 +848,7 @@ async function seedIfEmpty(app) {
     name: 'Mein erstes Projekt',
     description: 'Ein Platz, um Notizen, Aufgaben und Chats zu einem Vorhaben zu bündeln.',
   });
-  app.store.create('task', { title: 'Lokales Modell installieren', projectId: project.id, priority: 1 });
+  app.store.create('task', { title: 'Claude verbinden', projectId: project.id, priority: 1 });
   app.store.create('task', { title: 'Graph-Ansicht ausprobieren', projectId: project.id });
 
   await app.store.flush();

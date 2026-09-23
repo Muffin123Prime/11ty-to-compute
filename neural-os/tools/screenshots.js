@@ -250,25 +250,41 @@ async function los(page, base, view, warten = 1000) {
     await c.close();
   }
 
-  /* ============================================== 3 · Notizen im Detail */
+  /* ================================= 3 · Kalender und Notizwand im Detail */
+  //
+  // Die alte Notizansicht (Editor, Vorschau, Zweiter Blick) gibt es nicht mehr:
+  // die Notizen macht die KI, die Ansicht ist eine Wand aus Post-its. Gezeigt
+  // wird, was der Nutzer dort tut -- und woher ein Eintrag stammt.
   {
-    const { c, p } = await mach('light');
-    await los(p, base, 'notes', 1400);
-    await step('Notiz geöffnet', async () => {
-      await klick(p, /Espresso in der Praxis/, { warten: 900 });
-      await shot(p, 'notiz-geteilt-hell');
+    const { c, p } = await mach('dark');
+    await los(p, base, 'kalender', 1400);
+    await step('Kalender: automatischer Termin mit seinem Chat', async () => {
+      const eintrag = p.locator('.kal__entry').first();
+      await eintrag.waitFor({ state: 'visible', timeout: 4000 });
+      await eintrag.click();
+      await p.waitForTimeout(900);
+      await shot(p, 'kalender-termin-aus-dem-chat-dunkel');
+      await p.keyboard.press('Escape');
+      await p.waitForTimeout(300);
     });
-    await step('Notiz: Vorschau', async () => {
-      await klick(p, /^Vorschau$/, { warten: 700 });
-      await shot(p, 'notiz-vorschau-hell');
+    await step('Kalender: Woche', async () => {
+      await klick(p, /^Woche$/, { warten: 900 });
+      await shot(p, 'kalender-woche-dunkel');
     });
-    await step('Notiz: Text', async () => {
-      await klick(p, /^Text$/, { warten: 700 });
-      await shot(p, 'notiz-text-hell');
+    await step('Kalender: neuer Termin', async () => {
+      await klick(p, /^Termin$/, { warten: 600 });
+      await shot(p, 'kalender-neuer-termin-dunkel');
+      await p.keyboard.press('Escape');
+      await klick(p, /^Monat$/, { warten: 400 });
     });
-    await step('Zweiter Blick', async () => {
-      await klick(p, /Zweiter Blick/, { warten: 2500 });
-      await shot(p, 'notiz-zweiter-blick-hell');
+    await step('Notiz aus dem Chat, geöffnet', async () => {
+      await los(p, base, 'notes', 1400);
+      const zettel = p.locator('.nw__note', { hasText: 'aus dem Chat' }).first();
+      await zettel.waitFor({ state: 'visible', timeout: 4000 });
+      await zettel.click();
+      await p.waitForTimeout(800);
+      await shot(p, 'notiz-aus-dem-chat-dunkel');
+      await p.keyboard.press('Escape');
     });
     await c.close();
   }
@@ -491,7 +507,8 @@ async function los(page, base, view, warten = 1000) {
     });
     await step('Notiz: im Gehirn zeigen', async () => {
       await los(p, base, 'notes', 1500);
-      await klick(p, /Beetplanung/, { warten: 1000 });
+      // Die Notiz "Beetplanung", nicht eine aus dem Chat "Beetplanung 2027".
+      await klick(p, /^Beetplanung,/, { warten: 1000 });
       await klick(p, /Im Gehirn zeigen/, { warten: 2800 });
       await shot(p, 'notiz-im-gehirn-hell');
     });

@@ -79,6 +79,14 @@ function resolveName(name) {
   });
 }
 
+/** Die Zeilen des Prüfprotokolls, gelesen wie in Abschnitt 5. */
+function auditZeilen(home) {
+  const p = path.join(home, 'audit.jsonl');
+  if (!fs.existsSync(p)) return [];
+  return fs.readFileSync(p, 'utf8').split('\n').filter(Boolean)
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+}
+
 async function main() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-proof-'));
   console.log(`\n${B}Neural OS — Offline-Beweis${X}`);
@@ -123,15 +131,15 @@ async function main() {
           : `nur ${dnsRes.code || dnsRes.outcome}`);
 
     // ------------------------------------ 2. Lokales bleibt erreichbar
-    console.log(`\n${B}2. Lokales bleibt erreichbar${X} ${D}(lokale KI ist kein Netzwerkzugriff)${X}`);
+    console.log(`\n${B}2. Lokales bleibt erreichbar${X} ${D}(die eigene Oberfläche ist kein Netzwerkzugriff)${X}`);
     const loopback = await attempt('127.0.0.1', port);
     record('gate', 'Die eigene Oberfläche auf 127.0.0.1 ist erreichbar',
       loopback.outcome === 'connected' ? 'pass' : 'fail',
       `HTTP ${loopback.status || loopback.code || loopback.outcome}`);
 
-    const ollamaDecision = app.gate.check({ host: '127.0.0.1', port: 11434, scope: 'global', purpose: 'proof' });
-    record('gate', 'Ein lokales Modell auf 127.0.0.1:11434 wäre erlaubt',
-      ollamaDecision.allowed ? 'pass' : 'fail', ollamaDecision.reason);
+    const lokal = app.gate.check({ host: '127.0.0.1', port: port, scope: 'global', purpose: 'proof' });
+    record('gate', 'Ein Dienst auf 127.0.0.1 gilt nicht als Netzzugriff',
+      lokal.allowed ? 'pass' : 'fail', lokal.reason);
 
     // ------------------------------------------- 3. Funktionen ohne Netz
     console.log(`\n${B}3. Die Anwendung arbeitet ohne Netz${X}`);
@@ -247,22 +255,42 @@ async function main() {
       record('app', 'Rückgängig funktioniert ohne Netz', 'fail', 'Teilsystem nicht geladen');
     }
 
-    // ------------------------------------------------- 4. Modelle, ehrlich
-    console.log(`\n${B}4. Modellanbindung${X}`);
-    if (app.registry) {
-      const snap = await app.registry.refresh({ timeoutMs: 1200 });
-      const avail = (snap.providers || []).filter((p) => p.available);
-      if (avail.length) {
-        record('model', 'Lokales Modell erreichbar', 'pass',
-          avail.map((p) => `${p.id}: ${(p.models || []).map((m) => m.id).join(', ')}`).join(' · '));
-      } else {
-        record('model', 'Lokales Modell erreichbar', 'info',
-          'keins installiert — Chat und Agenten bleiben zu Recht funktionslos');
-        console.log(`      ${D}Das ist kein Fehler: ohne Modell erfindet die App keine Antworten.${X}`);
-        console.log(`      ${D}Abhilfe: ollama.com/download, dann 'ollama pull llama3.2'.${X}`);
+    // --------------------------------------------- 4. Claude, ohne Freigabe
+    //
+    // Die KI ist Claude und läuft bei Anthropic. Bewiesen wird hier die
+    // Kehrseite: ohne Freigabe verlässt auch für Claude nichts den Rechner --
+    // nicht der Schlüssel, nicht die Frage, nicht einmal der Name des Hosts
+    // (die Schleuse lehnt ab, bevor ein Resolver gefragt wird).
+    console.log(`\n${B}4. Claude ohne Freigabe${X} ${D}(die KI braucht Internet – und bekommt es nur, wenn du es erlaubst)${X}`);
+    if (app.claude) {
+      const vorher = auditZeilen(home).length;
+      let fehler = null;
+      try {
+        await app.claude.schluesselSpeichern('sk-ant-beweis-0000000000000000000000');
+      } catch (err) {
+        fehler = err;
       }
+      const neu = auditZeilen(home).slice(vorher).filter((l) => String(l.kind).startsWith('network.'));
+      const erlaubt = neu.filter((l) => /allow/.test(l.kind));
+      record('model', 'Ein Claude-Schlüssel wird offline weder geprüft noch gespeichert',
+        fehler && fehler.code === 'CLAUDE_OFFLINE' && erlaubt.length === 0 ? 'pass' : 'fail',
+        fehler ? fehler.message : 'es wurde nichts abgelehnt!');
+      let blockiert = null;
+      try {
+        await require('../src/models/providers/anthropic').senden({
+          apiKey: 'sk-ant-beweis', gate: app.gate, scope: 'global', purpose: 'Beweis',
+          body: { model: 'claude-opus-5', max_tokens: 1, messages: [{ role: 'user', content: 'x' }] },
+        });
+      } catch (err) {
+        blockiert = err;
+      }
+      record('model', 'Eine Anfrage an api.anthropic.com wird von der Schleuse verhindert',
+        blockiert && blockiert.code === 'CLAUDE_OFFLINE' ? 'pass' : 'fail',
+        blockiert ? blockiert.message : 'die Anfrage ging durch!');
+      const z = app.claude.zustand();
+      record('model', 'Der Status sagt ehrlich „nicht verbunden“', z.verbunden === false ? 'pass' : 'fail', z.grund || '');
     } else {
-      record('model', 'Modell-Registry geladen', 'fail', 'Subsystem fehlt');
+      record('model', 'Claude geladen', 'fail', 'Teilsystem fehlt');
     }
 
     // ---------------------------------------------------- 5. Audit-Nachweis

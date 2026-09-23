@@ -282,8 +282,9 @@ test('run: ohne jedes Modell wird nichts erfunden, sondern NoModelError mit der 
         assert.equal(err.code, 'NO_MODEL_AVAILABLE');
         assert.match(err.message, /Für keine der beiden Seiten ist ein Modell verfügbar/);
         // Die Anleitung der Registry, wörtlich, nicht eine zweite eigene.
-        assert.match(err.message, /ollama pull llama3\.2/);
-        assert.match(err.message, /Neural OS erfindet keine Antworten/);
+        // Seit dem Wegfall der Offline-KI: die Anleitung, Claude zu verbinden.
+        assert.match(err.message, /console\.anthropic\.com/);
+        assert.match(err.message, /erfindet Neural OS keine Antworten/);
         return true;
       },
     );

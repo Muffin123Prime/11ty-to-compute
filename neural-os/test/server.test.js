@@ -692,9 +692,10 @@ test('Chat: ein Fehler des Dienstes wird als Ereignis gemeldet, nie als erfunden
       r.end(payload);
     });
 
-    assert.match(res.text, /event: error/);
+    // Vertrag 6: der Fehler kommt als `fehler` mit deutschem Satz, `fertig` zuletzt.
+    assert.match(res.text, /event: fehler/);
     assert.match(res.text, /NO_MODEL_AVAILABLE/);
-    assert.match(res.text, /event: done/);
+    assert.match(res.text, /event: fertig/);
     assert.ok(!/"role":"assistant","content":"[^"]+"/.test(res.text), 'es darf keine erfundene Antwort auftauchen');
 
     // Leere Eingaben scheitern als Statuscode, bevor ein Strom geöffnet wird.

@@ -352,6 +352,96 @@ async function checkRecords() {
   });
 }
 
+/**
+ * Kalender, Notizwand, Projekte (src/http/api/events.js).
+ *
+ * Termine sind ueber /api/records absichtlich nicht anlegbar; ihre eigene
+ * Familie prueft, was ein Kalender nicht annehmen darf. Und die Liste steht
+ * unter /api/events/zeitraum, weil GET /api/events der Ereignisstrom ist --
+ * geprueft wird beides: dass die Liste antwortet UND dass der Strom noch da ist.
+ */
+async function checkKalender() {
+  area('2b · Kalender, Notizwand, Projekte');
+  const heute = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const tag = `${heute.getFullYear()}-${pad(heute.getMonth() + 1)}-${pad(heute.getDate())}`;
+  let terminId = null;
+  let chatId = null;
+
+  await check('Termin anlegen (POST /api/events)', async () => {
+    const r = ok(await api.post('/api/events', { title: 'Prüftermin', start: `${tag}T09:00`, end: `${tag}T10:00`, location: 'Raum 2' }), 'create');
+    terminId = r.record.id;
+    assert(body(r.record).source === 'user', `Herkunft ${body(r.record).source} statt user`);
+    return terminId;
+  });
+
+  await check('Ein 30. Februar wird abgewiesen, nicht verschoben', async () => {
+    const res = await api.post('/api/events', { title: 'Gibt es nicht', start: '2027-02-30T10:00' });
+    assert(res.status === 400, `HTTP ${res.status}`);
+    return (res.json && res.json.error && res.json.error.message || '').slice(0, 60);
+  });
+
+  await check('Der Zeitraum findet ihn (GET /api/events/zeitraum)', async () => {
+    const r = ok(await api.get(`/api/events/zeitraum?from=${tag}&to=${tag}`), 'zeitraum');
+    assert(r.items.some((e) => e.id === terminId), 'Termin fehlt in der Liste');
+    return `${r.total} Termin(e) heute`;
+  });
+
+  await check('Der Ereignisstrom unter GET /api/events ist weiter der Strom', async () => {
+    const res = await new Promise((resolve, reject) => {
+      const req = http.request({ method: 'GET', host: '127.0.0.1', port: PORT, path: '/api/events', headers: { accept: 'text/event-stream' } }, (r) => {
+        resolve({ status: r.statusCode, type: r.headers['content-type'] });
+        req.destroy();
+      });
+      req.on('error', (err) => (err.code === 'ECONNRESET' ? null : reject(err)));
+      req.end();
+    });
+    assert(res.status === 200 && /text\/event-stream/.test(String(res.type)), `HTTP ${res.status} ${res.type}`);
+    return res.type;
+  });
+
+  await check('Ein automatischer Termin nennt seinen Chat; die Herkunft bleibt', async () => {
+    const chat = ok(await api.post('/api/chats', { title: 'Prüfchat Termine' }), 'chat');
+    chatId = chat.record.id;
+    const r = ok(await api.post('/api/events', { title: 'Aus dem Chat', start: tag, source: 'auto', chatId }), 'create');
+    const eins = ok(await api.get(`/api/events/${r.record.id}`), 'get');
+    assert(eins.chat && eins.chat.title === 'Prüfchat Termine', `chat: ${JSON.stringify(eins.chat)}`);
+    const um = await api.patch(`/api/events/${r.record.id}`, { source: 'user' });
+    assert(um.status === 400, `Herkunft liess sich umschreiben (HTTP ${um.status})`);
+    return 'Chat genannt, Herkunft fest';
+  });
+
+  await check('Termin ändern und weich löschen', async () => {
+    const r = ok(await api.patch(`/api/events/${terminId}`, { start: `${tag}T11:00`, end: `${tag}T12:00` }), 'patch');
+    assert(body(r.record).start === `${tag}T11:00`, 'Änderung kam nicht an');
+    ok(await api.del(`/api/events/${terminId}`), 'delete');
+    assert((await api.get(`/api/events/${terminId}`)).status === 404, 'nach dem Löschen noch lesbar');
+    ok(await api.post(`/api/records/${terminId}/restore`), 'restore');
+    return 'verschoben, gelöscht, wiederhergestellt';
+  });
+
+  await check('Die Notizwand nennt die Herkunft (GET /api/notizen)', async () => {
+    ok(await api.post('/api/records', { type: 'note', data: { title: 'Automatisch gemerkt', source: 'auto', chatId } }), 'note');
+    const r = ok(await api.get('/api/notizen?quelle=auto&sort=neu&limit=1'), 'notizen');
+    const n = r.items[0];
+    assert(n && n.herkunft && n.herkunft.art === 'chat' && n.herkunft.chatTitel === 'Prüfchat Termine',
+      `herkunft: ${JSON.stringify(n && n.herkunft)}`);
+    return `${r.zaehler.automatisch} automatisch von ${r.zaehler.alle}`;
+  });
+
+  await check('Projekte sammeln ein, was dazugehört (GET /api/projekte)', async () => {
+    const p = ok(await api.post('/api/records', { type: 'project', data: { name: 'Prüfprojekt Kalender' } }), 'project');
+    ok(await api.post('/api/events', { title: 'Projekttermin', start: tag, projectId: p.record.id }), 'event');
+    ok(await api.post('/api/records', { type: 'task', data: { title: 'Projektaufgabe', projectId: p.record.id } }), 'task');
+    const liste = ok(await api.get('/api/projekte'), 'projekte');
+    assert(liste.items[0].id === p.record.id, `oben steht ${liste.items[0] && liste.items[0].name}, nicht das zuletzt geänderte`);
+    const eins = ok(await api.get(`/api/projekte/${p.record.id}`), 'projekt');
+    assert(eins.projekt.termine.length === 1 && eins.projekt.aufgaben.length === 1,
+      `${eins.projekt.termine.length} Termine, ${eins.projekt.aufgaben.length} Aufgaben`);
+    return `${liste.total} Projekte, das neueste oben`;
+  });
+}
+
 async function checkSearch() {
   area('3 · Suche');
   await check('Volltextsuche findet den Titel', async () => {
@@ -2008,6 +2098,7 @@ const AREAS = {
   verdrahtung: checkWiring,
   status: checkStatus,
   notizen: checkRecords,
+  kalender: checkKalender,
   suche: checkSearch,
   graph: checkGraph,
   chat: checkChat,

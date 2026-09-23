@@ -321,37 +321,12 @@ async function main() {
     check(await page.locator('.rail__chat.is-active', { hasText: 'Probe' }).count() === 1,
       'und der Chat ist in „Zuletzt“ markiert');
 
-    /* -------------------- 8. Zweiter Blick: belegbar vs. nicht belegbar */
-    console.log(`\n${B}8 · Der zweite Blick trennt Belegbares von Nichtbelegbarem${X}`);
-    const langerText = 'Der Mahlgrad entscheidet über den Widerstand im Sieb. Ist er zu fein, steigt '
-      + 'der Druck und der Espresso läuft nur tropfenweise; ist er zu grob, rauscht das Wasser durch '
-      + 'und die Crema bleibt dünn. Die Brühtemperatur liegt bei rund 93 Grad, bei dunklen Röstungen '
-      + 'eher darunter. Neun bar sind die Norm, aber viele Maschinen schwanken. Der Wassertank sollte '
-      + 'weiches Wasser enthalten, sonst verkalkt die Maschine schnell. Entkalker gehört alle zwei '
-      + 'Monate hinein. Offen bleibt, wie stark sich die Bohnenfrische auf den Druck auswirkt.';
-    const langeNotiz = store.create('note', { title: 'Espresso in der Praxis', body: langerText });
-    store.create('note', { title: 'Mahlgrad', body: 'Feiner Mahlgrad erhöht den Druck.' });
-    const kurzeNotiz = store.create('note', { title: 'Kurz', body: 'Zwei Sätze. Mehr nicht.' });
-    await store.flush();
-
-    await page.goto(`${base}/#/notes?id=${langeNotiz.id}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(1200);
-    const zbKnopf = page.getByRole('button', { name: /Zweiter Blick/ });
-    if (!(await zbKnopf.count())) {
-      bad('Der Knopf steht an einer langen Notiz');
-    } else {
-      ok('Der Knopf steht an einer langen Notiz');
-      await zbKnopf.first().click();
-      await page.waitForTimeout(2500);
-      const zbText = await page.locator('main').innerText();
-      check(/Mahlgrad|Druck|Grad/.test(zbText), 'Die bekannten Begriffe erscheinen auch ohne Modell');
-      check(/Volltextindex/.test(zbText), 'und sind als belegbar gekennzeichnet');
-      check(/braucht ein Modell/i.test(zbText), 'während der andere Teil als "braucht ein Modell" dasteht');
-    }
-    await page.goto(`${base}/#/notes?id=${kurzeNotiz.id}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(1200);
-    check(await page.getByRole('button', { name: /Zweiter Blick/ }).count() === 0,
-      'An einer kurzen Notiz gibt es ihn gar nicht erst');
+    /* ------------- 8. Kalender, Notizwand, Projekte: bis in den Tresor */
+    // Die alte Notizansicht mit Editor und "Zweiter Blick" gibt es nicht mehr:
+    // die Notizen macht die KI, die Ansicht ist eine Wand zum Wiederfinden.
+    // Geprueft wird, was man dort tut -- und ob es im Tresor ankommt.
+    console.log(`\n${B}8 · Kalender, Notizen, Projekte: ein Klick wirkt im Tresor${X}`);
+    await pruefeKalenderNotizenProjekte(page, base, store);
 
     /* ----------------- 9. Sichern: der Knopf muss einen Ordner hinterlassen */
     console.log(`\n${B}9 · „Jetzt sichern" legt wirklich einen Ordner an${X}`);
@@ -673,6 +648,145 @@ async function pruefeSchale(page, base, store) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Kalender, Notizen, Projekte                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Kalender, Notizwand und Projekte, jeweils mit dem, was der Nutzer dort
+ * wirklich tut: einen Termin eintragen und loeschen, dem automatischen
+ * Termin zu seinem Chat folgen, eine Notiz anheften, eine Aufgabe abhaken.
+ * Jedes Mal wird im Tresor nachgesehen, nicht auf dem Bildschirm. Dazu die
+ * beiden Kacheln rechts: sie muessen einen neuen Termin und eine neue Notiz
+ * ohne Neuladen zeigen (Bus), sonst sind sie ein Standbild.
+ */
+async function pruefeKalenderNotizenProjekte(page, base, store) {
+  const warte = (ms) => page.waitForTimeout(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  const d = new Date();
+  const heute = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const termine = () => store.all('event');
+
+  /* --- Kalender: eintragen --- */
+  await page.goto(`${base}/#/kalender`, { waitUntil: 'domcontentloaded' });
+  await warte(1200);
+  const blatt = await page.evaluate(() => ({
+    tage: document.querySelectorAll('.kal__weeks .kal__day').length,
+    heute: document.querySelectorAll('.kal__day.is-today').length,
+  }));
+  check(blatt.tage >= 28 && blatt.tage <= 42 && blatt.tage % 7 === 0 && blatt.heute === 1,
+    'Der Kalender zeigt ein Monatsblatt aus ganzen Wochen, heute ist markiert', `${blatt.tage} Tage, ${blatt.heute}× heute`);
+  const vorher = termine().length;
+  await page.getByRole('button', { name: /^Termin$/ }).click();
+  await warte(400);
+  await page.getByLabel('Titel', { exact: true }).fill('Probe beim Zahnarzt');
+  await page.getByLabel('von', { exact: true }).fill('10:00');
+  await page.getByLabel('bis', { exact: true }).fill('10:30');
+  await page.getByRole('button', { name: /^Eintragen$/ }).click();
+  await warte(1300);
+  const probe = termine().find((t) => t.data.title === 'Probe beim Zahnarzt');
+  check(termine().length === vorher + 1 && !!probe && probe.data.start === `${heute}T10:00` && probe.data.end === `${heute}T10:30`,
+    '„Termin“ → Titel, Tag, Uhrzeit → „Eintragen“ legt ihn wirklich im Tresor an',
+    probe ? `${probe.data.start}–${probe.data.end}, Herkunft ${probe.data.source}` : `${vorher} → ${termine().length}`);
+  check(!!probe && probe.data.source === 'user', 'und zwar als „von dir“, nicht als automatisch erkannt');
+  const imBlatt = await page.locator('.kal__day.is-today .kal__pill', { hasText: 'Probe beim Zahnarzt' }).count();
+  const imDetail = (await page.locator('.kal__sheet').innerText().catch(() => '')).replace(/\s+/g, ' ');
+  check(imBlatt === 1 && /Von dir eingetragen/.test(imDetail),
+    'Er steht sofort am heutigen Tag, und das Blatt sagt, woher er kommt', imDetail.slice(0, 90));
+
+  /* --- ein automatischer Termin, live, mit Weg zurueck in den Chat --- */
+  const chat = store.create('chat', { title: 'Terminabsprache' });
+  const auto = store.create('event', { title: 'Rückruf Werkstatt', start: `${heute}T08:00`, end: `${heute}T08:15`, source: 'auto', chatId: chat.id });
+  await store.flush();
+  await warte(1500);
+  check(await page.locator('.kal__day.is-today .kal__pill', { hasText: 'Rückruf Werkstatt' }).count() === 1,
+    'Ein Termin, den die KI anlegt, erscheint ohne Neuladen');
+  await page.goto(`${base}/#/kalender?id=${auto.id}`, { waitUntil: 'domcontentloaded' });
+  await warte(1300);
+  const autoText = (await page.locator('.kal__sheet').innerText().catch(() => '')).replace(/\s+/g, ' ');
+  check(/Automatisch erkannt/.test(autoText) && /Angelegt aus dem Chat „Terminabsprache“/.test(autoText),
+    'Ein automatischer Termin nennt den Chat, aus dem er stammt', autoText.slice(0, 100));
+  const zumChat = page.getByRole('button', { name: /Zum Chat/ });
+  if (await zumChat.count()) {
+    await zumChat.first().click();
+    await warte(900);
+    check(page.url().endsWith(`#/chat?id=${chat.id}`), '„Zum Chat“ führt in genau dieses Gespräch', page.url().split('#')[1]);
+  } else {
+    bad('„Zum Chat“ ist am automatischen Termin');
+  }
+
+  /* --- loeschen --- */
+  if (probe) {
+    await page.goto(`${base}/#/kalender?id=${probe.id}`, { waitUntil: 'domcontentloaded' });
+    await warte(1200);
+    await page.locator('.kal__sheet').getByRole('button', { name: /Löschen/ }).click();
+    await warte(400);
+    await page.locator('.dialog').getByRole('button', { name: /^Löschen$/ }).click();
+    await warte(1200);
+    check(store.get(probe.id) === null && !!store.get(probe.id, { includeDeleted: true }),
+      '„Löschen“ nimmt ihn aus dem Kalender – weich, also umkehrbar');
+    check(await page.locator('.kal__pill', { hasText: 'Probe beim Zahnarzt' }).count() === 0,
+      'und er verschwindet aus dem Monatsblatt');
+  }
+
+  /* --- die Kachel "Kalender", live --- */
+  await page.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+  await warte(1500);
+  const kachel = page.locator('.tile[data-tile="kalender"]');
+  const kachelText = (await kachel.innerText().catch(() => '')).replace(/\s+/g, ' ');
+  check(/Heute, /.test(kachelText) && /Rückruf Werkstatt/.test(kachelText),
+    'Die Kachel „Kalender“ zeigt die heutigen Termine', kachelText.slice(0, 90));
+  store.create('event', { title: 'Paket abholen', start: `${heute}T18:00` });
+  await store.flush();
+  await warte(1600);
+  check(/Paket abholen/.test(await kachel.innerText().catch(() => '')),
+    'und einen neuen Termin von heute ohne Neuladen');
+
+  /* --- Notizwand: Herkunft, anheften, Kachel --- */
+  const notiz = store.create('note', { title: 'Fragen für die Werkstatt', body: 'Bremsen prüfen lassen.', source: 'auto', chatId: chat.id });
+  await store.flush();
+  await warte(1500);
+  const notizKachel = (await page.locator('.tile[data-tile="notizen"]').innerText().catch(() => '')).replace(/\s+/g, ' ');
+  check(/Fragen für die Werkstatt/.test(notizKachel) && /Terminabsprache/.test(notizKachel),
+    'Die Kachel „Notizen“ zeigt die neueste automatische Notiz, live, mit ihrem Chat', notizKachel.slice(0, 90));
+  await page.goto(`${base}/#/notes`, { waitUntil: 'domcontentloaded' });
+  await warte(1300);
+  const zettel = page.locator('.nw__note', { hasText: 'Fragen für die Werkstatt' });
+  const zettelText = (await zettel.innerText().catch(() => '')).replace(/\s+/g, ' ');
+  check(/aus dem Chat „Terminabsprache“/.test(zettelText),
+    'Auf der Wand sagt jede Notiz, aus welchem Chat sie stammt', zettelText.slice(0, 90));
+  if (await zettel.count()) {
+    await zettel.first().click();
+    await warte(700);
+    await page.locator('.nw__read').getByRole('button', { name: /^Anheften$/ }).click();
+    await warte(1300);
+    check(store.get(notiz.id).data.pinned === true, '„Anheften“ steht danach wirklich im Tresor');
+    await page.keyboard.press('Escape');
+    await warte(500);
+    check(await page.locator('.nw__note.is-pinned', { hasText: 'Fragen für die Werkstatt' }).count() === 1,
+      'und die Notiz steht angeheftet auf der Wand');
+  }
+
+  /* --- Projekte: das zuletzt geaenderte oben, abhaken wirkt --- */
+  const projekt = store.create('project', { name: 'Auto verkaufen', description: 'Inserat, Probefahrt, Übergabe.' });
+  const aufgabe = store.create('task', { title: 'Fotos machen', projectId: projekt.id });
+  store.create('event', { title: 'Probefahrt', start: `${heute}T19:00`, projectId: projekt.id });
+  await store.flush();
+  await page.goto(`${base}/#/projects`, { waitUntil: 'domcontentloaded' });
+  await warte(1200);
+  const erstes = ((await page.locator('.pj__row .pj__name').first().innerText().catch(() => '')) || '').trim();
+  check(erstes === 'Auto verkaufen', 'Das zuletzt geänderte Projekt steht oben', erstes);
+  await page.locator('.pj__row', { hasText: 'Auto verkaufen' }).first().click();
+  await warte(1200);
+  check((await page.locator('.topbar__title').innerText()).trim() === 'Auto verkaufen'
+    && /Probefahrt/.test(await page.locator('main').innerText()),
+  'Ein Projekt zeigt, was dazugehört – der Kopf trägt seinen Namen');
+  await page.getByRole('checkbox', { name: /Fotos machen/ }).check();
+  await warte(1300);
+  check(store.get(aufgabe.id).data.status === 'done', 'Abhaken setzt die Aufgabe im Tresor auf erledigt',
+    store.get(aufgabe.id).data.status);
+}
+
+/* ------------------------------------------------------------------ */
 /* iPad                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -729,7 +843,11 @@ const IPAD_VOKABULAR = '.btn, .chip, .input, .select, .textarea, .icon-button,'
  * nicht in der Hand von web/app.css. Die Zahl ist der gemessene Rest (15 quer,
  * 13 hoch) plus etwas Luft -- nicht mehr, sonst deckt sie beim nächsten Mal
  * einen echten Rückfall zu. Vor der neuen Schale lag der Rest bei 35, mit
- * Heute, Zeitachse und Suche (10× .searchv__chip, 8× .tlv__type).
+ * Heute, Zeitachse und Suche (10× .searchv__chip, 8× .tlv__type). Seit die
+ * Notizen eine Wand aus Post-its sind statt eines Editors, sind .notesv__link,
+ * a.md-wiki und .notesv__tag-remove weg: gemessen 9 quer und 9 hoch
+ * (7× label.setv__perm, 1× input, 1× label.stickv__check). Die Schwelle bleibt
+ * bei 20, solange andere Bereiche noch umgebaut werden.
  *
  * Dieselbe Messung am Ausgangsstand, bevor es Fingermasse in web/app.css
  * gab: 361 im Querformat und 342 im Hochformat. Diese Schwelle wäre also rot

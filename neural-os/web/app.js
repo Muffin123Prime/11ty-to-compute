@@ -589,6 +589,8 @@ function createShell() {
 
   /** "Neuer Chat": kein leerer Datensatz auf Vorrat, nur eine leere Seite. */
   function startNewChat(event) {
+    // Strg/Cmd-Klick oeffnet wie jeder Link ein neues Fenster.
+    if (event && (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1)) return;
     if (event) event.preventDefault();
     state.set('activeChatId', null);
     removeStored(STORAGE.chat);
@@ -646,7 +648,7 @@ function createShell() {
           refreshStatus();
           return;
         }
-        navigate('#/network');
+        navigate(dom.statusButton.dataset.ziel || '#/network');
       },
     });
 
@@ -812,6 +814,7 @@ function createShell() {
     });
     clear(dom.statusButton);
     dom.statusButton.dataset.status = info.key;
+    dom.statusButton.dataset.ziel = info.ziel || '#/network';
     dom.statusButton.append(
       h('span.rail__status-icon', { 'aria-hidden': 'true' }, icon(info.offline ? ICONS.cloudOff : ICONS.cloud)),
       h('span', { class: cx('dot', info.dot ? `dot--${info.dot}` : '') }),
@@ -1049,6 +1052,30 @@ function createShell() {
       },
       setHeadActions: (...nodes) => {
         if (current()) setHeadActions(nodes);
+      },
+      /**
+       * Die Adresse nachziehen, OHNE die Ansicht neu aufzubauen -- fuer den
+       * Chat, der mit der ersten Nachricht aus "#/chat" zu "#/chat?id=…"
+       * wird, waehrend die Antwort schon laeuft. Leiste, "Zuletzt" und
+       * Zustand folgen; die Ansicht selbst bleibt, wie sie ist.
+       */
+      replaceRoute: (target) => {
+        if (!current()) return;
+        const raw = String(target || '');
+        const next = parseRoute(raw.startsWith('#') ? raw : `#${raw.startsWith('/') ? raw : `/${raw}`}`);
+        if (next.view !== route.view) {
+          navigate(next.hash);
+          return;
+        }
+        history.replaceState(null, '', `${window.location.pathname}${window.location.search}${next.hash}`);
+        renderedRoute = next;
+        state.set('route', next);
+        if (next.view === 'chat' && next.params.id) {
+          state.set('activeChatId', next.params.id);
+          writeStored(STORAGE.chat, next.params.id);
+          refreshRecentSoon();
+        }
+        markActiveRoute(next);
       },
     };
   }
@@ -1593,10 +1620,14 @@ function createShell() {
       // enthaelt ("eins" -> Einstellungen), dann die Treffer aus dem Tresor,
       // dann alles nur lose Passende. So fuehrt Strg+K, Wort, Enter dorthin,
       // wo man hinwollte, und Suchen bleibt trotzdem ein Tastendruck.
-      const stark = scored.filter((x) => query && x.s >= 9).map((x) => x.item);
-      const lose = scored.filter((x) => !query || x.s < 9)
+      const treffer = state.get('paletteResults') || [];
+      // Ein Chat, den die Suche schon gefunden hat, steht nicht noch einmal
+      // unter "Letzte Chats".
+      const schonDa = new Set(treffer.map((t) => String(t.id).replace(/^hit:/, 'chat:')));
+      const stark = scored.filter((x) => query && x.s >= 9 && !schonDa.has(x.item.id)).map((x) => x.item);
+      const lose = scored.filter((x) => (!query || x.s < 9) && !schonDa.has(x.item.id))
         .map((x) => (query ? { ...x.item, group: 'Weitere' } : x.item));
-      items = [...stark, ...(state.get('paletteResults') || []), ...lose];
+      items = [...stark, ...treffer, ...lose];
       active = 0;
       paint();
     }
@@ -2027,7 +2058,7 @@ function createShell() {
  * eine Verbindung behauptet, die niemand geprueft hat, waere genau die Art
  * bequemer Luege, die diese Anwendung nicht erzaehlen soll.
  *
- * @returns {{key:string, label:string, hint:string, dot:string|null, offline:boolean}}
+ * @returns {{key:string, label:string, hint:string, dot:string|null, offline:boolean, ziel?:string}}
  */
 export function describeStatus({ status, stale, connected, ready, claude }) {
   if (ready && !connected) {
@@ -2040,6 +2071,18 @@ export function describeStatus({ status, stale, connected, ready, claude }) {
     };
   }
   const mode = status && status.network ? status.network.mode : null;
+  // Ein gesperrter Tresor geht allem anderen vor: dann ist nichts lesbar,
+  // egal wie gut die Verbindung ist. Entsperrt wird in den Einstellungen.
+  if (!stale && status && status.vault && status.vault.state === 'locked') {
+    return {
+      key: 'gesperrt',
+      label: 'Tresor gesperrt',
+      hint: 'Die Daten sind verschlüsselt und gerade nicht lesbar. Entsperren geht in den Einstellungen.',
+      dot: 'warn',
+      offline: false,
+      ziel: '#/settings',
+    };
+  }
   if (stale || !mode) {
     return {
       key: 'unbekannt',

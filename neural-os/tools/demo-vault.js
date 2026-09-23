@@ -121,6 +121,51 @@ async function befuellen(app) {
   s.create('message', { chatId: chat.id, role: 'assistant', content: 'Meist ist der Mahlgrad zu grob. Stell ihn eine Stufe feiner und miss die Durchlaufzeit: 25 Sekunden für 30 ml sind ein guter Richtwert.', ordinal: 1 });
   s.create('chat', { title: 'Beetplanung 2027' });
 
+  // --- Termine und automatische Notizen (Kalender, Notizen, Projekte) ----
+  //
+  // So, wie die KI sie aus Gespraechen anlegt: ein Termin mit `source: 'auto'`
+  // traegt den Chat, aus dem er stammt, eine Notiz ebenso (Vertrag 3 und 4).
+  // Die Uhrzeiten sind vor Ort und ohne Zone -- "um neun" bleibt um neun.
+  // Alles relativ zu heute, damit Kalender und Kachel "Heute" nie leer sind.
+  {
+    // Ortszeit, nicht UTC: kurz nach Mitternacht waere "heute" sonst gestern.
+    const tag = (n) => {
+      const d = new Date();
+      d.setDate(d.getDate() + n);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    const um = (datum, zeit) => (zeit ? `${datum}T${zeit}` : datum);
+    const beetChat = s.all('chat').find((c) => c.data.title === 'Beetplanung 2027');
+    if (beetChat) s.update(beetChat.id, { projectId: garten.id });
+    s.update(chat.id, { projectId: kueche.id });
+
+    const woche = s.create('chat', { title: 'Woche planen' });
+    s.create('message', { chatId: woche.id, role: 'user', content: 'Heute um neun bin ich beim Zahnarzt, Dr. Weber in der Praxis am Markt – das ist ein Termin. Übermorgen fahre ich zu meinen Eltern, den ganzen Tag.', ordinal: 0 });
+    s.create('message', { chatId: woche.id, role: 'assistant', content: 'Eingetragen: heute 09:00–10:00 Zahnarzt Dr. Weber (Praxis am Markt) und übermorgen ganztägig „Eltern besuchen“. Soll ich mir die Fragen für den Zahnarzt als Notiz merken?', ordinal: 1 });
+
+    const termine = [
+      { title: 'Zahnarzt Dr. Weber', start: um(tag(0), '09:00'), end: um(tag(0), '10:00'), location: 'Praxis am Markt', source: 'auto', chatId: woche.id },
+      { title: 'Dichtung für den Siebträger abholen', start: um(tag(0), '16:30'), end: um(tag(0), '17:00'), location: 'Kaffeerösterei Böhm', projectId: kueche.id },
+      { title: 'Saatgut-Tauschbörse', start: um(tag(1), '18:00'), end: um(tag(1), '20:00'), location: 'Stadtteilzentrum', projectId: garten.id, source: beetChat ? 'auto' : 'user', chatId: beetChat ? beetChat.id : null },
+      { title: 'Eltern besuchen', start: tag(2), allDay: true, source: 'auto', chatId: woche.id },
+      { title: 'Beete abstecken mit Jonas', start: um(tag(5), '10:00'), end: um(tag(5), '11:30'), location: 'Garten', projectId: garten.id },
+      { title: 'Kurzurlaub an der Ostsee', start: tag(9), end: tag(11), allDay: true },
+      { title: 'Steuerberaterin', start: um(tag(14), '14:00'), end: um(tag(14), '15:00'), location: 'Kanzlei Hofmann' },
+      { title: 'Lesekreis: Die Wand', start: um(tag(-3), '19:00'), end: um(tag(-3), '21:00'), location: 'Stadtbücherei' },
+      { title: 'Mühle zur Wartung bringen', start: um(tag(-8), '08:30'), end: um(tag(-8), '09:00'), projectId: kueche.id },
+    ];
+    for (const t of termine) s.create('event', { source: 'user', ...t });
+
+    const auto = [
+      ['Zahnarzt: Fragen für heute', 'Nach der Füllung oben links fragen, die seit dem Winter empfindlich ist.\n\n- Lohnt sich eine professionelle Zahnreinigung zweimal im Jahr?\n- Welche Zahnbürste bei empfindlichem Zahnfleisch?', woche.id, null],
+      ['Beete: nächste Schritte', 'Tomaten in die Südwand, Salat in den Halbschatten. Vor der Tauschbörse die Liste der fehlenden Sorten machen: Ochsenherz, Schnittlauch, Kapuzinerkresse.', beetChat ? beetChat.id : null, garten.id],
+      ['Espresso: Richtwert Durchlaufzeit', '25 Sekunden für 30 ml. Läuft er schneller durch, den Mahlgrad eine Stufe feiner stellen; läuft er langsamer, eine Stufe gröber.', chat.id, kueche.id],
+    ];
+    for (const [title, body, chatId, projectId] of auto) {
+      s.create('note', { title, body, source: chatId ? 'auto' : 'user', chatId, ...(projectId ? { projectId } : {}), tags: [] });
+    }
+  }
+
   // --- Dateien -----------------------------------------------------------
   try {
     s.files.put(Buffer.from('# Handbuch\n\nEin kurzes Handbuch.\n'), { name: 'handbuch.md', mime: 'text/markdown' });

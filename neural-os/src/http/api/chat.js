@@ -1,34 +1,36 @@
 'use strict';
 
 /**
- * Chat routes. The only streaming write in the system.
+ * Chat-Routen. Der einzige schreibende Ereignisstrom im System.
  *
- * `POST /api/chats/:id/send` answers with an event stream rather than one JSON
- * body because the alternative -- buffer the answer, reply at the end -- makes
- * a slow local model look broken and loses every token if the connection dies.
- * The events mirror what the chat service really did:
+ * `POST /api/chats/:id/messages` antwortet mit einem Ereignisstrom (SSE)
+ * statt mit einem JSON-Körper, weil Claude denkt, sucht und schreibt, und
+ * das der Nutzer sehen soll, während es passiert. Die Ereignisse (Vertrag 6)
+ * spiegeln, was der Chat-Dienst wirklich getan hat:
  *
- *   user     the stored user message
- *   context  what had to be left out to fit the model's window (never a summary)
- *   start    the assistant record, created before the model was asked
- *   delta    a chunk that genuinely arrived from the model
- *   message  the final, stored assistant record
- *   error    a typed failure -- this is what "no model" looks like, and the
- *            client must show it instead of anything resembling an answer
- *   done     always last, whatever happened
+ *   nutzer      der gespeicherte Satz des Nutzers
+ *   antwort     der Antwort-Satz, angelegt BEVOR Claude gefragt wird
+ *   denken      {delta}  Zusammenfassung des Gedankengangs
+ *   text        {delta}  sichtbarer Antworttext
+ *   quelle      {titel, url, art}  zitierte oder gelesene Quelle
+ *   agent       {id, rolle, titel, zustand, schritt, dauerMs, ergebnis}
+ *   rueckfrage  {id, frage, optionen:[{label}], mehrfach}
+ *   hinweis     {satz}  z. B. "abgeschnitten, schreib weiter"
+ *   fehler      {code, satz}
+ *   fertig      {stopReason, record}  immer zuletzt
  *
- * The request is validated and the chat is fetched *before* the stream opens,
- * so a bad request still gets a normal JSON error with a status code. Once the
- * stream is open there is no going back to a status code, which is exactly why
- * `done` is guaranteed: a client that never sees it knows the connection broke
- * rather than assuming the answer ended.
+ * Geprüft wird VOR dem Öffnen des Stroms (leere Nachricht, unbekannter Chat,
+ * Claude nicht verbunden), damit das als gewöhnlicher Statuscode mit Satz
+ * zurückkommt. Danach ist `fertig` garantiert: ein Browser, der es nie
+ * sieht, weiß, dass die Verbindung brach, statt ein Ende anzunehmen.
  *
- * Disconnecting aborts the run. An answer nobody is listening to still costs a
- * local model its entire GPU, and a chat that keeps generating after its tab
- * closed would be invisible work on the user's own machine.
+ * Wer die Verbindung schließt, bricht den Zug ab -- eine Antwort, der niemand
+ * zuhört, kostet trotzdem Geld.
  */
 
-const { asNeuralError } = require('../../kernel/errors');
+const {
+  NeuralError, ValidationError, NotFoundError, asNeuralError,
+} = require('../../kernel/errors');
 const {
   need,
   asObject,
@@ -129,62 +131,104 @@ function register(router) {
     return { aborted, chatId: record.id };
   });
 
-  router.post('/api/chats/:id/send', async (rc) => {
-    rc.requireCapability('chat');
-    const chat = need(
-      chatService(rc),
-      'Der Chat-Dienst',
-      'Ohne ihn kann keine Antwort erzeugt werden; die Einrichtung eines lokalen Modells steht in der Notiz "Lokales Modell einrichten".',
-    );
-    const body = asObject(await rc.body());
-    const content = requireString(body.content, 'content', { max: MAX_CONTENT_CHARS });
-    // Both of these must fail as a status code, before the stream opens.
-    const record = getChatRecord(rc, rc.params.id);
-    if (typeof chat.send !== 'function') {
-      need(null, 'Das Senden von Nachrichten');
-    }
-
+  /**
+   * Einen Zug als Ereignisstrom liefern -- für das Senden und für die
+   * Antwort auf eine Rückfrage. Alles, was VOR dem Öffnen des Stroms
+   * scheitert (leere Nachricht, unbekannter Chat, Claude nicht verbunden,
+   * Rückfrage schon erledigt), kommt als gewöhnliche JSON-Antwort mit
+   * Statuscode. Danach gibt es keinen Statuscode mehr -- deshalb ist
+   * `fertig` garantiert das letzte Ereignis.
+   */
+  async function strom(rc, record, starten, vorab) {
+    const chat = chatService(rc);
+    vorab(chat);
     const stream = rc.openStream({ retryMs: 2000 });
     const controller = new AbortController();
-    // A closed tab must not leave a model generating into nothing.
+    // Ein geschlossener Tab soll keinen bezahlten Zug weiterlaufen lassen.
     stream.onClose(() => controller.abort());
-
-    let sawError = false;
-    let sawDone = false;
-
+    let sawFertig = false;
+    let sawFehler = false;
     const forward = (event) => {
       if (!event || typeof event.type !== 'string' || stream.closed) return;
-      if (event.type === 'error') sawError = true;
-      if (event.type === 'done') sawDone = true;
+      if (event.type === 'fertig') sawFertig = true;
+      if (event.type === 'fehler') sawFehler = true;
       stream.send(event.type, event);
     };
-
     try {
-      await chat.send({
-        chatId: record.id,
-        content,
-        network: typeof body.network === 'string' ? body.network : undefined,
-        options: body.options && typeof body.options === 'object' ? body.options : undefined,
-        signal: controller.signal,
-        onEvent: forward,
-      });
+      await starten(chat, controller.signal, forward);
     } catch (err) {
       const neural = asNeuralError(err);
-      // The service already reported it through `onEvent` in the normal case;
-      // this covers failures that happened outside that loop.
-      if (!sawError && !stream.closed) {
-        stream.send('error', {
-          type: 'error',
-          chatId: record.id,
-          error: { code: neural.code, message: neural.message, details: neural.details || null },
-        });
+      if (!sawFehler && !stream.closed && neural.code !== 'ABORTED') {
+        stream.send('fehler', { type: 'fehler', code: neural.code, satz: neural.message });
       }
       if (neural.status >= 500 && neural.code === 'INTERNAL_ERROR') rc.log.error(`Chat ${record.id}: ${neural.stack || neural.message}`);
     } finally {
-      if (!sawDone && !stream.closed) stream.send('done', { type: 'done', chatId: record.id });
+      if (!sawFertig && !stream.closed) stream.send('fertig', { type: 'fertig', stopReason: 'fehler' });
       stream.close();
     }
-    return undefined; // the stream owned the response
+    return undefined; // der Strom gehört der Antwort
+  }
+
+  /**
+   * Nachricht senden (Vertrag 6). Körper: { inhalt | content, effort? }.
+   * Ereignisse: nutzer, antwort, denken, text, quelle, agent, rueckfrage,
+   * hinweis, fehler, fertig -- siehe src/models/chat.js.
+   */
+  async function senden(rc) {
+    rc.requireCapability('chat');
+    need(chatService(rc), 'Der Chat-Dienst', 'Ohne ihn kann Claude nicht antworten.');
+    const body = asObject(await rc.body());
+    const roh = body.inhalt !== undefined ? body.inhalt : body.content;
+    const content = requireString(roh, 'inhalt', { max: MAX_CONTENT_CHARS });
+    const record = getChatRecord(rc, rc.params.id);
+    const effort = typeof body.effort === 'string' ? body.effort : undefined;
+    return strom(rc, record, (chat, signal, onEvent) => chat.send({
+      chatId: record.id, content, effort, signal, onEvent,
+    }), (chat) => {
+      if (typeof chat.send !== 'function') need(null, 'Das Senden von Nachrichten');
+      // Nicht verbunden, gerade beschäftigt: als Statuscode, bevor der Strom öffnet.
+      if (rc.ctx.claude && typeof rc.ctx.claude.zugang === 'function') rc.ctx.claude.zugang();
+      if (typeof chat.isStreaming === 'function' && chat.isStreaming(record.id)) {
+        throw new ValidationError('Für diesen Chat läuft bereits eine Antwort. Brich sie ab, bevor du erneut sendest.');
+      }
+    });
+  }
+
+  router.post('/api/chats/:id/messages', senden);
+  /** Früherer Name. Bleibt, bis keine Ansicht ihn mehr benutzt; gleiche Ereignisse. */
+  router.post('/api/chats/:id/send', senden);
+
+  /**
+   * Eine Rückfrage beantworten: { id, antwort } -- antwort ist der Text der
+   * gewählten Option (oder eigener Text), bei Mehrfachwahl eine Liste. Die
+   * Antwort ist wieder ein Ereignisstrom: der Zug läuft in derselben
+   * Antwort weiter.
+   */
+  router.post('/api/chats/:id/rueckfrage', async (rc) => {
+    rc.requireCapability('chat');
+    const chat = need(chatService(rc), 'Der Chat-Dienst');
+    if (typeof chat.antworten !== 'function') need(null, 'Das Beantworten von Rückfragen');
+    const body = asObject(await rc.body());
+    const id = requireString(body.id, 'id', { max: 200 });
+    const antwort = Array.isArray(body.antwort) ? body.antwort : requireString(body.antwort, 'antwort', { max: 500 });
+    const record = getChatRecord(rc, rc.params.id);
+    // Unbekannte oder erledigte Rückfrage: Statuscode statt Strom.
+    const offen = chat.messages(record.id).items.some((m) => m.data.role === 'assistant' && m.data.rueckfrageOffen
+      && Array.isArray(m.data.rueckfragen) && m.data.rueckfragen.some((f) => f.id === id && f.zustand === 'offen'));
+    if (!offen) {
+      const gibt = chat.messages(record.id).items.some((m) => Array.isArray(m.data.rueckfragen) && m.data.rueckfragen.some((f) => f.id === id));
+      if (!gibt) throw new NotFoundError(`Rückfrage ${id}`);
+      throw new NeuralError('RUECKFRAGE_ERLEDIGT', 'Diese Rückfrage ist schon erledigt.', { status: 409 });
+    }
+    return strom(rc, record, (svc, signal, onEvent) => svc.antworten({
+      chatId: record.id, id, antwort, signal, onEvent,
+      effort: typeof body.effort === 'string' ? body.effort : undefined,
+    }), () => {
+      if (rc.ctx.claude && typeof rc.ctx.claude.zugang === 'function') rc.ctx.claude.zugang();
+      if (typeof chat.isStreaming === 'function' && chat.isStreaming(record.id)) {
+        throw new ValidationError('Für diesen Chat läuft bereits eine Antwort.');
+      }
+    });
   });
 }
 

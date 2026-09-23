@@ -326,6 +326,7 @@ async function createServer(ctx = {}) {
     require('./api/graph'),
     require('./api/chat'),
     require('./api/models'),
+    require('./api/claude'),
     require('./api/network'),
     require('./api/agents'),
     require('./api/vault'),
@@ -339,6 +340,7 @@ async function createServer(ctx = {}) {
     require('./api/compare'),
     require('./api/secondlook'),
     require('./api/stick'),
+    require('./api/events'),
   ]) {
     mod.register(router);
   }
