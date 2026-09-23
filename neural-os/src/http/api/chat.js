@@ -46,6 +46,20 @@ const MAX_CONTENT_CHARS = 200000;
 /** Fields of a chat the interface may set. */
 const CHAT_FIELDS = ['title', 'model', 'network', 'systemPrompt', 'contextNodeIds', 'agentId', 'pinned'];
 
+/**
+ * `data.claude` ist der Mitschnitt für die NÄCHSTE Anfrage an Claude
+ * (Denkblöcke mit Signatur, verschlüsselte Suchergebnisse). Die Oberfläche
+ * braucht ihn nicht, und im Strom wäre er nur Gewicht: jedes `fertig` trüge
+ * sonst den ganzen Verlauf des Zuges mit.
+ */
+function ohneInterna(event) {
+  const r = event && event.record;
+  if (!r || !r.data || r.data.claude === undefined) return event;
+  const { claude, ...rest } = r.data;
+  void claude;
+  return { ...event, record: { ...r, data: rest } };
+}
+
 function chatService(rc) {
   return rc.ctx.chat || null;
 }
@@ -152,7 +166,7 @@ function register(router) {
       if (!event || typeof event.type !== 'string' || stream.closed) return;
       if (event.type === 'fertig') sawFertig = true;
       if (event.type === 'fehler') sawFehler = true;
-      stream.send(event.type, event);
+      stream.send(event.type, ohneInterna(event));
     };
     try {
       await starten(chat, controller.signal, forward);

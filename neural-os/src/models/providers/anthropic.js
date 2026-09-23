@@ -180,6 +180,15 @@ function transportFehler(err, waechter, teilInhalt) {
   if (err instanceof ClaudeFehler) return err;
   if (waechter && waechter.grund === 'aufrufer') return new AbortedError('Die Antwort wurde abgebrochen.');
   const code = err && err.code;
+  if (code === 'NETWORK_BLOCKED' && /Sperrliste|Freigabeliste|Hostliste/.test(String(err.message || ''))) {
+    // Online, aber die Schleuse lässt genau diesen Host nicht durch: das ist
+    // eine andere Abhilfe als "schalte auf Online".
+    return new ClaudeFehler(
+      'CLAUDE_GESPERRT',
+      'Die Schleuse lässt api.anthropic.com nicht durch. Unter Netzwerk freigeben.',
+      { status: 409, details: { grund: err.message }, teilInhalt },
+    );
+  }
   if (code === 'NETWORK_BLOCKED') {
     return new ClaudeFehler(
       'CLAUDE_OFFLINE',

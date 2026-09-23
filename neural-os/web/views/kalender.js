@@ -718,7 +718,10 @@ export default {
     function select(day, { focus = false } = {}) {
       const range = rangeFor(st.mode, st.cursor);
       st.selected = day;
-      if (day < range.from || day > range.to) {
+      // Ein Tag aus dem Nachbarmonat (die blassen am Rand) blaettert dorthin,
+      // wie die Pfeiltasten ueber den Monatsrand hinaus.
+      const otherMonth = st.mode === 'monat' && day.slice(0, 7) !== st.cursor.slice(0, 7);
+      if (otherMonth || day < range.from || day > range.to) {
         st.cursor = day;
         load();
       }
@@ -803,7 +806,7 @@ export default {
       const weeks = monthGrid(st.cursor);
       const month = st.cursor.slice(0, 7);
       const t = today();
-      const grid = h('div.kal__weeks', { role: 'grid', 'aria-label': fmt(st.cursor, { month: 'long', year: 'numeric' }) });
+      const grid = h('div.kal__weeks', { role: 'group', 'aria-label': fmt(st.cursor, { month: 'long', year: 'numeric' }) });
       weeks.forEach((week, wi) => {
         week.forEach((day, di) => {
           const list = eventsOn(day);

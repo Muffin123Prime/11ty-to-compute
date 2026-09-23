@@ -147,6 +147,7 @@ const SUBSYSTEM_ROUTES = {
   encryption: '/api/vault',
   graph: '/api/graph',
   models: '/api/models',
+  claude: '/api/claude',
   chat: '/api/chats',
   agents: '/api/agents',
   approvals: '/api/approvals',
@@ -168,8 +169,6 @@ const SUBSYSTEM_ROUTES = {
   // Laufzeiten. Ohne Pfadargument und ohne Nebenwirkung.
   stick: '/api/stick',
   modules: '/api/modules',
-  vectors: '/api/status',
-  embeddings: '/api/status',
 };
 
 async function checkWiring(app) {
@@ -531,20 +530,16 @@ async function checkChat() {
     assert(body(c.record).network === 'offline', 'neuer Chat ist nicht offline');
     return 'offline als Standard';
   });
-  await check('Ohne Modell: Fehler statt erfundener Antwort', async () => {
-    const res = await request('POST', `/api/chats/${chatId}/send`, { content: 'Hallo?' });
-    const text = res.text || '';
-    const erfunden = /"role"\s*:\s*"assistant"[\s\S]*?"content"\s*:\s*"[^"]{20,}/.test(text)
-      && !/NO_MODEL_AVAILABLE|MODEL_ERROR/.test(text);
-    assert(!erfunden, 'es wurde eine Antwort erfunden');
+  await check('Ohne Claude: ein Satz statt einer erfundenen Antwort – und kein Scheinchat', async () => {
+    const res = await request('POST', `/api/chats/${chatId}/messages`, { inhalt: 'Hallo?' });
+    assert(res.status === 409, `HTTP ${res.status} statt 409`);
+    const e = res.json && res.json.error;
+    assert(e && e.code === 'CLAUDE_NICHT_VERBUNDEN', `Code ${e && e.code}`);
+    assert(/Claude ist nicht verbunden/.test(e.message), `Satz: ${e.message}`);
     const msgs = ok(await api.get(`/api/chats/${chatId}/messages`), 'messages');
     const list = msgs.items || msgs.messages || [];
-    const assistant = list.find((m) => body(m).role === 'assistant');
-    if (!assistant) return unklar('keine Assistentennachricht angelegt');
-    const d = body(assistant);
-    assert(d.content === '', `Inhalt nicht leer: "${String(d.content).slice(0, 40)}"`);
-    assert(d.status === 'failed', `Status ist "${d.status}" statt failed`);
-    return `leer, status=failed, ${d.error && d.error.code}`;
+    assert(list.length === 0, `${list.length} Nachricht(en) angelegt, obwohl niemand antworten kann`);
+    return e.message;
   });
   await check('Netzmodus pro Chat umschaltbar', async () => {
     const r = ok(await api.patch(`/api/chats/${chatId}`, { network: 'lan' }), 'patch');
@@ -555,78 +550,94 @@ async function checkChat() {
 }
 
 async function checkModels() {
-  area('6 · Modellanbindung');
-  await check('Registry antwortet', async () => {
+  area('6 · Claude');
+  // Die KI ist Claude. Ohne Schlüssel und im Offline-Modus wird hier die
+  // Zusage geprüft: ehrlicher Zustand, keine Verbindung, kein Schlüssel
+  // heraus. Der ganze Weg MIT Antwort läuft danach gegen einen Statisten
+  // (test/claude-statist.js), der die Anthropic-Schnittstelle spricht --
+  // einen echten Schlüssel gibt es hier nicht, und so zu tun wäre gelogen.
+  await check('GET /api/claude sagt ehrlich: nicht verbunden, und warum', async () => {
+    const z = ok(await api.get('/api/claude'), 'claude');
+    assert(z.verbunden === false, 'ohne Schlüssel „verbunden“ – erfunden');
+    assert(z.schluesselVorhanden === false, 'Schlüssel angeblich vorhanden');
+    assert(z.modell === 'claude-opus-5', `Modell ${z.modell}`);
+    assert(typeof z.grund === 'string' && z.grund.length > 10, 'kein Grund');
+    assert(z.verbrauch && z.verbrauch.geschaetzt === true, 'Verbrauch nicht als Schätzung gekennzeichnet');
+    return z.grund;
+  });
+  await check('Die Registry kennt genau einen Anbieter: Claude, mit Anleitung', async () => {
     const m = ok(await api.get('/api/models'), 'models');
-    const providers = m.providers || (m.snapshot && m.snapshot.providers) || [];
-    assert(Array.isArray(providers), 'keine Provider-Liste');
-    const available = providers.filter((p) => p.available);
-    if (!available.length) {
-      return unklar(`kein lokales Modell installiert — ${providers.length} Anbieter geprüft, keiner erreichbar`);
-    }
-    return `${available.length} erreichbar: ${available.map((p) => p.id).join(', ')}`;
+    const providers = m.providers || [];
+    assert(providers.length === 1 && providers[0].id === 'claude', `Anbieter: ${providers.map((p) => p.id).join(', ')}`);
+    assert(providers[0].available === false, 'als erreichbar gemeldet');
+    assert(/console\.anthropic\.com/.test(String(m.hint || '')), 'keine Anleitung');
+    assert(!/ollama|11434/i.test(JSON.stringify(m)), 'die Offline-KI steht noch drin');
+    return 'claude, nicht verbunden, mit Anleitung';
   });
-  await check('Erneutes Suchen funktioniert', async () => {
-    const r = await api.post('/api/models/refresh');
-    assert(r.status === 200, `HTTP ${r.status}`);
-    return 'geprobt';
+  await check('Erneutes Suchen fragt kein Netz', async () => {
+    const r = ok(await api.post('/api/models/refresh'), 'refresh');
+    assert(r.providers.length === 1, 'mehr als Claude');
+    return 'abgeleitet, nicht geprobt';
   });
-
-  // --- Online-Anbieter ---------------------------------------------------
-  //
-  // Geprüft wird hier nicht, ob ein Anbieter antwortet (das hinge an einem
-  // fremden Dienst und an einem Schlüssel), sondern die Zusage, die dieses
-  // System gibt: einen anzulegen öffnet die Schleuse nicht, und der
-  // Schlüssel kommt nicht wieder heraus.
-  await check('Vorlagen für Online-Anbieter sind vorhanden', async () => {
-    const r = ok(await api.get('/api/models/remote'), 'models/remote');
-    assert(Array.isArray(r.presets) && r.presets.length >= 5, `nur ${(r.presets || []).length} Vorlagen`);
-    for (const preset of r.presets) {
-      assert(preset.id && preset.baseUrl && preset.host, `unvollständige Vorlage ${preset.id}`);
-    }
-    return `${r.presets.length} Vorlagen, Netzmodus ${r.mode}`;
-  });
-
-  await check('Anlegen eines Online-Anbieters öffnet die Schleuse nicht', async () => {
-    const created = ok(await api.post('/api/models/remote', {
-      id: 'pruefanbieter',
-      label: 'Prüfanbieter',
-      baseUrl: 'https://api.pruefung.invalid/v1',
-      apiKey: 'sk-pruef-geheim-0815',
-    }), 'anlegen');
-    assert(created.record.gate.allowed === false,
-      `die Schleuse hält den Host für erlaubt, obwohl niemand ihn freigegeben hat: ${JSON.stringify(created.record.gate)}`);
-    assert(created.grant === null, 'es wurde ungefragt eine Freigabe angelegt');
-    assert(/Klartext/.test(String(created.keyWarning || '')), 'der Hinweis auf den Klartext-Schlüssel fehlt');
-    return 'angelegt, Host bleibt gesperrt';
-  });
-
-  await check('Der Schlüssel kommt über keine Route wieder heraus', async () => {
-    const secret = 'sk-pruef-geheim-0815';
-    const routes = ['/api/models/remote', '/api/config', '/api/status'];
-    for (const route of routes) {
+  await check('Offline wird ein Schlüssel weder geprüft noch gespeichert', async () => {
+    const vorher = ok(await api.get('/api/config'), 'config').config.network.allowHosts;
+    const r = await api.post('/api/claude/schluessel', { schluessel: 'sk-ant-pruef-geheim-0815-abcdef' });
+    assert(r.status === 409, `HTTP ${r.status}`);
+    assert(r.json.error.code === 'CLAUDE_OFFLINE', r.json.error.code);
+    const z = ok(await api.get('/api/claude'), 'claude');
+    assert(z.schluesselVorhanden === false, 'trotzdem gespeichert');
+    const nachher = ok(await api.get('/api/config'), 'config').config.network.allowHosts;
+    assert(JSON.stringify(vorher) === JSON.stringify(nachher), 'offline wurde die Freigabeliste verändert');
+    for (const route of ['/api/claude', '/api/config', '/api/status', '/api/models']) {
       const res = await api.get(route);
-      assert(!String(res.text).includes(secret), `${route} hat den Schlüssel ausgeliefert`);
+      assert(!String(res.text).includes('sk-ant-pruef-geheim-0815'), `${route} zeigt den Schlüssel`);
     }
-    const tested = await api.post('/api/models/remote/pruefanbieter/test');
-    assert(!String(tested.text).includes(secret), 'der Verbindungstest hat den Schlüssel ausgeliefert');
-    return `${routes.length + 1} Routen geprüft, kein Schlüssel`;
+    return r.json.error.message;
   });
-
-  await check('Der Verbindungstest nennt die Schleuse als Grund', async () => {
-    const r = ok(await api.post('/api/models/remote/pruefanbieter/test'), 'test');
-    assert(r.ok === false, 'der Anbieter existiert nicht – "erreichbar" wäre erfunden');
-    assert(r.blocked === true, `nicht als Schleusen-Ablehnung erkannt: ${JSON.stringify(r.error)}`);
-    assert(/Netzwerk/.test(String(r.hint || '')), 'kein Hinweis, wo man das ändert');
-    return 'gesperrt statt "nicht erreichbar"';
+  await check('Weitere Online-Anbieter gibt es nicht mehr – und das wird gesagt', async () => {
+    const r = ok(await api.get('/api/models/remote'), 'remote');
+    assert(r.entfallen === true && r.items.length === 0, 'Liste nicht leer');
+    const neu = await api.post('/api/models/remote', { id: 'x', baseUrl: 'https://x.invalid/v1' });
+    assert(neu.status === 410, `HTTP ${neu.status}`);
+    return neu.json.error.message.slice(0, 70);
   });
-
-  await check('Entfernen räumt auf und verschweigt die Freigabe nicht', async () => {
-    const r = ok(await api.del('/api/models/remote/pruefanbieter'), 'entfernen');
-    assert(r.ok === true, 'nicht entfernt');
-    const after = ok(await api.get('/api/models/remote'), 'liste');
-    assert(!after.items.some((i) => i.id === 'pruefanbieter'), 'der Anbieter steht noch in der Liste');
-    return 'entfernt';
+  await check('Mit Claude (Statist): Schlüssel, Antwort, Termin, Rückfrage – über die echte Leitung', async () => {
+    const { starten, B, antwort } = require('../test/claude-statist');
+    const { createApp, seedIfEmpty } = require('../src/app');
+    const statist = await starten();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-check-claude-'));
+    let zweite = null;
+    try {
+      zweite = await createApp({ home: tmp, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false, claudeBasis: statist.url });
+      await seedIfEmpty(zweite);
+      const srv = await zweite.listen();
+      const port = srv.server.address().port;
+      const an = (m, p, b) => request(m, p, b, {}, port);
+      const falsch = await an('POST', '/api/claude/schluessel', { schluessel: 'sk-ant-falsch-00000000000000' });
+      assert(falsch.status === 400 && falsch.json.error.message === 'Der Claude-Schlüssel stimmt nicht.', `falscher Schlüssel: HTTP ${falsch.status}`);
+      const gut = await an('POST', '/api/claude/schluessel', { schluessel: statist.schluessel });
+      assert(gut.status === 200 && gut.json.verbunden === true, `Schlüssel: HTTP ${gut.status} ${gut.text.slice(0, 120)}`);
+      const chat = (await an('POST', '/api/chats', {})).json.record.id;
+      statist.weiter(
+        antwort(B.start(), B.text(0, 'Trage ich ein.'), B.werkzeug(1, 'toolu_c1', 'termin_anlegen', { titel: 'Elternabend', start: '2026-10-06T19:30', ganztaegig: false }), B.ende('tool_use')),
+        antwort(B.start(), B.text(0, 'Wie lange bleibst du?'), B.werkzeug(1, 'toolu_c2', 'rueckfrage', { frage: 'Wie lange?', optionen: ['1 Stunde', '2 Stunden'], mehrfach: false }), B.ende('tool_use')),
+        antwort(B.start(), B.text(0, 'Gut, zwei Stunden.'), B.ende('end_turn')),
+      );
+      const r1 = await an('POST', `/api/chats/${chat}/messages`, { inhalt: 'Dienstag 19:30 Elternabend' });
+      assert(/event: rueckfrage/.test(r1.text), 'keine Rückfrage im Strom');
+      assert(/"stopReason":"rueckfrage"/.test(r1.text), 'der Zug hielt nicht an');
+      const termin = zweite.store.all('event')[0];
+      assert(termin && termin.data.source === 'auto' && termin.data.chatId === chat, 'kein automatischer Termin');
+      const r2 = await an('POST', `/api/chats/${chat}/rueckfrage`, { id: 'toolu_c2', antwort: '2 Stunden' });
+      assert(/"stopReason":"end_turn"/.test(r2.text), 'der Zug lief nach der Antwort nicht weiter');
+      const letzte = statist.stromAnfragen().pop().body.messages.pop();
+      assert(letzte.content[0].type === 'tool_result' && /2 Stunden/.test(letzte.content[0].content), 'die Antwort ging nicht an Claude');
+      return `Termin „${termin.data.title}“ angelegt, Rückfrage beantwortet, ${statist.stromAnfragen().length} Aufrufe`;
+    } finally {
+      if (zweite) await zweite.close().catch(() => {});
+      await statist.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 }
 
@@ -642,7 +653,7 @@ async function checkNetwork(app) {
     const pub = ok(await api.post('/api/network/test', { host: '8.8.8.8', port: 53 }), 'test public');
     const ld = local.decision || local;
     const pd = pub.decision || pub;
-    assert(ld.allowed === true, 'Loopback wird blockiert — lokale Modelle wären tot');
+    assert(ld.allowed === true, 'Loopback wird blockiert — die eigene Oberfläche wäre tot');
     assert(pd.allowed === false, 'öffentliches Netz ist erlaubt');
     return 'korrekt getrennt';
   });

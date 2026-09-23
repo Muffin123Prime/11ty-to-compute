@@ -31,21 +31,16 @@
  *     `update()` clean them up, and restore `app/` if the crash happened in
  *     the one instant between the two renames.
  *
- *  4. `update()` NEVER TOUCHES THE DATA DIRECTORY -- NOR THE MODEL DIRECTORY.
- *     This is the single most important guarantee here, because the data
- *     directory is the user's thinking and the source tree is replaceable.
- *     `models/` joins it for a different reason with the same consequence: it
- *     holds gigabytes that were copied once, over minutes, and that no update
- *     of a few megabytes of source code may put at risk. Both are enforced in
- *     code (`geschuetzterOrdner` / `assertNichtGeschuetzt`), not by
- *     convention, and proven by a test.
+ *  4. `update()` NEVER TOUCHES THE DATA DIRECTORY. This is the single most
+ *     important guarantee here, because the data directory is the user's
+ *     thinking and the source tree is replaceable. It is enforced in code
+ *     (`geschuetzterOrdner` / `assertNichtGeschuetzt`), not by convention,
+ *     and proven by a test.
  *
  *  5. THE FILESYSTEM IS PROBED, NOT ASSUMED. Most sticks are exFAT or FAT32.
  *     `chmod 0600` silently does nothing there, so `0700` on the vault
  *     protects exactly nobody -- which makes vault encryption the only real
- *     protection and therefore something the user has to be told about. FAT32
- *     additionally cannot hold a file over 4 GB, and a language model usually
- *     is one.
+ *     protection and therefore something the user has to be told about.
  *
  *  6. NICHTS DAVON HAELT DEN SERVER AN. Dieselben Funktionen bedienen die
  *     Kommandozeile UND eine HTTP-Route. Am Terminal stoert es niemanden, wenn
@@ -112,12 +107,14 @@ const PLATFORMS = {
 /**
  * Directory and file names of the stick layout. Single source of truth.
  *
- * `models` kam dazu, weil bis dahin das WISSEN mitreiste und das MODELL nicht:
- * auf einem fremden Rechner standen die Notizen da, eine Antwort gab es nicht.
- * Der Ordner ist bewusst ein Geschwister von `runtime` und nicht ein Teil
- * davon: `runtime/` ist die Node-Laufzeit, die dieses Modul selbst kopiert,
- * `models/` enthaelt fremde Programme (Ollama, llama-server) und ihre Gewichte.
- * Was dort liegt, steht in `models/modelle.json` -- siehe src/portable/model.js.
+ * Ein Ordner fuer ein Sprachmodell gehoert nicht mehr dazu: die KI ist Claude
+ * und laeuft online (Entscheidung des Nutzers, "loesche das mit Offline-KI").
+ * Ein `models/` von einem aelteren Stick bleibt liegen, wie er ist -- kein
+ * Vorgang hier legt ihn an, liest ihn oder raeumt ihn weg.
+ *
+ * `backups` ist der Ordner, in den "Jetzt sichern" auf dem Stick schreibt.
+ * Bewusst NICHT in `data/`: eine Sicherung, die im gesicherten Ordner liegt,
+ * wuerde bei jeder weiteren Sicherung mitgesichert und waechst quadratisch.
  */
 const LAYOUT = {
   marker: PORTABLE_MARKER,
@@ -125,11 +122,20 @@ const LAYOUT = {
   runtime: 'runtime',
   data: 'data',
   sync: 'sync',
-  models: 'models',
-  /** Beschreibungsdatei IN models/. Ein spaeterer Leser soll nicht raten muessen. */
-  modelsIndex: 'modelle.json',
+  backups: 'Sicherungen',
   readme: 'LIESMICH.txt',
 };
+
+/**
+ * Fuer welche Rechner "Stick vorbereiten" die Laufzeit mitbringt.
+ *
+ * Die Geraete des Nutzers: ein Windows-Schullaptop und eventuell ein MacBook.
+ * Beim Mac beide Prozessoren: ein Apple-Silicon-Mac startet die x64-Laufzeit
+ * nur ueber Rosetta, und Rosetta nachzuinstallieren verlangt ein
+ * Administratorkennwort -- genau das, was es auf fremden Rechnern nicht gibt.
+ * Die Laufzeit DIESES Rechners kommt ohnehin immer mit und ohne Netz.
+ */
+const ZIEL_PLATTFORMEN = ['win-x64', 'darwin-arm64', 'darwin-x64'];
 
 /**
  * Launcher sources in the repository, and the names they get on the stick.
@@ -445,6 +451,17 @@ function lockRoot(root, what) {
   const entry = { what, since: Date.now() };
   busyRoots.set(key, entry);
   return () => { if (busyRoots.get(key) === entry) busyRoots.delete(key); };
+}
+
+/**
+ * Alles, was gerade auf irgendeinem Stick schreibt.
+ *
+ * Fuer "Beenden & abziehen": wer mitten in einer Kopie abzieht, hat einen
+ * halben Stick. Die Frage "laeuft irgendwo etwas?" muss deshalb ueber alle
+ * Wurzeln gehen, nicht nur ueber die, deren Pfad gerade im Feld steht.
+ */
+function laufendeVorgaenge() {
+  return [...busyRoots.entries()].map(([root, v]) => ({ root, what: v.what, since: v.since }));
 }
 
 /** A throwing progress callback must never break a copy in flight. */
@@ -916,46 +933,14 @@ function dataDirOf(root) {
   return path.resolve(root, rel);
 }
 
-/** Der Modellordner dieses Sticks. Absolut, damit isInside() damit rechnen kann. */
-function modelsDirOf(root) {
-  return path.resolve(root, LAYOUT.models);
-}
-
-/**
- * Wie viel liegt in models/, und ist es beschrieben?
- *
- * Bewusst nur Bytes, Dateizahl und "gibt es die Beschreibung": WAS dort liegt
- * und ob es zu diesem Rechner passt, beantwortet src/portable/model.js
- * (`aufDemStick`). Zwei Leser desselben Formats waeren einer zu viel -- der
- * zweite wuerde irgendwann etwas anderes behaupten als der erste.
- *
- * WARUM prepare() und preview() das trotzdem brauchen: hier liegt auf einem
- * fertigen Stick der groesste Posten. In `spaceNeeded()` geht er NICHT ein --
- * belegter Platz ist kein gebrauchter Platz, und statfs() hat ihn laengst
- * abgezogen --, aber in jede Vorschau gehoert er, sonst sucht jemand
- * vergeblich, wo seine Gigabyte geblieben sind.
- */
-function modelsUebersicht(root) {
-  const dir = modelsDirOf(root);
-  const out = { path: dir, exists: fs.existsSync(dir), bytes: 0, files: 0, index: false };
-  if (!out.exists) return out;
-  out.index = fs.existsSync(path.join(dir, LAYOUT.modelsIndex));
-  try {
-    const tree = collectTree(dir, { exclude: new Set(), dropLogs: false });
-    out.bytes = tree.bytes;
-    out.files = tree.files.length;
-  } catch { /* unlesbar: die Zahlen bleiben 0, `exists` sagt weiter die Wahrheit */ }
-  return out;
-}
-
 /**
  * Liegt `target` in einem Ordner, den kein Vorgang dieses Moduls ueberschreibt?
  *
- * WARUM das eine Funktion ist und keine zwei if-Zeilen an vier Stellen: die
- * Liste der unantastbaren Ordner ist gewachsen (erst `data/`, jetzt auch
- * `models/`) und wird wieder wachsen. Steht sie an einer Stelle, gilt jede
- * Erweiterung sofort an allen vier Schreibstellen von update(); steht sie
- * verteilt, gilt sie irgendwann an dreien.
+ * WARUM das eine Funktion ist und keine if-Zeile an vier Stellen: steht die
+ * Liste der unantastbaren Ordner an einer Stelle, gilt jede Erweiterung
+ * sofort an allen vier Schreibstellen von update(); steht sie verteilt, gilt
+ * sie irgendwann an dreien. Heute steht darin der Datenordner -- und der
+ * Ordner mit den Sicherungen, die "Jetzt sichern" auf den Stick legt.
  *
  * Reine Funktion, deshalb auf Modulebene und exportiert: so laesst sich die
  * Zusage direkt pruefen, ohne einen Stick anzulegen.
@@ -965,8 +950,8 @@ function modelsUebersicht(root) {
 function geschuetzterOrdner(root, target) {
   const data = dataDirOf(root);
   if (isInside(data, target)) return { dir: data, was: 'Datenordner' };
-  const models = modelsDirOf(root);
-  if (isInside(models, target)) return { dir: models, was: 'Modellordner' };
+  const backups = path.resolve(root, LAYOUT.backups);
+  if (isInside(backups, target)) return { dir: backups, was: 'Ordner mit deinen Sicherungen' };
   return null;
 }
 
@@ -1021,9 +1006,33 @@ function deployLaunchers(root, sourceRoot) {
   return { written, warnings };
 }
 
+/** Menschliche Namen der Plattformen, fuer LIESMICH und Oberflaeche. */
+const PLATTFORM_NAMEN = {
+  'win-x64': 'Windows',
+  'win-arm64': 'Windows (ARM)',
+  'darwin-x64': 'Mac (Intel)',
+  'darwin-arm64': 'Mac (Apple-Chip)',
+  'linux-x64': 'Linux',
+  'linux-arm64': 'Linux (ARM)',
+  'linux-armv7l': 'Linux (ARM, 32 Bit)',
+};
+
+function plattformName(id) {
+  return PLATTFORM_NAMEN[id] || id;
+}
+
+/**
+ * Die LIESMICH auf dem Stick.
+ *
+ * Sie ist fuer den Moment geschrieben, in dem jemand vor einem fremden Rechner
+ * steht und der Stick nicht tut, was er soll -- also kurz, und die
+ * Reihenfolge ist die Reihenfolge der Handgriffe. ASCII ohne Umlaute, weil
+ * der Windows-Editor eine UTF-8-Datei ohne BOM auf aelteren Systemen als
+ * Zeichensalat zeigt.
+ */
 function renderReadme({ platforms, version, fsInfo }) {
   const runtimeList = platforms.length
-    ? platforms.map((p) => `  - ${p}`).join('\n')
+    ? platforms.map((p) => `  - ${plattformName(p)} (${p})`).join('\n')
     : '  (keine - siehe unten)';
   const modeNote = fsInfo && fsInfo.enforcesModes === false
     ? 'WICHTIG: Das Dateisystem dieses Sticks kennt keine Zugriffsrechte. Jeder, der\n'
@@ -1032,71 +1041,62 @@ function renderReadme({ platforms, version, fsInfo }) {
     : 'Tipp: Schalte in den Einstellungen die Verschluesselung ein. Ein Stick geht\n'
       + 'leicht verloren, und ohne Verschluesselung kann ihn jeder lesen.\n';
 
-  return `Neural OS - portabel auf diesem Stick
-=====================================
-
-Was ist das?
-------------
-Dein persoenliches KI-System. Es laeuft komplett von diesem Stick: der Ordner
-"app" enthaelt das Programm, "runtime" die mitgelieferte Laufzeitumgebung und
-"data" deine Daten. Es wird nichts auf dem fremden Rechner installiert und
-nichts an irgendeinen Server geschickt.
+  return `Neural OS - deine KI auf diesem Stick
+====================================
 
 So startest du
 --------------
   Windows   -> Doppelklick auf  "Neural OS starten.bat"
-  macOS     -> Rechtsklick auf  "Neural OS starten.command"  -> Oeffnen
-               (Beim ersten Mal kommt eine Sicherheitswarnung. "Oeffnen"
-                anklicken. Nur ein Doppelklick genuegt beim ersten Mal nicht.)
-  Linux     -> Doppelklick auf  "Neural OS starten.sh"  oder im Terminal:
-               ./"Neural OS starten.sh"
+  Mac       -> Rechtsklick auf  "Neural OS starten.command"  -> Oeffnen
+               (nur beim ersten Mal; danach genuegt ein Doppelklick)
+  Linux     -> Doppelklick auf  "Neural OS starten.sh"
 
-Danach oeffnet sich dein Browser mit http://127.0.0.1:7777 . Solange das
-schwarze Fenster offen ist, laeuft Neural OS. Zum Beenden das Fenster
-schliessen oder Strg+C druecken.
+Danach oeffnet sich dein Browser mit Neural OS. Das schwarze Fenster bitte
+offen lassen - solange es offen ist, laeuft Neural OS.
 
-Wo liegen meine Daten?
-----------------------
-Alles in "${LAYOUT.data}" auf diesem Stick. Nichts ausserhalb. Ein Backup ist
-eine Kopie dieses Ordners - mehr braucht es nicht.
+So hoerst du auf
+----------------
+In Neural OS unter Einstellungen -> Stick auf "Beenden & abziehen" tippen.
+Sobald dort "Jetzt kannst du den Stick abziehen" steht, ist alles gespeichert.
 
-Und das Sprachmodell?
----------------------
-Im Ordner "${LAYOUT.models}" kann ein Sprachmodell samt Laufzeitkern (z. B.
-Ollama oder llama-server) liegen. Ist der Ordner leer, zeigt dieser Stick auf
-einem fremden Rechner zwar deine Notizen, kann aber KEINE Antwort geben - dafuer
-braucht es dann ein Modell, das auf jenem Rechner schon installiert ist. Was
-mitreist, steht in "${LAYOUT.models}/${LAYOUT.modelsIndex}": Modellname,
-Groesse, Pruefsummen und fuer welches Betriebssystem der Laufzeitkern gebaut
-ist. Ein Laufzeitkern fuer Windows startet auf einem Mac nicht - die
-Modelldateien selbst passen dagegen auf jeden Rechner.
+Was liegt hier?
+---------------
+  app        das Programm
+  runtime    die Laufzeit - deshalb muss auf dem Rechner nichts installiert sein
+  ${LAYOUT.data.padEnd(10)} dein Wissen: Notizen, Chats, Termine, Projekte
+  ${LAYOUT.backups.padEnd(10)} deine Sicherungen ("Jetzt sichern")
+
+Auf dem fremden Rechner wird nichts installiert und nichts gespeichert.
+
+Und die KI?
+-----------
+Die KI ist Claude und braucht Internet. Den Schluessel dafuer traegst du einmal
+in den Einstellungen unter "Claude verbinden" ein; er liegt dann in deinem
+Tresor auf diesem Stick und reist mit. Ohne Internet siehst du trotzdem alle
+Notizen, Termine und Projekte - nur neue Antworten gibt es dann nicht.
 
 ${modeNote}
 Mitgelieferte Laufzeiten
 ------------------------
 ${runtimeList}
 
-Steht dein Betriebssystem nicht in der Liste, meldet der Starter das und sagt,
-was fehlt. Nachlegen kannst du es in Neural OS im Bereich "Stick" (Seitenleiste,
-oder g dann t): auf einem Rechner DIESES Systems genuegt dort "Jetzt kopieren"
-und es braucht kein Internet; fuer ein fremdes System "Holen", dafuer einmalig
-Internet. Alternativ genuegt ein installiertes Node.js (Version 20 oder neuer)
-auf dem fremden Rechner.
+Steht dein Rechner nicht in der Liste, sagt der Starter das. Dann den Stick an
+einem Rechner mit Neural OS und Internet einstecken und dort unter
+Einstellungen -> Stick noch einmal "Stick vorbereiten" tippen - dein Wissen auf
+dem Stick bleibt dabei, wie es ist.
 
 Wenn gar nichts geht
 --------------------
 1. Starte im abgesicherten Modus - dabei bleiben eigene Erweiterungen aus:
      Windows:  runtime\\win-x64\\node.exe app\\bin\\neural-os.js start --safe
-     macOS:    ./runtime/darwin-arm64/node app/bin/neural-os.js start --safe
+     Mac:      ./runtime/darwin-arm64/node app/bin/neural-os.js start --safe
      Linux:    ./runtime/linux-x64/node app/bin/neural-os.js start --safe
-2. Sagt der Starter "Laufzeit fehlt", passt keine mitgelieferte Laufzeit zu
-   diesem Rechner (anderes Betriebssystem oder andere Prozessorarchitektur).
-3. Passiert nach dem Doppelklick gar nichts, ist der Stick moeglicherweise mit
-   "noexec" eingehaengt. Dann kopiere den ganzen Ordner auf die Festplatte und
-   starte ihn von dort.
-4. Der Ordner "app" fehlt oder ist halb? Dann wurde der Stick beim Kopieren
-   abgezogen. In Neural OS im Bereich "Stick" erst "Stick pruefen" und danach
-   "Nur Programm erneuern" klicken - dein Datenordner bleibt dabei unberuehrt.
+2. Passiert nach dem Doppelklick gar nichts, ist der Stick moeglicherweise mit
+   "noexec" eingehaengt. Dann den ganzen Ordner auf die Festplatte kopieren
+   und von dort starten.
+3. Der Ordner "app" fehlt oder ist halb? Dann wurde der Stick beim Kopieren
+   abgezogen. An einem Rechner mit Neural OS noch einmal "Stick vorbereiten"
+   tippen - dein Wissen in "${LAYOUT.data}" bleibt dabei unberuehrt.
 
 Version: ${version}
 Erstellt: ${new Date().toISOString().slice(0, 10)}
@@ -1331,6 +1331,286 @@ function pickFromZip(buffer, matches, maxBytes) {
   return null;
 }
 
+/* ----------------------------------------- Laufwerke finden und auswerfen */
+
+/**
+ * Ein Programm starten und auf sein Ende warten -- ohne je zu werfen.
+ *
+ * WARUM nicht execFileSync: eine haengende PowerShell (Gruppenrichtlinie,
+ * langsamer WMI-Dienst) wuerde den Server so lange anhalten, und zwar fuer
+ * jeden Tab. Die Zeitgrenze beendet den Kindprozess; das Ergebnis sagt dann
+ * ehrlich "zeit", statt eine Antwort zu erfinden.
+ */
+function ausfuehren(cmd, args, { timeoutMs = 8000 } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      resolve({ code: null, stdout: '', stderr: '', error: (err && err.code) || String(err) });
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* schon beendet */ }
+      finish({ code: null, stdout, stderr, error: 'zeit' });
+    }, timeoutMs);
+    child.stdout.on('data', (c) => { if (stdout.length < 200000) stdout += String(c); });
+    child.stderr.on('data', (c) => { if (stderr.length < 20000) stderr += String(c); });
+    child.on('error', (err) => finish({ code: null, stdout, stderr, error: (err && err.code) || String(err) }));
+    child.on('close', (code) => finish({ code, stdout, stderr, error: null }));
+  });
+}
+
+/** PowerShell ohne Profil und ohne Rueckfragen. Braucht keine Administratorrechte. */
+function powershell(skript, opts) {
+  return ausfuehren('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', skript], opts);
+}
+
+/** Windows' Laufwerksarten (Win32_LogicalDisk.DriveType) in einem Wort. */
+const WINDOWS_ARTEN = { 2: 'wechsel', 3: 'fest', 4: 'netz', 5: 'cd', 6: 'ram' };
+
+/**
+ * Welche Laufwerksbuchstaben gibt es, und welcher Art sind sie?
+ *
+ * Nur zum Ordnen, nicht zum Weglassen: ein USB-Stick meldet sich als
+ * "Wechseldatenträger", eine USB-SSD aber als feste Platte -- wer nur Art 2
+ * zeigte, versteckte genau die schnellen Sticks. Scheitert die Abfrage (keine
+ * PowerShell, gesperrt, zu langsam), wird ohne Arten weitergemacht.
+ *
+ * @returns {Promise<Map<string,{art:string|null,name:string}>|null>}
+ */
+async function klassifiziereWindows(run = powershell) {
+  const skript = "$d = try { Get-CimInstance Win32_LogicalDisk -ErrorAction Stop } catch { Get-WmiObject Win32_LogicalDisk }; "
+    + '$d | Select-Object DeviceID,DriveType,VolumeName | ConvertTo-Json -Compress';
+  const r = await run(skript, { timeoutMs: 6000 });
+  if (!r || r.code !== 0 || !r.stdout.trim()) return null;
+  let liste;
+  try { liste = JSON.parse(r.stdout.trim()); } catch { return null; }
+  if (!Array.isArray(liste)) liste = [liste];
+  const out = new Map();
+  for (const d of liste) {
+    if (!d || typeof d.DeviceID !== 'string') continue;
+    out.set(d.DeviceID.toUpperCase(), { art: WINDOWS_ARTEN[d.DriveType] || null, name: typeof d.VolumeName === 'string' ? d.VolumeName : '' });
+  }
+  return out;
+}
+
+function existiertStill(p) {
+  try { return fs.existsSync(p); } catch { return false; }
+}
+
+function istOrdner(p) {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+
+function ordnerInhalt(p) {
+  try { return fs.readdirSync(p); } catch { return []; }
+}
+
+/**
+ * Ist `dir` ein Einhaengepunkt? Unter Linux genau dann, wenn er auf einem
+ * anderen Geraet liegt als sein Elternordner -- ein leerer Ordner in /media,
+ * den niemand weggeraeumt hat, ist dann kein Stick.
+ */
+function einhaengepunkt(dir) {
+  try {
+    return fs.statSync(dir).dev !== fs.statSync(path.dirname(dir)).dev;
+  } catch {
+    return false;
+  }
+}
+
+function gleicherPfad(a, b) {
+  const norm = (p) => {
+    const r = path.resolve(p).replace(/[\\/]+$/, '');
+    return process.platform === 'win32' ? r.toLowerCase() : r;
+  };
+  return norm(a) === norm(b);
+}
+
+/** Reihenfolge der Vorschlaege: was schon ein Stick ist, dann Wechselmedien. */
+const ART_RANG = { wechsel: 1, null: 2, fest: 3, ram: 4, netz: 5, cd: 6 };
+
+/**
+ * Welche Sticks stecken gerade an DIESEM Rechner?
+ *
+ * WARUM der Server das tut und nicht der Browser: der Browser kennt keine
+ * Dateipfade, und auf dem iPad, das nur der Bildschirm ist, steckt gar kein
+ * Stick. Gesucht wird dort, wo die Betriebssysteme ihn einhaengen: unter
+ * Windows die Laufwerksbuchstaben D: bis Z: (ohne das Systemlaufwerk), unter
+ * macOS /Volumes (ohne das Startvolume), unter Linux /media und /run/media.
+ * Nichts davon schreibt; gelesen wird nur, ob es den Ordner gibt, wie viel
+ * Platz frei ist und ob schon ein Neural-OS-Stick darauf liegt.
+ *
+ * Die Abhaengigkeiten sind einschleusbar, weil sich ein eingesteckter Stick
+ * in einem Test nicht herbeizaubern laesst.
+ *
+ * @param {{platform?:string, wurzeln?:string[], buchstaben?:string[],
+ *          einhaengepunkt?:(dir:string)=>boolean, klassifiziere?:()=>Promise<Map|null>,
+ *          eigenerStick?:string|null, freeBytes?:Function}} [opts]
+ * @returns {Promise<{system:string, gesucht:string[], laufwerke:object[]}>}
+ */
+async function findeLaufwerke(opts = {}) {
+  const platform = opts.platform || process.platform;
+  const kandidaten = [];
+  let gesucht = [];
+
+  if (platform === 'win32') {
+    const buchstaben = opts.buchstaben || 'DEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+    const system = String(process.env.SystemDrive || 'C:').slice(0, 2).toUpperCase();
+    gesucht = [`${buchstaben[0]}: bis ${buchstaben[buchstaben.length - 1]}:`];
+    let arten = null;
+    try { arten = await (opts.klassifiziere || klassifiziereWindows)(); } catch { arten = null; }
+    for (const b of buchstaben) {
+      const id = `${String(b).toUpperCase()}:`;
+      if (id === system) continue;
+      const info = arten ? arten.get(id) : null;
+      // Ein getrenntes Netzlaufwerk kann existsSync sekundenlang aufhalten,
+      // und ein CD-Laufwerk ist kein Ziel. Beide werden nicht einmal befragt.
+      if (arten && !info) continue;
+      if (info && (info.art === 'netz' || info.art === 'cd')) continue;
+      const pfad = `${id}\\`;
+      if (!existiertStill(pfad)) continue;
+      kandidaten.push({ pfad, name: (info && info.name) || '', art: info ? info.art : null });
+    }
+  } else if (platform === 'darwin') {
+    const wurzeln = opts.wurzeln || ['/Volumes'];
+    gesucht = wurzeln;
+    let startDev = null;
+    try { startDev = fs.statSync('/').dev; } catch { /* dann wird nichts ausgeschlossen */ }
+    for (const w of wurzeln) {
+      for (const name of ordnerInhalt(w)) {
+        if (name.startsWith('.')) continue;
+        const abs = path.join(w, name);
+        let st;
+        try { st = fs.statSync(abs); } catch { continue; }
+        if (!st.isDirectory()) continue;
+        // "Macintosh HD" in /Volumes ist ein Verweis auf das Startvolume.
+        if (!opts.wurzeln && startDev !== null && st.dev === startDev) continue;
+        kandidaten.push({ pfad: abs, name, art: 'wechsel' });
+      }
+    }
+  } else {
+    const wurzeln = opts.wurzeln || ['/media', '/run/media'];
+    gesucht = wurzeln;
+    const istEinhaengepunkt = opts.einhaengepunkt || einhaengepunkt;
+    for (const w of wurzeln) {
+      for (const name of ordnerInhalt(w)) {
+        const abs = path.join(w, name);
+        if (!istOrdner(abs)) continue;
+        if (istEinhaengepunkt(abs)) {
+          kandidaten.push({ pfad: abs, name, art: 'wechsel' });
+          continue;
+        }
+        // /media/<benutzer>/<stick> und /run/media/<benutzer>/<stick>
+        for (const name2 of ordnerInhalt(abs)) {
+          const abs2 = path.join(abs, name2);
+          if (istOrdner(abs2) && istEinhaengepunkt(abs2)) kandidaten.push({ pfad: abs2, name: name2, art: 'wechsel' });
+        }
+      }
+    }
+  }
+
+  const frei = typeof opts.freeBytes === 'function' ? opts.freeBytes : freeBytesOf;
+  const laufwerke = kandidaten.map((k) => {
+    let gesamt = null;
+    try {
+      const st = fs.statfsSync(k.pfad);
+      gesamt = Number(st.bsize) * Number(st.blocks);
+      if (!Number.isFinite(gesamt)) gesamt = null;
+    } catch { /* bleibt unbekannt */ }
+    return {
+      ...k,
+      frei: frei(k.pfad),
+      gesamt,
+      istStick: !!readMarker(k.pfad),
+      eigener: opts.eigenerStick ? gleicherPfad(opts.eigenerStick, k.pfad) : false,
+    };
+  });
+  laufwerke.sort((a, b) => {
+    if (a.eigener !== b.eigener) return a.eigener ? 1 : -1;
+    if (a.istStick !== b.istStick) return a.istStick ? -1 : 1;
+    const ra = ART_RANG[a.art] || 2;
+    const rb = ART_RANG[b.art] || 2;
+    if (ra !== rb) return ra - rb;
+    return a.pfad < b.pfad ? -1 : 1;
+  });
+  return { system: platform, gesucht, laufwerke };
+}
+
+/**
+ * Den Stick auswerfen, wo das ohne Administrator geht -- und sonst ehrlich
+ * sagen, dass er einfach abgezogen werden kann.
+ *
+ * Windows: die Shell selbst ("Auswerfen" im Kontextmenue des Laufwerks) ueber
+ * Shell.Application. Das braucht keine erhoehten Rechte. Ob es geklappt hat,
+ * sagt nicht der Aufruf (der meldet nichts), sondern ob der Laufwerksbuchstabe
+ * danach verschwunden ist. Der kanonische Verbname "Eject" wird zuerst
+ * versucht; tut sich nichts, der angezeigte ("Auswerfen" / "Eject").
+ * macOS: `diskutil eject`, das fuer ein vom Benutzer eingehaengtes Volume
+ * ebenfalls ohne Administrator geht. Linux: kein Auswerfen, aber `sync`, damit
+ * nichts mehr im Schreibpuffer steht.
+ *
+ * @param {string} pfad
+ * @param {{platform?:string, run?:Function, ps?:Function}} [opts]
+ * @returns {Promise<{ausgeworfen:boolean|null, wie:string, grund:string|null}>}
+ */
+async function auswerfen(pfad, opts = {}) {
+  const platform = opts.platform || process.platform;
+  const run = opts.run || ausfuehren;
+  const ps = opts.ps || powershell;
+
+  if (platform === 'win32') {
+    const m = /^([A-Za-z]):/.exec(String(pfad || ''));
+    if (!m) return { ausgeworfen: false, wie: 'keins', grund: 'Kein Laufwerksbuchstabe im Pfad.' };
+    const id = `${m[1].toUpperCase()}:`;
+    const system = String(process.env.SystemDrive || 'C:').slice(0, 2).toUpperCase();
+    if (id === system) return { ausgeworfen: false, wie: 'keins', grund: 'Das ist das Systemlaufwerk.' };
+    const skript = [
+      "$ErrorActionPreference = 'SilentlyContinue'",
+      `$ziel = '${id}'`,
+      "$item = (New-Object -ComObject Shell.Application).Namespace(17).ParseName($ziel)",
+      'if ($null -eq $item) { exit 3 }',
+      "$item.InvokeVerb('Eject')",
+      "for ($i = 0; $i -lt 12; $i++) { Start-Sleep -Milliseconds 250; if (-not (Test-Path ($ziel + '\\'))) { exit 0 } }",
+      "foreach ($v in $item.Verbs()) { $n = ($v.Name -replace '&', ''); if ($n -match '^(Auswerfen|Eject)$') { $v.DoIt() } }",
+      "for ($i = 0; $i -lt 16; $i++) { Start-Sleep -Milliseconds 250; if (-not (Test-Path ($ziel + '\\'))) { exit 0 } }",
+      'exit 2',
+    ].join('; ');
+    const r = await ps(skript, { timeoutMs: 15000 });
+    if (r && r.code === 0) return { ausgeworfen: true, wie: 'windows', grund: null };
+    const grund = !r || r.error
+      ? `PowerShell war nicht zu starten (${(r && r.error) || 'unbekannt'}).`
+      : r.code === 3 ? `Windows kennt das Laufwerk ${id} nicht.`
+        : 'Windows hat das Laufwerk nicht freigegeben – es wird vielleicht noch benutzt.';
+    return { ausgeworfen: false, wie: 'windows', grund };
+  }
+
+  if (platform === 'darwin') {
+    const r = await run('diskutil', ['eject', String(pfad)], { timeoutMs: 20000 });
+    if (r && r.code === 0) return { ausgeworfen: true, wie: 'diskutil', grund: null };
+    return {
+      ausgeworfen: false,
+      wie: 'diskutil',
+      grund: (r && (r.stderr || r.stdout || r.error) ? String(r.stderr || r.stdout || r.error).trim().slice(0, 200) : null) || 'diskutil hat abgelehnt.',
+    };
+  }
+
+  // Linux und der Rest: sync, damit der Schreibpuffer leer ist. Auswerfen
+  // (umount) verlangt dort je nach System Rechte, die hier niemand hat.
+  const r = await run('sync', [], { timeoutMs: 20000 });
+  return { ausgeworfen: null, wie: 'sync', grund: r && r.code === 0 ? null : 'sync ließ sich nicht ausführen.' };
+}
+
 /* ----------------------------------------------------------- the factory */
 
 /**
@@ -1391,7 +1671,7 @@ function createStick(deps = {}) {
 
   /**
    * The guard behind update()'s central promise. Every write during an update
-   * goes through here, so "data and models are never touched" is a property of
+   * goes through here, so "the data is never touched" is a property of
    * the code and not of the author's attention.
    */
   function assertNichtGeschuetzt(root, target) {
@@ -1399,7 +1679,7 @@ function createStick(deps = {}) {
     if (treffer) {
       throw new StorageError(
         `Abgebrochen: "${target}" liegt im ${treffer.was}. Eine Aktualisierung erneuert nur das Programm - `
-        + 'sie darf weder deinen Datenbestand noch ein mitgenommenes Modell verändern.',
+        + 'sie darf weder deinen Datenbestand noch deine Sicherungen verändern.',
         { target, ordner: treffer.dir, was: treffer.was },
       );
     }
@@ -1418,17 +1698,9 @@ function createStick(deps = {}) {
         + 'Laufwerks. Auf einem Stick heißt das praktisch: Verschlüsselung einschalten.',
       );
     }
-    if (fsInfo.maxFileBytes !== null && fsInfo.maxFileBytes !== undefined && fsInfo.maxFileBytes < 4 * 1024 * 1024 * 1024) {
-      warnings.push(
-        `Der Stick ist mit ${fsInfo.typeName} formatiert. Dort kann keine einzelne Datei größer als 4 GB sein - `
-        + 'ein größeres KI-Modell passt also nicht darauf. Für Modelle brauchst du exFAT oder NTFS.',
-      );
-    } else if (fsInfo.enforcesModes === false && fsInfo.typeName === 'unbekannt') {
-      warnings.push(
-        'Der Typ des Dateisystems ließ sich nicht bestimmen. Falls es FAT32 ist, passt keine Datei '
-        + 'über 4 GB darauf - das betrifft größere KI-Modelle.',
-      );
-    }
+    // Die 4-GB-Grenze von FAT32 stand hier, solange ein Sprachmodell mitreisen
+    // konnte. Die groesste Datei auf dem Stick ist jetzt eine Node-Laufzeit
+    // (rund 100 MB); eine Warnung dazu waere eine Warnung vor nichts.
     if (fsInfo.error) {
       warnings.push(`Beim Prüfen des Dateisystems trat ein Fehler auf: ${fsInfo.error}`);
     }
@@ -1881,11 +2153,6 @@ function createStick(deps = {}) {
     const dataDir = dataDirOf(root);
     mkdirp(dataDir, 0o700);
     mkdirp(path.join(root, LAYOUT.sync), 0o700);
-    // models/ wird angelegt, aber NIE geleert: hier kann ein Modell von einem
-    // frueheren Mal liegen, das Minuten gekostet hat. Kein Modus 0700 - die
-    // Gewichte sind kein Geheimnis, und ein fremder Laufzeitkern muss sie
-    // lesen duerfen.
-    mkdirp(path.join(root, LAYOUT.models));
 
     if (home) {
       const existing = fs.readdirSync(dataDir).filter((n) => !n.startsWith('.'));
@@ -1949,6 +2216,10 @@ function createStick(deps = {}) {
       }
     }
 
+    // Welche Laufzeit fehlt und warum -- strukturiert, damit die Oberflaeche
+    // "laeuft auf Windows, der Mac fehlt: keine Verbindung" sagen kann, ohne
+    // Warnsaetze auseinanderzunehmen.
+    const fehlend = [];
     for (const platform of plan.extra) {
       throwIfAborted(signal, what);
       try {
@@ -1964,6 +2235,7 @@ function createStick(deps = {}) {
         // stick. It is reported in full and the work continues.
         const message = err && err.message ? err.message : String(err);
         warnings.push(`Laufzeit für ${platform} wurde NICHT auf den Stick gelegt: ${message}`);
+        fehlend.push({ platform, grund: message, code: (err && err.code) || null });
         log.warn(`Laufzeit ${platform} fehlgeschlagen: ${message}`);
       }
     }
@@ -1986,7 +2258,7 @@ function createStick(deps = {}) {
     });
 
     progress({ phase: 'done', message: 'Der Stick ist fertig.', bytes: totalBytes, files: totalFiles, percent: 100 });
-    return { root, bytes: totalBytes, files: totalFiles, runtimes, warnings };
+    return { root, bytes: totalBytes, files: totalFiles, runtimes, fehlend, warnings, vault: !!home };
   }
 
   /**
@@ -2271,9 +2543,6 @@ function createStick(deps = {}) {
       },
       home: home ? { root: homeDir, files: home.files.length, bytes: home.bytes } : null,
       data: { path: dataDir, exists: fs.existsSync(dataDir), entries: dataEntries.length },
-      // Belegt, nicht gebraucht: siehe modelsUebersicht(). Ohne diese Zahl
-      // erklaert keine Vorschau, warum auf einem 64-GB-Stick 6 GB frei sind.
-      models: modelsUebersicht(root),
       runtimes: {
         local: LOCAL_PLATFORM,
         copyLocal: plan.local,
@@ -2320,7 +2589,6 @@ function createStick(deps = {}) {
       data: { path: path.join(root, LAYOUT.data), exists: false },
       runtime: { path: path.join(root, LAYOUT.runtime), exists: false },
       sync: { path: path.join(root, LAYOUT.sync), exists: false },
-      models: { path: modelsDirOf(root), exists: false, bytes: 0, files: 0, index: false },
       readme: { path: path.join(root, LAYOUT.readme), exists: false },
       launchers: {},
       runtimes: [],
@@ -2343,18 +2611,7 @@ function createStick(deps = {}) {
     layout.app.exists = fs.existsSync(layout.app.path);
     layout.runtime.exists = fs.existsSync(layout.runtime.path);
     layout.sync.exists = fs.existsSync(path.join(root, LAYOUT.sync));
-    layout.models = modelsUebersicht(root);
     layout.readme.exists = fs.existsSync(path.join(root, LAYOUT.readme));
-
-    // Dateien ohne Beschreibung sind auf einem fremden Rechner wertlos: niemand
-    // sieht einer 4-GB-Datei an, zu welchem Modell sie gehoert und welcher
-    // Laufzeitkern sie oeffnen kann. Kein Fehler -- der Stick startet trotzdem.
-    if (layout.models.exists && layout.models.files > 0 && !layout.models.index) {
-      add('info', 'MODELS_UNDOCUMENTED',
-        `Im Ordner "${LAYOUT.models}" liegen ${layout.models.files} Datei(en) (${humanBytes(layout.models.bytes)}), `
-        + `aber keine Beschreibung "${LAYOUT.modelsIndex}". Was dort liegt, laesst sich nur raten.`,
-        'Lege das Modell noch einmal über "Modell mitnehmen" ab - dabei wird die Beschreibung geschrieben.');
-    }
 
     // An interrupted copy is the one failure mode a stick really has.
     const stale = [];
@@ -2436,11 +2693,6 @@ function createStick(deps = {}) {
         'Ob dieses Dateisystem Zugriffsrechte durchsetzt, ist hier nicht zu sehen - die Prüfung schreibt nichts auf den Stick.',
         'Beim Vorbereiten oder Aktualisieren wird es geprüft und gemeldet; bis dahin gilt: auf einem Stick schützt nur Verschlüsselung.');
     }
-    if (fsInfo.maxFileBytes !== null && fsInfo.maxFileBytes !== undefined && fsInfo.maxFileBytes < 4 * 1024 * 1024 * 1024) {
-      add('warn', 'MAX_FILE_SIZE',
-        `Auf ${fsInfo.typeName} kann keine Datei größer als 4 GB sein; größere KI-Modelle passen nicht darauf.`,
-        'Für Modelle den Stick mit exFAT formatieren (Achtung: dabei gehen alle Daten verloren - vorher sichern).');
-    }
 
     const free = freeBytes(root);
     if (free !== null && free < MIN_HEADROOM_BYTES) {
@@ -2507,6 +2759,192 @@ function createStick(deps = {}) {
   }
 
   /**
+   * "Stick vorbereiten" mit einem Klick: was dieser Stick braucht, und nur das.
+   *
+   * WARUM eine eigene Funktion statt dreier Knoepfe: der Nutzer will "Stick
+   * rein, Knopf, fertig" und nicht entscheiden muessen, ob das hier ein
+   * Vorbereiten, ein Erneuern oder ein Laufzeit-Nachlegen ist. Diese Frage
+   * beantwortet der Stick selbst:
+   *
+   *   neu       -- kein Neural-OS-Stick, oder einer ohne Wissen: Programm,
+   *                Laufzeiten und das Wissen dieses Rechners kommen drauf.
+   *   erneuern  -- auf dem Stick liegt schon Wissen. Das ist womoeglich
+   *                NEUER als das hier (auf einem anderen Rechner geschrieben)
+   *                und wird deshalb nie ueberschrieben: nur das Programm wird
+   *                erneuert und fehlende Laufzeiten kommen dazu.
+   *   eigener   -- der Stick, von dem diese Instanz laeuft. Das Programm kann
+   *                sich nicht selbst ersetzen (die Quelle laege im Ziel); es
+   *                kommen nur fehlende Laufzeiten dazu.
+   *
+   * Laufzeiten fuer andere Betriebssysteme brauchen einmal nodejs.org. Scheitert
+   * das (kein Netz, Schleuse zu), ist der Stick trotzdem fertig -- `fehlend`
+   * sagt, welche fehlen und warum, und ein spaeterer Klick holt sie nach.
+   *
+   * Der Fortschritt ist ein einziger Balken ueber alle Schritte. Jede
+   * Bewegung kommt aus einem echten Ereignis (kopierte Bytes, begonnener
+   * Download); fest sind nur die Anteile, die jeder Schritt am Balken hat.
+   *
+   * @param {string} targetDir
+   * @param {{andereSysteme?:boolean, plattformen?:string[], mitWissen?:boolean,
+   *          eigenerStick?:string|null, sourceRoot?:string, sourceHome?:string,
+   *          signal?:AbortSignal, onProgress?:Function}} [opts]
+   */
+  async function einrichten(targetDir, opts = {}) {
+    const root = requireTarget(targetDir, 'Stick vorbereiten');
+    const release = lockRoot(root, 'Stick vorbereiten');
+    try {
+      return await einrichtenLocked(root, opts);
+    } finally {
+      release();
+    }
+  }
+
+  /** Der Plan, den einrichten() fahren wuerde -- ohne etwas zu schreiben. */
+  function einrichtenPlan(targetDir, opts = {}) {
+    const root = requireTarget(targetDir, 'Stick vorbereiten');
+    const eigener = !!(opts.eigenerStick && gleicherPfad(opts.eigenerStick, root));
+    const marker = readMarker(root);
+    let wissen = 0;
+    try { wissen = fs.readdirSync(dataDirOf(root)).filter((n) => !n.startsWith('.')).length; } catch { /* noch keiner */ }
+    const fall = eigener ? 'eigener' : (!marker || wissen === 0 ? 'neu' : 'erneuern');
+    const vorhanden = new Set(detectPlatforms(root).map((r) => r.platform));
+    const andere = opts.andereSysteme === false
+      ? []
+      : (opts.plattformen || ZIEL_PLATTFORMEN).filter((p) => PLATFORMS[p] && p !== LOCAL_PLATFORM && !vorhanden.has(p));
+    const lokalFehlt = !!LOCAL_PLATFORM && !vorhanden.has(LOCAL_PLATFORM);
+    return { root, fall, eigener, istStick: !!marker, wissenAufStick: wissen, vorhanden: [...vorhanden], andere, lokalFehlt };
+  }
+
+  async function einrichtenLocked(root, opts) {
+    const signal = opts.signal || null;
+    const progress = makeProgress(opts.onProgress, log);
+    const plan = einrichtenPlan(root, opts);
+    const warnings = [];
+    const fehlend = [];
+    let bytes = 0;
+    let files = 0;
+    let wissen = 'blieb';
+
+    // Die Baender des einen Balkens. Ein Schritt, den es in diesem Fall nicht
+    // gibt, bekommt keins -- sonst stuende der Balken dort still.
+    const schritte = [];
+    if (plan.fall === 'neu') schritte.push(['source', 40], ['data', 22]);
+    if (plan.fall === 'erneuern') schritte.push(['source', 55]);
+    if (plan.fall === 'neu' || plan.lokalFehlt) schritte.push(['local', 8]);
+    for (const p of plan.andere) schritte.push([`dl:${p}`, 22]);
+    const summe = schritte.reduce((a, [, w]) => a + w, 0) || 1;
+    const band = new Map();
+    let lauf = 0;
+    for (const [key, w] of schritte) {
+      band.set(key, { von: (lauf / summe) * 97, breite: (w / summe) * 97 });
+      lauf += w;
+    }
+    let stand = 0;
+    const downloads = new Map();
+    const melde = (key, anteil, event) => {
+      const b = band.get(key);
+      if (b) stand = Math.max(stand, Math.round(b.von + b.breite * Math.max(0, Math.min(1, anteil))));
+      progress({ ...event, percent: stand, schritt: key });
+    };
+    const weiter = (event) => {
+      if (!event) return;
+      const phase = event.phase;
+      if (phase === 'source' || phase === 'data') {
+        const anteil = Number.isFinite(event.percent) ? event.percent / 100 : 0;
+        melde(phase, anteil, event);
+      } else if (phase === 'runtime') {
+        if (event.platform === LOCAL_PLATFORM && !plan.andere.includes(event.platform)) {
+          melde('local', 0.1, event);
+        } else {
+          const key = `dl:${event.platform}`;
+          const n = (downloads.get(key) || 0) + 1;
+          downloads.set(key, n);
+          melde(key, n === 1 ? 0.05 : n === 2 ? 0.25 : 0.85, event);
+        }
+      } else if (phase === 'check') {
+        melde('source', 0, event);
+      } else if (phase === 'finish') {
+        // prepare() schreibt Starter und LIESMICH ganz zum Schluss, update()
+        // gleich nach dem Programm -- danach kommen dort noch die Laufzeiten.
+        if (plan.fall === 'neu') {
+          stand = Math.max(stand, 98);
+          progress({ ...event, percent: stand });
+        } else {
+          melde('source', 1, event);
+        }
+      }
+      // 'done' der Teilschritte wird verschluckt: fertig ist erst das Ganze.
+    };
+
+    if (plan.fall === 'neu') {
+      const r = await prepareLocked(root, {
+        includeVault: opts.mitWissen !== false,
+        includeRuntimes: plan.andere.length ? plan.andere : true,
+        sourceRoot: opts.sourceRoot,
+        sourceHome: opts.sourceHome,
+        signal,
+        onProgress: weiter,
+      });
+      bytes += r.bytes;
+      files += r.files;
+      warnings.push(...r.warnings.filter((w) => !/^Laufzeit für .* wurde NICHT/.test(w)));
+      fehlend.push(...(r.fehlend || []));
+      wissen = r.vault ? 'kopiert' : 'leer';
+    } else {
+      if (plan.fall === 'erneuern') {
+        const r = await updateLocked(root, { sourceRoot: opts.sourceRoot, signal, onProgress: weiter });
+        bytes += r.bytes;
+        files += r.files;
+        warnings.push(...r.warnings);
+      }
+      if (plan.lokalFehlt) {
+        melde('local', 0, { phase: 'runtime', message: `Laufzeit für ${plattformName(LOCAL_PLATFORM)} wird kopiert …`, platform: LOCAL_PLATFORM });
+        const r = await addRuntimeLocked(root, LOCAL_PLATFORM, { signal });
+        bytes += r.bytes || 0;
+        files += 1;
+        melde('local', 1, { phase: 'runtime', message: `Laufzeit für ${plattformName(LOCAL_PLATFORM)} liegt auf dem Stick.`, platform: LOCAL_PLATFORM });
+      }
+      for (const platform of plan.andere) {
+        throwIfAborted(signal, 'Das Vorbereiten des Sticks');
+        try {
+          const r = await addRuntimeLocked(root, platform, { signal, onProgress: weiter });
+          bytes += r.bytes || 0;
+          files += 1;
+        } catch (err) {
+          if (err instanceof AbortedError || (err && err.code === 'ABORTED')) throw err;
+          const message = err && err.message ? err.message : String(err);
+          fehlend.push({ platform, grund: message, code: (err && err.code) || null });
+          log.warn(`Laufzeit ${platform} fehlgeschlagen: ${message}`);
+        }
+        melde(`dl:${platform}`, 1, { phase: 'runtime', message: `${plattformName(platform)}: erledigt.`, platform });
+      }
+      if (plan.fall === 'eigener' && (plan.andere.length || plan.lokalFehlt)) {
+        // Die LIESMICH nennt die Laufzeiten; sie soll nach dem Nachlegen stimmen.
+        try {
+          writeFileAtomic(path.join(root, LAYOUT.readme), renderReadme({
+            platforms: detectPlatforms(root).map((p) => p.platform),
+            version: appVersion(opts.sourceRoot ? path.resolve(opts.sourceRoot) : APP_ROOT),
+            fsInfo: null,
+          }));
+        } catch { /* die LIESMICH ist Beiwerk; der Stick laeuft ohne sie */ }
+      }
+    }
+
+    const laufzeiten = detectPlatforms(root).map((p) => p.platform);
+    progress({ phase: 'done', message: 'Der Stick ist fertig.', percent: 100 });
+    return {
+      root,
+      fall: plan.fall,
+      bytes,
+      files,
+      wissen,
+      laufzeiten,
+      fehlend: fehlend.filter((f) => !laufzeiten.includes(f.platform)),
+      warnings,
+    };
+  }
+
+  /**
    * Which runtimes are already on the stick?
    *
    * The version is read from the file written next to the binary rather than by
@@ -2563,6 +3001,10 @@ function createStick(deps = {}) {
     update,
     verify,
     addRuntime,
+    /** Ein Klick: vorbereiten, erneuern oder Laufzeiten nachlegen -- was der Stick braucht. */
+    einrichten,
+    /** Was einrichten() tun wuerde. Schreibt nichts. */
+    einrichtenPlan,
     /** Was WUERDE passieren -- dieselben Zahlen, ohne eine Zeile zu schreiben. */
     preview,
     detectPlatforms,
@@ -2603,15 +3045,8 @@ module.exports = {
   nodeDistPlatform,
   humanBytes,
   /**
-   * Fuer src/portable/model.js, das dieselbe Stick-Wurzel beschreibt.
-   *
-   * WARUM exportiert und nicht dort nachgebaut: jede dieser Funktionen traegt
-   * eine Zusage, die oben im Kopf begruendet ist -- die Sperre je Wurzel
-   * (sonst raeumen sich zwei Tabs die halbfertigen Ordner weg), das Kopieren
-   * ueber den Thread-Pool (sonst steht der Server minutenlang), das
-   * zweistufige Umbenennen (sonst gibt es halbe Ordner) und die Reparatur der
-   * Reste. Ein zweites Kopierwerk daneben haette dieselben Zusagen ein
-   * zweites Mal einhalten muessen -- und haette sie irgendwann nicht mehr.
+   * Die Sperre je Wurzel und ihre Helfer, fuer die HTTP-Route: "Beenden &
+   * abziehen" muss wissen, ob gerade auf IRGENDEINEM Stick geschrieben wird.
    */
   lockRoot,
   runningOn,
@@ -2628,8 +3063,12 @@ module.exports = {
   StickFullError,
   /** Die unantastbaren Ordner, als reine Funktion pruefbar. */
   geschuetzterOrdner,
-  modelsDirOf,
-  modelsUebersicht,
+  laufendeVorgaenge,
+  ZIEL_PLATTFORMEN,
+  PLATTFORM_NAMEN,
+  plattformName,
+  findeLaufwerke,
+  auswerfen,
   MIN_HEADROOM_BYTES,
   // Exported for tests and for anything that needs to read an archive without
   // touching the network: both take a complete buffer and return one member.

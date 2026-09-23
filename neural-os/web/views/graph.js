@@ -1,54 +1,38 @@
 /**
- * views/graph.js -- "Gehirn": the knowledge graph as a place you can work in.
+ * views/graph.js -- "Gehirn": alles, was die KI ueber dich weiss, als Netz.
  *
- * Decisions worth explaining
- * --------------------------
- * 1. **Filtering happens in the browser, loading happens on the server.**
- *    `/api/graph` is asked once for the whole selection (optionally focused and
- *    depth-limited); type filters, the "only my own links" switch and the
- *    search all run over the loaded set. Toggling a type is then instant and
- *    costs no round trip -- and, more importantly, it cannot change which
- *    nodes the server picked, so the picture stays stable while you explore
- *    it.
- * 2. **Every edge in the inspector carries its reason.** The inspector reads
- *    `/api/records/:id`, which returns the edge records themselves, so the
- *    panel can show `source` and `reason` for each link and offer to delete
- *    it. A knowledge graph that cannot answer "why are these two connected?"
- *    is decoration; this panel is where that promise is kept.
- * 3. **Hand-drawn links are marked as such by the server.** `POST /api/edges`
- *    always stores `source:'manual'`; the view never claims a provenance. The
- *    new edge is inserted into the local model immediately so it is visible at
- *    once, and the next reload replaces it with the server's own record.
- * 4. **Clusters are computed here, not fetched.** There is no clusters
- *    endpoint in the API contract, and a component labelling that runs over
- *    the nodes actually on screen is the honest one: it describes the picture
- *    the user is looking at, filters included.
- * 5. **The view owns its layout CSS.** `web/app.css` is the design system and
- *    is not edited from a view; the handful of rules that only exist to make a
- *    full-bleed canvas and a side panel fit are injected once, and every
- *    colour in them comes from a design token.
- * 6. **Live events reload instead of patching.** Records and edges change from
- *    chats, agents and rescans. A reload through `setData` keeps node
- *    positions and pinned nodes (the renderer matches on id), so a live update
- *    does not shuffle the map under the user's hands.
- * 7. **Type is a shape, not a colour.** The renderer draws a different
- *    silhouette per record type and keeps the whole picture neutral; the
- *    legend and the filter chips therefore draw the *same* silhouette, using
- *    the renderer's own `drawNodeShape`. A legend with its own idea of what a
- *    project looks like would be a second source of truth, and the first one
- *    to go stale.
- * 8. **Focus dims, it never hides.** Selecting a node quiets everything more
- *    than `depth` hops away instead of removing it, so the surroundings -- the
- *    thing that makes a neighbourhood mean anything -- stay on screen.
+ * Vorlage des Nutzers: docs/vorlage/gehirn-obsidian.png ("so soll das Gehirn
+ * aussehen"). Die fruehere Fassung mit Werkzeugleiste, Formen-Legende und
+ * Inspektor-Spalte fand er "ganz, ganz schlimm". Deshalb:
+ *
+ * 1. **Die Flaeche gehoert dem Netz.** Kein Kopf ueber der Leinwand, keine
+ *    Legende, keine Seitenspalte. Alles Verstellbare liegt in EINEM Panel
+ *    oben rechts, wie in Obsidian: Filter, Gruppen, Anzeige, Kraefte --
+ *    einklappbar, und es merkt sich, wie man es verlassen hat.
+ * 2. **Antippen zeigt, was es ist -- klein.** Ein schmales Kaertchen unten
+ *    links mit Art, Titel, zwei Zeilen Auszug und "Oeffnen". Zweimal
+ *    Antippen oeffnet sofort. Mehr braucht es nicht, um vom Netz in den
+ *    Eintrag zu springen.
+ * 3. **Themenfarben sind eine Gruppe, keine Grundeinstellung.** Der Nutzer
+ *    wollte frueher "je nach Thema eine andere Farbe"; die Vorlage ist grau.
+ *    Beides geht: die Themen werden hier erkannt (Label Propagation ueber
+ *    die geladenen Verbindungen, benannt nach dem haeufigsten Schlagwort
+ *    oder Wort), im Panel unter "Gruppen" gezeigt und auf Wunsch gedaempft
+ *    eingefaerbt -- ab Werk aus.
+ * 4. **Laden auf dem Server, Filtern im Browser.** `/api/graph` wird einmal
+ *    gefragt; Arten, Waisen und Suche laufen ueber die geladene Menge. Ein
+ *    Schalter wirkt sofort und veraendert nicht, welche Knoten der Server
+ *    ausgewaehlt hat -- das Bild bleibt ruhig.
+ * 5. **Live, ohne Umwerfen.** Neue Notizen, Termine und Verbindungen kommen
+ *    ueber den Bus; nachgeladen wird gebuendelt, und der Zeichner behaelt jede
+ *    Position nach id. Was schon da war, bleibt, wo es ist.
  */
 
-import {
-  h, text, clear, on, icon, timeAgo, formatNumber, debounce,
-} from '../lib/dom.js';
-import { createGraphCanvas, drawNodeShape, GRAPH_TYPES } from '../lib/graph-canvas.js';
+import { h, text, clear, on, icon, formatNumber, debounce } from '../lib/dom.js';
+import { createGraphCanvas, GRAPH_DEFAULTS, GRAPH_TYPES } from '../lib/graph-canvas.js';
 
 /* ------------------------------------------------------------------ */
-/* Vocabulary (German UI copy)                                         */
+/* Wortschatz                                                          */
 /* ------------------------------------------------------------------ */
 
 const TYPE_LABELS = {
@@ -56,11 +40,11 @@ const TYPE_LABELS = {
   chat: 'Chat',
   project: 'Projekt',
   task: 'Aufgabe',
+  event: 'Termin',
   agent: 'Agent',
   file: 'Datei',
-  entity: 'Entität',
+  entity: 'Begriff',
   run: 'Lauf',
-  unknown: 'Sonstiges',
 };
 
 const TYPE_PLURALS = {
@@ -68,38 +52,14 @@ const TYPE_PLURALS = {
   chat: 'Chats',
   project: 'Projekte',
   task: 'Aufgaben',
+  event: 'Termine',
   agent: 'Agenten',
   file: 'Dateien',
-  entity: 'Entitäten',
+  entity: 'Begriffe',
   run: 'Läufe',
-  unknown: 'Sonstiges',
 };
 
-const KIND_LABELS = {
-  'links-to': 'verweist auf',
-  mentions: 'erwähnt',
-  tagged: 'gemeinsames Schlagwort',
-  'belongs-to': 'gehört zu',
-  'derived-from': 'abgeleitet aus',
-  produced: 'erzeugt',
-  uses: 'nutzt',
-  related: 'verwandt mit',
-};
-
-const SOURCE_LABELS = {
-  manual: 'von dir',
-  derived: 'abgeleitet',
-  agent: 'Agent-Vorschlag',
-};
-
-/** Edge kinds offered when drawing a link by hand (mirrors schema.EDGE_KINDS). */
-const DRAWABLE_KINDS = ['links-to', 'related', 'mentions', 'belongs-to', 'derived-from', 'uses'];
-
-/**
- * Where a record is actually editable. The shell only ships eight views, so a
- * file or an entity has no detail screen of its own yet -- they open in the
- * notes list, which is where they are reachable from.
- */
+/** Wo ein Eintrag sich oeffnen laesst. */
 const OPEN_ROUTES = {
   note: (id) => `#/notes?id=${encodeURIComponent(id)}`,
   file: (id) => `#/notes?id=${encodeURIComponent(id)}`,
@@ -107,135 +67,215 @@ const OPEN_ROUTES = {
   chat: (id) => `#/chat?id=${encodeURIComponent(id)}`,
   project: (id) => `#/projects?id=${encodeURIComponent(id)}`,
   task: (id) => `#/projects?id=${encodeURIComponent(id)}`,
+  event: (id) => `#/kalender?id=${encodeURIComponent(id)}`,
   agent: (id) => `#/agents?id=${encodeURIComponent(id)}`,
   run: (id) => `#/agents?id=${encodeURIComponent(id)}`,
 };
 
-const ICONS = {
-  search: '<circle cx="9" cy="9" r="5.2"/><path d="m13 13 4 4"/>',
+/**
+ * Themenfarben. Acht Toene mit gleicher Helligkeit, keiner davon blau: Blau
+ * ist der Akzent und heisst "gewaehlt". Der Zeichner mischt sie ohnehin
+ * zu gut einem Drittel ins Grau -- gedaempft, wie in Obsidian.
+ */
+const GROUP_COLORS = ['#5fb8a5', '#d4a857', '#a98bd6', '#8cbc6a', '#d9828f', '#b9b56a', '#cc86c0', '#d98f5c'];
+const MAX_GROUPS = GROUP_COLORS.length;
+
+const ICON = {
+  chevron: '<path d="m7.5 5 5 5-5 5"/>',
+  sliders: '<path d="M4 6h7M15 6h1M4 14h1M9 14h7"/><circle cx="13" cy="6" r="1.8"/><circle cx="7" cy="14" r="1.8"/>',
+  reset: '<path d="M4.6 10a5.4 5.4 0 1 0 1.7-3.9"/><path d="M4.2 3.6v3.2h3.2"/>',
   close: '<path d="m5.5 5.5 9 9M14.5 5.5l-9 9"/>',
-  trash: '<path d="M4.6 6.4h10.8M8.2 6.4V5a1 1 0 0 1 1-1h1.6a1 1 0 0 1 1 1v1.4M6.2 6.4l.7 8.4a1.4 1.4 0 0 0 1.4 1.3h3.4a1.4 1.4 0 0 0 1.4-1.3l.7-8.4"/>',
-  fit: '<path d="M3.6 7.4V4.6a1 1 0 0 1 1-1h2.8M12.6 3.6h2.8a1 1 0 0 1 1 1v2.8M16.4 12.6v2.8a1 1 0 0 1-1 1h-2.8M7.4 16.4H4.6a1 1 0 0 1-1-1v-2.8"/>',
-  refresh: '<path d="M16 10a6 6 0 1 1-1.8-4.3"/><path d="M16.2 3.4v3.2H13"/>',
-  arrowRight: '<path d="M4 10h11M11 6l4 4-4 4"/>',
-  arrowLeft: '<path d="M16 10H5M9 6l-4 4 4 4"/>',
-  plus: '<path d="M10 4.2v11.6M4.2 10h11.6"/>',
-  minus: '<path d="M4.2 10h11.6"/>',
-  chat: '<path d="M4 6.2A2.2 2.2 0 0 1 6.2 4h7.6A2.2 2.2 0 0 1 16 6.2v5a2.2 2.2 0 0 1-2.2 2.2H8.6L5 16.2v-2.8A2.2 2.2 0 0 1 4 11.2z"/>',
-  open: '<path d="M11.5 4.5h4v4M15.5 4.5 9 11"/><path d="M14 11.8v3.1a1.4 1.4 0 0 1-1.4 1.4H5.1a1.4 1.4 0 0 1-1.4-1.4V7.4A1.4 1.4 0 0 1 5.1 6h3.1"/>',
-  pin: '<path d="M8 3.6h4l-.6 4.2 2.4 2.1v1.3H6.2v-1.3l2.4-2.1z"/><path d="M10 11.2v5"/>',
-  brain: '<circle cx="10" cy="4.6" r="2.1"/><circle cx="4.6" cy="14.4" r="2.1"/><circle cx="15.4" cy="14.4" r="2.1"/><path d="M8.5 6.3 5.8 12.4M11.5 6.3l2.7 6.1M6.7 14.4h6.6"/>',
+  open: '<path d="M4 10h11M11 6l4 4-4 4"/>',
+  search: '<circle cx="9" cy="9" r="5.2"/><path d="m13 13 4 4"/>',
 };
 
-/** The one-time layout stylesheet (see decision 5 in the header). */
-const STYLE_ID = 'nos-graph-view-style';
-const STYLE = `
+const STORE_KEY = 'neural-os:gehirn';
+const LOAD_LIMIT = 2500;
+
+/* ------------------------------------------------------------------ */
+/* Eigenes CSS (nur Marken aus web/app.css)                            */
+/* ------------------------------------------------------------------ */
+
+const STYLE_ID = 'nos-gehirn-style';
+const CSS = `
 .main[data-view="graph"] { overflow: hidden; }
-.graph-view { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.graph-view__bar {
-  display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap;
-  padding: var(--sp-1) var(--sp-2);
-  background: var(--surface); border-bottom: 1px solid var(--border);
+.gh {
+  position: relative; height: 100%; min-height: 320px; overflow: hidden;
+  background: var(--bg);
 }
-.graph-view__bar--filters { gap: var(--sp-05) var(--sp-1); }
-.graph-view__search { position: relative; display: flex; align-items: center; gap: var(--sp-05); }
-.graph-view__search .input { width: 15rem; padding-left: 30px; }
-.graph-view__search-icon {
-  position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
-  color: var(--fg-subtle); pointer-events: none;
+.gh__canvas {
+  position: absolute; inset: 0; display: block; width: 100%; height: 100%;
+  touch-action: none; outline: none; cursor: default;
+  -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none;
 }
-.graph-view__search-icon svg { width: 15px; height: 15px; }
-.graph-view__matches {
-  position: absolute; top: calc(100% + 4px); left: 0; z-index: 6;
-  width: min(24rem, 80vw); max-height: 17rem; overflow: auto;
-  padding: var(--sp-05); background: var(--surface);
-  border: 1px solid var(--border); border-radius: var(--r-2); box-shadow: var(--shadow-2);
-}
-.graph-view__match {
-  display: block; width: 100%; padding: 6px 8px; text-align: left;
-  background: none; border: 0; border-radius: var(--r-1); color: var(--fg); cursor: pointer;
-}
-.graph-view__match:hover, .graph-view__match.is-active { background: var(--surface-3); }
-.graph-view__match small { display: block; color: var(--fg-subtle); font-size: var(--fs-xs); }
-.graph-view__depth { display: flex; align-items: center; gap: var(--sp-05); color: var(--fg-muted); font-size: var(--fs-sm); }
-.graph-view__depth input[type="range"] { width: 6.5rem; accent-color: var(--accent); }
-.graph-view__status { color: var(--fg-muted); font-size: var(--fs-sm); }
-.graph-view__body { display: flex; flex: 1 1 auto; min-height: 0; }
-.graph-view__stage { position: relative; flex: 1 1 auto; min-width: 0; background: var(--bg); }
-.graph-view__canvas { display: block; width: 100%; height: 100%; }
-.graph-view__canvas:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -2px; }
-.graph-view__float {
-  position: absolute; z-index: 2; padding: var(--sp-1);
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--r-2); box-shadow: var(--shadow-1);
-}
-.graph-view__legend {
-  left: var(--sp-2); bottom: var(--sp-2); max-width: min(25rem, calc(100% - var(--sp-4)));
-  display: flex; flex-wrap: wrap; gap: 3px var(--sp-1);
-  padding: var(--sp-05) var(--sp-1);
-  font-size: var(--fs-xs); color: var(--fg-muted);
-}
-.graph-view__legend hr {
-  width: 100%; height: 0; margin: 0; border: 0; border-top: 1px solid var(--border);
-}
-.graph-view__legend-item { display: inline-flex; align-items: center; gap: 5px; }
-.graph-view__glyph { display: block; flex: 0 0 auto; }
-.graph-view__live {
+.gh__canvas:focus-visible { box-shadow: inset 0 0 0 2px var(--accent-ring); }
+.gh__live {
   position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
   overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
 }
-.graph-view__zoom { right: var(--sp-2); bottom: var(--sp-2); display: flex; flex-direction: column; gap: 4px; }
-.graph-view__stage-state {
-  position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center;
-  padding: var(--sp-3); background: var(--bg);
+
+/* Das Panel oben rechts, wie in Obsidian. */
+.gh__panel {
+  position: absolute; top: 14px; right: 14px; z-index: 3;
+  width: min(292px, calc(100% - 28px)); max-height: calc(100% - 28px); overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--surface-2); border: 1px solid var(--border-strong);
+  border-radius: var(--r-3); box-shadow: var(--shadow-2);
+  font-size: var(--fs-base); color: var(--fg);
 }
-.graph-view__stage-state--quiet { background: transparent; pointer-events: none; }
-.graph-view__side {
-  flex: 0 0 22rem; width: 22rem; min-width: 0; overflow: auto;
-  padding: var(--sp-2); background: var(--surface); border-left: 1px solid var(--border);
+.gh__sec + .gh__sec { border-top: 1px solid var(--border); }
+.gh__sum {
+  display: flex; align-items: center; gap: var(--sp-1);
+  min-height: 44px; padding: 0 var(--sp-1) 0 12px;
+  list-style: none; cursor: pointer; user-select: none; -webkit-user-select: none;
+  color: var(--fg); font-size: var(--fs-md);
 }
-.graph-view__side-head { display: flex; align-items: flex-start; gap: var(--sp-1); margin-bottom: var(--sp-1); }
-.graph-view__side-title { font-size: var(--fs-md); line-height: var(--lh-tight); word-break: break-word; }
-.graph-view__edge {
-  display: flex; align-items: flex-start; gap: var(--sp-1);
-  padding: var(--sp-1) 0; border-top: 1px solid var(--border);
+.gh__sum::-webkit-details-marker { display: none; }
+.gh__sum::marker { content: ''; }
+.gh__sum:hover { background: var(--surface-3); }
+.gh__sec:first-child .gh__sum { border-radius: var(--r-3) var(--r-3) 0 0; }
+.gh__chev { display: grid; place-items: center; color: var(--fg-subtle); transition: transform var(--dur-2) var(--ease); }
+.gh__chev svg { width: 15px; height: 15px; }
+.gh__sec[open] > .gh__sum .gh__chev { transform: rotate(90deg); }
+.gh__sum-title { flex: 1 1 auto; min-width: 0; }
+.gh__sum .icon-button { width: 32px; height: 32px; }
+.gh__sum .icon-button svg { width: 17px; height: 17px; }
+.gh__body { display: flex; flex-direction: column; gap: 12px; padding: 4px 14px 16px; }
+.gh__search { position: relative; }
+.gh__search .input { width: 100%; padding-left: 32px; }
+.gh__search-icon {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  display: grid; color: var(--fg-subtle); pointer-events: none;
 }
-.graph-view__edge-main { flex: 1 1 auto; min-width: 0; }
-.graph-view__edge-target {
-  display: block; width: 100%; padding: 0; text-align: left; background: none; border: 0;
-  color: var(--fg); font-weight: 500; cursor: pointer; word-break: break-word;
-}
-.graph-view__edge-target:hover { color: var(--accent); }
-.graph-view__edge-reason { margin: 2px 0 0; color: var(--fg-subtle); font-size: var(--fs-sm); word-break: break-word; }
-.graph-view__cluster {
+.gh__search-icon svg { width: 15px; height: 15px; }
+.gh__hint { margin: 0; color: var(--fg-subtle); font-size: var(--fs-sm); line-height: 1.45; }
+.gh__label { margin: 0; color: var(--fg-muted); font-size: var(--fs-sm); }
+.gh__chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.gh__chips .chip { min-height: 28px; padding: 0 10px; }
+.gh__chip-n { color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
+.chip.is-active .gh__chip-n { color: inherit; opacity: 0.75; }
+
+.gh__toggle {
   display: flex; align-items: center; gap: var(--sp-1); width: 100%;
-  padding: var(--sp-1); text-align: left; background: none;
-  border: 0; border-radius: var(--r-2); color: var(--fg); cursor: pointer;
+  min-height: 34px; padding: 0; background: none; border: 0; cursor: pointer;
+  color: var(--fg); font: inherit; font-size: var(--fs-base); text-align: left;
 }
-.graph-view__cluster:hover, .graph-view__cluster.is-active { background: var(--surface-3); }
-.graph-view__cluster-dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
-.graph-view__hint { color: var(--fg-subtle); font-size: var(--fs-sm); }
-@media (max-width: 820px) {
-  .graph-view__body { flex-direction: column; }
-  .graph-view__side { flex: 0 0 45%; width: auto; border-left: 0; border-top: 1px solid var(--border); }
-  .graph-view__search .input { width: 9rem; }
-  .graph-view__legend { display: none; }
+.gh__toggle-text { flex: 1 1 auto; min-width: 0; }
+.gh__switch {
+  position: relative; flex: none; width: 34px; height: 20px;
+  background: var(--surface-4); border: 1px solid var(--border-strong); border-radius: var(--r-full);
+  transition: background var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease);
+}
+.gh__switch::after {
+  content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+  background: var(--fg-muted); border-radius: 50%;
+  transition: transform var(--dur-2) var(--ease), background var(--dur-2) var(--ease);
+}
+.gh__toggle[aria-checked="true"] .gh__switch { background: var(--accent); border-color: var(--accent); }
+.gh__toggle[aria-checked="true"] .gh__switch::after { transform: translateX(14px); background: var(--accent-fg); }
+.gh__toggle:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 2px; border-radius: var(--r-1); }
+
+.gh__groups { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.gh__group {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  min-height: 32px; padding: 0 8px; margin: 0 -8px; width: calc(100% + 16px);
+  background: none; border: 0; border-radius: var(--r-1); cursor: pointer;
+  color: var(--fg); font: inherit; font-size: var(--fs-base); text-align: left;
+}
+.gh__group:hover { background: var(--surface-3); }
+.gh__group[aria-pressed="false"] { color: var(--fg-subtle); }
+.gh__group-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; }
+.gh__group[aria-pressed="false"] .gh__group-dot { background: var(--surface-4) !important; }
+.gh__group-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh__group-n { flex: none; color: var(--fg-subtle); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+
+.gh__range { display: flex; flex-direction: column; gap: 2px; }
+.gh__range-head { display: flex; justify-content: space-between; color: var(--fg-muted); font-size: var(--fs-sm); }
+.gh__range-val { color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
+.gh__range input[type="range"] { width: 100%; margin: 0; height: 22px; accent-color: var(--accent); cursor: pointer; }
+.gh__row { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+
+.gh__opener {
+  position: absolute; top: 14px; right: 14px; z-index: 3;
+  background: var(--surface-2); border: 1px solid var(--border-strong); box-shadow: var(--shadow-2);
+}
+
+/* Das schmale Kaertchen beim Antippen. */
+.gh__card {
+  position: absolute; left: 14px; bottom: 14px; z-index: 3;
+  width: min(330px, calc(100% - 28px));
+  padding: 12px 12px 14px 16px;
+  background: var(--surface-2); border: 1px solid var(--border-strong);
+  border-radius: var(--r-3); box-shadow: var(--shadow-2);
+}
+.gh__card-head { display: flex; align-items: center; gap: var(--sp-1); min-height: 32px; }
+.gh__card-kind { flex: 1 1 auto; min-width: 0; color: var(--fg-subtle); font-size: var(--fs-sm); }
+.gh__card-head .icon-button { width: 32px; height: 32px; margin: -4px -2px -4px 0; }
+.gh__card-title {
+  margin: 2px 0 0; font-size: var(--fs-md); font-weight: 500; line-height: var(--lh-tight);
+  overflow-wrap: anywhere;
+}
+.gh__card-snip {
+  margin: 6px 0 0; color: var(--fg-muted); font-size: var(--fs-sm); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.gh__card-actions { display: flex; align-items: center; gap: var(--sp-1); margin-top: 12px; }
+.gh__card-actions .btn svg { width: 16px; height: 16px; }
+
+.gh__state {
+  position: absolute; inset: 0; z-index: 2; display: grid; place-items: center;
+  padding: var(--sp-4); text-align: center; pointer-events: none;
+}
+.gh__state-box { max-width: 420px; pointer-events: auto; }
+.gh__state-title { margin: 0 0 6px; font-size: var(--fs-lg); font-weight: 500; color: var(--fg); }
+.gh__state-text { margin: 0; color: var(--fg-muted); line-height: var(--lh); }
+.gh__state .btn { margin-top: var(--sp-2); }
+.gh__count { color: var(--fg-subtle); font-size: var(--fs-sm); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+@media (pointer: coarse) {
+  .gh__sum .icon-button, .gh__card-head .icon-button { width: 40px; height: 40px; }
+  .gh__toggle, .gh__group { min-height: 44px; }
+  .gh__chips .chip { min-height: 44px; }
+  .gh__range input[type="range"] { height: 44px; }
+}
+@media (max-width: 640px) {
+  .gh__count { display: none; }
 }
 `;
 
 function ensureStyle() {
-  if (document.getElementById(STYLE_ID)) return;
+  if (typeof document === 'undefined' || document.getElementById(STYLE_ID)) return;
   const node = document.createElement('style');
   node.id = STYLE_ID;
-  node.textContent = STYLE; // authored here, never user data
+  node.textContent = CSS;
   document.head.appendChild(node);
 }
 
 /* ------------------------------------------------------------------ */
-/* Text helpers                                                        */
+/* Gemerkte Einstellungen                                              */
 /* ------------------------------------------------------------------ */
 
-/** Fold for search: German umlauts the way a German reader types them. */
+function readPrefs() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writePrefs(prefs) {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(prefs));
+  } catch { /* privates Fenster: dann eben nur fuer diese Sitzung */ }
+}
+
+/* ------------------------------------------------------------------ */
+/* Text                                                                */
+/* ------------------------------------------------------------------ */
+
+/** Fuer die Suche: Umlaute so, wie ein Deutscher sie tippt. */
 function fold(value) {
   return String(value == null ? '' : value)
     .toLowerCase()
@@ -243,124 +283,98 @@ function fold(value) {
     .normalize('NFD').replace(/[̀-ͯ]/g, '');
 }
 
-function typeLabel(type) {
-  return TYPE_LABELS[type] || TYPE_LABELS.unknown;
-}
-
-function kindLabel(kind) {
-  return KIND_LABELS[kind] || kind || 'verwandt mit';
-}
-
-function sourceLabel(source) {
-  return SOURCE_LABELS[source] || 'abgeleitet';
-}
-
-/** Display title for a raw record, for endpoints not present in the graph. */
-function recordLabel(record) {
-  if (!record || typeof record !== 'object') return null;
-  const d = record.data || {};
-  for (const field of ['title', 'name', 'goal', 'label', 'text', 'content']) {
-    if (typeof d[field] === 'string' && d[field].trim()) {
-      const clipped = d[field].trim().replace(/\s+/g, ' ');
-      return clipped.length > 90 ? `${clipped.slice(0, 89)}…` : clipped;
-    }
-  }
-  return null;
-}
-
-/* ------------------------------------------------------------------ */
-/* Clusters (connected components of what is actually on screen)       */
-/* ------------------------------------------------------------------ */
-
-const CLUSTER_STOPWORDS = new Set([
-  'der', 'die', 'das', 'den', 'dem', 'des', 'ein', 'eine', 'einen', 'einem', 'einer',
-  'und', 'oder', 'aber', 'nicht', 'auch', 'noch', 'schon', 'nur', 'wie', 'wenn', 'dann',
-  'ist', 'sind', 'war', 'waren', 'hat', 'haben', 'wird', 'werden', 'fuer', 'mit', 'von',
-  'zum', 'zur', 'auf', 'aus', 'bei', 'nach', 'ueber', 'unter', 'vor', 'durch', 'ohne',
-  'the', 'and', 'for', 'with', 'from', 'this', 'that', 'neue', 'neuer', 'neues', 'ohne',
+const STOPWORDS = new Set([
+  'der', 'die', 'das', 'den', 'dem', 'des', 'ein', 'eine', 'einen', 'einem', 'einer', 'und', 'oder',
+  'aber', 'nicht', 'auch', 'noch', 'schon', 'nur', 'wie', 'wenn', 'dann', 'ist', 'sind', 'war', 'hat',
+  'haben', 'wird', 'fuer', 'mit', 'von', 'zum', 'zur', 'auf', 'aus', 'bei', 'nach', 'ueber', 'unter',
+  'vor', 'durch', 'ohne', 'neue', 'neuer', 'neues', 'gespraech', 'gedanke', 'termin', 'notiz', 'chat',
+  'lauf', 'erledigen', 'the', 'and', 'for', 'with',
 ]);
 
+/* ------------------------------------------------------------------ */
+/* Themen: Label Propagation                                           */
+/* ------------------------------------------------------------------ */
+
 /**
- * Union-Find over the visible nodes plus a derived label per component.
- * The label is never invented: a shared tag wins, then a word shared by
- * several titles, then the title of the best-connected node.
+ * Themen aus der Struktur, nicht geraten: jeder Knoten uebernimmt reihum
+ * die Gruppe, die unter seinen Nachbarn am haeufigsten ist, bis sich nichts
+ * mehr aendert. Deterministisch (feste Reihenfolge, feste Gleichstandsregel),
+ * damit dieselbe Karte dieselben Farben behaelt. Benannt wird eine Gruppe
+ * nach dem, was ihre Knoten wirklich teilen: erst ein Schlagwort, dann ein
+ * Wort aus den Titeln, zuletzt der Titel des groessten Knotens.
  */
-function computeClusters(nodes, edges) {
-  const parent = new Map();
-  const find = (id) => {
-    let root = id;
-    while (parent.get(root) !== root) root = parent.get(root);
-    let cursor = id;
-    while (parent.get(cursor) !== root) {
-      const next = parent.get(cursor);
-      parent.set(cursor, root);
-      cursor = next;
-    }
-    return root;
-  };
-  for (const node of nodes) parent.set(node.id, node.id);
-  for (const edge of edges) {
-    if (!parent.has(edge.from) || !parent.has(edge.to)) continue;
-    const a = find(edge.from);
-    const b = find(edge.to);
-    if (a !== b) parent.set(a, b);
+function detectTopics(nodes, edges) {
+  const idx = new Map(nodes.map((node, i) => [node.id, i]));
+  const adj = nodes.map(() => []);
+  for (const e of edges) {
+    const a = idx.get(e.from);
+    const b = idx.get(e.to);
+    if (a === undefined || b === undefined || a === b) continue;
+    adj[a].push(b);
+    adj[b].push(a);
   }
-
-  const groups = new Map();
-  for (const node of nodes) {
-    const root = find(node.id);
-    let group = groups.get(root);
-    if (!group) groups.set(root, (group = { root, nodes: [], edges: 0 }));
-    group.nodes.push(node);
-  }
-  for (const edge of edges) {
-    if (!parent.has(edge.from) || !parent.has(edge.to)) continue;
-    const group = groups.get(find(edge.from));
-    if (group) group.edges += 1;
-  }
-
-  const out = [];
-  for (const group of groups.values()) {
-    const tagCount = new Map();
-    const wordCount = new Map();
-    const typeCount = new Map();
-    let top = null;
-    for (const node of group.nodes) {
-      typeCount.set(node.type, (typeCount.get(node.type) || 0) + 1);
-      if (!top || node.degree > top.degree || (node.degree === top.degree && node.id < top.id)) top = node;
-      for (const tag of new Set((node.tags || []).map((t) => t.trim()).filter(Boolean))) {
-        tagCount.set(tag, (tagCount.get(tag) || 0) + 1);
+  const label = nodes.map((_, i) => i);
+  const order = nodes.map((_, i) => i).sort((p, q) => (adj[q].length - adj[p].length) || (nodes[p].id < nodes[q].id ? -1 : 1));
+  for (let round = 0; round < 24; round++) {
+    let changed = 0;
+    for (const i of order) {
+      if (!adj[i].length) continue;
+      const count = new Map();
+      for (const j of adj[i]) count.set(label[j], (count.get(label[j]) || 0) + 1 + adj[j].length * 0.002);
+      let best = label[i];
+      let bestN = count.get(best) || 0;
+      for (const [l, c] of count) {
+        if (c > bestN + 1e-9 || (Math.abs(c - bestN) < 1e-9 && l < best)) {
+          best = l;
+          bestN = c;
+        }
       }
-      const words = new Set(fold(node.label).split(/[^a-z0-9]+/).filter((w) => w.length > 3 && !CLUSTER_STOPWORDS.has(w)));
-      for (const word of words) wordCount.set(word, (wordCount.get(word) || 0) + 1);
+      if (best !== label[i]) {
+        label[i] = best;
+        changed++;
+      }
     }
-    const best = (map) => [...map.entries()].sort((a, b) => (b[1] === a[1] ? (a[0] < b[0] ? -1 : 1) : b[1] - a[1]))[0] || null;
-    const topTag = best(tagCount);
-    const topWord = best(wordCount);
-    let label;
-    if (topTag && (topTag[1] > 1 || group.nodes.length === 1)) label = `#${topTag[0]}`;
-    else if (topWord && topWord[1] > 1) label = topWord[0].charAt(0).toUpperCase() + topWord[0].slice(1);
-    else if (top) label = top.label;
-    else label = 'Gruppe';
-    out.push({
-      id: group.root,
-      label,
-      size: group.nodes.length,
-      edges: group.edges,
-      nodeIds: group.nodes.map((node) => node.id),
-      topNodeId: top ? top.id : null,
-      types: [...typeCount.entries()].sort((a, b) => b[1] - a[1]),
-    });
+    if (!changed) break;
   }
-  out.sort((a, b) => (b.size === a.size ? (a.label < b.label ? -1 : 1) : b.size - a.size));
-  return out;
+  const groups = new Map();
+  nodes.forEach((node, i) => {
+    if (!adj[i].length) return;
+    let g = groups.get(label[i]);
+    if (!g) groups.set(label[i], (g = []));
+    g.push(i);
+  });
+  const out = [];
+  for (const members of groups.values()) {
+    if (members.length < 4) continue;
+    const tags = new Map();
+    const words = new Map();
+    let top = members[0];
+    for (const i of members) {
+      const node = nodes[i];
+      if (adj[i].length > adj[top].length) top = i;
+      for (const t of new Set((node.tags || []).map((x) => String(x).trim()).filter(Boolean))) tags.set(t, (tags.get(t) || 0) + 1);
+      for (const w of new Set(fold(node.label).split(/[^a-z0-9]+/).filter((x) => x.length > 3 && !STOPWORDS.has(x) && !/^\d+$/.test(x)))) {
+        words.set(w, (words.get(w) || 0) + 1);
+      }
+    }
+    const best = (map) => [...map.entries()].sort((a, b) => (b[1] - a[1]) || (a[0] < b[0] ? -1 : 1))[0];
+    const tag = best(tags);
+    const word = best(words);
+    let name;
+    if (tag && tag[1] >= Math.max(2, members.length * 0.25)) name = `#${tag[0]}`;
+    else if (adj[top].length >= 3) name = nodes[top].label;
+    else if (word && word[1] >= 2) name = word[0].charAt(0).toUpperCase() + word[0].slice(1);
+    else name = nodes[top].label;
+    out.push({ key: nodes[top].id, name: String(name || 'Gruppe'), ids: members.map((i) => nodes[i].id) });
+  }
+  out.sort((a, b) => (b.ids.length - a.ids.length) || (a.key < b.key ? -1 : 1));
+  return out.slice(0, MAX_GROUPS);
 }
 
 /* ------------------------------------------------------------------ */
-/* View                                                                */
+/* Die Ansicht                                                         */
 /* ------------------------------------------------------------------ */
 
-/** Per-mount state. The shell caches the module, so this is reset in mount(). */
 let view = null;
 
 function teardown() {
@@ -372,113 +386,56 @@ function teardown() {
     try {
       off();
     } catch (err) {
-      console.error('[graph] Aufräumen ist gescheitert:', err);
+      console.error('[gehirn] Aufräumen ist gescheitert:', err);
     }
   }
-  for (const controller of dying.requests) {
-    try {
-      controller.abort();
-    } catch { /* already done */ }
-  }
-  dying.requests.clear();
-  closeContextMenu(dying);
-  if (dying.reloadSoon && typeof dying.reloadSoon.cancel === 'function') dying.reloadSoon.cancel();
-  if (dying.searchSoon && typeof dying.searchSoon.cancel === 'function') dying.searchSoon.cancel();
-  if (dying.graph) {
-    try {
-      dying.graph.destroy();
-    } catch (err) {
-      console.error('[graph] Renderer konnte nicht abgebaut werden:', err);
-    }
-  }
+  if (dying.abort) dying.abort.abort();
+  if (dying.graph) dying.graph.destroy();
 }
 
 export default {
   id: 'graph',
   title: 'Gehirn',
-  icon: ICONS.brain,
 
   async mount(container, ctx) {
     ensureStyle();
-    teardown(); // defensive: a failed unmount must not leak the old renderer
-
+    teardown();
     const params = (ctx.route && ctx.route.params) || {};
-
-  /** An ISO timestamp from the address bar, or null when it is not one. */
-  function parseStamp(value) {
-    if (typeof value !== 'string' || !value) return null;
-    const ms = Date.parse(value);
-    return Number.isFinite(ms) ? ms : null;
-  }
-    const depthParam = Number.parseInt(params.depth, 10);
-
+    const prefs = readPrefs();
     const self = {
       alive: true,
       ctx,
       container,
       cleanups: [],
-      requests: new Set(),
+      abort: null,
       graph: null,
       dom: {},
-
-      // data
       nodes: [],
       edges: [],
-      nodeById: new Map(),
-      stats: null,
+      byId: new Map(),
       truncated: false,
-      loading: false,
-      loadError: null,
-      limit: 1200,
-
-      // query options
+      total: 0,
+      loading: true,
+      error: null,
       focusId: typeof params.focus === 'string' && params.focus ? params.focus : null,
-      depth: Number.isFinite(depthParam) ? Math.min(Math.max(depthParam, 0), 6) : 2,
-      serverQuery: typeof params.q === 'string' ? params.q : '',
-
-      // Time window handed over by the timeline view ("Im Gehirn zeigen").
-      // Without this the button navigated here and silently showed everything,
-      // which is worse than not offering it: the user believes they are looking
-      // at the selected period.
-      from: parseStamp(params.from),
-      to: parseStamp(params.to),
-
-      // client-side filters
-      activeTypes: new Set(
-        typeof params.types === 'string' && params.types
-          ? params.types.split(',').map((t) => t.trim()).filter((t) => GRAPH_TYPES.includes(t))
-          : GRAPH_TYPES,
-      ),
-      onlyMine: false,
-      clusterMode: false,
-      // On by default: the whole reason to click a node is to see what hangs
-      // off it, and dimming the rest is the cheapest way to show that without
-      // throwing the surroundings away.
-      focusMode: true,
-      pendingFit: null,
-      manualIds: new Set(),
-
-      // search
+      selectedId: null,
       query: '',
       matches: [],
-      matchIndex: -1,
-
-      // selection / inspector
-      selectedId: null,
-      inspector: null, // {record, edges, labels:Map, loading, error}
-      inspectorToken: 0,
-      clusters: [],
-      activeCluster: null,
-      drawKind: 'links-to',
+      matchAt: -1,
+      topics: [],
+      prefs: {
+        panel: typeof prefs.panel === 'boolean' ? prefs.panel : null,
+        open: prefs.open && typeof prefs.open === 'object' ? prefs.open : {},
+        settings: { ...GRAPH_DEFAULTS, ...(prefs.settings || {}) },
+        hiddenTypes: Array.isArray(prefs.hiddenTypes) ? prefs.hiddenTypes.filter((t) => GRAPH_TYPES.includes(t)) : [],
+        orphans: prefs.orphans !== false,
+        colors: prefs.colors === true,
+        groupsOff: Array.isArray(prefs.groupsOff) ? prefs.groupsOff.map(String) : [],
+      },
     };
     view = self;
-
-    buildLayout(self);
-    createRenderer(self);
-    subscribe(self);
-    renderToolbar(self);
-    renderSide(self);
-    await load(self, { fit: true });
+    build(self);
+    await load(self, { first: true });
   },
 
   async unmount() {
@@ -486,1331 +443,583 @@ export default {
   },
 };
 
-/* ------------------------------------------------------------------ */
-/* Layout                                                              */
-/* ------------------------------------------------------------------ */
+function save(self) {
+  writePrefs(self.prefs);
+}
 
-function buildLayout(self) {
-  const { container } = self;
+/* ---------------------------- Aufbau -------------------------------- */
+
+function build(self) {
+  const { ctx, container, dom } = self;
   clear(container);
 
-  const dom = self.dom;
+  dom.canvas = h('canvas.gh__canvas', { tabindex: '0', role: 'img', 'aria-label': 'Gehirn wird geladen.' });
+  dom.live = h('p.gh__live', { role: 'status', 'aria-live': 'polite' });
+  dom.state = h('div.gh__state', { hidden: true });
+  dom.card = h('div.gh__card', { hidden: true, role: 'dialog', 'aria-label': 'Ausgewählter Eintrag' });
+  dom.panel = h('div.gh__panel', { role: 'region', 'aria-label': 'Filter und Anzeige des Gehirns' });
+  dom.opener = h('button.icon-button.gh__opener', {
+    type: 'button',
+    title: 'Filter und Anzeige',
+    'aria-label': 'Filter und Anzeige öffnen',
+    onClick: () => setPanel(self, true),
+  }, icon(ICON.sliders));
+  dom.root = h('div.gh', null, dom.canvas, dom.state, dom.panel, dom.opener, dom.card, dom.live);
+  container.appendChild(dom.root);
 
-  dom.searchInput = h('input.input', {
-    type: 'search',
-    placeholder: 'Knoten suchen …',
-    'aria-label': 'Knoten im Graphen suchen',
-    autocomplete: 'off',
-    spellcheck: 'false',
+  dom.count = h('span.gh__count');
+  ctx.setHeadActions(dom.count);
+
+  self.graph = createGraphCanvas(dom.canvas, {
+    onSelect: (node) => select(self, node ? node.id : null, { fromCanvas: true }),
+    onOpen: (node) => openNode(self, node),
+    onHover: (node) => announce(self, node ? `${TYPE_LABELS[node.type] || 'Eintrag'}: ${node.label}` : ''),
+    // Fuer Pruefwerkzeuge und Bildschirmfotos: die Wolke ruht.
+    onSettle: () => { if (self.alive) dom.root.dataset.ruhe = 'ja'; },
+    onUserMove: () => {},
   });
-  dom.matchBox = h('div.graph-view__matches', { hidden: true, role: 'listbox' });
-  dom.matchCount = h('span.graph-view__status');
+  self.graph.setSettings(self.prefs.settings);
 
-  dom.search = h('div.graph-view__search', null,
-    h('span.graph-view__search-icon', null, icon(ICONS.search)),
-    dom.searchInput,
-    dom.matchBox);
-
-  dom.toolbarRight = h('div.row');
-  dom.bar = h('div.graph-view__bar', null, dom.search, dom.matchCount, h('span.spacer'), dom.toolbarRight);
-
-  dom.filters = h('div.graph-view__bar.graph-view__bar--filters');
-
-  dom.canvas = h('canvas.graph-view__canvas', {
-    role: 'img',
-    'aria-label': 'Wissensgraph wird geladen.',
-  });
-  // The canvas itself can only ever be one label. Selection and hover changes
-  // are announced here instead, so a screen reader follows what is happening
-  // on the map rather than being told once that a map exists.
-  dom.live = h('p.graph-view__live', { role: 'status', 'aria-live': 'polite' });
-  dom.legend = h('div.graph-view__float.graph-view__legend', { 'aria-label': 'Legende' });
-  dom.zoom = h('div.graph-view__float.graph-view__zoom', null,
-    h('button.icon-button', { type: 'button', title: 'Vergrößern', 'aria-label': 'Vergrößern', onClick: () => self.graph && self.graph.zoomBy(1.3, undefined, undefined, true) }, icon(ICONS.plus)),
-    h('button.icon-button', { type: 'button', title: 'Verkleinern', 'aria-label': 'Verkleinern', onClick: () => self.graph && self.graph.zoomBy(0.77, undefined, undefined, true) }, icon(ICONS.minus)),
-    h('button.icon-button', { type: 'button', title: 'Ansicht einpassen (F)', 'aria-label': 'Ansicht einpassen', onClick: () => self.graph && self.graph.fitToView() }, icon(ICONS.fit)));
-  dom.stageState = h('div.graph-view__stage-state', { hidden: true });
-  dom.stage = h('div.graph-view__stage', null, dom.canvas, dom.legend, dom.zoom, dom.stageState, dom.live);
-
-  dom.side = h('aside.graph-view__side', { 'aria-label': 'Inspektor' });
-  dom.body = h('div.graph-view__body', null, dom.stage, dom.side);
-
-  container.appendChild(h('div.graph-view', null, dom.bar, dom.filters, dom.body));
-
-  // --- search interactions ---
-  self.searchSoon = debounce((value) => {
+  // Die Leinwand folgt der Darstellung (hell/dunkel), auch mitten im Blick.
+  const retheme = () => {
     if (!self.alive) return;
-    applySearch(self, value);
-  }, 160);
-
-  self.cleanups.push(on(dom.searchInput, 'input', () => {
-    self.searchSoon(dom.searchInput.value);
-  }));
-  self.cleanups.push(on(dom.searchInput, 'keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      self.searchSoon.cancel();
-      const value = dom.searchInput.value.trim();
-      if (value === self.query && self.matches.length) {
-        // Same query, pressed again: walk to the next hit instead of
-        // jumping back to the first one.
-        stepMatch(self, event.shiftKey ? -1 : 1);
-      } else {
-        applySearch(self, value);
-      }
-    } else if (event.key === 'Escape') {
-      event.preventDefault();
-      dom.searchInput.value = '';
-      applySearch(self, '');
-    } else if (event.key === 'ArrowDown') {
-      event.preventDefault();
-      stepMatch(self, 1);
-    } else if (event.key === 'ArrowUp') {
-      event.preventDefault();
-      stepMatch(self, -1);
-    }
-  }));
-  self.cleanups.push(on(dom.searchInput, 'blur', () => {
-    // Late enough for a click on a result to land first.
-    setTimeout(() => {
-      if (self.alive) dom.matchBox.hidden = true;
-    }, 140);
-  }));
-  self.cleanups.push(on(dom.searchInput, 'focus', () => {
-    if (self.matches.length) dom.matchBox.hidden = false;
-  }));
-
-  // --- view-level shortcuts, deliberately few (the shell owns g, / and ?) ---
-  self.cleanups.push(on(document, 'keydown', (event) => {
-    if (!self.alive || event.defaultPrevented) return;
-    if (event.metaKey || event.ctrlKey || event.altKey) return;
-    const target = event.target;
-    const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
-    if (typing) return;
-    if (event.key === 'f') {
-      event.preventDefault();
-      if (self.graph) self.graph.fitToView();
-    } else if (event.key === 'Escape' && self.selectedId) {
-      event.preventDefault();
-      selectNode(self, null);
-    }
-  }));
-}
-
-/* ------------------------------------------------------------------ */
-/* Renderer wiring                                                     */
-/* ------------------------------------------------------------------ */
-
-function createRenderer(self) {
-  const { ctx } = self;
-  self.graph = createGraphCanvas(self.dom.canvas, {
-    onSelect: (node) => {
-      selectNode(self, node ? node.id : null);
-    },
-    onDoubleClick: (node) => {
-      if (!node) return;
-      // Double click = "show me this corner of the graph": refocus the query
-      // on that node so its neighbourhood is loaded, not just centred.
-      setFocus(self, node.id);
-    },
-    onContext: (node, position) => {
-      if (!node) return;
-      selectNode(self, node.id);
-      openContextMenu(self, node, position);
-    },
-    onLink: ({ from, to }) => {
-      createEdge(self, from, to);
-    },
-    onHover: (node) => {
-      announce(self, node ? `${typeLabel(node.type)}: ${node.label}` : '');
-    },
-    onTransform: () => {
-      // Nothing to persist: the transform is view state, not user data.
-    },
-    onSettle: () => {
-      // The first frame after a load frames the seed layout, not the graph.
-      // `prewarm` gets most of the way there; this is the correction once the
-      // simulation has actually come to rest -- animated, so the picture is
-      // never yanked out from under a user who is already looking at it.
-      if (!self.alive || !self.pendingFit) return;
-      const wanted = self.pendingFit;
-      self.pendingFit = null;
-      if (typeof wanted === 'string') self.graph.focus(wanted);
-      else self.graph.fitToView();
-    },
-  });
-  self.graph.setFocusDepth(self.focusMode ? Math.max(1, self.depth) : 0);
-
-  // Any deliberate move by the user outranks a fit we still owed them.
-  const cancelPendingFit = () => { self.pendingFit = null; };
-  self.cleanups.push(on(self.dom.canvas, 'pointerdown', cancelPendingFit));
-  self.cleanups.push(on(self.dom.canvas, 'wheel', cancelPendingFit, { passive: true }));
-
-  // The legend mirrors the renderer's palette, which follows the theme.
-  const refreshLegend = () => {
-    if (!self.alive) return;
-    self.graph.refreshTheme();
-    // The legend and the filter chips paint the node silhouettes themselves,
-    // so both have to be redrawn when the palette underneath them changes.
-    renderLegend(self);
-    renderToolbar(self);
+    requestAnimationFrame(() => {
+      if (!self.alive) return;
+      self.graph.refreshTheme();
+      applyColors(self);
+    });
   };
-  if (ctx.state && typeof ctx.state.on === 'function') {
-    self.cleanups.push(ctx.state.on('theme', refreshLegend));
-  }
+  if (ctx.state && typeof ctx.state.on === 'function') self.cleanups.push(ctx.state.on('theme', retheme));
   try {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
-    const handler = () => refreshLegend();
-    if (typeof media.addEventListener === 'function') {
-      media.addEventListener('change', handler);
-      self.cleanups.push(() => media.removeEventListener('change', handler));
+    media.addEventListener('change', retheme);
+    self.cleanups.push(() => media.removeEventListener('change', retheme));
+  } catch { /* ohne matchMedia bleibt die erste Palette */ }
+
+  // Live: gebuendelt nachladen, Positionen bleiben.
+  const soon = debounce(() => {
+    if (self.alive && !self.loading) load(self, { first: false });
+  }, 1200);
+  self.cleanups.push(() => soon.cancel && soon.cancel());
+  if (ctx.bus && typeof ctx.bus.on === 'function') {
+    for (const name of ['record.created', 'record.updated', 'record.deleted', 'edge.created', 'edge.deleted', 'graph.rescanned']) {
+      self.cleanups.push(ctx.bus.on(name, () => soon()));
     }
-  } catch {
-    /* a browser without matchMedia simply keeps the first palette */
   }
-  renderLegend(self);
+
+  // Tasten, die nur hier gelten: f passt ein, Escape schliesst das Kaertchen.
+  self.cleanups.push(on(document, 'keydown', (event) => {
+    if (!self.alive || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+    const t = event.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (event.key === 'f') {
+      event.preventDefault();
+      self.graph.fitToView();
+    } else if (event.key === 'Escape' && self.selectedId) {
+      event.preventDefault();
+      select(self, null);
+    }
+  }));
+
+  renderPanel(self);
 }
 
-function subscribe(self) {
-  const { ctx } = self;
-  if (!ctx.bus || typeof ctx.bus.on !== 'function') return;
-  self.reloadSoon = debounce(() => {
-    if (!self.alive || self.loading) return;
-    load(self, { fit: false });
-  }, 900);
-  for (const name of ['edge.created', 'edge.deleted', 'record.created', 'record.updated', 'record.deleted', 'graph.rescanned']) {
-    self.cleanups.push(ctx.bus.on(name, () => self.reloadSoon()));
-  }
-}
+/* ---------------------------- Laden --------------------------------- */
 
-/* ------------------------------------------------------------------ */
-/* Loading                                                             */
-/* ------------------------------------------------------------------ */
-
-function request(self, run) {
-  const controller = new AbortController();
-  self.requests.add(controller);
-  return run(controller.signal).finally(() => self.requests.delete(controller));
-}
-
-async function load(self, { fit = false } = {}) {
+async function load(self, { first }) {
   const { ctx } = self;
   self.loading = true;
-  self.loadError = null;
-  renderStage(self);
-  renderToolbar(self);
-
-  const query = { limit: self.limit, includeOrphans: true };
-  if (self.focusId) {
-    query.focus = self.focusId;
-    query.depth = self.depth;
-  }
-  if (self.serverQuery) query.q = self.serverQuery;
+  if (first) renderState(self);
+  if (self.abort) self.abort.abort();
+  const controller = new AbortController();
+  self.abort = controller;
 
   let data;
   try {
-    data = await request(self, (signal) => ctx.api.get('/graph', { query, signal, timeoutMs: 20000 }));
-  } catch (err) {
-    if (!self.alive) return;
-    if (err && err.isAborted) return;
-    self.loading = false;
-    // A focus id that no longer exists must not leave the view stuck on it.
-    if (err && err.status === 404 && self.focusId) {
-      self.focusId = null;
-      ctx.toast('Der Fokus-Knoten existiert nicht mehr. Es wird der ganze Graph gezeigt.', 'info');
-      await load(self, { fit: true });
-      return;
+    data = await ctx.api.get('/graph', {
+      query: { limit: LOAD_LIMIT, includeOrphans: true },
+      signal: controller.signal,
+      timeoutMs: 20000,
+    });
+    // Ein Sprung von "Im Gehirn zeigen" auf einen Eintrag, der nicht unter
+    // den geladenen ist: seine Nachbarschaft dazuholen, statt still das
+    // Falsche zu zeigen.
+    if (self.focusId && !(data.nodes || []).some((node) => node.id === self.focusId)) {
+      try {
+        const extra = await ctx.api.get('/graph', {
+          query: { focus: self.focusId, depth: 1, limit: 200 },
+          signal: controller.signal,
+          timeoutMs: 20000,
+        });
+        const have = new Set((data.nodes || []).map((node) => node.id));
+        data.nodes = [...(data.nodes || []), ...(extra.nodes || []).filter((node) => !have.has(node.id))];
+        const edgeIds = new Set((data.edges || []).map((e) => e.id));
+        data.edges = [...(data.edges || []), ...(extra.edges || []).filter((e) => !edgeIds.has(e.id))];
+      } catch (err) {
+        if (err && err.status === 404) {
+          ctx.toast('Diesen Eintrag gibt es nicht mehr. Gezeigt wird das ganze Gehirn.', 'info');
+          self.focusId = null;
+        }
+      }
     }
-    self.loadError = err;
-    renderStage(self);
-    renderToolbar(self);
+  } catch (err) {
+    if (!self.alive || (err && (err.isAborted || err.name === 'AbortError'))) return;
+    self.loading = false;
+    self.error = err;
+    renderState(self);
     return;
   }
-  if (!self.alive) return;
-
+  if (!self.alive || controller.signal.aborted) return;
+  self.loading = false;
+  self.error = null;
   self.nodes = Array.isArray(data && data.nodes) ? data.nodes : [];
   self.edges = Array.isArray(data && data.edges) ? data.edges : [];
-  self.stats = (data && data.stats) || null;
+  self.byId = new Map(self.nodes.map((node) => [node.id, node]));
   self.truncated = !!(data && data.truncated);
-  self.nodeById = new Map(self.nodes.map((node) => [node.id, node]));
-  self.manualIds = new Set();
-  for (const edge of self.edges) {
-    if (edge.source !== 'manual') continue;
-    self.manualIds.add(edge.from);
-    self.manualIds.add(edge.to);
-  }
-  self.loading = false;
+  self.total = data && data.stats && Number.isFinite(data.stats.candidates) ? data.stats.candidates : self.nodes.length;
 
-  self.graph.setData({ nodes: self.nodes, edges: self.edges });
-  applyFilter(self);
-  if (self.query) applySearch(self, self.query, { jump: false });
-  if (self.clusterMode) rebuildClusters(self);
-  if (self.selectedId && !self.nodeById.has(self.selectedId)) selectNode(self, null);
-  else self.graph.setSelection(self.selectedId);
+  const graph = self.graph;
+  graph.setData({ nodes: self.nodes, edges: self.edges });
+  applyFilter(self, { quiet: true });
+  self.topics = detectTopics(self.nodes, self.edges);
+  applyColors(self);
+  if (self.query) runSearch(self, self.query, { jump: false });
+  if (self.selectedId && !self.byId.has(self.selectedId)) select(self, null);
 
-  if (fit) {
-    // Settle the layout before framing it. Framing the seed spiral and then
-    // letting the graph grow out of the viewport for three seconds is how the
-    // view used to open, and it made the map look out of control.
-    self.graph.prewarm(self.nodes.length > 900 ? 90 : 160, 140);
-    self.graph.fitToView({ animate: false });
-    self.pendingFit = true;
-    if (self.focusId && self.nodeById.has(self.focusId)) {
-      self.graph.focus(self.focusId, { animate: false });
-      selectNode(self, self.focusId);
-      self.pendingFit = self.focusId;
+  if (first) {
+    // Die ersten, wildesten Schritte rechnet der Zeichner vorab; danach
+    // folgt die Kamera der Wolke weich, bis sie ruht oder jemand eingreift.
+    graph.prewarm(self.nodes.length > 1200 ? 90 : 140, 260);
+    if (self.focusId && self.byId.has(self.focusId)) {
+      select(self, self.focusId);
+      graph.focus(self.focusId, { animate: false, zoom: 1.5 });
+    } else {
+      graph.fitToView({ animate: false, follow: true });
     }
   }
-
-  renderStage(self);
-  renderToolbar(self);
-  renderSide(self);
-  describeGraph(self);
+  renderState(self);
+  renderPanel(self);
+  describe(self);
 }
 
-/**
- * Keep the canvas's own accessible name truthful. It is the only thing a
- * screen reader gets from the element itself, so it carries the real counts
- * and the current selection rather than a fixed sentence about a graph.
- */
-function describeGraph(self) {
-  const { dom } = self;
-  if (!dom.canvas) return;
-  const stats = self.graph ? self.graph.stats() : null;
-  const parts = [];
-  if (stats) {
-    parts.push(`Wissensgraph mit ${formatNumber(stats.visibleNodes)} sichtbaren Knoten und ${formatNumber(stats.visibleEdges)} Verknüpfungen`);
-  } else {
-    parts.push('Wissensgraph');
+/* ---------------------------- Filter -------------------------------- */
+
+function applyFilter(self, { quiet = false } = {}) {
+  const hidden = new Set(self.prefs.hiddenTypes);
+  const keep = self.selectedId;
+  self.graph.setFilter((node) => !hidden.has(node.type) || node.id === keep, { orphans: self.prefs.orphans });
+  self.graph.setOrphans(self.prefs.orphans);
+  if (!quiet) {
+    if (self.query) runSearch(self, self.query, { jump: false });
+    describe(self);
+    renderCount(self);
   }
-  const selected = self.selectedId ? self.nodeById.get(self.selectedId) : null;
-  if (selected) parts.push(`ausgewählt: ${selected.label}`);
-  parts.push('Pfeiltasten verschieben, Plus und Minus zoomen, 0 passt ein, Eingabetaste wählt den Knoten in der Mitte, n und p gehen zu den Nachbarn');
+}
+
+function applyColors(self) {
+  if (!self.prefs.colors || !self.topics.length) {
+    self.graph.setColors(null);
+    return;
+  }
+  const off = new Set(self.prefs.groupsOff);
+  const map = new Map();
+  self.topics.forEach((topic, i) => {
+    if (off.has(topic.name)) return;
+    for (const id of topic.ids) map.set(id, i);
+  });
+  self.graph.setColors(map, GROUP_COLORS);
+}
+
+/* ---------------------------- Suche --------------------------------- */
+
+function runSearch(self, value, { jump = false } = {}) {
+  const q = fold(String(value || '').trim());
+  self.query = String(value || '').trim();
+  if (!q) {
+    self.matches = [];
+    self.matchAt = -1;
+    self.graph.setHighlight(null);
+  } else {
+    const hidden = new Set(self.prefs.hiddenTypes);
+    self.matches = self.nodes
+      .filter((node) => !hidden.has(node.type))
+      .filter((node) => fold(node.label).includes(q) || (node.tags || []).some((t) => fold(t).includes(q)))
+      .sort((a, b) => (b.degree || 0) - (a.degree || 0));
+    self.graph.setHighlight(self.matches.map((node) => node.id));
+    if (jump && self.matches.length) {
+      self.matchAt = (self.matchAt + 1) % self.matches.length;
+      const hit = self.matches[self.matchAt];
+      select(self, hit.id);
+      self.graph.focus(hit.id, { zoom: Math.max(1.6, self.graph.transform.k) });
+    }
+  }
+  if (self.dom.searchHint) {
+    clear(self.dom.searchHint);
+    self.dom.searchHint.hidden = !q;
+    if (q) {
+      self.dom.searchHint.appendChild(text(self.matches.length
+        ? `${formatNumber(self.matches.length)} ${self.matches.length === 1 ? 'Treffer' : 'Treffer'} · Eingabetaste springt hin`
+        : 'Nichts gefunden.'));
+    }
+  }
+}
+
+/* ---------------------------- Auswahl ------------------------------- */
+
+function select(self, id, { fromCanvas = false } = {}) {
+  self.selectedId = id && self.byId.has(id) ? id : null;
+  if (!fromCanvas) self.graph.setSelection(self.selectedId);
+  renderCard(self);
+  const node = self.selectedId ? self.byId.get(self.selectedId) : null;
+  if (node) announce(self, `Gewählt: ${TYPE_LABELS[node.type] || 'Eintrag'} ${node.label}`);
+  describe(self);
+}
+
+function openNode(self, node) {
+  if (!node) return;
+  const route = OPEN_ROUTES[node.type];
+  if (route) self.ctx.navigate(route(node.id));
+}
+
+function renderCard(self) {
+  const { dom } = self;
+  clear(dom.card);
+  const node = self.selectedId ? self.byId.get(self.selectedId) : null;
+  dom.card.hidden = !node;
+  if (!node) return;
+  const links = self.graph.neighbours(node.id).length;
+  const kind = `${TYPE_LABELS[node.type] || 'Eintrag'} · ${links === 1 ? '1 Verbindung' : `${formatNumber(links)} Verbindungen`}`;
+  const route = OPEN_ROUTES[node.type];
+  dom.card.append(
+    h('div.gh__card-head', null,
+      h('span.gh__card-kind', null, text(kind)),
+      h('button.icon-button', {
+        type: 'button', title: 'Schließen', 'aria-label': 'Auswahl schließen', onClick: () => select(self, null),
+      }, icon(ICON.close))),
+    h('h3.gh__card-title', null, text(node.label || 'Ohne Titel')),
+    node.snippet && node.snippet !== node.label ? h('p.gh__card-snip', null, text(node.snippet)) : null,
+    h('div.gh__card-actions', null,
+      route
+        ? h('button.btn.btn--accent', { type: 'button', onClick: () => openNode(self, node) }, icon(ICON.open), text('Öffnen'))
+        : h('span.gh__hint', null, text('Dieser Eintrag hat keine eigene Seite.')),
+      h('button.btn.btn--ghost', {
+        type: 'button',
+        onClick: () => self.graph.focus(node.id, { zoom: Math.max(1.8, self.graph.transform.k) }),
+      }, text('Hinzoomen'))),
+  );
+}
+
+/* ---------------------------- Panel --------------------------------- */
+
+function setPanel(self, open) {
+  self.prefs.panel = open;
+  save(self);
+  renderPanel(self);
+  if (open) {
+    const first = self.dom.panel.querySelector('summary');
+    if (first) first.focus({ preventScroll: true });
+  } else {
+    self.dom.opener.focus({ preventScroll: true });
+  }
+}
+
+function panelOpen(self) {
+  if (typeof self.prefs.panel === 'boolean') return self.prefs.panel;
+  // Ohne gemerkte Wahl: auf breiter Flaeche offen (wie die Vorlage), auf
+  // schmaler zu -- dort braucht das Netz jeden Zentimeter.
+  const w = self.dom.root ? self.dom.root.clientWidth : 0;
+  return w >= 760;
+}
+
+function section(self, key, title, body, extra) {
+  const isOpen = !!self.prefs.open[key];
+  const details = h('details.gh__sec', { open: isOpen },
+    h('summary.gh__sum', null,
+      h('span.gh__chev', null, icon(ICON.chevron)),
+      h('span.gh__sum-title', null, text(title)),
+      extra || null),
+    h('div.gh__body', null, ...body));
+  details.addEventListener('toggle', () => {
+    self.prefs.open = { ...self.prefs.open, [key]: details.open };
+    save(self);
+  });
+  return details;
+}
+
+function toggle(label, checked, onChange) {
+  return h('button.gh__toggle', {
+    type: 'button',
+    role: 'switch',
+    'aria-checked': checked ? 'true' : 'false',
+    onClick: (event) => {
+      const next = event.currentTarget.getAttribute('aria-checked') !== 'true';
+      event.currentTarget.setAttribute('aria-checked', next ? 'true' : 'false');
+      onChange(next);
+    },
+  }, h('span.gh__toggle-text', null, text(label)), h('span.gh__switch', { 'aria-hidden': 'true' }));
+}
+
+function slider(self, key, label, min, max, step) {
+  const valueText = () => `${Math.round(self.prefs.settings[key] * 100)} %`;
+  const out = h('span.gh__range-val', null, text(valueText()));
+  const input = h('input', {
+    type: 'range', min: String(min), max: String(max), step: String(step),
+    value: String(self.prefs.settings[key]),
+    'aria-label': label,
+    onInput: (event) => {
+      const v = Number(event.target.value);
+      if (!Number.isFinite(v)) return;
+      self.prefs.settings = { ...self.prefs.settings, [key]: v };
+      self.graph.setSettings({ [key]: v });
+      clear(out);
+      out.appendChild(text(valueText()));
+    },
+    onChange: () => save(self),
+  });
+  return h('label.gh__range', null, h('span.gh__range-head', null, h('span', null, text(label)), out), input);
+}
+
+function renderPanel(self) {
+  const { dom, prefs } = self;
+  const open = panelOpen(self);
+  dom.panel.hidden = !open;
+  dom.opener.hidden = open;
+  clear(dom.panel);
+  if (!open) return;
+
+  /* Filter */
+  dom.search = h('input.input', {
+    type: 'search',
+    placeholder: 'Suchen …',
+    value: self.query,
+    'aria-label': 'Im Gehirn suchen',
+    autocomplete: 'off',
+    spellcheck: 'false',
+  });
+  dom.searchHint = h('p.gh__hint', { hidden: !self.query });
+  const searchSoon = debounce((v) => { if (self.alive) runSearch(self, v); }, 120);
+  dom.search.addEventListener('input', () => searchSoon(dom.search.value));
+  dom.search.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      if (searchSoon.cancel) searchSoon.cancel();
+      runSearch(self, dom.search.value, { jump: true });
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      dom.search.value = '';
+      runSearch(self, '');
+    }
+  });
+
+  const counts = new Map();
+  for (const node of self.nodes) counts.set(node.type, (counts.get(node.type) || 0) + 1);
+  const hidden = new Set(prefs.hiddenTypes);
+  const chips = GRAPH_TYPES.filter((t) => counts.get(t)).map((type) => h('button.chip', {
+    type: 'button',
+    class: hidden.has(type) ? '' : 'is-active',
+    'aria-pressed': hidden.has(type) ? 'false' : 'true',
+    onClick: () => {
+      const set = new Set(self.prefs.hiddenTypes);
+      if (set.has(type)) set.delete(type);
+      else set.add(type);
+      self.prefs.hiddenTypes = [...set];
+      save(self);
+      applyFilter(self);
+      renderPanel(self);
+    },
+  }, h('span.chip__label', null, text(TYPE_PLURALS[type] || type)), h('span.gh__chip-n', null, text(formatNumber(counts.get(type))))));
+
+  const filterBody = [
+    h('div.gh__search', null, h('span.gh__search-icon', null, icon(ICON.search)), dom.search),
+    dom.searchHint,
+    chips.length ? h('p.gh__label', null, text('Arten')) : null,
+    chips.length ? h('div.gh__chips', null, ...chips) : null,
+    toggle('Unverbundene zeigen', prefs.orphans, (v) => {
+      self.prefs.orphans = v;
+      save(self);
+      applyFilter(self);
+    }),
+  ];
+  runSearchHintOnly(self);
+
+  const headButtons = h('span', { class: 'row', style: { gap: '2px' } },
+    h('button.icon-button', {
+      type: 'button',
+      title: 'Alles zurücksetzen',
+      'aria-label': 'Filter, Anzeige und Kräfte zurücksetzen',
+      onClick: (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        resetAll(self);
+      },
+    }, icon(ICON.reset)),
+    h('button.icon-button', {
+      type: 'button',
+      title: 'Schließen',
+      'aria-label': 'Panel schließen',
+      onClick: (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setPanel(self, false);
+      },
+    }, icon(ICON.close)));
+
+  /* Gruppen */
+  const off = new Set(prefs.groupsOff);
+  const groupRows = self.topics.map((topic, i) => {
+    const color = `color-mix(in srgb, ${GROUP_COLORS[i]} 62%, var(--fg-muted))`;
+    const active = prefs.colors && !off.has(topic.name);
+    const row = h('button.gh__group', {
+      type: 'button',
+      'aria-pressed': active ? 'true' : 'false',
+      title: active ? 'Farbe dieser Gruppe ausschalten' : 'Diese Gruppe einfärben',
+      onClick: () => {
+        const set = new Set(self.prefs.groupsOff);
+        if (!self.prefs.colors) {
+          // Wer eine Gruppe antippt, will Farbe sehen.
+          self.prefs.colors = true;
+          set.delete(topic.name);
+        } else if (set.has(topic.name)) set.delete(topic.name);
+        else set.add(topic.name);
+        self.prefs.groupsOff = [...set];
+        save(self);
+        applyColors(self);
+        renderPanel(self);
+      },
+    },
+    h('span.gh__group-dot', { style: { background: color } }),
+    h('span.gh__group-name', null, text(topic.name)),
+    h('span.gh__group-n', null, text(formatNumber(topic.ids.length))));
+    // Ueberfahren zeigt, wo die Gruppe liegt -- ohne sie einzufaerben.
+    row.addEventListener('pointerenter', (event) => {
+      if (event.pointerType === 'mouse') self.graph.setHighlight(topic.ids);
+    });
+    row.addEventListener('pointerleave', (event) => {
+      if (event.pointerType === 'mouse') self.graph.setHighlight(self.query ? self.matches.map((node) => node.id) : null);
+    });
+    return h('li', null, row);
+  });
+  const groupsBody = [
+    toggle('Nach Thema einfärben', prefs.colors, (v) => {
+      self.prefs.colors = v;
+      save(self);
+      applyColors(self);
+      renderPanel(self);
+    }),
+    groupRows.length
+      ? h('ul.gh__groups', null, ...groupRows)
+      : h('p.gh__hint', null, text('Noch keine Themen erkennbar. Sie entstehen, sobald mehrere Einträge miteinander verbunden sind.')),
+    groupRows.length ? h('p.gh__hint', null, text('Erkannt aus den Verbindungen, benannt nach Schlagwort oder Titel.')) : null,
+  ];
+
+  /* Anzeige */
+  const displayBody = [
+    slider(self, 'nodeScale', 'Knotengröße', 0.4, 2.5, 0.05),
+    slider(self, 'linkScale', 'Liniendicke', 0.2, 3, 0.05),
+    slider(self, 'labelZoom', 'Beschriftung ab Zoom', 0.2, 3, 0.05),
+    h('div.gh__row', null,
+      h('button.btn.btn--small', { type: 'button', onClick: () => self.graph.fitToView() }, text('Einpassen'))),
+  ];
+
+  /* Kraefte */
+  const forcesBody = [
+    slider(self, 'repel', 'Abstoßung', 0.2, 3, 0.05),
+    slider(self, 'linkDistance', 'Federlänge', 0.3, 3, 0.05),
+    slider(self, 'center', 'Zentrierung', 0, 3, 0.05),
+    h('div.gh__row', null,
+      h('button.btn.btn--small', {
+        type: 'button',
+        onClick: () => {
+          self.graph.reheat(1);
+          self.graph.fitToView({ follow: true });
+        },
+      }, text('Neu anordnen'))),
+  ];
+
+  dom.panel.append(
+    section(self, 'filter', 'Filter', filterBody, headButtons),
+    section(self, 'groups', 'Gruppen', groupsBody),
+    section(self, 'display', 'Anzeige', displayBody),
+    section(self, 'forces', 'Kräfte', forcesBody),
+  );
+  renderCount(self);
+}
+
+/** Nach einem Neuaufbau des Panels den Treffer-Hinweis wieder fuellen. */
+function runSearchHintOnly(self) {
+  if (!self.query || !self.dom.searchHint) return;
+  clear(self.dom.searchHint);
+  self.dom.searchHint.hidden = false;
+  self.dom.searchHint.appendChild(text(self.matches.length
+    ? `${formatNumber(self.matches.length)} Treffer · Eingabetaste springt hin`
+    : 'Nichts gefunden.'));
+}
+
+function resetAll(self) {
+  self.prefs.settings = { ...GRAPH_DEFAULTS };
+  self.prefs.hiddenTypes = [];
+  self.prefs.orphans = true;
+  self.prefs.colors = false;
+  self.prefs.groupsOff = [];
+  save(self);
+  self.graph.setSettings(self.prefs.settings);
+  self.query = '';
+  runSearch(self, '');
+  applyFilter(self);
+  applyColors(self);
+  renderPanel(self);
+  self.graph.fitToView();
+}
+
+/* ---------------------------- Zustand ------------------------------- */
+
+function renderState(self) {
+  const { dom } = self;
+  clear(dom.state);
+  let box = null;
+  if (self.loading && !self.nodes.length) {
+    box = h('div.gh__state-box', null, h('span.spinner', { 'aria-hidden': 'true' }), h('p.gh__state-text', null, text('Das Gehirn wird geladen …')));
+  } else if (self.error && !self.nodes.length) {
+    const msg = self.error && self.error.message ? self.error.message : 'Unbekannter Fehler.';
+    box = h('div.gh__state-box', { role: 'alert' },
+      h('p.gh__state-title', null, text('Das Gehirn konnte nicht geladen werden.')),
+      h('p.gh__state-text', null, text(msg)),
+      h('button.btn', { type: 'button', onClick: () => load(self, { first: true }) }, text('Nochmal versuchen')));
+  } else if (!self.loading && !self.nodes.length) {
+    box = h('div.gh__state-box', null,
+      h('p.gh__state-title', null, text('Noch leer.')),
+      h('p.gh__state-text', null, text('Was die KI über dich lernt, wächst hier als Netz: jede Notiz, jeder Termin, jedes Projekt ein Punkt, jede Verbindung eine Linie.')));
+  }
+  dom.state.hidden = !box;
+  if (box) dom.state.appendChild(box);
+  renderCount(self);
+}
+
+function renderCount(self) {
+  const { dom } = self;
+  if (!dom.count) return;
+  clear(dom.count);
+  if (!self.nodes.length) return;
+  const s = self.graph.stats();
+  let line = `${formatNumber(s.visibleNodes)} Einträge · ${formatNumber(s.visibleEdges)} Verbindungen`;
+  if (self.truncated) line += ` · die neuesten ${formatNumber(self.nodes.length)} von ${formatNumber(self.total)}`;
+  dom.count.appendChild(text(line));
+}
+
+function describe(self) {
+  const { dom } = self;
+  if (!dom.canvas || !self.graph) return;
+  const s = self.graph.stats();
+  const parts = [`Gehirn mit ${formatNumber(s.visibleNodes)} Einträgen und ${formatNumber(s.visibleEdges)} Verbindungen`];
+  const node = self.selectedId ? self.byId.get(self.selectedId) : null;
+  if (node) parts.push(`gewählt: ${node.label}`);
+  parts.push('Ziehen verschiebt, Mausrad oder zwei Finger zoomen, Antippen wählt, zweimal Antippen öffnet, Pfeiltasten verschieben, 0 passt ein');
   dom.canvas.setAttribute('aria-label', `${parts.join('. ')}.`);
 }
 
-/** Say something once, for screen readers. Empty text clears the region. */
 function announce(self, message) {
   const { dom } = self;
   if (!dom.live) return;
   clear(dom.live);
   if (message) dom.live.appendChild(text(message));
-}
-
-/* ------------------------------------------------------------------ */
-/* Filtering                                                           */
-/* ------------------------------------------------------------------ */
-
-function applyFilter(self) {
-  const types = self.activeTypes;
-  const onlyMine = self.onlyMine;
-  const manual = self.manualIds;
-  const keepId = self.selectedId;
-
-  const filter = (node) => {
-    if (!types.has(node.type)) return node.id === keepId;
-    if (onlyMine && !manual.has(node.id)) return node.id === keepId;
-    return true;
-  };
-  // Edge visibility rides along on the node filter: the renderer asks for it
-  // separately so that "only my links" can hide derived edges between two
-  // nodes that both stay on screen.
-  if (onlyMine) filter.edge = (edge) => edge.source === 'manual';
-
-  self.graph.setFilter(filter);
-  if (self.clusterMode) rebuildClusters(self);
-  renderStage(self);
-  renderToolbar(self);
-  describeGraph(self);
-}
-
-function visibleNodes(self) {
-  const types = self.activeTypes;
-  const onlyMine = self.onlyMine;
-  const from = self.from;
-  const to = self.to;
-  return self.nodes.filter((node) => {
-    if (!types.has(node.type)) return false;
-    if (onlyMine && !self.manualIds.has(node.id)) return false;
-    if (from || to) {
-      // A node without a usable timestamp is kept: dropping it would silently
-      // hide records the window cannot judge, and the user would read the gap
-      // as "nothing happened then".
-      const stamp = Date.parse(node.updatedAt || node.createdAt || '');
-      if (Number.isFinite(stamp)) {
-        if (from && stamp < from) return false;
-        if (to && stamp > to) return false;
-      }
-    }
-    return true;
-  });
-}
-
-function visibleEdges(self, nodeIds) {
-  return self.edges.filter((edge) => (!self.onlyMine || edge.source === 'manual')
-    && nodeIds.has(edge.from) && nodeIds.has(edge.to));
-}
-
-/* ------------------------------------------------------------------ */
-/* Toolbar                                                             */
-/* ------------------------------------------------------------------ */
-
-function renderToolbar(self) {
-  const { dom, ctx } = self;
-
-  /* --- right-hand actions --- */
-  clear(dom.toolbarRight);
-  dom.toolbarRight.appendChild(toggleButton('Nur meine Verknüpfungen', self.onlyMine, () => {
-    self.onlyMine = !self.onlyMine;
-    applyFilter(self);
-    renderSide(self);
-  }, 'Blendet alles aus, was das System selbst abgeleitet oder ein Agent vorgeschlagen hat.'));
-  dom.toolbarRight.appendChild(toggleButton('Fokus', self.focusMode, () => {
-    self.focusMode = !self.focusMode;
-    self.graph.setFocusDepth(self.focusMode ? Math.max(1, self.depth) : 0);
-    renderToolbar(self);
-  }, 'Beim Ausgewählten: alles weiter weg als die eingestellte Tiefe wird gedämpft – nicht ausgeblendet.'));
-  dom.toolbarRight.appendChild(toggleButton('Gruppen', self.clusterMode, () => {
-    self.clusterMode = !self.clusterMode;
-    if (self.clusterMode) {
-      // Asking for the group list is a request to see the list, so the
-      // inspector steps aside; picking a node afterwards brings it back.
-      selectNode(self, null);
-      rebuildClusters(self);
-    } else {
-      self.clusters = [];
-      self.activeCluster = null;
-      self.graph.setHulls([]);
-      self.graph.setActiveHull(null);
-      self.graph.highlight(self.query ? self.matches.map((n) => n.id) : null);
-    }
-    renderToolbar(self);
-    renderSide(self);
-  }, 'Zeichnet eine weiche Umrandung um jede zusammenhängende Gruppe und listet sie auf.'));
-
-  dom.toolbarRight.appendChild(h('button.btn.btn--small', {
-    type: 'button',
-    title: 'Ansicht einpassen (F)',
-    onClick: () => self.graph && self.graph.fitToView(),
-  }, icon(ICONS.fit), text('Einpassen')));
-
-  dom.toolbarRight.appendChild(h('button.btn.btn--small', {
-    type: 'button',
-    disabled: self.loading,
-    title: 'Leitet alle Verknüpfungen neu aus [[Wiki-Links]], #Schlagwörtern und Zugehörigkeiten ab.',
-    onClick: () => rescan(self),
-  }, icon(ICONS.refresh), text('Links neu berechnen')));
-
-  /* --- filter row --- */
-  clear(dom.filters);
-  const counts = new Map();
-  for (const node of self.nodes) counts.set(node.type, (counts.get(node.type) || 0) + 1);
-
-  for (const type of GRAPH_TYPES) {
-    const count = counts.get(type) || 0;
-    const active = self.activeTypes.has(type);
-    const chip = h('button.chip', {
-      type: 'button',
-      'aria-pressed': active ? 'true' : 'false',
-      title: count === 0 ? `Keine ${TYPE_PLURALS[type]} im Ausschnitt` : `${TYPE_PLURALS[type]} ein- oder ausblenden`,
-      style: active ? null : { opacity: '0.45' },
-      onClick: () => {
-        if (self.activeTypes.has(type)) self.activeTypes.delete(type);
-        else self.activeTypes.add(type);
-        if (!self.activeTypes.size) {
-          // Hiding everything is never what someone means.
-          for (const t of GRAPH_TYPES) self.activeTypes.add(t);
-          ctx.toast('Mindestens eine Art muss sichtbar bleiben.', 'info');
-        }
-        applyFilter(self);
-        renderSide(self);
-      },
-    },
-    typeGlyph(self, type, 13),
-    h('span.chip__label', null, text(`${TYPE_PLURALS[type]} ${formatNumber(count)}`)));
-    dom.filters.appendChild(chip);
-  }
-
-  const depthWrap = h('label.graph-view__depth', {
-    title: self.focusId
-      ? 'Wie viele Schritte weit die Nachbarschaft des Fokus-Knotens geladen wird – und wie weit der Fokus-Modus reicht.'
-      : 'Wie weit der Fokus-Modus um den ausgewählten Knoten herum hell bleibt. Mit einem Fokus-Knoten bestimmt sie zusätzlich, wie viel geladen wird.',
-  },
-  text('Tiefe'),
-  h('input', {
-    type: 'range',
-    min: '1',
-    max: '4',
-    step: '1',
-    value: String(Math.max(1, self.depth)),
-    'aria-label': 'Tiefe der Nachbarschaft',
-    onChange: (event) => {
-      const next = Number.parseInt(event.target.value, 10);
-      if (!Number.isFinite(next) || next === self.depth) return;
-      self.depth = next;
-      self.graph.setFocusDepth(self.focusMode ? Math.max(1, self.depth) : 0);
-      syncRoute(self);
-      renderToolbar(self);
-      // Only a server-side focus changes which records are loaded; without one
-      // the depth is purely about what stays bright, and a round trip would
-      // buy nothing.
-      if (self.focusId) load(self, { fit: false });
-    },
-  }),
-  h('span', null, text(String(Math.max(1, self.depth)))));
-  dom.filters.appendChild(depthWrap);
-
-  if (self.focusId) {
-    const node = self.nodeById.get(self.focusId);
-    dom.filters.appendChild(h('button.btn.btn--small', {
-      type: 'button',
-      title: 'Fokus aufheben und wieder den ganzen Graphen zeigen',
-      onClick: () => setFocus(self, null),
-    }, icon(ICONS.close), text(`Fokus: ${node ? node.label : self.focusId}`)));
-  }
-
-  dom.filters.appendChild(h('span.spacer'));
-  dom.filters.appendChild(statusLine(self));
-}
-
-function statusLine(self) {
-  const stats = self.graph ? self.graph.stats() : null;
-  const parts = [];
-  if (self.loading) parts.push('lädt …');
-  else if (stats) {
-    parts.push(`${formatNumber(stats.visibleNodes)} von ${formatNumber(self.nodes.length)} Knoten`);
-    parts.push(`${formatNumber(stats.visibleEdges)} Verknüpfungen`);
-  }
-  const line = h('span.graph-view__status', null, text(parts.join(' · ')));
-  if (!self.truncated) return line;
-
-  const total = self.stats && Number.isFinite(self.stats.candidates) ? self.stats.candidates : null;
-  return h('span.row', null,
-    line,
-    h('span.badge.badge--danger', {
-      title: total
-        ? `Es gibt ${formatNumber(total)} passende Einträge; geladen sind ${formatNumber(self.nodes.length)}.`
-        : 'Es gibt mehr passende Einträge, als geladen wurden.',
-    }, text('Ausschnitt')),
-    self.limit < 5000
-      ? h('button.btn.btn--small', {
-        type: 'button',
-        disabled: self.loading,
-        onClick: () => {
-          self.limit = Math.min(5000, self.limit * 2);
-          load(self, { fit: false });
-        },
-      }, text('Mehr laden'))
-      : null);
-}
-
-function toggleButton(label, active, onClick, title) {
-  return h('button.btn.btn--small', {
-    type: 'button',
-    'aria-pressed': active ? 'true' : 'false',
-    class: active ? 'btn--primary' : '',
-    title: title || '',
-    onClick,
-  }, text(label));
-}
-
-function rgbOf(color) {
-  return `rgb(${Math.round(color.r)}, ${Math.round(color.g)}, ${Math.round(color.b)})`;
-}
-
-/**
- * The silhouette the renderer would draw for this record type, painted into a
- * small canvas. It uses `drawNodeShape` from the renderer itself, so legend,
- * filter chip and map can never disagree about what a project looks like.
- */
-function typeGlyph(self, type, size = 13) {
-  const node = document.createElement('canvas');
-  node.className = 'graph-view__glyph';
-  node.setAttribute('aria-hidden', 'true');
-  const ratio = Math.min(Math.max(window.devicePixelRatio || 1, 1), 3);
-  node.width = Math.round(size * ratio);
-  node.height = Math.round(size * ratio);
-  node.style.width = `${size}px`;
-  node.style.height = `${size}px`;
-
-  const c = node.getContext('2d');
-  const palette = self.graph ? self.graph.getPalette() : null;
-  if (!c || !palette) return node;
-  c.setTransform(ratio, 0, 0, ratio, 0, 0);
-  c.lineJoin = 'round';
-  c.beginPath();
-  drawNodeShape(c, type, size / 2, size / 2, size * 0.3);
-  c.fillStyle = rgbOf(palette.plate);
-  c.fill();
-  c.lineWidth = 1.2;
-  c.strokeStyle = rgbOf(palette.inks[1]);
-  c.stroke();
-  return node;
-}
-
-function renderLegend(self) {
-  const { dom } = self;
-  clear(dom.legend);
-  for (const type of GRAPH_TYPES) {
-    dom.legend.appendChild(h('span.graph-view__legend-item', null,
-      typeGlyph(self, type, 13),
-      text(TYPE_LABELS[type])));
-  }
-  dom.legend.appendChild(h('hr'));
-  const lineIcon = (dash, color) => h('svg', { width: '22', height: '10', viewBox: '0 0 22 10', 'aria-hidden': 'true' },
-    h('line', {
-      x1: '1', y1: '5', x2: '21', y2: '5',
-      stroke: color, 'stroke-width': '1.6', 'stroke-dasharray': dash,
-    }));
-  dom.legend.appendChild(h('span.graph-view__legend-item', null, lineIcon('', 'currentColor'), text('von dir verknüpft')));
-  dom.legend.appendChild(h('span.graph-view__legend-item', null, lineIcon('3 3', 'currentColor'), text('abgeleitet')));
-  dom.legend.appendChild(h('span.graph-view__legend-item', null, lineIcon('7 3 1.5 3', 'var(--warn)'), text('Agent-Vorschlag')));
-  dom.legend.appendChild(h('span.graph-view__legend-item', null, text('Größe = Anzahl Verknüpfungen')));
-}
-
-/* ------------------------------------------------------------------ */
-/* Stage states: loading, error, empty                                 */
-/* ------------------------------------------------------------------ */
-
-function renderStage(self) {
-  const { dom, ctx } = self;
-  const state = dom.stageState;
-  clear(state);
-
-  if (self.loadError) {
-    state.hidden = false;
-    state.appendChild(h('div.view-state', null,
-      h('div.view-state__icon', null, icon(ICONS.brain)),
-      h('h2.view-state__title', null, text('Der Graph konnte nicht geladen werden')),
-      h('p.view-state__text', null, text(self.loadError.message || 'Unbekannter Fehler.')),
-      h('div.view-state__actions', null,
-        h('button.btn.btn--primary', { type: 'button', onClick: () => load(self, { fit: true }) }, text('Erneut versuchen')))));
-    return;
-  }
-
-  if (self.loading && !self.nodes.length) {
-    state.hidden = false;
-    state.appendChild(h('div.view-state', { role: 'status' },
-      h('div.spinner', { 'aria-hidden': 'true' }),
-      h('p.view-state__text', null, text('Der Graph wird aufgebaut …'))));
-    return;
-  }
-
-  if (!self.nodes.length) {
-    state.hidden = false;
-    state.appendChild(h('div.view-state', null,
-      h('div.view-state__icon', null, icon(ICONS.brain)),
-      h('h2.view-state__title', null, text('Hier ist noch nichts verknüpft')),
-      h('p.view-state__text', null, text(
-        'Dieses Gehirn wächst aus dem, was du festhältst: Jede Notiz, jeder Chat, '
-        + 'jedes Projekt und jede Aufgabe wird ein Knoten. Verknüpfungen entstehen von selbst '
-        + 'aus [[Wiki-Links]] und #Schlagwörtern in deinen Texten – und aus allem, was du hier '
-        + 'von Hand verbindest.')),
-      h('div.view-state__actions', null,
-        h('button.btn.btn--primary', { type: 'button', onClick: () => ctx.navigate('#/notes') }, text('Notiz schreiben')),
-        h('button.btn', { type: 'button', onClick: () => ctx.navigate('#/chat') }, icon(ICONS.chat), text('Chat öffnen')),
-        h('button.btn', { type: 'button', disabled: self.loading, onClick: () => rescan(self) }, icon(ICONS.refresh), text('Links neu berechnen')))));
-    return;
-  }
-
-  const stats = self.graph ? self.graph.stats() : null;
-  if (stats && stats.visibleNodes === 0) {
-    state.hidden = false;
-    state.appendChild(h('div.view-state', null,
-      h('h2.view-state__title', null, text('Keine Knoten in dieser Auswahl')),
-      h('p.view-state__text', null, text('Die aktuellen Filter blenden alles aus, was geladen ist.')),
-      h('div.view-state__actions', null,
-        h('button.btn.btn--primary', {
-          type: 'button',
-          onClick: () => {
-            self.activeTypes = new Set(GRAPH_TYPES);
-            self.onlyMine = false;
-            applyFilter(self);
-            renderToolbar(self);
-            renderSide(self);
-            self.graph.fitToView();
-          },
-        }, text('Filter zurücksetzen')))));
-    return;
-  }
-
-  state.hidden = true;
-}
-
-/* ------------------------------------------------------------------ */
-/* Search                                                              */
-/* ------------------------------------------------------------------ */
-
-function applySearch(self, rawValue, { jump = true } = {}) {
-  const value = String(rawValue || '').trim();
-  self.query = value;
-  const { dom } = self;
-
-  if (!value) {
-    self.matches = [];
-    self.matchIndex = -1;
-    dom.matchBox.hidden = true;
-    clear(dom.matchBox);
-    clear(dom.matchCount);
-    self.graph.highlight(null);
-    return;
-  }
-
-  const needle = fold(value);
-  const scored = [];
-  for (const node of visibleNodes(self)) {
-    const label = fold(node.label);
-    let score = 0;
-    if (label === needle) score = 100;
-    else if (label.startsWith(needle)) score = 80;
-    else if (label.includes(needle)) score = 60;
-    else if ((node.tags || []).some((tag) => fold(tag).includes(needle))) score = 40;
-    else if (fold(node.snippet).includes(needle)) score = 20;
-    if (!score) continue;
-    scored.push({ node, score: score + Math.min(node.degree, 20) / 100 });
-  }
-  scored.sort((a, b) => b.score - a.score);
-  self.matches = scored.map((entry) => entry.node);
-  self.matchIndex = self.matches.length ? 0 : -1;
-
-  clear(dom.matchCount);
-  dom.matchCount.appendChild(text(self.matches.length
-    ? `${self.matches.length} Treffer`
-    : 'Kein Treffer im geladenen Ausschnitt'));
-
-  clear(dom.matchBox);
-  if (!self.matches.length) {
-    dom.matchBox.appendChild(h('div.graph-view__match.is-muted', null,
-      text('Nichts gefunden.'),
-      h('small', null, text('Im ganzen Tresor suchen: Enter drücken, um die Auswahl neu zu laden.'))));
-    dom.matchBox.appendChild(h('button.graph-view__match', {
-      type: 'button',
-      onClick: () => {
-        self.serverQuery = value;
-        syncRoute(self);
-        load(self, { fit: true });
-      },
-    }, text(`„${value}“ im ganzen Tresor suchen`)));
-    dom.matchBox.hidden = false;
-  } else {
-    for (const [i, node] of self.matches.slice(0, 12).entries()) {
-      dom.matchBox.appendChild(h('button.graph-view__match', {
-        type: 'button',
-        role: 'option',
-        class: i === 0 ? 'is-active' : '',
-        onClick: () => {
-          self.matchIndex = i;
-          jumpToMatch(self);
-        },
-      }, text(node.label), h('small', null, text(`${typeLabel(node.type)} · ${formatNumber(node.degree)} Verknüpfungen`))));
-    }
-    dom.matchBox.hidden = false;
-  }
-
-  self.graph.highlight(self.matches.map((node) => node.id));
-  if (jump && self.matches.length) jumpToMatch(self);
-}
-
-function stepMatch(self, delta) {
-  if (!self.matches.length) return;
-  self.matchIndex = (self.matchIndex + delta + self.matches.length) % self.matches.length;
-  jumpToMatch(self);
-}
-
-function jumpToMatch(self) {
-  const node = self.matches[self.matchIndex];
-  if (!node) return;
-  self.graph.focus(node.id);
-  selectNode(self, node.id);
-  const { dom } = self;
-  for (const [i, child] of [...dom.matchBox.children].entries()) {
-    child.classList.toggle('is-active', i === self.matchIndex);
-  }
-  clear(dom.matchCount);
-  dom.matchCount.appendChild(text(`Treffer ${self.matchIndex + 1} von ${self.matches.length}`));
-}
-
-/* ------------------------------------------------------------------ */
-/* Focus / route                                                       */
-/* ------------------------------------------------------------------ */
-
-function syncRoute(self) {
-  const params = new URLSearchParams();
-  if (self.focusId) {
-    params.set('focus', self.focusId);
-    params.set('depth', String(self.depth));
-  }
-  if (self.serverQuery) params.set('q', self.serverQuery);
-  if (self.from) params.set('from', new Date(self.from).toISOString());
-  if (self.to) params.set('to', new Date(self.to).toISOString());
-  const hash = params.toString() ? `#/graph?${params.toString()}` : '#/graph';
-  if (window.location.hash === hash) return;
-  // Replace instead of navigate: re-rendering the view here would throw away
-  // the simulation the user is looking at.
-  try {
-    window.history.replaceState(null, '', hash);
-  } catch {
-    /* file:// or a locked-down browser: the address just stays as it is */
-  }
-}
-
-function setFocus(self, id) {
-  self.focusId = id || null;
-  if (!self.focusId) self.serverQuery = '';
-  syncRoute(self);
-  load(self, { fit: true });
-}
-
-/* ------------------------------------------------------------------ */
-/* Selection + inspector                                               */
-/* ------------------------------------------------------------------ */
-
-function selectNode(self, id) {
-  const next = id && self.nodeById.has(id) ? id : null;
-  self.selectedId = next;
-  self.graph.setSelection(next);
-  self.activeCluster = null;
-  self.graph.setActiveHull(null);
-  describeGraph(self);
-  const chosen = next ? self.nodeById.get(next) : null;
-  announce(self, chosen ? `Ausgewählt: ${chosen.label}, ${typeLabel(chosen.type)}, ${formatNumber(chosen.totalDegree || chosen.degree || 0)} Verknüpfungen.` : 'Auswahl aufgehoben.');
-  if (!next) {
-    self.inspector = null;
-    renderSide(self);
-    return;
-  }
-  self.inspector = { node: self.nodeById.get(next), edges: [], labels: new Map(), loading: true, error: null };
-  renderSide(self);
-  loadInspector(self, next);
-}
-
-async function loadInspector(self, id) {
-  const token = ++self.inspectorToken;
-  let payload;
-  try {
-    payload = await request(self, (signal) => self.ctx.api.get(`/records/${encodeURIComponent(id)}`, { signal }));
-  } catch (err) {
-    if (!self.alive || token !== self.inspectorToken) return;
-    if (err && err.isAborted) return;
-    self.inspector = { ...self.inspector, loading: false, error: err };
-    renderSide(self);
-    return;
-  }
-  if (!self.alive || token !== self.inspectorToken) return;
-
-  const record = payload && payload.record ? payload.record : null;
-  const edgeRecords = Array.isArray(payload && payload.edges) ? payload.edges : [];
-  const labels = new Map();
-  const unknown = [];
-  for (const edge of edgeRecords) {
-    const other = edge.data && (edge.data.from === id ? edge.data.to : edge.data.from);
-    if (!other) continue;
-    const known = self.nodeById.get(other);
-    if (known) labels.set(other, { label: known.label, type: known.type });
-    else if (!unknown.includes(other)) unknown.push(other);
-  }
-
-  self.inspector = { node: self.nodeById.get(id), record, edges: edgeRecords, labels, loading: false, error: null };
-  renderSide(self);
-
-  // Endpoints outside the loaded excerpt: fetch just their titles, capped so
-  // a hub with 200 links cannot fire 200 requests.
-  if (unknown.length) {
-    const wanted = unknown.slice(0, 24);
-    const results = await Promise.allSettled(wanted.map((other) => request(
-      self,
-      (signal) => self.ctx.api.get(`/records/${encodeURIComponent(other)}`, { signal, timeoutMs: 8000 }),
-    )));
-    if (!self.alive || token !== self.inspectorToken) return;
-    let changed = false;
-    for (const [i, result] of results.entries()) {
-      if (result.status !== 'fulfilled') continue;
-      const other = result.value && result.value.record;
-      const label = recordLabel(other);
-      if (!label) continue;
-      labels.set(wanted[i], { label, type: other.type });
-      changed = true;
-    }
-    if (changed) renderSide(self);
-  }
-}
-
-function renderSide(self) {
-  const { dom } = self;
-  clear(dom.side);
-
-  // A selected node outranks the cluster list: the user just pointed at
-  // something and expects to see what it is.
-  if (self.selectedId && self.inspector) {
-    dom.side.appendChild(renderInspector(self));
-    return;
-  }
-  if (self.clusterMode) {
-    dom.side.appendChild(renderClusterPanel(self));
-    return;
-  }
-  dom.side.appendChild(renderSideHelp(self));
-}
-
-function renderSideHelp(self) {
-  const stats = self.graph ? self.graph.stats() : null;
-  return h('div.stack', null,
-    h('h2.graph-view__side-title', null, text('Inspektor')),
-    h('p.graph-view__hint', null, text('Wähle einen Knoten aus, um Auszug, Schlagwörter und alle Verknüpfungen mit ihrer Begründung zu sehen.')),
-    h('hr.divider'),
-    h('p.graph-view__hint', null, text('Bedienung')),
-    h('ul.graph-view__hint', { style: { paddingLeft: '18px', margin: '0' } },
-      h('li', null, text('Ziehen auf freier Fläche verschiebt, Mausrad zoomt.')),
-      h('li', null, text('Einen Knoten ziehen fixiert ihn an dieser Stelle.')),
-      h('li', null, text('Doppelklick lädt die Nachbarschaft dieses Knotens.')),
-      h('li', null, text('Alt gedrückt halten und von einem Knoten auf einen zweiten ziehen legt eine eigene Verknüpfung an.')),
-      h('li', null, text('Die Übersicht oben rechts zeigt den ganzen Graphen; ein Klick hinein springt dorthin.')),
-      h('li', null, text('Mit der Tastatur: Eingabetaste wählt den Knoten in der Mitte, n und p gehen die Nachbarn durch, Pfeiltasten verschieben, + und − zoomen.')),
-      h('li', null, text('Taste F passt die Ansicht ein, Escape hebt die Auswahl auf.'))),
-    stats
-      ? h('p.graph-view__hint', null, text(`Geladen: ${formatNumber(self.nodes.length)} Knoten, ${formatNumber(self.edges.length)} Verknüpfungen.`))
-      : null);
-}
-
-function renderInspector(self) {
-  const { ctx, inspector } = self;
-  const node = inspector.node || { id: self.selectedId, label: self.selectedId, type: 'unknown', tags: [], snippet: '', degree: 0, totalDegree: 0 };
-  const pinned = self.graph.isPinned(node.id);
-
-  const head = h('div.graph-view__side-head', null,
-    h('div', { style: { flex: '1 1 auto', minWidth: '0' } },
-      h('span.badge', null, text(typeLabel(node.type))),
-      h('h2.graph-view__side-title', null, text(node.label))),
-    h('button.icon-button', {
-      type: 'button',
-      title: self.clusterMode ? 'Zurück zur Cluster-Liste' : 'Auswahl aufheben',
-      'aria-label': self.clusterMode ? 'Zurück zur Cluster-Liste' : 'Auswahl aufheben',
-      onClick: () => selectNode(self, null),
-    }, icon(ICONS.close)));
-
-  const meta = [];
-  if (node.updatedAt) meta.push(`geändert ${timeAgo(node.updatedAt)}`);
-  meta.push(`${formatNumber(node.totalDegree || node.degree || 0)} Verknüpfungen`);
-  if (pinned) meta.push('fixiert');
-
-  const actions = h('div.row', null,
-    h('button.btn.btn--small.btn--primary', {
-      type: 'button',
-      onClick: () => {
-        const route = OPEN_ROUTES[node.type];
-        if (!route) {
-          ctx.toast('Für diese Art gibt es noch keine eigene Ansicht.', 'info');
-          return;
-        }
-        ctx.navigate(route(node.id));
-      },
-    }, icon(ICONS.open), text('Öffnen')),
-    h('button.btn.btn--small', {
-      type: 'button',
-      title: 'Hängt diesen Knoten als Kontext an den aktuellen Chat an.',
-      onClick: () => addToChat(self, node),
-    }, icon(ICONS.chat), text('Zu Chat hinzufügen')),
-    h('button.btn.btn--small', {
-      type: 'button',
-      onClick: () => setFocus(self, node.id),
-      title: 'Lädt die Nachbarschaft dieses Knotens.',
-    }, text('Fokussieren')),
-    pinned
-      ? h('button.btn.btn--small', {
-        type: 'button',
-        onClick: () => {
-          self.graph.unpin(node.id);
-          renderSide(self);
-        },
-      }, icon(ICONS.pin), text('Fixierung lösen'))
-      : null);
-
-  const body = h('div.stack', null,
-    head,
-    h('p.meta', null, text(meta.join(' · '))),
-    node.snippet ? h('p', null, text(node.snippet)) : null,
-    (node.tags && node.tags.length)
-      ? h('div.row', null, ...node.tags.map((tag) => h('span.tag', null, text(`#${tag}`))))
-      : null,
-    actions,
-    h('hr.divider'));
-
-  if (inspector.loading) {
-    body.appendChild(h('p.graph-view__hint', { role: 'status' }, text('Verknüpfungen werden geladen …')));
-    return body;
-  }
-  if (inspector.error) {
-    body.appendChild(h('p.is-danger', null, text(inspector.error.message || 'Die Verknüpfungen konnten nicht geladen werden.')));
-    body.appendChild(h('button.btn.btn--small', { type: 'button', onClick: () => loadInspector(self, node.id) }, text('Erneut versuchen')));
-    return body;
-  }
-
-  const edgeRecords = inspector.edges.filter((edge) => edge && edge.data && !edge.deletedAt);
-  body.appendChild(h('h3', { style: { fontSize: 'var(--fs-base)' } },
-    text(`Verknüpfungen (${formatNumber(edgeRecords.length)})`)));
-
-  if (!edgeRecords.length) {
-    body.appendChild(h('p.graph-view__hint', null, text(
-      'Noch nichts verknüpft. Halte Alt gedrückt und ziehe von diesem Knoten auf einen anderen, '
-      + 'um die erste Verbindung selbst zu legen.')));
-  }
-
-  // Own links first: what the user decided outranks what the system guessed.
-  const order = { manual: 0, agent: 1, derived: 2 };
-  edgeRecords.sort((a, b) => (order[a.data.source] ?? 3) - (order[b.data.source] ?? 3));
-
-  for (const edge of edgeRecords) {
-    body.appendChild(renderEdgeRow(self, node, edge));
-  }
-
-  body.appendChild(h('div.row', { style: { marginTop: 'var(--sp-1)' } },
-    h('label.graph-view__hint', { for: 'graph-draw-kind' }, text('Neue Verknüpfung als')),
-    h('select.select#graph-draw-kind', {
-      style: { width: 'auto' },
-      onChange: (event) => { self.drawKind = event.target.value; },
-    }, ...DRAWABLE_KINDS.map((kind) => h('option', { value: kind, selected: kind === self.drawKind }, text(kindLabel(kind)))))));
-  body.appendChild(h('p.graph-view__hint', null, text('Alt gedrückt halten und auf einen zweiten Knoten ziehen.')));
-
-  return body;
-}
-
-function renderEdgeRow(self, node, edge) {
-  const data = edge.data || {};
-  const outgoing = data.from === node.id;
-  const otherId = outgoing ? data.to : data.from;
-  const known = self.inspector.labels.get(otherId);
-  const label = known ? known.label : otherId;
-
-  return h('div.graph-view__edge', null,
-    h('span', { title: outgoing ? 'zeigt auf' : 'wird verwiesen von', style: { color: 'var(--fg-subtle)', marginTop: '2px' } },
-      icon(outgoing ? ICONS.arrowRight : ICONS.arrowLeft)),
-    h('div.graph-view__edge-main', null,
-      h('button.graph-view__edge-target', {
-        type: 'button',
-        title: self.nodeById.has(otherId) ? 'Im Graphen auswählen' : 'Nicht im geladenen Ausschnitt – lädt die Nachbarschaft',
-        onClick: () => {
-          if (self.nodeById.has(otherId)) {
-            self.graph.focus(otherId);
-            selectNode(self, otherId);
-          } else {
-            setFocus(self, otherId);
-          }
-        },
-      }, text(label)),
-      h('p.meta', null, text(`${kindLabel(data.kind)} · ${sourceLabel(data.source)}`)),
-      h('p.graph-view__edge-reason', null, text(data.reason || 'Keine Begründung hinterlegt.'))),
-    h('button.icon-button', {
-      type: 'button',
-      title: 'Diese Verknüpfung löschen',
-      'aria-label': `Verknüpfung zu ${label} löschen`,
-      onClick: () => removeEdge(self, edge, label),
-    }, icon(ICONS.trash)));
-}
-
-/* ------------------------------------------------------------------ */
-/* Mutations                                                           */
-/* ------------------------------------------------------------------ */
-
-async function createEdge(self, from, to) {
-  const { ctx } = self;
-  if (from === to) return;
-  const target = self.nodeById.get(to);
-  const source = self.nodeById.get(from);
-  try {
-    const result = await request(self, (signal) => ctx.api.post('/edges', {
-      from,
-      to,
-      kind: self.drawKind,
-      reason: 'Im Graphen von Hand gezogen',
-    }, { signal }));
-    if (!self.alive) return;
-    const record = result && result.record;
-    if (!record || !record.data) throw new Error('Der Server hat keine Verknüpfung zurückgegeben.');
-
-    if (self.edges.some((edge) => edge.id === record.id)) {
-      ctx.toast('Diese Verknüpfung gibt es bereits.', 'info');
-      return;
-    }
-    // Insert locally so the line appears immediately; the next reload replaces
-    // this with the server's own record.
-    self.edges.push({
-      id: record.id,
-      from: record.data.from,
-      to: record.data.to,
-      kind: record.data.kind,
-      source: record.data.source || 'manual',
-      weight: Number.isFinite(record.data.weight) ? record.data.weight : 1,
-      reason: record.data.reason || '',
-    });
-    for (const node of [source, target]) {
-      if (!node) continue;
-      node.degree = (node.degree || 0) + 1;
-      node.totalDegree = (node.totalDegree || 0) + 1;
-    }
-    self.manualIds.add(from);
-    self.manualIds.add(to);
-    self.graph.setData({ nodes: self.nodes, edges: self.edges });
-    applyFilter(self);
-    self.graph.setSelection(self.selectedId);
-    ctx.toast(`Verknüpft: ${source ? source.label : from} → ${target ? target.label : to}`, 'success');
-    if (self.selectedId === from || self.selectedId === to) loadInspector(self, self.selectedId);
-    renderToolbar(self);
-  } catch (err) {
-    if (!self.alive || (err && err.isAborted)) return;
-    ctx.toast(err && err.message ? err.message : 'Die Verknüpfung konnte nicht angelegt werden.', 'error');
-  }
-}
-
-async function removeEdge(self, edge, label) {
-  const { ctx } = self;
-  const data = edge.data || {};
-  const confirmed = await ctx.confirm({
-    title: 'Verknüpfung löschen?',
-    message: `Die Verbindung „${kindLabel(data.kind)} ${label}“ (${sourceLabel(data.source)}) wird entfernt. `
-      + 'Abgeleitete Verknüpfungen können beim nächsten Neuberechnen wieder entstehen.',
-    confirmLabel: 'Löschen',
-    danger: true,
-  });
-  if (!confirmed || !self.alive) return;
-
-  try {
-    await request(self, (signal) => ctx.api.del(`/edges/${encodeURIComponent(edge.id)}`, { signal }));
-  } catch (err) {
-    if (!self.alive || (err && err.isAborted)) return;
-    ctx.toast(err && err.message ? err.message : 'Die Verknüpfung konnte nicht gelöscht werden.', 'error');
-    return;
-  }
-  if (!self.alive) return;
-
-  self.edges = self.edges.filter((item) => item.id !== edge.id);
-  if (self.inspector) self.inspector.edges = self.inspector.edges.filter((item) => item.id !== edge.id);
-  for (const id of [data.from, data.to]) {
-    const node = self.nodeById.get(id);
-    if (!node) continue;
-    node.degree = Math.max(0, (node.degree || 0) - 1);
-    node.totalDegree = Math.max(0, (node.totalDegree || 0) - 1);
-  }
-  self.manualIds = new Set();
-  for (const item of self.edges) {
-    if (item.source !== 'manual') continue;
-    self.manualIds.add(item.from);
-    self.manualIds.add(item.to);
-  }
-  self.graph.setData({ nodes: self.nodes, edges: self.edges });
-  applyFilter(self);
-  self.graph.setSelection(self.selectedId);
-  renderSide(self);
-  renderToolbar(self);
-  ctx.toast('Verknüpfung gelöscht.', 'success');
-}
-
-async function rescan(self) {
-  const { ctx } = self;
-  self.loading = true;
-  renderToolbar(self);
-  try {
-    const result = await request(self, (signal) => ctx.api.post('/graph/rescan', null, { signal, timeoutMs: 120000 }));
-    if (!self.alive) return;
-    const created = Number.isFinite(result && result.created) ? result.created : 0;
-    const removed = Number.isFinite(result && result.removed) ? result.removed : 0;
-    const scanned = Number.isFinite(result && result.scanned) ? result.scanned : 0;
-    ctx.toast(
-      `${formatNumber(scanned)} Einträge geprüft: ${formatNumber(created)} neu verknüpft, ${formatNumber(removed)} entfernt.`,
-      'success',
-    );
-    await load(self, { fit: false });
-  } catch (err) {
-    if (!self.alive || (err && err.isAborted)) return;
-    self.loading = false;
-    renderToolbar(self);
-    ctx.toast(err && err.message ? err.message : 'Die Verknüpfungen konnten nicht neu berechnet werden.', 'error');
-  }
-}
-
-async function addToChat(self, node) {
-  const { ctx } = self;
-  const activeId = ctx.state && typeof ctx.state.get === 'function' ? ctx.state.get('activeChatId') : null;
-  try {
-    let chatId = activeId || null;
-    let existing = [];
-    if (chatId) {
-      try {
-        const payload = await request(self, (signal) => ctx.api.get(`/chats/${encodeURIComponent(chatId)}`, { signal }));
-        const record = payload && payload.record;
-        existing = Array.isArray(record && record.data && record.data.contextNodeIds) ? record.data.contextNodeIds : [];
-      } catch (err) {
-        // The remembered chat may be gone; fall through to creating one.
-        if (err && err.status !== 404) throw err;
-        chatId = null;
-      }
-    }
-    if (!self.alive) return;
-
-    if (!chatId) {
-      const created = await request(self, (signal) => ctx.api.post('/chats', {
-        title: `Kontext: ${node.label}`,
-        contextNodeIds: [node.id],
-      }, { signal }));
-      const record = created && created.record;
-      if (!record || !record.id) throw new Error('Der Chat konnte nicht angelegt werden.');
-      if (!self.alive) return;
-      ctx.toast('Neuer Chat mit diesem Knoten als Kontext angelegt.', 'success');
-      ctx.navigate(`#/chat?id=${encodeURIComponent(record.id)}`);
-      return;
-    }
-
-    if (existing.includes(node.id)) {
-      ctx.toast('Dieser Knoten ist im aktuellen Chat bereits als Kontext gesetzt.', 'info');
-      return;
-    }
-    await request(self, (signal) => ctx.api.patch(`/chats/${encodeURIComponent(chatId)}`, {
-      contextNodeIds: [...existing, node.id],
-    }, { signal }));
-    if (!self.alive) return;
-    ctx.toast(`„${node.label}“ ist jetzt Kontext im aktuellen Chat.`, 'success');
-  } catch (err) {
-    if (!self.alive || (err && err.isAborted)) return;
-    ctx.toast(err && err.message ? err.message : 'Der Knoten konnte nicht an den Chat gehängt werden.', 'error');
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* Clusters                                                            */
-/* ------------------------------------------------------------------ */
-
-function rebuildClusters(self) {
-  const nodes = visibleNodes(self);
-  const ids = new Set(nodes.map((node) => node.id));
-  const edges = visibleEdges(self, ids);
-  self.clusters = computeClusters(nodes, edges);
-
-  // The renderer draws one soft outline per group with the group's own name
-  // and size on it. Single records are left out: an outline around one node
-  // says nothing that the node does not already say.
-  self.graph.setHulls(self.clusters
-    .filter((cluster) => cluster.size >= 3)
-    .map((cluster) => ({ id: cluster.id, label: cluster.label, ids: cluster.nodeIds })));
-  self.graph.setActiveHull(self.activeCluster);
-}
-
-function renderClusterPanel(self) {
-  const palette = self.graph.getPalette();
-
-  const wrap = h('div.stack', null,
-    h('div.graph-view__side-head', null,
-      h('h2.graph-view__side-title', { style: { flex: '1 1 auto' } }, text(`Gruppen (${formatNumber(self.clusters.length)})`)),
-      h('button.icon-button', {
-        type: 'button',
-        title: 'Gruppen-Ansicht schließen',
-        'aria-label': 'Gruppen-Ansicht schließen',
-        onClick: () => {
-          self.clusterMode = false;
-          self.clusters = [];
-          self.activeCluster = null;
-          self.graph.setHulls([]);
-          self.graph.setActiveHull(null);
-          self.graph.highlight(self.query ? self.matches.map((node) => node.id) : null);
-          renderToolbar(self);
-          renderSide(self);
-        },
-      }, icon(ICONS.close))),
-    h('p.graph-view__hint', null, text('Zusammenhängende Gruppen im aktuellen Ausschnitt. Ab drei Knoten wird eine Gruppe im Graphen umrandet. Der Name kommt aus den Inhalten der Gruppe, er ist nicht erfunden.')));
-
-  if (!self.clusters.length) {
-    wrap.appendChild(h('p.graph-view__hint', null, text('Nichts zu gruppieren – der Ausschnitt ist leer.')));
-    return wrap;
-  }
-
-  for (const [i, cluster] of self.clusters.entries()) {
-    const color = palette.clusters[i % palette.clusters.length];
-    wrap.appendChild(h('button.graph-view__cluster', {
-      type: 'button',
-      class: self.activeCluster === cluster.id ? 'is-active' : '',
-      onClick: () => {
-        self.activeCluster = cluster.id;
-        self.graph.setActiveHull(cluster.id);
-        self.graph.highlight(cluster.nodeIds);
-        self.graph.fitToView({ ids: cluster.nodeIds });
-        renderSide(self);
-      },
-    },
-    h('span.graph-view__cluster-dot', { style: { background: rgbOf(color) } }),
-    h('span', { style: { flex: '1 1 auto', minWidth: '0' } },
-      h('span', null, text(cluster.label)),
-      h('small.meta', { style: { display: 'block' } }, text(
-        `${formatNumber(cluster.size)} Knoten · ${formatNumber(cluster.edges)} Verknüpfungen · `
-        + cluster.types.slice(0, 3).map(([type, count]) => `${count} ${TYPE_PLURALS[type] || type}`).join(', '),
-      )))));
-  }
-  return wrap;
-}
-
-/* ------------------------------------------------------------------ */
-/* Context menu                                                        */
-/* ------------------------------------------------------------------ */
-
-function openContextMenu(self, node, position) {
-  const { dom } = self;
-  closeContextMenu(self);
-
-  const item = (label, run) => h('button.graph-view__match', {
-    type: 'button',
-    onClick: () => {
-      closeContextMenu(self);
-      run();
-    },
-  }, text(label));
-
-  const rect = dom.stage.getBoundingClientRect();
-  const menu = h('div.graph-view__float', {
-    role: 'menu',
-    style: {
-      left: `${Math.min(Math.max(position.clientX - rect.left, 8), Math.max(rect.width - 220, 8))}px`,
-      top: `${Math.min(Math.max(position.clientY - rect.top, 8), Math.max(rect.height - 180, 8))}px`,
-      width: '13rem',
-      zIndex: '5',
-    },
-  },
-  h('p.meta', { style: { padding: '0 8px 4px', margin: '0' } }, text(node.label)),
-  item('Fokussieren', () => setFocus(self, node.id)),
-  item('Nachbarn hervorheben', () => {
-    const ids = self.graph.neighbours(node.id).map((other) => other.id);
-    self.graph.highlight([node.id, ...ids]);
-  }),
-  self.graph.isPinned(node.id)
-    ? item('Fixierung lösen', () => {
-      self.graph.unpin(node.id);
-      renderSide(self);
-    })
-    : null,
-  OPEN_ROUTES[node.type] ? item('Öffnen', () => self.ctx.navigate(OPEN_ROUTES[node.type](node.id))) : null,
-  item('Zu Chat hinzufügen', () => addToChat(self, node)));
-
-  dom.stage.appendChild(menu);
-  self.contextMenu = menu;
-  const close = () => closeContextMenu(self);
-  // Dismiss on the next pointer press anywhere else. Presses inside the menu
-  // are ignored, because removing the node on `pointerdown` would detach the
-  // button before its own `click` could ever fire.
-  const offDown = on(window, 'pointerdown', (event) => {
-    if (menu.contains(event.target)) return;
-    close();
-  }, { capture: true });
-  const offKey = on(window, 'keydown', (event) => {
-    if (event.key === 'Escape') close();
-  });
-  self.contextCleanups = [offDown, offKey];
-}
-
-function closeContextMenu(self) {
-  if (self.contextMenu && self.contextMenu.parentNode) self.contextMenu.parentNode.removeChild(self.contextMenu);
-  self.contextMenu = null;
-  if (self.contextCleanups) {
-    for (const off of self.contextCleanups) {
-      try {
-        off();
-      } catch { /* already gone */ }
-    }
-    self.contextCleanups = null;
-  }
 }

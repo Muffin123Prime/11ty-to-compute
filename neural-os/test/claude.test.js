@@ -699,6 +699,39 @@ test('Offline: ohne Freigabe verlässt nichts den Rechner – nicht einmal der N
   }
 });
 
+test('Online mit strenger Freigabeliste: „Claude verbinden“ trägt genau api.anthropic.com ein – sonst nichts', async () => {
+  const { home, cleanup } = tempHome('nos-claude-freigabe');
+  let app = null;
+  try {
+    app = await createApp({ home, port: 0, logLevel: 'error', harden: false });
+    app.saveConfig({ network: { mode: 'online' } });
+    assert.equal(app.config.network.strictAllowlist, true);
+    assert.equal(app.claude.zustand().grundCode, 'kein-schluessel');
+    const { createClaude } = require('../src/models/claude');
+    const geprueft = [];
+    // Derselbe Dienst, nur der Probeaufruf ist ein Stellvertreter: ins echte
+    // Internet geht aus einem Test nichts.
+    const claude = createClaude({
+      paths: app.paths, config: app.config, gate: app.gate, bus: app.bus, vaultCrypto: app.vaultCrypto,
+      konfigSpeichern: (patch) => app.saveConfig(patch),
+      anbieter: { ...anbieter, probe: async (o) => { geprueft.push(o); return { ok: true }; } },
+    });
+    assert.equal(claude.zustand().netz.erlaubt, false, 'vorher gesperrt');
+    const z = await claude.schluesselSpeichern('sk-ant-stellvertreter-0123456789');
+    assert.equal(z.verbunden, true);
+    assert.deepEqual(app.config.network.allowHosts, ['api.anthropic.com']);
+    assert.equal(geprueft.length, 1);
+    assert.equal(geprueft[0].modell, 'claude-opus-5');
+    // Und mit dem Host auf der Sperrliste gibt es keine stille Umgehung.
+    app.saveConfig({ network: { blockHosts: ['api.anthropic.com'] } });
+    assert.equal(claude.zustand().verbunden, false);
+    assert.equal(claude.zustand().grundCode, 'schleuse');
+  } finally {
+    if (app) await app.close().catch(() => {});
+    cleanup();
+  }
+});
+
 /* -------------------------------------------- der allgemeine Adapter */
 
 test('Die Registry spricht Claude: Werkzeugnamen mit Punkt, Denkblöcke reisen mit, kein Websuche-Werkzeug', async () => {
