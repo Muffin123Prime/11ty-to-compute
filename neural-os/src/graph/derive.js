@@ -53,6 +53,7 @@ const OWNED = new Set(OWNED_KINDS);
 const TEXT_FIELDS = {
   note: ['body'],
   task: ['body'],
+  event: ['body', 'location'],
   project: ['description'],
   entity: ['description'],
 };
@@ -61,10 +62,10 @@ const TEXT_FIELDS = {
 const TAG_FIELD = { note: 'tags', project: 'tags', file: 'tags' };
 
 /** Title lookup priority. A `[[Titel]]` should mean the note first. */
-const TITLE_TYPES = ['note', 'project', 'entity', 'task', 'file', 'chat', 'agent'];
+const TITLE_TYPES = ['note', 'project', 'entity', 'task', 'event', 'file', 'chat', 'agent'];
 
 /** Types reconciled by `scanAll` (includes types that only need cleanup). */
-const SCAN_TYPES = ['note', 'task', 'project', 'entity', 'file', 'chat', 'agent', 'run', 'message'];
+const SCAN_TYPES = ['note', 'task', 'event', 'project', 'entity', 'file', 'chat', 'agent', 'run', 'message'];
 
 const KEY_SEP = '\u0000';
 
@@ -464,6 +465,12 @@ function desiredEdges(store, record, index) {
   }
   if (record.type === 'message' && live(data.chatId)) {
     want(data.chatId, 'belongs-to', 'Nachricht aus diesem Chat');
+  }
+  // Ein Termin haengt an seinem Projekt und an dem Gespraech, aus dem die KI
+  // ihn angelegt hat -- so zeigt das Gehirn, woher er kommt.
+  if (record.type === 'event') {
+    if (live(data.projectId)) want(data.projectId, 'belongs-to', 'Termin gehoert zu diesem Projekt');
+    if (live(data.chatId)) want(data.chatId, 'mentions', 'Termin stammt aus diesem Chat');
   }
   if (record.type === 'run') {
     if (live(data.agentId)) want(data.agentId, 'belongs-to', 'Lauf dieses Agenten');

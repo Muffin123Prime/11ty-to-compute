@@ -177,7 +177,7 @@ const ROLE_LABELS = { user: 'Nutzer', assistant: 'Assistent', system: 'System', 
  * German that it does not know it.
  */
 const TYPE_LABELS = {
-  note: 'Notizen', chat: 'Chats', message: 'Nachrichten', project: 'Projekte', task: 'Aufgaben',
+  note: 'Notizen', chat: 'Chats', message: 'Nachrichten', project: 'Projekte', task: 'Aufgaben', event: 'Termine',
   agent: 'Agenten', run: 'Agentenlaeufe', file: 'Dateien', entity: 'Entitaeten', edge: 'Verknuepfungen',
   memory: 'Erinnerungen', approval: 'Freigaben', grant: 'Netz-Freigaben', token: 'Zugangstoken',
   peer: 'Gekoppelte Geraete', conflict: 'Abgleich-Konflikte', module: 'Erweiterungen',

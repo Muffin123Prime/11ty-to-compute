@@ -76,7 +76,7 @@ const GONE = 'gone';
  * (a deny-list) would share every new type by default and only stop the ones
  * somebody remembered.
  */
-const SYNC_TYPES = ['note', 'project', 'task', 'entity', 'memory', 'chat', 'message', 'file', 'edge'];
+const SYNC_TYPES = ['note', 'project', 'task', 'event', 'entity', 'memory', 'chat', 'message', 'file', 'edge'];
 
 const CLASSIFICATIONS = ['identical', 'remote-newer', 'local-newer', 'conflict', 'remote-only', 'local-only'];
 

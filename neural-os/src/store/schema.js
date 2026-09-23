@@ -23,7 +23,7 @@ const { ValidationError } = require('../kernel/errors');
  */
 
 /** Node-ish record types that may appear in the knowledge graph. */
-const GRAPH_TYPES = ['note', 'chat', 'project', 'task', 'agent', 'file', 'entity', 'run'];
+const GRAPH_TYPES = ['note', 'chat', 'project', 'task', 'event', 'agent', 'file', 'entity', 'run'];
 
 /** All record types, including non-graph bookkeeping types. */
 const TYPES = [...GRAPH_TYPES, 'message', 'edge', 'memory', 'approval', 'grant', 'token', 'peer', 'conflict', 'module', 'suggestion', 'schedule', 'trigger', 'watch'];
@@ -104,6 +104,24 @@ const FIELDS = {
     due: { type: 'string', nullable: true, default: null }, // ISO date
     priority: { type: 'number', default: 2 }, // 1 high .. 3 low
     body: { type: 'string', default: '' },
+  },
+  /**
+   * Ein Termin im Kalender. Die KI legt ihn aus dem Gespraech an ("naechsten
+   * Dienstag um 10 Zahnarzt"), deshalb traegt er, woher er stammt: ohne
+   * `chatId` kann niemand nachsehen, warum ein Termin im Kalender steht, den
+   * er nicht selbst eingetragen hat. `start`/`end` sind ISO-Zeitpunkte
+   * (mit Uhrzeit) oder reine Daten (ganztaegig, dann `allDay: true`).
+   */
+  event: {
+    title: { type: 'string', required: true, max: 500 },
+    start: { type: 'string', required: true, max: 40 },
+    end: { type: 'string', nullable: true, default: null, max: 40 },
+    allDay: { type: 'boolean', default: false },
+    location: { type: 'string', default: '', max: 500 },
+    body: { type: 'string', default: '' },
+    projectId: { type: 'string', nullable: true, default: null },
+    chatId: { type: 'string', nullable: true, default: null },
+    source: { type: 'string', default: 'user', enum: ['user', 'auto'] },
   },
   agent: {
     name: { type: 'string', required: true, max: 200 },
