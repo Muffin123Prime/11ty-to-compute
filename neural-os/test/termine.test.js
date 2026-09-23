@@ -325,7 +325,9 @@ test('GET /api/projekte sammelt Chats, Termine, Notizen und Aufgaben ein; das zu
     // Weg 1: projectId am Termin.
     const termin = store.create('event', { title: 'Review', start: '2099-01-10T09:00', projectId: launch.id });
     store.create('event', { title: 'Vergangen', start: '2000-01-10T09:00', projectId: launch.id });
-    // Weg 1 auch am Chat.
+    // Weg 1 auch am Chat. Die Pause davor ist noetig: ohne sie entsteht der Chat oft in derselben
+    // Millisekunde wie der Termin von "Produktlaunch", und die Reihenfolge waere ein Muenzwurf.
+    await new Promise((r) => setTimeout(r, 5));
     store.create('chat', { title: 'Beete', projectId: garten.id });
     await new Promise((r) => setTimeout(r, 5));
     store.update(nebenChat.id, { title: 'Nebenbei, umbenannt' }); // gehoert zu nichts: darf nichts verschieben
