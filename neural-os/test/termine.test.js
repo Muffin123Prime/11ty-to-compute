@@ -617,3 +617,44 @@ test('Aendert ein PATCH nichts, bietet die Antwort auch kein Rueckgaengig an (so
     assert.equal(store.get(t.record.id).data.title, 'Zahnarzt', 'zurückgenommen wurde die Umbenennung, nicht das Anlegen');
   });
 });
+
+test('„Werktags“ an einem Samstag angelegt: der Beginn liegt auf dem Montag, ?nur am Samstag gibt es nicht', async () => {
+  await withApp(async ({ base }) => {
+    const r = await request(base, 'POST', '/api/events', {
+      title: 'Pendeln', start: '2026-09-26T08:00', end: '2026-09-26T08:30',
+      recurrence: { freq: 'weekly', byDay: ['MO', 'TU', 'WE', 'TH', 'FR'] },
+    });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.record.data.start, '2026-09-28T08:00', 'das erste echte Vorkommen');
+    assert.equal(r.json.record.data.end, '2026-09-28T08:30', 'das Ende wandert mit');
+    const ics = await request(base, 'GET', `/api/events/${r.json.record.id}/ics`);
+    assert.match(ics.text, /DTSTART:20260928T080000/, 'das iPad zeigt keinen Samstag, den Neural OS nicht zeigt');
+    // Nie ein Vorkommen: bis zum Sonntag davor.
+    const nie = await request(base, 'POST', '/api/events', {
+      title: 'Nie', start: '2026-09-26T08:00', recurrence: { freq: 'weekly', byDay: ['MO'], until: '2026-09-27' },
+    });
+    assert.equal(nie.status, 400);
+    assert.match(nie.json.error.message, /nie statt/);
+  });
+});
+
+test('DELETE einer ganzen Serie nimmt die per ?nur geloesten Vorkommen mit; ein Rueckgaengig holt alles zurueck', async () => {
+  await withApp(async ({ base }) => {
+    const s = (await request(base, 'POST', '/api/events', {
+      title: 'Training', start: '2026-10-06T18:00', end: '2026-10-06T19:00', recurrence: { freq: 'weekly' },
+    })).json.record;
+    await request(base, 'PATCH', `/api/events/${s.id}?nur=2026-10-13`, { title: 'A' });
+    await request(base, 'PATCH', `/api/events/${s.id}?nur=2026-11-10`, { start: '2026-11-11T18:00', end: '2026-11-11T19:00' });
+    const weg = await request(base, 'DELETE', `/api/events/${s.id}`);
+    assert.equal(weg.status, 200, weg.text);
+    assert.equal(weg.json.mitgeloescht.length, 2);
+    const leer = (await request(base, 'GET', '/api/events/zeitraum?from=2026-09-01&to=2026-12-31')).json.items;
+    assert.deepEqual(leer.map((x) => `${x.data.title}@${x.data.start}`), [], 'kein „A“ und kein verlegtes Training bleiben stehen');
+    await request(base, 'POST', weg.json.rueckgaengig.pfad, {});
+    const zurueck = (await request(base, 'GET', '/api/events/zeitraum?from=2026-10-01&to=2026-11-30')).json.items;
+    const namen = zurueck.map((x) => `${x.data.title}@${x.data.start.slice(0, 10)}`);
+    assert.ok(namen.includes('A@2026-10-13'));
+    assert.ok(namen.includes('Training@2026-11-11'));
+    assert.ok(namen.includes('Training@2026-10-20'));
+  });
+});
