@@ -807,3 +807,12 @@ test('verlaufHerrichten: jeder Aufruf bekommt sein Ergebnis, Waisen fallen weg, 
 });
 
 module.exports = { name: 'claude', tests: drain() };
+
+test('Ein leeres Guthaben (400 "credit balance") heisst Guthaben, nicht "Anfrage abgelehnt"', () => {
+  const { fehlerAusAntwort } = require('../src/models/providers/anthropic');
+  const guthaben = fehlerAusAntwort({ status: 400, typ: 'invalid_request_error', text: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.' });
+  assert.equal(guthaben.code, 'CLAUDE_GUTHABEN');
+  assert.match(guthaben.message, /Guthaben/);
+  const anderes = fehlerAusAntwort({ status: 400, typ: 'invalid_request_error', text: 'max_tokens: must be positive' });
+  assert.equal(anderes.code, 'CLAUDE_ANFRAGE_ABGELEHNT');
+});

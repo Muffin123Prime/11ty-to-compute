@@ -170,6 +170,12 @@ function fehlerAusAntwort({ status, typ, text, wiederholenNachS, teilInhalt }) {
     return new ClaudeFehler('CLAUDE_ZU_GROSS', 'Das Gespräch ist zu lang für eine einzelne Anfrage. Fang einen neuen Chat an.', opts(413));
   }
   if (status === 400 || typ === 'invalid_request_error') {
+    // Anthropic meldet ein leeres Guthaben NICHT als 402, sondern als 400 mit
+    // "credit balance is too low". Für den Nutzer ist das der häufigste Grund,
+    // warum ein frisch erzeugter Schlüssel "nicht angenommen" wird.
+    if (/credit balance/i.test(String(text || ''))) {
+      return new ClaudeFehler('CLAUDE_GUTHABEN', 'Das Guthaben bei Anthropic reicht nicht. Unter console.anthropic.com aufladen.', opts(402));
+    }
     return new ClaudeFehler('CLAUDE_ANFRAGE_ABGELEHNT', 'Claude hat die Anfrage nicht angenommen.', opts(502));
   }
   return new ClaudeFehler('CLAUDE_FEHLER', 'Bei Claude ist ein Fehler aufgetreten. Versuch es gleich noch einmal.', opts(502));
