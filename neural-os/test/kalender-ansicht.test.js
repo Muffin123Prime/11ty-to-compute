@@ -258,7 +258,10 @@ test('serienPatch: "Alle" -- jeden Dienstag gezogen auf Mittwoch wird jeden Mitt
   assert.equal(p.start, '2026-09-09T18:30', 'der Beginn der SERIE wandert, nicht der des angetippten Vorkommens');
   assert.equal(p.end, '2026-09-09T20:00');
   assert.deepEqual(p.recurrence.byDay, ['WE']);
-  assert.equal(p.recurrence.until, '2026-12-16', 'das letzte Vorkommen wandert mit und faellt nicht weg');
+  // Runde 3: "bis" bleibt stehen, wie es der Nutzer gesagt hat (so auch
+  // Claude, src/kalender/wiederholung.js serieVerschieben). Vorher wanderte
+  // es mit, und aus "bis 30.10." wurde ein Termin am 2.11.
+  assert.equal(p.recurrence.until, '2026-12-15', 'das genannte Ende bleibt');
   assert.deepEqual(p.exdates, ['2026-09-16'], 'der ausgelassene Tag bleibt derselbe Termin');
 
   const laenger = k.serienPatch(serie, alt, { start: alt.start, end: '2026-09-29T20:00' });
@@ -477,4 +480,39 @@ test('Projekte: der naechste Termin kurz beschrieben', async () => {
   assert.equal(p.whenShort({ start: '2026-09-24', allDay: true }, jetzt), 'morgen');
   assert.match(p.whenShort({ start: '2026-09-28T10:00' }, jetzt), /28\. Sept?\.? · 10:00$/);
   assert.equal(p.whenShort({ start: 'irgendwann' }, jetzt), '');
+});
+
+/* ------------------------------------------------ Runde 3 (Pruefer) */
+
+test('serienPatch: „alle 2 Wochen“ über die Wochengrenze ist ein Satz, keine still falsche Serie; „bis“ bleibt', async () => {
+  const k = await load('kalender');
+  // Mo+Di alle 2 Wochen, "Alle" einen Tag frueher gezogen: So+Mo -- der Montag
+  // rutscht in die Woche davor, jeder zweite laege falsch.
+  const serie = { start: '2026-10-05T18:00', end: '2026-10-05T19:00', recurrence: { freq: 'weekly', interval: 2, byDay: ['MO', 'TU'], until: null, count: null } };
+  assert.throws(() => k.serienPatch(serie, { start: '2026-10-05T18:00', end: '2026-10-05T19:00' }, { start: '2026-10-04T18:00', end: '2026-10-04T19:00' }), /nächste Woche/);
+  // Beide Tage bleiben in ihrer Woche (Mo+Di -> Di+Mi): das geht.
+  const ok = k.serienPatch(serie, { start: '2026-10-05T18:00', end: '2026-10-05T19:00' }, { start: '2026-10-06T18:00', end: '2026-10-06T19:00' });
+  assert.deepEqual(ok.recurrence.byDay, ['TU', 'WE']);
+  // Jede Woche (interval 1) ist nie betroffen.
+  const woche = { ...serie, recurrence: { ...serie.recurrence, interval: 1, until: '2026-10-30' } };
+  const w1 = k.serienPatch(woche, { start: '2026-10-05T18:00', end: '2026-10-05T19:00' }, { start: '2026-10-04T18:00', end: '2026-10-04T19:00' });
+  assert.deepEqual(w1.recurrence.byDay, ['MO', 'SU']);
+  assert.equal(w1.recurrence.until, '2026-10-30', 'das genannte Ende bleibt');
+});
+
+test('Formular: „bis“ zu einer Serie mit Anzahl ersetzt die Anzahl (kein 400 mit until/count)', async () => {
+  const k = await load('kalender');
+  const bisher = { freq: 'weekly', interval: 1, byDay: ['TU'], until: null, count: 10 };
+  assert.deepEqual(k.regelAusFormular('bisher', bisher, null, '2026-11-17'), { freq: 'weekly', interval: 1, byDay: ['TU'], until: '2026-11-17', count: null });
+  assert.deepEqual(k.regelAusFormular('bisher', bisher, null, ''), { freq: 'weekly', interval: 1, byDay: ['TU'], until: null, count: 10 }, 'ohne „bis“ bleibt die Anzahl');
+  assert.equal(k.regelAusFormular('', bisher, null, ''), null);
+});
+
+test('Formular: nur geänderte Felder -- der Ort allein überschreibt nicht, was Claude an der Zeit geändert hat', async () => {
+  const k = await load('kalender');
+  const anfang = { title: 'Zahnarzt', location: 'Praxis Weber', body: '', allDay: false, start: '2026-10-08T10:00', end: '2026-10-08T10:45', recurrence: null, reminder: null };
+  assert.deepEqual(k.geaenderteFelder(anfang, { ...anfang, location: 'Praxis Weber, 2. OG' }), { location: 'Praxis Weber, 2. OG' });
+  assert.deepEqual(k.geaenderteFelder(anfang, { ...anfang, end: '2026-10-08T11:00' }),
+    { start: '2026-10-08T10:00', end: '2026-10-08T11:00', allDay: false }, 'Beginn, Ende und ganztaegig gehoeren zusammen');
+  assert.deepEqual(k.geaenderteFelder(anfang, { ...anfang }), {});
 });

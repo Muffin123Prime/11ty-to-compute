@@ -900,6 +900,16 @@ function createWerkzeuge({ store, bus, logger } = {}) {
     return [...treffer.values()].slice(0, 5);
   }
 
+  /**
+   * Welches Vorkommen einer Serie gemeint ist: der gewuenschte Tag, wenn die
+   * Serie dort stattfindet, sonst das naechste ab heute, sonst das erste.
+   */
+  function vorkommenFuer(rec, wunschTag) {
+    const d = rec.data;
+    if (wunschTag && wdh.istVorkommen(d, wunschTag)) return wunschTag;
+    return wdh.naechstesVorkommen(d, heuteTag()) || wdh.naechstesVorkommen(d, String(d.start).slice(0, 10));
+  }
+
   function ueberschneidungSatz(liste) {
     if (!liste.length) return '';
     return ` · überschneidet sich mit ${liste.slice(0, 2).map((u) => `„${kurz(u.titel, 40)}“`).join(', ')}${liste.length > 2 ? ' …' : ''}`;
@@ -1141,12 +1151,35 @@ function createWerkzeuge({ store, bus, logger } = {}) {
         }
       }
       const basis = bezug ? { ...vorher.data, ...wdh.aufTagLegen(vorher.data, bezug) } : vorher.data;
+      // "Verschieb den Zahnarzt auf Freitag": Claude schickt oft nur den Tag.
+      // Hat der Termin eine Uhrzeit und sagt niemand "ganztaegig", bleibt die
+      // Uhrzeit -- frueher wurde der Termin still ganztaegig, und 10:00-10:45
+      // war verloren, obwohl niemand das wollte.
+      let neuStart = w.start;
+      let neuEnde = w.end;
+      let uhrzeitBehalten = null;
+      const basisMitZeit = !basis.allDay && !!wdh.wandzeitLesen(basis.start) && wdh.wandzeitLesen(basis.start).zeit !== '';
+      const nurTag = (t) => typeof t === 'string' && t.length === 10;
+      if (w.ganztaegig === undefined && (nurTag(neuStart) || nurTag(neuEnde)) && !basis.allDay) {
+        if (!basisMitZeit) {
+          throw new ValidationError(`„${titelAlt}“ hat eine Uhrzeit. Bitte start als YYYY-MM-DDTHH:MM angeben – oder ganztaegig: true, wenn er ganztägig werden soll.`);
+        }
+        const zeitStart = wdh.wandzeitLesen(basis.start).zeit;
+        const endeAlt = basis.end ? wdh.wandzeitLesen(basis.end) : null;
+        if (nurTag(neuStart)) neuStart = `${neuStart}${zeitStart}`;
+        if (nurTag(neuEnde)) {
+          if (endeAlt && endeAlt.zeit) neuEnde = `${neuEnde}${endeAlt.zeit}`;
+          else neuEnde = undefined; // kein altes Ende mit Uhrzeit: die Dauer ergibt sich unten
+        }
+        uhrzeitBehalten = `Nur ein Tag genannt – die Uhrzeit ${zeitStart.slice(1, 6)}${endeAlt && endeAlt.zeit ? `–${endeAlt.zeit.slice(1, 6)}` : ''} ist geblieben. `
+          + 'Soll er ganztägig werden: ganztaegig: true.';
+      }
       const patch = {};
       if (w.titel !== undefined) patch.title = w.titel;
-      if (w.start !== undefined) patch.start = w.start;
-      if (w.end !== undefined) patch.end = w.end;
-      else if (w.start !== undefined) {
-        const ende = dauerBehalten(basis.start, basis.end, w.start);
+      if (neuStart !== undefined) patch.start = neuStart;
+      if (neuEnde !== undefined) patch.end = neuEnde;
+      else if (neuStart !== undefined) {
+        const ende = dauerBehalten(basis.start, basis.end, neuStart);
         if (ende !== undefined) patch.end = ende;
       }
       if (w.ganztaegig !== undefined) patch.allDay = w.ganztaegig;
@@ -1168,7 +1201,7 @@ function createWerkzeuge({ store, bus, logger } = {}) {
           const v = wdh.serieVerschieben(serienDaten, bezug, {
             start: patch.start !== undefined ? patch.start : basis.start,
             end: Object.prototype.hasOwnProperty.call(patch, 'end') ? patch.end : undefined,
-          });
+          }, { eigeneRegel: patch.recurrence !== undefined });
           patch.start = v.start;
           if (v.end !== undefined) patch.end = v.end;
           if (v.recurrence && patch.recurrence === undefined) patch.recurrence = v.recurrence;
@@ -1185,6 +1218,16 @@ function createWerkzeuge({ store, bus, logger } = {}) {
       }
       const unveraendert = !geteilt && rec.id === vorher.id && rec.rev === vorher.rev;
       const kurzform = terminKurz(rec);
+      // Bei einer Serie nennt "wann" das Vorkommen, um das es ging (dessen
+      // neue Lage), sonst das naechste -- nicht den Beginn der Serie im
+      // Januar. Claude bestaetigt dem Nutzer genau diesen Satz.
+      const vorkommen = wdh.istSerie(rec.data)
+        ? vorkommenFuer(rec, neuStart !== undefined ? neuStart.slice(0, 10) : bezug)
+        : null;
+      if (vorkommen) {
+        const lage = wdh.aufTagLegen(rec.data, vorkommen);
+        kurzform.wann = spanneDeutsch(lage.start, lage.end);
+      }
       const ueber = ueberschneidungenFuer(rec);
       const inhalt = {
         ok: true,
@@ -1199,9 +1242,11 @@ function createWerkzeuge({ store, bus, logger } = {}) {
         titel: rec.data.title,
         start: rec.data.start,
         end: rec.data.end || null,
+        ...(vorkommen ? { vorkommen } : {}),
         wann: kurzform.wann,
         ...(kurzform.wiederholung ? { wiederholung: kurzform.wiederholung } : {}),
         erinnerung_minuten: kurzform.erinnerung_minuten,
+        ...(uhrzeitBehalten ? { hinweis_uhrzeit: uhrzeitBehalten } : {}),
         ueberschneidungen: ueber,
         hinweis: unveraendert
           ? 'Nichts geändert – der Termin stand schon so im Kalender.'
@@ -1212,7 +1257,7 @@ function createWerkzeuge({ store, bus, logger } = {}) {
         inhalt,
         ergebnis: unveraendert
           ? `${kurz(rec.data.title, 50)}: nichts zu ändern`
-          : `${kurz(rec.data.title, 50)} → ${kurzform.wann}${wieOft}${ueberschneidungSatz(ueber)}`,
+          : `${kurz(rec.data.title, 50)} → ${kurzform.wann}${wieOft}${vorkommen && kurzform.wiederholung && !w.nurAm ? ` · ${kurzform.wiederholung}` : ''}${ueberschneidungSatz(ueber)}`,
         produced: unveraendert ? [] : [rec.id],
       };
     },

@@ -299,6 +299,9 @@ function createFolderSync(deps = {}) {
   const vaultCrypto = deps.vaultCrypto || null;
   const identitaet = deps.identitaet || null;
   const postfach = deps.postfach || null;
+  /** Fingerabdrücke der Startinhalte (app.js startBasen): gemeinsamer Ausgangsstand fester Start-IDs. */
+  const saatBasen = typeof deps.saatBasen === 'function' ? deps.saatBasen
+    : (deps.saatBasen && typeof deps.saatBasen === 'object' ? () => deps.saatBasen : () => ({}));
   const log = typeof deps.logger === 'function' ? deps.logger('sync.folder') : (deps.logger || nullLogger());
 
   const appVersion = safeAppVersion();
@@ -455,22 +458,29 @@ function createFolderSync(deps = {}) {
       state = emptyState();
       return state;
     }
-    state = decodeState(raw);
+    let klartext = false;
+    state = decodeState(raw, () => { klartext = true; });
     // Aus der Zeit vor der PIN: Fingerabdrücke jedes Satzes nicht länger im
     // Klartext neben einem verschlüsselten Tresor.
-    if (raw.length && raw[0] === 0x7b && vault.enabled && vault.state === 'unlocked') saveState();
+    if (klartext && vault.enabled && vault.state === 'unlocked') saveState();
     return state;
   }
 
-  function decodeState(raw) {
-    const attempts = raw.length && raw[0] === 0x7b /* '{' */
-      ? [() => raw.toString('utf8'), () => vault.decrypt(raw).toString('utf8')]
-      : [() => vault.decrypt(raw).toString('utf8'), () => raw.toString('utf8')];
-    for (const attempt of attempts) {
+  /**
+   * Klartext zuerst als JSON versuchen, dann entsiegeln: Am ersten Byte ist
+   * nichts zu erkennen (ein Siegel beginnt mit einem zufälligen IV).
+   */
+  function decodeState(raw, alsKlartext = () => {}) {
+    const attempts = [
+      [() => raw.toString('utf8'), true],
+      [() => vault.decrypt(raw).toString('utf8'), false],
+    ];
+    for (const [attempt, klar] of attempts) {
       try {
         const parsed = JSON.parse(attempt());
         if (parsed && typeof parsed === 'object' && parsed.devices && typeof parsed.devices === 'object') {
           const ziele = parsed.ziele && typeof parsed.ziele === 'object' && !Array.isArray(parsed.ziele) ? parsed.ziele : {};
+          if (klar) alsKlartext();
           return { v: STATE_VERSION, devices: parsed.devices, ziele };
         }
       } catch {
@@ -700,6 +710,26 @@ function createFolderSync(deps = {}) {
     return !!(manifest && stand && manifest.generation === stand.generation && manifest.sha256 === stand.sha256);
   }
 
+  /** Höchstens so viele Stände, die vielleicht noch dort liegen, werden gemerkt. */
+  const MAX_VORHER = 8;
+
+  /**
+   * Was in einem Zielordner von mir liegen kann: der zuletzt gemerkte Stand
+   * und, solange er nicht bestätigt ist (Schreiben abgebrochen, Stick voll,
+   * gezogen), die Stände davor. `vorher` war früher ein einzelnes Objekt.
+   */
+  function vorherListe(zielStand) {
+    if (!zielStand || !zielStand.vorher) return [];
+    return (Array.isArray(zielStand.vorher) ? zielStand.vorher : [zielStand.vorher])
+      .filter((v) => v && Number.isInteger(v.generation) && typeof v.sha256 === 'string');
+  }
+
+  /** Liegt dort ein Postfach, das ich geschrieben habe (oder geschrieben haben kann)? */
+  function vonMir(vorhanden, zielStand) {
+    if (!zielStand) return false;
+    return passt(vorhanden, zielStand) || vorherListe(zielStand).some((v) => passt(vorhanden, v));
+  }
+
   /** Das Manifest, das gerade in meinem Postfach liegt: {generation, sha256} oder null. */
   async function eigenesManifest(dir) {
     let raw;
@@ -768,7 +798,7 @@ function createFolderSync(deps = {}) {
     const zielStand = s.ziele[zielKey] && typeof s.ziele[zielKey] === 'object' ? s.ziele[zielKey] : null;
     const vorhanden = await eigenesManifest(mine);
     const lesbar = !!(vorhanden && Number.isInteger(vorhanden.generation) && isHex64(vorhanden.sha256));
-    if (lesbar && zielStand && !passt(vorhanden, zielStand) && !passt(vorhanden, zielStand.vorher)) {
+    if (lesbar && zielStand && !vonMir(vorhanden, zielStand)) {
       log.warn(`In ${mine} liegt ein Postfach mit der Kennung dieser KI, das sie nicht geschrieben hat.`);
       emit('sync.folder', { action: 'zwilling', folder: dir, deviceId: ich });
       return { ...out, grund: 'zwilling', zwilling: true };
@@ -825,12 +855,20 @@ function createFolderSync(deps = {}) {
     const { manifest, records } = gebaut;
 
     // Erst merken, dann schreiben: Bricht es danach ab, liegt dort entweder
-    // das alte Postfach (steht als "vorher" im Stand) oder das neue.
+    // das neue Postfach oder eines, das in "vorher" steht. War der letzte
+    // Stand selbst nie bestätigt (Schreiben gescheitert, Stick gezogen),
+    // bleiben auch die davor mögliche Kandidaten; sonst hielte sich die KI
+    // nach zwei Fehlschlägen für einen Zwilling (Prüfung Runde 1, ENOSPC).
+    const kandidaten = zielStand
+      ? [{ generation: zielStand.generation, sha256: zielStand.sha256 },
+        ...(zielStand.bestaetigt === false ? vorherListe(zielStand) : [])].slice(0, MAX_VORHER)
+      : [];
     s.ziele[zielKey] = {
       generation,
       sha256: manifest.sha256,
       at,
-      vorher: zielStand ? { generation: zielStand.generation, sha256: zielStand.sha256 } : null,
+      vorher: kandidaten,
+      bestaetigt: false,
     };
     if (!saveState()) {
       if (zielStand) s.ziele[zielKey] = zielStand;
@@ -839,12 +877,21 @@ function createFolderSync(deps = {}) {
     }
 
     report({ phase: 'write', done: 0, total: records.length });
-    await writeFileAtomic(path.join(mine, RECORDS_NAME), records, 'Das Schreiben der Datensätze');
-    await writeFileAtomic(
-      path.join(mine, MANIFEST_NAME),
-      Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'),
-      'Das Schreiben der Beschreibungsdatei',
-    );
+    try {
+      await writeFileAtomic(path.join(mine, RECORDS_NAME), records, 'Das Schreiben der Datensätze');
+      await writeFileAtomic(
+        path.join(mine, MANIFEST_NAME),
+        Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'),
+        'Das Schreiben der Beschreibungsdatei',
+      );
+    } catch (err) {
+      // Nichts Neues angekommen: dort liegt weiter, was vorher dort lag.
+      if (zielStand) s.ziele[zielKey] = zielStand;
+      else delete s.ziele[zielKey];
+      saveState();
+      throw err;
+    }
+    s.ziele[zielKey].bestaetigt = true;
     // Ein Postfach aus Protokoll 1 lag im Klartext; es hat hier nichts mehr zu suchen.
     try { await fs.promises.unlink(path.join(mine, ALT_RECORDS_NAME)); } catch { /* war nicht da */ }
     report({ phase: 'write', done: records.length, total: records.length });
@@ -1184,10 +1231,16 @@ function createFolderSync(deps = {}) {
       }
       if (outcome.status === 'applied') {
         applied++;
-        // Eine Kopie bekommt KEINE Basis: Mit Basis hielte der Partner sie
-        // über die mitgereiste Basis für "hier endgültig gelöscht" (v8).
-        if (!merge.istKopieId(entry.id)) bases[entry.id] = { h: entry.hash, at };
-        else if (entry.action === 'create') neueKopien.push({ titel: merge.titelOhneZusatz(entry.record), kopieId: entry.id });
+        // Auch eine Kopie, die aus dem Postfach des Partners kommt, bekommt
+        // ihre Basis: Beide Seiten hatten sie so. Ohne Basis wäre jede
+        // spätere Löschung oder Bearbeitung der Kopie ein Konflikt, und die
+        // lebende bzw. zufällige Fassung gewönne (Prüfung Runde 1). KEINE
+        // Basis bekommt nur die Kopie, die beideBehalten hier selbst anlegt
+        // (unten; v8).
+        bases[entry.id] = { h: entry.hash, at };
+        if (merge.istKopieId(entry.id) && entry.action === 'create') {
+          neueKopien.push({ titel: merge.titelOhneZusatz(entry.record), kopieId: entry.id });
+        }
         push({ id: entry.id, type: entry.type, status: 'applied', action: outcome.action, rev: outcome.rev });
       } else {
         skipped++;
@@ -1231,7 +1284,10 @@ function createFolderSync(deps = {}) {
         bases[conflict.recordId] = { h: hash, at, note: 'fassung' };
       }
       let kopieId = null;
-      if (kopie && !store.get(kopie.id, { includeDeleted: true })) {
+      // Führt das Postfach des Partners diese Kopie schon (lebend oder als
+      // Grabstein), kommt sie von dort oder wurde dort gelöscht: keine eigene.
+      const imPostfach = kopie && ctx.kopienImPostfach instanceof Set && ctx.kopienImPostfach.has(kopie.id);
+      if (kopie && !imPostfach && !store.get(kopie.id, { includeDeleted: true })) {
         let outcome;
         try {
           outcome = applyOne({ record: kopie, action: 'create' });
@@ -1344,6 +1400,46 @@ function createFolderSync(deps = {}) {
     return result;
   }
 
+  /**
+   * Welche Konflikt-Kopien führt dieses Postfach (lebend oder als Grabstein)?
+   * Ein Vorlauf nur über die IDs: Jede Zeile beginnt mit {"id":"…"
+   * (JSON.stringify eines Satzes aus dem Speicher).
+   * @returns {Promise<Set<string>>}
+   */
+  async function kopieIdsIn(gepackt) {
+    const ids = new Set();
+    const pruefe = (zeile) => {
+      const m = /^\{"id":"([^"]{1,80})"/.exec(zeile);
+      if (m && merge.istKopieId(m[1])) ids.add(m[1]);
+    };
+    try {
+      const decoder = new StringDecoder('utf8');
+      let rest = '';
+      let ueberspringen = false; // der Rest einer überlangen Zeile
+      await pipeline(Readable.from([gepackt]), zlib.createGunzip(), async function lesen(stuecke) {
+        for await (const stueck of stuecke) {
+          rest += decoder.write(stueck);
+          let i = rest.indexOf('\n');
+          while (i !== -1) {
+            if (!ueberspringen) pruefe(rest.slice(0, i));
+            ueberspringen = false;
+            rest = rest.slice(i + 1);
+            i = rest.indexOf('\n');
+          }
+          // Nur der Anfang einer Zeile zählt; eine lange Zeile muss nicht ganz im Speicher stehen.
+          if (rest.length > 256) {
+            if (!ueberspringen) pruefe(rest);
+            ueberspringen = true;
+            rest = '';
+          }
+        }
+        rest += decoder.end();
+        if (rest && !ueberspringen) pruefe(rest);
+      });
+    } catch { /* unlesbar: dann prüft der eigentliche Lauf und sagt es */ }
+    return ids;
+  }
+
   async function leseBox(box, remoteId, gesehen, report) {
     const pf = postfach;
     const ich = deviceId();
@@ -1401,8 +1497,11 @@ function createFolderSync(deps = {}) {
 
     const entry = deviceState(remoteId);
     const eigeneBasen = basesFromResolvedConflicts(remoteId, { ...entry.bases });
-    let bases = eigeneBasen;
+    const bases = eigeneBasen;
+    /** Die mitgereiste Basis (Kopfzeile), dahinter die Startinhalte. */
+    let basenFern = {};
     let kopf = null;
+    const kopienImPostfach = await kopieIdsIn(gepackt);
     const nameLokal = deviceName();
     let nameFern = box.deviceName || null;
 
@@ -1427,13 +1526,13 @@ function createFolderSync(deps = {}) {
         const local = store.get(rec.id, { includeDeleted: true });
         if (local) locals.set(local.id, local);
       }
-      const planned = merge.plan(locals, batch, { bases }, { clockSkewMs });
+      const planned = merge.plan(locals, batch, { bases, basenFern }, { clockSkewMs });
       for (const text of planned.warnings) addWarning(text);
 
       angewendet = true;
       const outcome = withActor(
         { kind: 'sync', label: nameFern || remoteId },
-        () => store.transaction(() => applyPlan(planned, { remoteId, nameLokal, nameFern })),
+        () => store.transaction(() => applyPlan(planned, { remoteId, nameLokal, nameFern, kopienImPostfach })),
       );
 
       Object.assign(bases, outcome.bases);
@@ -1471,12 +1570,20 @@ function createFolderSync(deps = {}) {
           throw new Uebergangen('zwilling');
         }
       }
-      // Die mitgereiste Basis: was der Partner mit mir vereinbart hat. Die
-      // eigene gewinnt (peer.js); die mitgereiste füllt nur Lücken (p2c).
+      // Die mitgereiste Basis: was der Partner mit mir vereinbart hat. Beide
+      // Basen zählen (merge.classify): Eine Seite, die noch auf einer von
+      // beiden steht, hat nichts geändert (p2c, Prüfung Runde 1).
       const mitgereist = kopf.basen && typeof kopf.basen[ich] === 'object' && kopf.basen[ich] ? kopf.basen[ich] : {};
       const sauber = {};
       for (const [id, h] of Object.entries(mitgereist)) if (typeof h === 'string' && h) sauber[id] = { h };
-      bases = { ...sauber, ...eigeneBasen };
+      // Feste Start-IDs ohne jede Basis: Beide hatten einmal die Einführung
+      // (app.js startBasen). Dann gewinnt, wer sie geändert hat, ohne Kopie.
+      let saat = {};
+      try { saat = saatBasen() || {}; } catch { saat = {}; }
+      for (const [id, h] of Object.entries(saat)) {
+        if (typeof h === 'string' && h && !eigeneBasen[id] && !sauber[id]) sauber[id] = { h, note: 'saat' };
+      }
+      basenFern = sauber;
       if (Array.isArray(kopf.partner)) {
         const selbst = kopf.partner.find((p) => p && p.id === remoteId);
         if (selbst && typeof selbst.name === 'string' && !nameFern) nameFern = selbst.name;
@@ -1823,7 +1930,7 @@ function createFolderSync(deps = {}) {
     const zielStand = loadState().ziele[zielKey] || null;
     const vorhanden = await eigenesManifest(mailboxDir(dir, deviceId()));
     const lesbar = !!(vorhanden && Number.isInteger(vorhanden.generation) && isHex64(vorhanden.sha256));
-    return !!(lesbar && zielStand && !passt(vorhanden, zielStand) && !passt(vorhanden, zielStand.vorher));
+    return !!(lesbar && zielStand && !vonMir(vorhanden, zielStand));
   }
 
   /**
@@ -1843,7 +1950,7 @@ function createFolderSync(deps = {}) {
     const zielStand = loadState().ziele[zielKey] || null;
     const mine = mailboxDir(dir, deviceId());
     const vorhanden = await eigenesManifest(mine);
-    if (!vorhanden || !zielStand || !(passt(vorhanden, zielStand) || passt(vorhanden, zielStand.vorher))) return false;
+    if (!vorhanden || !zielStand || !vonMir(vorhanden, zielStand)) return false;
     try {
       await fs.promises.rm(mine, { recursive: true, force: true });
       return true;

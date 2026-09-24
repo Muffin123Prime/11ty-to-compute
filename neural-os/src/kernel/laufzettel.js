@@ -21,7 +21,8 @@ const { NeuralError, StorageError } = require('./errors');
  *
  *   {"v":2, "pid":1234, "rechner":"<kennung>", "boot":1790000000, "seit":"ISO",
  *    "zustand":"startet|gesperrt|bereit", "port":21064, "url":"http://127.0.0.1:21064/",
- *    "instanz":"<12 Zeichen>", "heim":"<sha256(realpath(home))[0..15]>", "version":"0.1.0"}
+ *    "instanz":"<12 Zeichen>", "heim":"<sha256(realpath(home))[0..15]>", "version":"0.1.0",
+ *    "stopp":"<zufällig, das Beenden-Recht von `neural-os stop`>"}
  *
  * `seit` ist der Zeitpunkt des letzten Zustandswechsels: "startet" gilt nur
  * 120 s, und wer zwischen Vorraum und Anwendung wieder auf "startet" geht,
@@ -139,10 +140,14 @@ function zeitAus(iso) {
  * Wie steht es um den Laufzettel? Die Regeln der Reihe nach (Bauplan 2.4):
  *   1. fehlt -> frei
  *   2. unlesbar -> verwaist (jünger als 10 s: startet, er wird gerade geschrieben)
- *   3. anderer Rechner -> verwaist
- *   4. anderer Start dieses Rechners -> verwaist
- *   5. PID tot -> verwaist
- *   6. bereit/gesperrt und /api/health mit gleicher Instanz und gleichem Heim -> läuft
+ *   3. anderer Rechner -> verwaist; ein anderes heim als das eigene
+ *      (mitkopierter Zettel) -> verwaist
+ *   4./5. PID tot -> verwaist
+ *   6. bereit/gesperrt und /api/health mit gleicher Instanz und dem EIGENEN
+ *      heim -> läuft, auch bei anderer Bootzeit (die hängt an der Wanduhr,
+ *      eine Uhrkorrektur verschiebt sie; Abweichung von der Reihenfolge in
+ *      Bauplan 2.4, Prüfung Runde 1)
+ *   4. anderer Start dieses Rechners (sonst) -> verwaist
  *   7. startet und jünger als 120 s -> startet
  *   8. sonst verwaist (die PID ist wiederverwendet)
  * Eine alte Sperre `{pid, at}` ist verwaist, wenn die PID tot ist oder `at`
@@ -181,14 +186,26 @@ async function pruefen(paths, opts = {}) {
   }
 
   if (z.rechner !== kennung) return { zustand: 'verwaist', grund: 'Laufzettel von einem anderen Rechner', zettel: z };
-  if (!rechner.gleicherStart(z.boot, boot)) return { zustand: 'verwaist', grund: 'Laufzettel von einem früheren Start', zettel: z };
-  if (!lebt(z.pid)) return { zustand: 'verwaist', grund: `Prozess ${z.pid} läuft nicht mehr`, zettel: z };
+  // Ein Zettel, der ein anderes heim nennt, wurde mitkopiert (Stick samt
+  // data/ gesichert, während er lief): Er gehört dem Original, nicht uns.
+  const eigenesHeim = opts.heim || (paths.home ? heimKennung(paths.home) : null);
+  if (eigenesHeim && z.heim !== eigenesHeim) {
+    return { zustand: 'verwaist', grund: 'Laufzettel eines anderen Datenordners (mitkopiert)', zettel: z };
+  }
+  const gleicherBoot = rechner.gleicherStart(z.boot, boot);
+  if (!lebt(z.pid)) {
+    return { zustand: 'verwaist', grund: gleicherBoot ? `Prozess ${z.pid} läuft nicht mehr` : 'Laufzettel von einem früheren Start', zettel: z };
+  }
 
   if (z.zustand === 'bereit' || z.zustand === 'gesperrt') {
-    const heim = z.heim;
+    // Die Gesundheitsabfrage beweist mehr als die Bootzeit: bootZeit() hängt
+    // an der Wanduhr, und eine Uhrkorrektur (NTP, leere CMOS-Batterie)
+    // verschiebt sie. Antwortet unter dem Port DIESE Instanz mit DIESEM
+    // heim, läuft sie -- egal, was boot sagt (Prüfung Runde 1).
+    const heim = eigenesHeim || z.heim;
     const passt = (a) => a && a.instanz === z.instanz && a.heim === heim && typeof heim === 'string' && heim;
     let antwort = await frag(z.port);
-    if (!passt(antwort)) {
+    if (!passt(antwort) && gleicherBoot) {
       // Ein Server, der gerade eine PIN prüft oder kompaktiert, antwortet
       // vielleicht einmal zu spät; ein zweiter Blick kostet 0,4 s, ein
       // falsches "verwaist" einen zweiten Dienst auf demselben Tresor.
@@ -199,8 +216,10 @@ async function pruefen(paths, opts = {}) {
       const url = typeof z.url === 'string' && z.url ? z.url : `http://127.0.0.1:${z.port}/`;
       return { zustand: 'laeuft', url, zettel: z };
     }
+    if (!gleicherBoot) return { zustand: 'verwaist', grund: 'Laufzettel von einem früheren Start', zettel: z };
     return { zustand: 'verwaist', grund: `keine passende Antwort auf Port ${z.port}`, zettel: z };
   }
+  if (!gleicherBoot) return { zustand: 'verwaist', grund: 'Laufzettel von einem früheren Start', zettel: z };
 
   if (z.zustand === 'startet') {
     const seit = zeitAus(z.seit);
@@ -227,20 +246,67 @@ function exklusivSchreiben(datei, zettel) {
   fsyncOrdner(path.dirname(datei));
 }
 
-/** Einen verwaisten Zettel wegräumen, samt Tresor-Sperre DERSELBEN PID. */
+/** Zeigen zwei gelesene Zettel denselben Stand? (unlesbar gegen unlesbar zählt als gleich) */
+function derselbeZettel(a, b) {
+  if (!a || !b) return !a && !b;
+  return a.instanz === b.instanz && a.pid === b.pid && a.zustand === b.zustand && a.seit === b.seit;
+}
+
+/** So lange hält ein Aufräumer höchstens die Aufräum-Sperre; älter ist sie liegen geblieben. */
+const RAEUMEN_ALT_MS = 5000;
+
+/**
+ * Die Aufräum-Sperre `data/.lock.raeumen` ('wx'): Zwei Starts, die denselben
+ * verwaisten Zettel gesehen haben, räumen nacheinander, und der zweite sieht
+ * dann den frischen Zettel des ersten, statt ihn zu löschen (Prüfung Runde 1).
+ */
+async function mitRaeumSperre(paths, fn) {
+  const sperre = `${paths.lock}.raeumen`;
+  const ende = Date.now() + RAEUMEN_ALT_MS + 1000;
+  for (;;) {
+    try {
+      fs.closeSync(fs.openSync(sperre, 'wx', 0o600));
+      break;
+    } catch (err) {
+      if (!err || err.code !== 'EEXIST') throw err;
+      let alt = false;
+      try { alt = Date.now() - fs.statSync(sperre).mtimeMs > RAEUMEN_ALT_MS; } catch { /* eben weg */ }
+      if (alt || Date.now() > ende) {
+        try { fs.unlinkSync(sperre); } catch { /* ein anderer war schneller */ }
+        continue;
+      }
+      await new Promise((r) => { setTimeout(r, 25); });
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try { fs.unlinkSync(sperre); } catch { /* weg */ }
+  }
+}
+
+/**
+ * Einen verwaisten Zettel wegräumen, samt Tresor-Sperre DERSELBEN PID --
+ * aber nur, wenn dort noch genau der geprüfte Zettel liegt.
+ * @returns {boolean} weggeräumt?
+ */
 function verwaistesWegraeumen(paths, befund) {
   const alt = befund.zettel;
+  const jetzt = lesen(paths);
+  if (jetzt.fehlt) return false;
+  if (!derselbeZettel(jetzt.zettel, alt)) return false; // ein anderer Start hat schon einen neuen angelegt
   try { fs.unlinkSync(paths.lock); } catch (err) {
     if (!err || err.code !== 'ENOENT') throw err;
   }
-  if (!alt || !Number.isInteger(alt.pid) || alt.pid === process.pid) return;
+  if (!alt || !Number.isInteger(alt.pid) || alt.pid === process.pid) return true;
   const vaultLock = paths.vault ? path.join(paths.vault, '.lock') : (paths.home ? path.join(paths.home, 'vault', '.lock') : null);
-  if (!vaultLock) return;
+  if (!vaultLock) return true;
   let halter = null;
-  try { halter = JSON.parse(fs.readFileSync(vaultLock, 'utf8')); } catch { return; }
+  try { halter = JSON.parse(fs.readFileSync(vaultLock, 'utf8')); } catch { return true; }
   if (halter && halter.pid === alt.pid) {
     try { fs.unlinkSync(vaultLock); } catch { /* schon weg */ }
   }
+  return true;
 }
 
 function laeuftSchon(befund) {
@@ -258,7 +324,7 @@ function laeuftSchon(befund) {
 /**
  * Den eigenen Laufzettel anlegen.
  * @param {{lock:string, home:string, vault?:string}} paths
- * @param {{instanz?:string, heim?:string, zustand?:string, port?:number|null, url?:string|null, version?:string}} [felder]
+ * @param {{instanz?:string, heim?:string, zustand?:string, port?:number|null, url?:string|null, version?:string, stopp?:string}} [felder]
  * @param {object} [opts] wie bei `pruefen`
  * @returns {Promise<{instanz:string, zettel:object, aktualisieren:(f:object)=>boolean, freigeben:()=>boolean}>}
  * @throws NeuralError LAEUFT_SCHON {url} | STARTET_SCHON | AELTERE_VERSION
@@ -277,6 +343,9 @@ async function anlegen(paths, felder = {}, opts = {}) {
     heim: felder.heim || heimKennung(paths.home),
     version: felder.version || programmVersion,
   };
+  // Das Beenden-Recht für `neural-os stop` (ohne PIN-Sitzung, etwa unter
+  // Windows ohne SIGTERM). Steht nur hier, nie in /api/health.
+  if (typeof felder.stopp === 'string' && felder.stopp) zettel.stopp = felder.stopp;
 
   for (let versuch = 0; versuch < 4; versuch++) {
     try {
@@ -290,7 +359,7 @@ async function anlegen(paths, felder = {}, opts = {}) {
     const befund = await pruefen(paths, opts);
     if (befund.zustand === 'frei') continue;
     if (befund.zustand === 'verwaist') {
-      verwaistesWegraeumen(paths, befund);
+      await mitRaeumSperre(paths, () => verwaistesWegraeumen(paths, befund));
       continue;
     }
     throw laeuftSchon(befund);

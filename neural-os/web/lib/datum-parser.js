@@ -237,6 +237,9 @@ export function parse(text, jetzt = new Date()) {
     wtSpanne: null, // {von, bis} aus "Montag bis Freitag" (ohne "jeden")
     imMonat: null, // {n, index} aus "jeden ersten Freitag im Monat" (n = -1: der letzte)
     relVonTag: false, // relTag stammt aus heute/morgen/uebermorgen: "in einer Woche" rechnet von dort weiter
+    wtBis: null, // Index des zweiten Wochentags in "Dienstag 18 Uhr bis Donnerstag 12 Uhr"
+    dauerTage: null, // {n, tage, wort} aus "für 2 Wochen", "3 Tage"
+    recWiderspruch: false, // "alle 5 Tage freitags": Rhythmus und Wochentag passen nicht zusammen
     kaputt: false,
   };
 
@@ -267,8 +270,22 @@ export function parse(text, jetzt = new Date()) {
   function setzeRec(freq, interval = 1, tage = []) {
     if (!f.rec) f.rec = { freq, interval, byDay: new Set() };
     else if (f.rec.freq !== freq) {
-      // "alle 2 Wochen" + "dienstags": dieselbe Woche. Sonst gilt das Erste.
-      if (!(f.rec.freq === 'weekly' && freq === 'weekly')) return;
+      // "alle 14 Tage freitags": N Tage (durch 7 teilbar) und ein Wochentag
+      // sind alle N/7 Wochen an diesem Tag. Frueher gewann das Erste, und
+      // "freitags" verschwand still -- die Serie lief donnerstags.
+      const paar = [f.rec.freq, freq];
+      if (paar.includes('daily') && paar.includes('weekly')) {
+        const n = f.rec.freq === 'daily' ? f.rec.interval : interval;
+        if (n % 7 === 0) {
+          f.rec.freq = 'weekly';
+          f.rec.interval = n / 7;
+          for (const t of tage) f.rec.byDay.add(t);
+          return;
+        }
+      }
+      // Sonst gilt das Erste -- mit einem Hinweis, statt still etwas wegzuwerfen.
+      f.recWiderspruch = true;
+      return;
     }
     if (interval > 1) f.rec.interval = interval;
     for (const t of tage) f.rec.byDay.add(t);
@@ -343,6 +360,20 @@ export function parse(text, jetzt = new Date()) {
     const tage = [m[1], ...(m[2] || '').split(/\s*(?:,|und|&|\+)\s*/)].filter(Boolean).map(wtIndex);
     setzeRec('weekly', 1, tage);
   });
+  // "Gym Mo, Mi, Fr 7 Uhr", "Mo Mi Fr Gym", "Mo/Mi/Fr": eine Liste von
+  // Wochentagen ist eine Woche mit diesen Tagen, auch ohne "jeden" -- ein
+  // einzelner Termin an drei Tagen waere keiner. Zwei Tage nur mit "und"
+  // ("Montag und Dienstag Urlaub") bleiben, wie sie waren: das kann auch
+  // diese eine Woche meinen.
+  const WT_EL = `(?:${WT_VOLL}|mo|di|mi|do|fr|sa|so)\\.?`;
+  nimm(rx(`${B0}(${WT_EL})((?:\\s*(?:,|/|\\+|&)\\s*${WT_EL}|\\s+und\\s+${WT_EL}|\\s+${WT_EL})+)${B1}`), (m) => {
+    const teile = m[0].split(/\s*(?:,|\/|\+|&)\s*|\s+und\s+|\s+/u).filter(Boolean);
+    const tage = [...new Set(teile.map(wtIndex))];
+    if (tage.length < 2 || tage.some((t) => t < 0)) return false;
+    if (tage.length === 2 && /^\S+\s+und\s+\S+$/u.test(m[0].trim())) return false;
+    setzeRec('weekly', 1, tage);
+    return undefined;
+  });
   // "jeden 15." -- monatlich an diesem Tag.
   nimm(rx(`${B0}jede[nrs]?\\s+(\\d{1,2})\\.(?:\\s+(?:des|im)\\s+monats?)?(?!\\d)(?!\\s*(?:${WT_VOLL}|tag|woche|monat|jahr))`), (m, a) => {
     const d = Number(m[1]);
@@ -384,6 +415,17 @@ export function parse(text, jetzt = new Date()) {
     const y = m[4] ? Number(m[4]) : null;
     f.daten.push({ a, d: Number(m[1]), m: mo, y, bis: false });
     f.daten.push({ a: a + 1, d: Number(m[2]), m: mo, y, bis: true });
+  });
+  // "bis Weihnachten", "bis Jahresende", "bis Monatsende": feste Tage als Ende.
+  // Nur nach "bis" -- "Weihnachten bei Oma" bleibt ein Titel.
+  nimm(rx(`${B0}bis\\s+(?:(?:zum|zu|an)\\s+)?(weihnachten|heiligabend|silvester|jahresende|ende\\s+des\\s+jahres|monatsende|ende\\s+des\\s+monats)${B1}`), (m, a, b) => {
+    const w = m[1];
+    if (/^(weih|heilig)/.test(w)) f.daten.push({ a, e: b, d: 24, m: 12, y: null, bis: true });
+    else if (/^silv/.test(w) || w.includes('jahr')) f.daten.push({ a, e: b, d: 31, m: 12, y: null, bis: true });
+    else {
+      const [y, mo] = heute.split('-').map(Number);
+      f.daten.push({ a, e: b, d: Number(tagAus(y, mo + 1, 0).slice(8, 10)), m: mo, y, bis: true });
+    }
   });
   // 2026-10-03
   nimm(rx(`${B0}${praep}(\\d{4})-(\\d{1,2})-(\\d{1,2})${B1}`), (m, a, b) => {
@@ -496,7 +538,16 @@ export function parse(text, jetzt = new Date()) {
   });
   const modRe = '(nächste[nrs]?|naechste[nrs]?|kommende[nrs]?|übernächste[nrs]?|uebernaechste[nrs]?|diese[nrs]?)';
   nimm(rx(`${B0}(?:(am|ab)\\s+)?(?:${modRe}\\s+)?(${WT_VOLL}|mo|di|mi|do|fr|sa|so)(\\.)?,?${B1}`), (m, a, b) => {
-    if (f.wt) return false;
+    if (f.wt) {
+      // "Dienstag 18 Uhr bis Donnerstag 12 Uhr": der zweite Wochentag nach
+      // "bis" ist der Tag des Endes (wie "5.10. 9 Uhr bis 7.10. 16 Uhr").
+      // Frueher endete das Seminar am Mittwoch, und "Donnerstag" stand im Titel.
+      if (f.wtBis !== null || f.wt.b === undefined || m[1] || m[2]) return false;
+      if (!/(?:^|\s)(?:bis|-|–)\s*$/u.test(s.slice(f.wt.b, a))) return false;
+      if (m[3].length === 2 && !/^\s*\d/.test(s.slice(b))) return false;
+      f.wtBis = wtIndex(m[3]);
+      return undefined;
+    }
     const wort = m[3];
     if (wort.length === 2 && !m[1] && !m[2]) {
       // Ein Kuerzel nur, wo es nicht "so" im Satz sein kann.
@@ -506,22 +557,39 @@ export function parse(text, jetzt = new Date()) {
     }
     let mod = 0;
     if (m[2]) mod = /^(ü|ue)ber/.test(m[2]) ? 2 : /^diese/.test(m[2]) ? 0 : 1;
-    f.wt = { index: wtIndex(wort), mod };
+    f.wt = { index: wtIndex(wort), mod, b };
     return undefined;
   });
 
   /* ---- 6. Uhrzeiten ---- */
   const T = '(\\d{1,2})(?:[:.](\\d{2}))?';
-  nimm(rx(`${B0}(?:(von|zwischen|ab)\\s+)?${T}\\s*(?:uhr\\s*)?(-|–|—|bis|und)\\s*${T}(?:\\s*uhr)?${B1}`), (m) => {
-    if (m[4] === 'und' && m[1] !== 'zwischen') return false;
-    const [h, mi, h2, mi2] = [Number(m[2]), Number(m[3] || 0), Number(m[5]), Number(m[6] || 0)];
-    if (h > 24 || h2 > 24 || mi > 59 || mi2 > 59) return false;
-    // Mit Minuten geschrieben ("5:30-7") ist der Beginn 24-Stunden-Zeit (siehe oben);
-    // das Ende richtet sich wie immer nach dem Beginn (endeNach).
-    f.spanne = { h: h % 24, min: mi, literal: literal(m[2]) || m[3] !== undefined, h2: h2 % 24, min2: mi2, literal2: literal(m[5]) };
+  const STUNDE = `(\\d{1,2}|${Object.keys(ZAHLWORT).sort((x, y) => y.length - x.length).join('|')})`;
+  // Ein Ende der Spanne: "14", "14:30", "14h", "halb 11". Mit "h" und "halb"
+  // wurde "14-15h" frueher zu 15-16 Uhr mit "Meeting 14" im Titel, und
+  // "halb 10 bis 11" zu morgen 10-11 Uhr mit "Meeting halb".
+  const SP_TEIL = `(?:halb\\s+${STUNDE}|${T})`;
+  const halbH = (n) => (n - 1 === 0 ? 12 : (n - 1) % 24);
+  nimm(rx(`${B0}(?:(von|zwischen|ab)\\s+)?${SP_TEIL}\\s*(?:uhr\\s*|h\\s*)?(-|–|—|bis|und)\\s*${SP_TEIL}(?:\\s*(?:uhr|h))?${B1}`), (m) => {
+    if (m[5] === 'und' && m[1] !== 'zwischen') return false;
+    const teil = (halb, hs, ms, istBeginn) => {
+      if (halb !== undefined) {
+        const n = zahl(halb);
+        if (!n || n > 24) return null;
+        return { h: halbH(n), min: 30, literal: false };
+      }
+      const h = Number(hs);
+      const mi = Number(ms || 0);
+      if (h > 24 || mi > 59) return null;
+      // Mit Minuten geschrieben ("5:30-7") ist der Beginn 24-Stunden-Zeit (siehe oben);
+      // das Ende richtet sich wie immer nach dem Beginn (endeNach).
+      return { h: h % 24, min: mi, literal: literal(hs) || (istBeginn && ms !== undefined) };
+    };
+    const a1 = teil(m[2], m[3], m[4], true);
+    const a2 = teil(m[6], m[7], m[8], false);
+    if (!a1 || !a2) return false;
+    f.spanne = { h: a1.h, min: a1.min, literal: a1.literal, h2: a2.h, min2: a2.min, literal2: a2.literal, zwischen: m[1] === 'zwischen' };
     return undefined;
   });
-  const STUNDE = `(\\d{1,2}|${Object.keys(ZAHLWORT).sort((x, y) => y.length - x.length).join('|')})`;
   nimm(rx(`${B0}(?:(?:um|gegen|ab)\\s+)?halb\\s+${STUNDE}(?:\\s*uhr)?${B1}`), (m, a) => {
     const n = zahl(m[1]);
     if (!n || n > 24) return false;
@@ -604,6 +672,19 @@ export function parse(text, jetzt = new Date()) {
   nimm(rx(`${B0}(?:(?:für|fuer)\\s+)?(\\d{1,2}(?:[,.]\\d)?)h${B1}`), (m) => {
     f.dauer = Math.round(Number(m[1].replace(',', '.')) * 60);
     return f.dauer > 0 ? undefined : false;
+  });
+
+  // "für 2 Wochen", "3 Tage", "für 30 Tage": eine Dauer in ganzen Tagen --
+  // bei Ganztaegigem das Ende, bei einer Serie ihr Ende (Anzahl bzw. bis).
+  // Frueher blieb "2 Wochen" im Titel, und aus "für 30 Tage" wurde eine
+  // endlose Serie.
+  nimm(rx(`${B0}(?:(?:für|fuer|über|ueber)\\s+)?${ZAHL}\\s*(tag(?:e|en)?|woche(?:n)?)${B1}`), (m, a, b) => {
+    const n = zahl(m[1]);
+    if (!n) return false;
+    const tage = m[2].startsWith('t') ? n : n * 7;
+    if (tage < 1 || tage > 366) return false;
+    f.dauerTage = { n, tage, wort: text.slice(a, b).trim() };
+    return undefined;
   });
 
   /* ---- 9. ganztaegig ---- */
@@ -695,8 +776,15 @@ export function parse(text, jetzt = new Date()) {
     }
   }
 
+  if (f.wtBis !== null && tag && !bisTag && !f.rec) {
+    let d = (f.wtBis - wochentag(tag) + 7) % 7;
+    if (d === 0) d = 7;
+    bisTag = plusTage(tag, d);
+  }
+
   // Eine Serie "jeden Dienstag" beginnt am ersten Dienstag ab dem Tag.
   let rec = null;
+  let sperre = null;
   if (f.rec) {
     const byDay = [...f.rec.byDay].sort((x, y) => x - y);
     if (f.rec.freq === 'weekly' && byDay.length) {
@@ -707,9 +795,24 @@ export function parse(text, jetzt = new Date()) {
     rec = { freq: f.rec.freq, interval: Math.min(99, f.rec.interval) };
     if (f.rec.freq === 'weekly') rec.byDay = byDay.map((i) => WT_CODES[i]);
     rec.until = bisTag && bisTag >= (tag || heute) ? bisTag : null;
+    // Ein Ende VOR dem ersten Termin ("jeden Mittwoch bis 29.9.", am Mittwoch
+    // ist der 30.): nicht still eine endlose Serie, sondern ein Satz, und
+    // "Eintragen" wartet, bis das stimmt.
+    if (bisTag && bisTag < (tag || heute)) sperre = 'Die Serie endet vor ihrem ersten Termin.';
     rec.count = f.anzahl;
+    if (f.dauerTage && !rec.count && !rec.until) {
+      if (rec.freq === 'daily' && rec.interval === 1 && !/woche/.test(f.dauerTage.wort)) rec.count = f.dauerTage.n;
+      else rec.until = plusTage(tag || heute, f.dauerTage.tage - 1);
+    }
+    // Anzahl UND Ende ("6 x dienstags bis 20.12."): der Server nimmt nur
+    // eines. Die Anzahl ist die genauere Angabe; gesagt wird es trotzdem.
+    if (rec.count && rec.until) {
+      hinweis = hinweis || `Beides angegeben – es gilt „${rec.count}-mal“, das Ende am ${Number(rec.until.slice(8, 10))}.${Number(rec.until.slice(5, 7))}. entfällt.`;
+      rec.until = null;
+    }
     bisTag = null;
   }
+  if (f.recWiderspruch && !hinweis) hinweis = 'Rhythmus und Wochentag passen nicht zusammen – es gilt der Rhythmus. Für einen Wochentag: „jeden Freitag“ oder „alle 2 Wochen freitags“.';
 
   // Die Uhrzeit.
   let startMin = null;
@@ -738,7 +841,11 @@ export function parse(text, jetzt = new Date()) {
   if (!tag) {
     tag = heute;
     // Eine Uhrzeit ohne Tag, die heute schon vorbei ist, meint morgen.
-    if (startMin !== null && !rec && !f.ganztags && startMin < jetztMin) tag = plusTage(heute, 1);
+    // Mit einem Ende, das noch kommt, laeuft er gerade: heute ("halb 10 bis 11"
+    // um 10:05). "zwischen 9 und 11" ist dagegen ein Fenster, in dem etwas
+    // kommt (der Handwerker) -- um 10 eingetragen, meint das morgen.
+    const laeuft = endeMin !== null && endeMin > jetztMin && !(f.spanne && f.spanne.zwischen);
+    if (startMin !== null && !rec && !f.ganztags && startMin < jetztMin && !laeuft) tag = plusTage(heute, 1);
   }
 
   const ganz = f.ganztags || startMin === null;
@@ -759,10 +866,18 @@ export function parse(text, jetzt = new Date()) {
     }
   }
 
+  if (f.dauerTage && !rec) {
+    if (ganz) {
+      if (!end && f.dauerTage.tage > 1) end = plusTage(start, f.dauerTage.tage - 1);
+    } else if (!hinweis) {
+      hinweis = `„${f.dauerTage.wort}“ bei einer Uhrzeit: eingetragen ist nur der erste Tag. Für mehrere Tage die Uhrzeit weglassen.`;
+    }
+  }
+
   if (!hinweis && start.slice(0, 10) < heute && !rec) hinweis = 'Das liegt in der Vergangenheit.';
 
   const { titel, ort } = restText(text, used);
-  return { titel, start, end, allDay: ganz, recurrence: rec, ort, hinweis };
+  return { titel, start, end, allDay: ganz, recurrence: rec, ort, hinweis, sperre };
 
   /* ---- Helfer, die f und heute sehen ---- */
 

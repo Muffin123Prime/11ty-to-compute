@@ -40,9 +40,17 @@ const pad = (n) => String(n).padStart(2, '0');
 
 /* ------------------------------------------------------------ Texte */
 
-/** Text fuer SUMMARY, LOCATION, DESCRIPTION maskieren (RFC 5545, 3.3.11). */
+/**
+ * Text fuer SUMMARY, LOCATION, DESCRIPTION maskieren (RFC 5545, 3.3.11).
+ * TEXT darf keine Steuerzeichen ausser HTAB enthalten: \v und \f werden
+ * Leerzeichen, der Rest faellt weg. Sonst lehnt die Kalender-App die Datei
+ * ab oder schneidet am \u0000 ab -- auch bei Bestand, der vor der Pruefung
+ * in checkEvent gespeichert wurde.
+ */
 function textMaskieren(text) {
   return String(text === undefined || text === null ? '' : text)
+    .replace(/[\u000B\u000C]/g, ' ')
+    .replace(/[\u0000-\u0008\u000E-\u001F\u007F]/g, '')
     .replace(/\\/g, '\\\\')
     .replace(/;/g, '\\;')
     .replace(/,/g, '\\,')

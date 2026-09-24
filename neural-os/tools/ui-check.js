@@ -1135,6 +1135,32 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
   await warte(900);
   check(await page.locator('.kal__weeks').count() === 1, 'Taste M zurück zum Monat');
 
+  /* --- Ein ausgefallener Tag einer Serie (Karte "Termin fällt einmal aus" -> Öffnen) --- */
+  {
+    const gitarre = store.create('event', {
+      title: 'Gitarre-Probe', start: '2026-10-07T17:00', end: '2026-10-07T17:45', allDay: false, source: 'user',
+      recurrence: { freq: 'weekly', interval: 1, byDay: ['WE'], until: '2026-10-28', count: null }, exdates: ['2026-10-14'],
+    });
+    await store.flush();
+    await page.goto(`${base}/#/kalender?id=${gitarre.id}&am=2026-10-14`, { waitUntil: 'domcontentloaded' });
+    await warte(1500);
+    const blattText = (await page.locator('.kal__sheet').innerText().catch(() => '')).replace(/\s+/g, ' ');
+    const knoepfe = await page.locator('.kal__sheet button').allInnerTexts().catch(() => []);
+    check(/fällt aus/i.test(blattText) && !knoepfe.some((k) => /Bearbeiten|Löschen/.test(k)),
+      'Ein ausgefallener Tag öffnet als „fällt aus“ – ohne Bearbeiten/Löschen eines Termins, den es nicht gibt', blattText.slice(0, 90));
+    const doch = page.locator('.kal__sheet').getByRole('button', { name: 'Doch stattfinden lassen' });
+    if (await doch.count()) {
+      await doch.click();
+      await warte(1300);
+      check((store.get(gitarre.id).data.exdates || []).length === 0, '„Doch stattfinden lassen“ nimmt den Tag aus den Ausnahmen',
+        JSON.stringify(store.get(gitarre.id).data.exdates));
+    } else {
+      bad('Am ausgefallenen Tag steht „Doch stattfinden lassen“ bereit');
+    }
+    store.remove(gitarre.id);
+    await store.flush();
+  }
+
   /* --- Erinnerung im Kopf, solange Neural OS offen ist --- */
   const bald = new Date(Date.now() + 10 * 60000);
   const wandzeit = (t) => `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T${pad(t.getHours())}:${pad(t.getMinutes())}`;

@@ -721,7 +721,8 @@ test('zwei Tresore mit verschiedenen PINs gleichen über den Paarschlüssel ab, 
 
     // sync-folder.json bleibt mit dem eigenen Tresorschlüssel versiegelt (Befund 17).
     const roh = fs.readFileSync(path.join(twin.home, 'sync-folder.json'));
-    assert.notEqual(roh[0], 0x7b);
+    // Kein Klartext: ein Siegel ist nie gültiges JSON (sein erstes Byte ist zufällig, auch mal „{“).
+    assert.throws(() => JSON.parse(roh.toString('utf8')));
     const stand = JSON.parse(twin.vaultCrypto.decryptBuffer(roh).toString('utf8'));
     assert.ok(stand.devices[enc.deviceId]);
   } finally {

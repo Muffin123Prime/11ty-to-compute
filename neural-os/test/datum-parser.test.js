@@ -326,3 +326,45 @@ test('Wandzeit: Tag fuer Tag gerechnet, auch ueber die Zeitumstellung', async ()
   assert.equal(d.gibtEs(2028, 2, 29), true);
   assert.equal(d.tagKurz('2026-09-24', JETZT), 'Do., 24. Sept.', 'deutsche Kurzform mit Punkt, wie Intl de-DE');
 });
+
+/* ---------------------------------------------- Runde 3 (Pruefer), Do 24.09.2026 10:05 */
+// Jeder dieser Saetze wurde vorher falsch gelesen -- meist still: ein Wort
+// verschwand, blieb im Titel stehen, oder die Serie wurde endlos.
+
+// "alle N Tage" (durch 7 teilbar) plus Wochentag ist "alle N/7 Wochen an diesem Tag".
+const ALLE = (n, byDay, extra = {}) => WOECHENTLICH(byDay, { interval: n, ...extra });
+fall('alle 14 Tage freitags Stammtisch 20 Uhr', { titel: 'Stammtisch', start: '2026-09-25T20:00', recurrence: ALLE(2, ['FR']) }, DO);
+fall('Stammtisch freitags alle 14 Tage 20 Uhr', { titel: 'Stammtisch', start: '2026-09-25T20:00', recurrence: ALLE(2, ['FR']) }, DO);
+fall('alle 7 Tage montags Sport', { titel: 'Sport', start: '2026-09-28', recurrence: ALLE(1, ['MO']) }, DO);
+fall('alle 5 Tage freitags Laufen', { titel: 'Laufen', recurrence: { freq: 'daily', interval: 5, until: null, count: null }, hinweis: 'Rhythmus und Wochentag passen nicht zusammen – es gilt der Rhythmus. Für einen Wochentag: „jeden Freitag“ oder „alle 2 Wochen freitags“.' }, DO);
+
+// Wochentag mit Uhrzeit bis Wochentag mit Uhrzeit.
+fall('Seminar Dienstag 18 Uhr bis Donnerstag 12 Uhr', { titel: 'Seminar', start: '2026-09-29T18:00', end: '2026-10-01T12:00', allDay: false }, DO);
+fall('Seminar von Montag 9 Uhr bis Mittwoch 16 Uhr', { titel: 'Seminar', start: '2026-09-28T09:00', end: '2026-09-30T16:00' }, DO);
+
+// Aufzaehlungen von Wochentagen ohne "jeden".
+fall('Gym Mo, Mi, Fr 7 Uhr', { titel: 'Gym', start: '2026-09-25T07:00', recurrence: WOECHENTLICH(['MO', 'WE', 'FR']) }, DO);
+fall('Mo Mi Fr Gym 7 Uhr', { titel: 'Gym', start: '2026-09-25T07:00', recurrence: WOECHENTLICH(['MO', 'WE', 'FR']) }, DO);
+fall('Gym Mo/Mi/Fr 7 Uhr', { titel: 'Gym', start: '2026-09-25T07:00', recurrence: WOECHENTLICH(['MO', 'WE', 'FR']) }, DO);
+
+// Spannen mit "h" und "halb".
+fall('Meeting 14-15h', { titel: 'Meeting', start: '2026-09-24T14:00', end: '2026-09-24T15:00' }, DO);
+fall('Meeting morgen 10-11h', { titel: 'Meeting', start: '2026-09-25T10:00', end: '2026-09-25T11:00' }, DO);
+fall('Meeting 10h-11h', { titel: 'Meeting', start: '2026-09-24T10:00', end: '2026-09-24T11:00' }, DO);
+fall('Meeting 9 bis halb 11', { titel: 'Meeting', start: '2026-09-24T09:00', end: '2026-09-24T10:30' }, DO);
+fall('Meeting halb 10 bis 11', { titel: 'Meeting', start: '2026-09-24T09:30', end: '2026-09-24T11:00' }, DO);
+
+// Dauer in Tagen oder Wochen.
+fall('Urlaub ab 1.10. für 2 Wochen', { titel: 'Urlaub', start: '2026-10-01', end: '2026-10-14', allDay: true }, DO);
+fall('Urlaub 3 Tage ab Montag', { titel: 'Urlaub', start: '2026-09-28', end: '2026-09-30', allDay: true }, DO);
+fall('Kur für 3 Wochen ab 5.10.', { titel: 'Kur', start: '2026-10-05', end: '2026-10-25', allDay: true }, DO);
+fall('Vitamin D jeden Morgen um 8 für 30 Tage', { titel: 'Vitamin D', start: '2026-09-24T08:00', recurrence: { freq: 'daily', interval: 1, until: null, count: 30 } }, DO);
+
+// "bis" vor dem ersten Termin, und feste Tage als Ende.
+fall('Yoga jeden Mittwoch bis 29.9.', { titel: 'Yoga', sperre: 'Die Serie endet vor ihrem ersten Termin.' }, DO);
+fall('Training jeden Dienstag 18-19:30 bis Weihnachten', { titel: 'Training', recurrence: WOECHENTLICH(['TU'], { until: '2026-12-24' }), sperre: null }, DO);
+fall('Standup werktags 9:15 bis Jahresende', { titel: 'Standup', recurrence: WOECHENTLICH(['MO', 'TU', 'WE', 'TH', 'FR'], { until: '2026-12-31' }) }, DO);
+fall('Weihnachten bei Oma', null, DO);
+
+// Anzahl UND Ende: eines davon, mit Hinweis -- kein 400 beim Eintragen.
+fall('Kurs 6 x dienstags bis 20.12.', { titel: 'Kurs', recurrence: WOECHENTLICH(['TU'], { count: 6 }), hinweis: 'Beides angegeben – es gilt „6-mal“, das Ende am 20.12. entfällt.' }, DO);

@@ -144,16 +144,24 @@ function vorschau(paths, flags) {
   }
   const portable = pathsMod.portableInfo(paths.home);
   let ki = { id: null, name: null };
+  let kiErneuert = null;
   try {
     const identitaet = require('../src/kernel/identitaet').createIdentitaet({
       config, paths, portable, speichern: (c) => configMod.save(paths.config, c),
     });
     identitaet.sicherstellen();
+    // Auch den Marker prüfen, schon hier: Kam data/ von einem anderen Stick,
+    // bekommt die KI ihre neue Kennung VOR dem Vorraum. Sonst lauschte der
+    // Vorraum auf dem Port der alten KI, und sein Cookie hieße nach ihr
+    // (nach der PIN sofort PIN_NOETIG; Prüfung Runde 1). createApp erfährt
+    // es über opts.kiErneuert (Audit, Bus).
+    const marker = identitaet.pruefeMarker();
+    if (marker.aktion === 'erneuert') kiErneuert = { grund: 'daten-kopiert', id: marker.id };
     ki = { id: identitaet.id || null, name: identitaet.name || null };
   } catch { /* createApp meldet es gleich, mit Grund */ }
   const wunsch = portWunsch(flags);
   const port = wunsch !== undefined ? wunsch : (Number(config.server && config.server.port) || 7777);
-  return { config, portable, ki, port };
+  return { config, portable, ki, port, kiErneuert };
 }
 
 /**
@@ -202,7 +210,9 @@ async function hochfahren(flags, { dienst, erreichbar = () => {}, beiStart = () 
   const paths = pathsMod.ensureLayout(pathsMod.layout(homeAus(flags)));
   const heim = laufzettel.heimKennung(paths.home);
   const instanz = laufzettel.neueInstanz();
-  const zettel = await laufzettel.anlegen(paths, { instanz, heim, zustand: 'startet' });
+  // Das Beenden-Recht für `neural-os stop`: steht nur im Laufzettel.
+  const stopp = require('node:crypto').randomBytes(24).toString('base64url');
+  const zettel = await laufzettel.anlegen(paths, { instanz, heim, zustand: 'startet', stopp });
   const log = logMod.logger('start');
 
   const lage = { app: null, vorraum: null, boot: null, ende: null, waechter: null };
@@ -255,7 +265,7 @@ async function hochfahren(flags, { dienst, erreichbar = () => {}, beiStart = () 
   const weiter = () => { if (lage.ende) throw ABBRUCH; };
 
   try {
-    const { config, portable, ki, port } = vorschau(paths, flags);
+    const { config, portable, ki, port, kiErneuert } = vorschau(paths, flags);
     beiStart({ lage, beenden, portable });
     const tryPorts = portWunsch(flags) !== undefined ? 1 : (portable ? 20 : 12);
 
@@ -275,7 +285,9 @@ async function hochfahren(flags, { dienst, erreichbar = () => {}, beiStart = () 
     }
     if (vorraumNoetig) {
       gesperrt = true;
-      lage.vorraum = await vorraumMod.oeffnen({ paths, config, host: '127.0.0.1', port, tryPorts, ki, instanz, heim });
+      lage.vorraum = await vorraumMod.oeffnen({
+        paths, config, host: '127.0.0.1', port, tryPorts, ki, instanz, heim, stopp, beiStopp: (grund) => beenden(grund || 'stop'),
+      });
       weiter();
       zettel.aktualisieren({ zustand: 'gesperrt', port: lage.vorraum.port, url: lage.vorraum.url });
       await erreichbar(lage.vorraum.url);
@@ -290,11 +302,12 @@ async function hochfahren(flags, { dienst, erreichbar = () => {}, beiStart = () 
       zettel.aktualisieren({ zustand: 'startet' });
     }
 
-    lage.boot = boot(flags, { passphrase }).then((app) => { lage.app = app; return app; });
+    lage.boot = boot(flags, { passphrase, kiErneuert }).then((app) => { lage.app = app; return app; });
     const app = await lage.boot;
     lage.boot = null;
     weiter();
     app.instanz = instanz;
+    if (app.auth && typeof app.auth.stoppGeheimnisSetzen === 'function') app.auth.stoppGeheimnisSetzen(stopp);
     app.beenden = (grund) => beenden(grund || 'knopf');
 
     const seeded = await seedIfEmpty(app);
@@ -647,14 +660,18 @@ async function cmdStarter(flags) {
 /* ------------------------------------------------------------------ stop */
 
 /** POST /api/system/beenden an 127.0.0.1:<port>. */
-function beendenAnfragen(port) {
+function beendenAnfragen(port, stopp) {
   const { classify } = require('../src/net/gate');
   if (classify('127.0.0.1') !== 'loopback') return Promise.reject(new Error('Nur lokal.'));
   return new Promise((resolve, reject) => {
     const koerper = Buffer.from('{}');
     const req = require('node:http').request({
       host: '127.0.0.1', port, path: '/api/system/beenden', method: 'POST', agent: false,
-      headers: { host: `127.0.0.1:${port}`, 'x-neural-os': '1', 'content-type': 'application/json', 'content-length': koerper.length },
+      headers: {
+        host: `127.0.0.1:${port}`, 'x-neural-os': '1', 'content-type': 'application/json', 'content-length': koerper.length,
+        // Das Beenden-Recht aus dem Laufzettel: ohne PIN-Sitzung, auch im Vorraum.
+        ...(typeof stopp === 'string' && stopp ? { 'x-neural-os-stopp': stopp } : {}),
+      },
     }, (res) => {
       const teile = [];
       res.on('data', (c) => teile.push(c));
@@ -681,7 +698,7 @@ async function cmdStop(flags) {
 
   let antwort;
   try {
-    antwort = await beendenAnfragen(z.port);
+    antwort = await beendenAnfragen(z.port, z.stopp);
   } catch (err) {
     antwort = { status: 0, json: { error: { message: err && err.message } } };
   }

@@ -133,7 +133,11 @@ async function createApp(opts = {}) {
   try {
     identitaet.sicherstellen();
     const marker = identitaet.pruefeMarker();
-    if (marker.aktion === 'erneuert') {
+    // Der Dienst prüft den Marker schon vor dem Vorraum (bin/neural-os.js
+    // vorschau); dann ist hier nichts mehr zu erneuern, gemeldet wird es trotzdem.
+    const vorher = opts.kiErneuert && typeof opts.kiErneuert === 'object' && opts.kiErneuert.id === identitaet.id;
+    if (vorher && marker.aktion !== 'erneuert') bus.publish('ki.erneuert', { grund: opts.kiErneuert.grund || 'daten-kopiert' });
+    if (marker.aktion === 'erneuert' || vorher) {
       audit.write('ki.erneuert', { grund: 'daten-kopiert' });
       log.warn('Dieser Datenordner kam von einem anderen Stick und ist jetzt eine eigene KI.');
     }
@@ -422,6 +426,7 @@ async function createApp(opts = {}) {
   const kopplung = kopplungMod
     ? optional(failures, 'kopplung', () => kopplungMod.createKopplung({
       store, bus, config, paths, portable, identitaet, vaultCrypto, history, logger, version: VERSION,
+      saatBasen: startBasen,
       ableitung: {
         async aussetzen(fn) {
           derivationSuspended++;
@@ -890,17 +895,15 @@ async function gekoppeltOderAngeboten(app) {
 }
 
 /** Seed a brand-new vault so the first run is not an empty void. */
-async function seedIfEmpty(app) {
-  if (app.store.count('note') > 0 || app.store.count('agent') > 0) return false;
-  if (await gekoppeltOderAngeboten(app)) return false;
-
-  // Die Reihenfolge ist Absicht. Die Ableitung der Verknüpfungen läuft bei
-  // jedem Anlegen mit und vergäbe ihren Kanten zufällige IDs. Deshalb wird
-  // jeder Satz angelegt, bevor sein Ziel existiert (die Einführung vor der
-  // Notiz, auf die sie verweist; die Aufgaben vor ihrem Projekt), und die
-  // Kanten kommen danach mit festen IDs. Sie sind genau die, die die
-  // Ableitung selbst zöge; ein späteres "neu ableiten" behält sie.
-  app.store.create('note', {
+/**
+ * Die Startinhalte als reine Daten, in der Reihenfolge des Anlegens (siehe
+ * seedIfEmpty). Dieselben Daten ergeben auf jedem Stick dieselben
+ * Fingerabdrücke; `startBasen()` gibt sie dem Ordner-Abgleich als
+ * gemeinsamen Ausgangsstand (Prüfung Runde 1: zwei schon benutzte Sticks).
+ * @returns {{vorAgenten:Array<{type,id,data}>, nachAgenten:Array<{type,id,data}>}}
+ */
+function startInhalte() {
+  const willkommen = {
     title: 'Willkommen in Neural OS',
     body: [
       'Dies ist deine eigene KI. Alles, was du hier schreibst, bleibt auf diesem Stick.',
@@ -929,9 +932,8 @@ async function seedIfEmpty(app) {
     ].join('\n'),
     tags: ['willkommen', 'anleitung'],
     pinned: true,
-  }, { id: START.willkommen });
-
-  app.store.create('note', {
+  };
+  const claude = {
     title: 'Claude verbinden',
     body: [
       'Neural OS benutzt Claude von Anthropic. Dafür braucht es einmal einen Schlüssel.',
@@ -948,7 +950,64 @@ async function seedIfEmpty(app) {
       '#anleitung',
     ].join('\n'),
     tags: ['anleitung'],
-  }, { id: START.claude });
+  };
+  // Wortgleich mit src/graph/derive.js (desiredEdges): weicht der Grund ab,
+  // schreibt die nächste Ableitung ihn um, und die Sticks wären verschieden.
+  const kante = (id, from, to, kind, reason) => ({ type: 'edge', id, data: { from, to, kind, source: 'derived', reason, weight: 1 } });
+  return {
+    vorAgenten: [
+      { type: 'note', id: START.willkommen, data: willkommen },
+      { type: 'note', id: START.claude, data: claude },
+    ],
+    nachAgenten: [
+      { type: 'task', id: START.aufgabeClaude, data: { title: 'Claude verbinden', projectId: START.projekt, priority: 1 } },
+      { type: 'task', id: START.aufgabeGehirn, data: { title: 'Gehirn ansehen', projectId: START.projekt } },
+      {
+        type: 'project',
+        id: START.projekt,
+        data: { name: 'Mein erstes Projekt', description: 'Ein Platz, um Notizen, Aufgaben und Chats zu einem Vorhaben zu bündeln.' },
+      },
+      kante(START.kanteLink, START.willkommen, START.claude, 'links-to', 'Wiki-Link [[Claude verbinden]] im Text'),
+      kante(START.kanteClaude, START.aufgabeClaude, START.projekt, 'belongs-to', 'Aufgabe gehoert zu diesem Projekt'),
+      kante(START.kanteGehirn, START.aufgabeGehirn, START.projekt, 'belongs-to', 'Aufgabe gehoert zu diesem Projekt'),
+    ],
+  };
+}
+
+let startBasenCache = null;
+
+/**
+ * Fingerabdruck je Start-ID, so wie der Speicher die Startinhalte ablegt
+ * (schema.validate ergänzt die Vorgaben). Zwei Sticks, die ihre Einführung
+ * je selbst bekamen, hatten beide genau diesen Stand: Er ist ihre gemeinsame
+ * Basis, solange sie noch keine andere haben.
+ * @returns {Object<string,string>}
+ */
+function startBasen() {
+  if (startBasenCache) return startBasenCache;
+  const schema = require('./store/schema');
+  const merge = require('./sync/merge');
+  const out = {};
+  const { vorAgenten, nachAgenten } = startInhalte();
+  for (const r of [...vorAgenten, ...nachAgenten]) {
+    out[r.id] = merge.fingerprint({ type: r.type, data: schema.validate(r.type, r.data) });
+  }
+  startBasenCache = Object.freeze(out);
+  return startBasenCache;
+}
+
+async function seedIfEmpty(app) {
+  if (app.store.count('note') > 0 || app.store.count('agent') > 0) return false;
+  if (await gekoppeltOderAngeboten(app)) return false;
+
+  // Die Reihenfolge ist Absicht. Die Ableitung der Verknüpfungen läuft bei
+  // jedem Anlegen mit und vergäbe ihren Kanten zufällige IDs. Deshalb wird
+  // jeder Satz angelegt, bevor sein Ziel existiert (die Einführung vor der
+  // Notiz, auf die sie verweist; die Aufgaben vor ihrem Projekt), und die
+  // Kanten kommen danach mit festen IDs. Sie sind genau die, die die
+  // Ableitung selbst zöge; ein späteres "neu ableiten" behält sie.
+  const { vorAgenten, nachAgenten } = startInhalte();
+  for (const r of vorAgenten) app.store.create(r.type, r.data, { id: r.id });
 
   // Built-in agent templates, deliberately with restrictive defaults. Agenten
   // reisen beim Koppeln nicht mit, ihre IDs dürfen also je Stick verschieden sein.
@@ -966,21 +1025,7 @@ async function seedIfEmpty(app) {
     }
   }
 
-  app.store.create('task', { title: 'Claude verbinden', projectId: START.projekt, priority: 1 }, { id: START.aufgabeClaude });
-  app.store.create('task', { title: 'Gehirn ansehen', projectId: START.projekt }, { id: START.aufgabeGehirn });
-  app.store.create('project', {
-    name: 'Mein erstes Projekt',
-    description: 'Ein Platz, um Notizen, Aufgaben und Chats zu einem Vorhaben zu bündeln.',
-  }, { id: START.projekt });
-
-  // Wortgleich mit src/graph/derive.js (desiredEdges): weicht der Grund ab,
-  // schreibt die nächste Ableitung ihn um, und die Sticks wären verschieden.
-  const kante = (id, from, to, kind, reason) => app.store.create('edge', {
-    from, to, kind, source: 'derived', reason, weight: 1,
-  }, { id });
-  kante(START.kanteLink, START.willkommen, START.claude, 'links-to', 'Wiki-Link [[Claude verbinden]] im Text');
-  kante(START.kanteClaude, START.aufgabeClaude, START.projekt, 'belongs-to', 'Aufgabe gehoert zu diesem Projekt');
-  kante(START.kanteGehirn, START.aufgabeGehirn, START.projekt, 'belongs-to', 'Aufgabe gehoert zu diesem Projekt');
+  for (const r of nachAgenten) app.store.create(r.type, r.data, { id: r.id });
 
   await app.store.flush();
   return true;
@@ -999,4 +1044,4 @@ async function acquireLock(paths, felder = {}) {
   return async () => { griff.freigeben(); };
 }
 
-module.exports = { createApp, seedIfEmpty, acquireLock, sanitiseConfig, VERSION };
+module.exports = { createApp, seedIfEmpty, startBasen, acquireLock, sanitiseConfig, VERSION };

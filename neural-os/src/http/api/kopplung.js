@@ -76,7 +76,18 @@ function register(router) {
 
   router.post('/api/kopplung/eigenstaendig', async (rc) => {
     rc.requireOwner(WAS);
-    return kopplungOf(rc).eigenstaendig();
+    // Das Sitzungs-Cookie heißt nach der Kennung der KI (nos_s_<id>) und
+    // ist mit ihr gesiegelt. Der Browser, der gerade mit seiner PIN-Sitzung
+    // den Knopf gedrückt hat, bekommt eine Sitzung der NEUEN Kennung; sonst
+    // stünde er sofort vor PIN_NOETIG (Prüfung Runde 1).
+    const auth = rc.ctx.auth;
+    const zustand = auth && typeof auth.sitzungsZustand === 'function' ? auth.sitzungsZustand(rc.req) : null;
+    const ergebnis = await kopplungOf(rc).eigenstaendig();
+    if (zustand && zustand.vorhanden && typeof auth.sitzungAusstellen === 'function') {
+      const cookie = auth.sitzungAusstellen();
+      if (cookie) rc.res.setHeader('Set-Cookie', cookie);
+    }
+    return ergebnis;
   });
 }
 

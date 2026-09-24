@@ -143,17 +143,31 @@ function baseNote(base) {
 /**
  * How two versions of one record relate.
  *
+ * Zwei Basen (Ordner-Abgleich, Bauplan 2.8): `base` ist, was DIESES Gerät
+ * zuletzt mit dem Partner vereinbart hat, `baseFern` die mitgereiste Basis,
+ * also was der PARTNER zuletzt mit mir vereinbart hat. Jede der beiden ist ein
+ * Stand, den beide Seiten einmal hatten. Eine Seite, deren Fassung gleich
+ * einer der beiden ist, hat seitdem nichts geändert; die andere schon (Prüfung
+ * Runde 1: A ändert zweimal, bevor es das Echo liest, und die eigene Basis ist
+ * dann veraltet). Zeigen beide Seiten auf eine Basis (verschiedene), lässt
+ * sich nicht sagen, wer später war: Konflikt, beide behalten.
+ *
  * @param {object|null} local  the record as this device holds it (tombstones included)
  * @param {object|null} remote the record as the peer sent it
  * @param {{h:string}|string|null} [base] the state both devices last agreed on
+ * @param {{h:string}|string|null} [baseFern] die mitgereiste Basis des Partners
  * @returns {'identical'|'remote-newer'|'local-newer'|'conflict'|'remote-only'|'local-only'}
  */
-function classify(local, remote, base) {
+function classify(local, remote, base, baseFern) {
   if (!local && !remote) {
     throw new ValidationError('classify() braucht mindestens eine der beiden Fassungen.');
   }
 
-  const bh = baseHash(base);
+  const fh = baseHash(baseFern);
+  // Die Startinhalte (note 'saat') sind nur ein Ausgangsstand für zwei
+  // vorhandene Fassungen; wer den Satz gar nicht hat, hat ihn nicht gelöscht.
+  const saat = baseNote(baseFern) === 'saat';
+  const bh = baseHash(base) || ((local && remote) || !saat ? fh : null);
 
   if (!local) {
     // A tombstone we never had is nothing to do: both sides agree it is gone.
@@ -179,8 +193,11 @@ function classify(local, remote, base) {
   const rh = fingerprint(remote);
   if (lh === rh) return 'identical';
   if (!bh) return 'conflict';
-  if (lh === bh) return 'remote-newer';
-  if (rh === bh) return 'local-newer';
+  const vereinbart = [bh, fh].filter(Boolean);
+  const lokalUnveraendert = vereinbart.includes(lh);
+  const fernUnveraendert = vereinbart.includes(rh);
+  if (lokalUnveraendert && !fernUnveraendert) return 'remote-newer';
+  if (fernUnveraendert && !lokalUnveraendert) return 'local-newer';
   return 'conflict';
 }
 
@@ -236,6 +253,7 @@ function describeSides(local, remote) {
 function plan(localRecords, remoteRecords, state = {}, opts = {}) {
   const locals = toMap(localRecords);
   const bases = (state && typeof state.bases === 'object' && state.bases) || {};
+  const basenFern = (state && typeof state.basenFern === 'object' && state.basenFern) || {};
   const tolerance = Number.isFinite(opts.skewToleranceMs) && opts.skewToleranceMs >= 0
     ? opts.skewToleranceMs
     : DEFAULT_SKEW_TOLERANCE_MS;
@@ -291,8 +309,9 @@ function plan(localRecords, remoteRecords, state = {}, opts = {}) {
       continue;
     }
 
+    const baseFern = basenFern[remote.id] || null;
     const base = bases[remote.id] || null;
-    let classification = classify(local, remote, base);
+    let classification = classify(local, remote, base, baseFern);
     const hash = fingerprint(remote);
 
     if (skewed && classification === 'remote-newer' && remote.deletedAt && local && !local.deletedAt) {
@@ -314,8 +333,8 @@ function plan(localRecords, remoteRecords, state = {}, opts = {}) {
         recordType: remote.type,
         local: local || null,
         remote,
-        base: baseHash(base),
-        reason: base
+        base: baseHash(base || baseFern),
+        reason: base || baseFern
           ? describeSides(local, remote)
           : 'Dieser Eintrag ist auf beiden Geräten vorhanden, aber unterschiedlich, und die Geräte haben ihn noch nie '
             + 'gemeinsam abgeglichen. Ohne gemeinsamen Stand lässt sich nicht feststellen, welche Fassung die neuere ist.',
@@ -324,7 +343,7 @@ function plan(localRecords, remoteRecords, state = {}, opts = {}) {
     }
 
     if (classification === 'local-newer') {
-      const note = baseNote(base);
+      const note = baseNote(base || baseFern);
       skip.push({
         id: remote.id,
         type: remote.type,

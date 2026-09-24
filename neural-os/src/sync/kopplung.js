@@ -44,6 +44,10 @@ const DATEI = 'kopplungen.json';
 const ZUSTAND_VERSION = 1;
 /** So viele eigene Generationen reisen als Verlauf mit (Zwillingserkennung). */
 const VERLAUF_MAX = 64;
+/** So viele Suchläufe ohne Fund (je 15 s), dann gilt eine gelöschte Kopie als weg. */
+/** Entkoppel-Nachricht, die auf dem EIGENEN Stick für den Partner liegt: <Partner>.abmeldung */
+const ABMELDUNG = '.abmeldung';
+const ZWILLING_WEG_NACH = 3;
 const SCHLUESSEL_BYTES = 32;
 const NAME_MAX = 60;
 const FASSUNGEN_MAX = 20;
@@ -302,10 +306,19 @@ function createKopplung(deps = {}) {
       zustand = leerZustand();
       return zustand;
     }
-    const klartext = roh.length > 0 && roh[0] === 0x7b;
+    // Klartext (aus der Zeit vor der PIN) nicht am ersten Byte erkennen: Ein
+    // Siegel beginnt mit einem zufälligen IV, und das ist in etwa jedem
+    // 256. Fall ein „{“ (Prüfung Runde 1). Erst als JSON versuchen – ein
+    // Siegel ist nie gültiges JSON –, sonst entsiegeln.
+    let klartext = false;
+    let wert;
     try {
-      const text = klartext ? roh.toString('utf8') : vaultCrypto.decryptBuffer(roh).toString('utf8');
-      zustand = normalisieren(JSON.parse(text));
+      wert = JSON.parse(roh.toString('utf8'));
+      klartext = !!wert && typeof wert === 'object' && !Array.isArray(wert);
+    } catch { klartext = false; }
+    try {
+      const text = klartext ? null : vaultCrypto.decryptBuffer(roh).toString('utf8');
+      zustand = normalisieren(klartext ? wert : JSON.parse(text));
       unlesbar = false;
     } catch (err) {
       const e = asNeuralError(err);
@@ -348,6 +361,7 @@ function createKopplung(deps = {}) {
   const postfach = createPostfach({ zustand: laden, sichern, ich });
   const folder = createFolderSync({
     store, merge, bus, logger: deps.logger, config: deps.config, vaultCrypto, paths, identitaet, postfach,
+    saatBasen: deps.saatBasen,
   });
 
   /* ------------------------------------------------------ flüchtiger Stand */
@@ -356,6 +370,8 @@ function createKopplung(deps = {}) {
   let gefunden = [];
   /** Kennung -> {pfad, sync} der steckenden Partner */
   const steckt = new Map();
+  /** Suchläufe hintereinander, in denen der Zwilling (grund 'gefunden') nicht mehr da war */
+  let zwillingOhneFund = 0;
   /** Partner, deren Postfach ein neueres Protokoll trägt */
   const neuer = new Set();
   /** Partner, deren Postfach von einer Gabelung stammt (Zwilling beim Partner) */
@@ -741,10 +757,29 @@ function createKopplung(deps = {}) {
       if (g.zustand === 'zwilling') alsZwilling('gefunden', { pfad: g.pfad });
       else if (z.partner.some((p) => p.id === g.id)) steckt.set(g.id, { pfad: g.pfad, sync: path.join(g.pfad, 'sync') });
     }
-    // Der andere Stick trägt inzwischen eine eigene Kennung: vorbei.
-    if (z.zwilling && z.zwilling.grund === 'gefunden' && !liste.some((g) => g.zustand === 'zwilling')
-      && liste.some((g) => g.pfad === z.zwilling.pfad && g.id && g.id !== ich())) {
-      zwillingVorbei();
+    // Die Kopie ist weg (Prüfung Runde 1): Am gemerkten Pfad steckt ein
+    // Stick mit eigener Kennung oder ein Datenträger ohne diese KI
+    // (formatiert) -> sofort vorbei; ist der Pfad ganz weg (gelöscht oder
+    // abgezogen), nach einigen Suchläufen ohne Fund. Läuft die Kopie irgendwo
+    // weiter, erkennt sie das fremde Postfach bzw. die Gabelung beim Partner.
+    if (z.zwilling && z.zwilling.grund === 'gefunden' && !liste.some((g) => g.zustand === 'zwilling')) {
+      const pfad = z.zwilling.pfad;
+      let vorbei = liste.some((g) => g.pfad === pfad && g.id && g.id !== ich());
+      if (!vorbei && typeof pfad === 'string' && !punkte.some((p) => (gesperrt.get(p) || 0) > jetzt && (pfad === p || pfad.startsWith(p + path.sep)))) {
+        let st = null;
+        try { st = await dateisystem.stat(pfad); } catch { st = null; }
+        if (st && st.isDirectory() && !(await traegt(pfad, ich()))) vorbei = true;
+        else if (!st) {
+          zwillingOhneFund += 1;
+          if (zwillingOhneFund >= ZWILLING_WEG_NACH) vorbei = true;
+        }
+      }
+      if (vorbei) {
+        zwillingOhneFund = 0;
+        zwillingVorbei();
+      }
+    } else {
+      zwillingOhneFund = 0;
     }
     return liste.map((g) => ({ ...g }));
   }
@@ -824,8 +859,12 @@ function createKopplung(deps = {}) {
       version: null,
       erster: true,
     };
+    const ausstehendVorher = z.ausstehend;
     try {
       z.partner = z.partner.filter((p) => p.id !== b.id).concat(eintrag);
+      // Eine Entkoppel-Nachricht an B, die noch wartet, ist mit dem neuen
+      // Angebot überholt; zugestellt zöge sie es sofort zurück (Prüfung Runde 1).
+      z.ausstehend = z.ausstehend.filter((a) => a.an !== b.id);
       try {
         sichern();
         const angebot = { v: 1, von: ich(), name: identitaet.name, an: b.id, schluessel: eintrag.schluessel, at: nowIso() };
@@ -834,8 +873,13 @@ function createKopplung(deps = {}) {
           : angebot;
         const koppelOrdner = ordnerAnlegen(ordnerAnlegen(b.markerDir, 'sync'), 'koppeln');
         schreibeDauerhaft(path.join(koppelOrdner, `${ich()}.angebot`), `${JSON.stringify(inhalt)}\n`);
+        // Alte Nachrichten zu diesem Paar: meine Entkoppel-Nachricht auf B
+        // und meine eigene Abmeldung für B (siehe entkoppeln).
+        loeschen(path.join(koppelOrdner, `${ich()}.entkoppelt`));
+        if (eigenesSync) loeschen(path.join(eigenesSync, 'koppeln', `${b.id}${ABMELDUNG}`));
       } catch (err) {
         z.partner = z.partner.filter((p) => p !== eintrag).concat(vorher ? [vorher] : []);
+        z.ausstehend = ausstehendVorher;
         try { sichern(); } catch { /* der Fehler unten ist der wichtigere */ }
         throw err instanceof NeuralError ? err : new StorageError(`Das Angebot ließ sich nicht auf den Stick schreiben: ${err.message}`);
       }
@@ -951,9 +995,12 @@ function createKopplung(deps = {}) {
           erster: true,
         });
         gabelungen.delete(von);
+        // Eine eigene Entkoppel-Nachricht an ihn ist damit überholt.
+        z.ausstehend = z.ausstehend.filter((a) => a.an !== von);
         // Erst merken, dann das Angebot löschen: seedIfEmpty sieht immer eines von beiden.
         sichern();
         loeschen(datei);
+        loeschen(path.join(dir, `${von}${ABMELDUNG}`));
         hinweis = `Gekoppelt mit ${angebot.name}.`;
         out.angenommen.push({ id: von, name: angebot.name });
         melde('kopplung.angenommen', { id: von, name: angebot.name, text: hinweis });
@@ -983,6 +1030,33 @@ function createKopplung(deps = {}) {
     return out;
   }
 
+  /**
+   * Hat ein steckender Partner mich an seinem Rechner entkoppelt, liegt die
+   * Nachricht auf SEINEM Stick (`<ich>.abmeldung`, siehe entkoppeln). Dann
+   * entkopple ich ebenso, statt weiter mein Postfach auf seinen Stick zu legen
+   * und „abgeglichen“ zu zeigen.
+   */
+  async function abmeldungenAbholen() {
+    const z = laden();
+    for (const p of [...z.partner]) {
+      const s = steckt.get(p.id);
+      if (!s || !(await traegt(s.pfad, p.id))) continue;
+      const datei = path.join(s.sync, 'koppeln', `${ich()}${ABMELDUNG}`);
+      if (!fs.existsSync(datei) || !entkoppeltGueltig(datei, p)) continue;
+      z.partner = z.partner.filter((x) => x.id !== p.id);
+      sichern();
+      if (eigenesSync) loeschen(path.join(eigenesSync, p.id));
+      // Ohne Partner liest mein Postfach niemand mehr.
+      if (eigenesSync && !z.partner.length) loeschen(path.join(eigenesSync, ich()));
+      loeschen(path.join(s.sync, ich()));
+      loeschen(datei);
+      steckt.delete(p.id);
+      neuer.delete(p.id);
+      gabelungen.delete(p.id);
+      melde('kopplung.entkoppelt', { id: p.id, name: p.name });
+    }
+  }
+
   /* ---------------------------------------------------------- Entkoppeln */
 
   function zustellen(stick, nachricht) {
@@ -1005,6 +1079,7 @@ function createKopplung(deps = {}) {
       }
       try {
         zustellen({ pfad: g.pfad, sync: path.join(g.pfad, 'sync') }, a.nachricht);
+        if (eigenesSync) loeschen(path.join(eigenesSync, 'koppeln', `${a.an}${ABMELDUNG}`));
       } catch {
         rest.push(a);
       }
@@ -1047,7 +1122,20 @@ function createKopplung(deps = {}) {
           log.warn(`Die Entkoppel-Nachricht ließ sich nicht ablegen: ${err.message}`);
         }
       }
-      if (!zugestellt) z.ausstehend = z.ausstehend.filter((a) => a.an !== id).concat({ an: id, nachricht });
+      if (!zugestellt) {
+        z.ausstehend = z.ausstehend.filter((a) => a.an !== id).concat({ an: id, nachricht });
+        // Dieselbe Nachricht auch auf den EIGENEN Stick: Läuft der Partner
+        // mit diesem Stick, bevor ich mit seinem laufe, erfährt er es dort
+        // (Prüfung Runde 1: Lena entkoppelt an ihrem Laptop).
+        if (eigenesSync) {
+          try {
+            const ordner = ordnerAnlegen(eigenesSync, 'koppeln');
+            schreibeDauerhaft(path.join(ordner, `${id}${ABMELDUNG}`), `${JSON.stringify(nachricht)}\n`);
+          } catch (err) {
+            log.warn(`Die Abmeldung ließ sich nicht auf diesen Stick legen: ${err.message}`);
+          }
+        }
+      }
       sichern();
       steckt.delete(id);
       neuer.delete(id);
@@ -1134,7 +1222,8 @@ function createKopplung(deps = {}) {
       if (!z.partner.length && !z.ausstehend.length) return bericht;
       if (mitSuche) await finden();
       await ausstehendeZustellen();
-      if (!z.partner.length) return bericht;
+      await abmeldungenAbholen();
+      if (!laden().partner.length) return bericht;
 
       const selbst = ich();
       const erster = z.partner.some((p) => p.erster);

@@ -223,7 +223,8 @@ function regelPruefen(regel, startTag) {
   }
   // RFC 5545: UNTIL und COUNT schliessen sich aus. Beides zu nehmen hiesse zu
   // raten, welches gewinnt -- und das iPad raete womoeglich anders.
-  if (until && count) throw new ValidationError('Eine Serie endet entweder an einem Tag ("until") oder nach einer Anzahl ("count"), nicht beides.');
+  // Ohne Feldnamen: den Satz liest auch, wer im Formular nur "bis" sieht.
+  if (until && count) throw new ValidationError('Eine Serie endet entweder an einem Tag oder nach einer Anzahl von Terminen, nicht beides.');
   return { freq: regel.freq, interval, byDay, until, count };
 }
 
@@ -466,14 +467,39 @@ function wochentageDrehen(byDay, tage) {
 }
 
 /**
+ * Laesst sich "alle N Wochen an diesen Tagen", um `tage` verschoben, noch als
+ * EINE Regel schreiben? Nur dann ein Satz, warum nicht; sonst null.
+ *
+ * Warum: Wochen beginnen am Montag (WKST=MO). "Alle 2 Wochen Sa+So" einen Tag
+ * spaeter ist So+Mo -- der Sonntag bleibt in seiner Woche, der Montag
+ * rutscht in die naechste. Eine Regel "alle 2 Wochen am So, Mo" legt beide
+ * aber in DIESELBE Woche, also So 04.10. und Mo 12.10. statt Mo 05.10.: jeder
+ * zweite Montag laege in der falschen Woche. Das laesst sich mit einer Regel
+ * nicht ausdruecken; lieber ein Satz als eine still verschobene Serie.
+ * Rutschen alle Tage gleich weit (alle bleiben oder alle wechseln die
+ * Woche), wandert der Beginn der Serie mit und alles stimmt.
+ */
+function drehungPasstNicht(regel, startTag, tage) {
+  if (!regel || regel.freq !== 'weekly' || (regel.interval || 1) < 2 || !tage) return null;
+  const byDay = Array.isArray(regel.byDay) && regel.byDay.length ? regel.byDay : [wochentag(startTag)];
+  const wochen = new Set(byDay.map((t) => Math.floor((WOCHENTAGE.indexOf(t) + tage) / 7)));
+  if (wochen.size < 2) return null;
+  const vorher = byDay.map((t) => TAG_KURZ[t]).join(', ');
+  const nachher = wochentageDrehen(byDay, tage).map((t) => TAG_KURZ[t]).join(', ');
+  return `„Alle ${regel.interval} Wochen am ${vorher}“ lässt sich nicht als eine Serie auf ${nachher} verschieben: `
+    + 'ein Teil der Tage rutscht über den Montag in die nächste Woche. '
+    + 'Bitte die Tage einzeln ändern (etwa eine Serie je Wochentag) oder nur dieses Vorkommen verschieben.';
+}
+
+/**
  * Die GANZE Serie so verschieben, wie ein Vorkommen verschoben wurde.
  *
  * "Das Training ist ab jetzt um 19 Uhr": die KI kennt aus termine_lesen nur
  * das Vorkommen vom 29.09. und schickt dessen neue Zeit. Wuerde diese Zeit
  * zum neuen BEGINN der Serie, verschwaenden alle frueheren Vorkommen, und
  * eine Serie mit fester Anzahl liefe laenger. Stattdessen wird die Serie um
- * denselben Abstand verschoben -- Beginn, Anzahl und Ende bleiben, nur die
- * Lage aendert sich. Dieselbe Rechnung wie "Alle" beim Ziehen in der
+ * denselben Abstand verschoben -- Anzahl und genanntes Ende ("bis") bleiben,
+ * nur die Lage aendert sich. Dieselbe Rechnung wie "Alle" beim Ziehen in der
  * Kalenderansicht (serienPatch in web/views/kalender.js).
  *
  * Gerechnet wird mit Tagen und Uhrzeit-Text, nicht mit Millisekunden: ein
@@ -484,9 +510,11 @@ function wochentageDrehen(byDay, tage) {
  * @param {string} bezugTag  der Tag des Vorkommens, auf das sich `neu` bezieht
  * @param {{start:string, end?:string|null}} neu  neue Lage DIESES Vorkommens
  *   (`end` weggelassen = die Serie behaelt ihr Ende unveraendert)
+ * @param {{eigeneRegel?:boolean}} [opts]  true = der Aufrufer setzt die Regel selbst
+ * @throws {ValidationError}  wenn sich "alle N Wochen" so nicht als eine Regel schreiben laesst
  * @returns {{start:string, end?:string|null, recurrence?:object, exdates?:string[]}}
  */
-function serieVerschieben(daten, bezugTag, neu) {
+function serieVerschieben(daten, bezugTag, neu, { eigeneRegel = false } = {}) {
   const s0 = wandzeitLesen(daten.start);
   const offset = tageZwischen(bezugTag, s0.tag);
   const schieben = (text) => {
@@ -499,10 +527,22 @@ function serieVerschieben(daten, bezugTag, neu) {
   const neuTag = wandzeitLesen(out.start);
   const tage = neuTag ? tageZwischen(s0.tag, neuTag.tag) : 0;
   const regel = daten.recurrence;
-  if (tage && regel && typeof regel === 'object') {
+  // Bringt der Aufrufer selbst eine neue Regel mit ("ab jetzt montags,
+  // alle zwei Wochen"), gilt diese; gedreht wird nichts, nur die
+  // ausgelassenen Tage wandern mit der Lage.
+  if (tage && eigeneRegel && Array.isArray(daten.exdates) && daten.exdates.length) {
+    out.exdates = daten.exdates.map((d) => plusTage(d, tage));
+  }
+  if (tage && !eigeneRegel && regel && typeof regel === 'object') {
+    const passt = drehungPasstNicht(regel, s0.tag, tage);
+    if (passt) throw new ValidationError(passt);
     const r = { ...regel };
     if (r.freq === 'weekly' && Array.isArray(r.byDay) && r.byDay.length) r.byDay = wochentageDrehen(r.byDay, tage);
-    if (r.until) r.until = plusTage(r.until, tage);
+    // `until` bleibt stehen: "bis 30.10." hat der Nutzer so gesagt. Frueher
+    // wanderte es mit, und aus "jeden Freitag bis 30.10." wurde nach "ab
+    // jetzt montags" ein Termin am 2.11. -- nach dem genannten Ende. Faellt
+    // dadurch das letzte Vorkommen weg, ist das die ehrliche Folge von "bis".
+    // `count` bleibt ebenfalls: zehnmal bleibt zehnmal.
     out.recurrence = r;
     if (Array.isArray(daten.exdates) && daten.exdates.length) out.exdates = daten.exdates.map((d) => plusTage(d, tage));
   }
@@ -613,6 +653,7 @@ module.exports = {
   ersterTag,
   beginnAufVorkommen,
   serieVerschieben,
+  drehungPasstNicht,
   abTagTeilen,
   inWorten,
   datumDeutsch,

@@ -382,3 +382,50 @@ test('Vorraum: CSP ohne unsafe-inline für Skripte, das Skript der Seite per Has
     heim.cleanup();
   }
 });
+
+/* ------------------------------------------------ Prüfung Runde 1 (V) */
+
+test('Vorraum: richtige und falsche PIN gleichzeitig -> 200 und 401, die falsche bekommt kein Cookie', async () => {
+  const heim = tempHome('vorraum-gleichzeitig');
+  let v = null;
+  try {
+    await mitProfil(async () => {
+      const { paths, config } = await nurSchluessel(heim.home, '4711');
+      v = await vorraum.oeffnen({ paths, config, port: 0, ki: { id: KI, name: 'Max' }, instanz: 'i', heim: 'h' });
+      const richtig = rufe({ port: v.port, method: 'POST', pfad: '/api/vault/unlock', body: { passphrase: '4711' } });
+      await new Promise((r) => { setTimeout(r, 30); });
+      const falsch = rufe({ port: v.port, method: 'POST', pfad: '/api/vault/unlock', body: { passphrase: '0000' } });
+      const [a, b] = await Promise.all([richtig, falsch]);
+      assert.equal(a.status, 200, a.text);
+      assert.ok(cookieAus(a, `nos_s_${KI_TEIL}`));
+      assert.equal(b.status, 401, `falsche PIN angenommen: ${b.text}`);
+      assert.equal(cookieAus(b, 'nos_s_'), null);
+    });
+  } finally {
+    if (v) await v.schliessen().catch(() => {});
+    heim.cleanup();
+  }
+});
+
+test('Vorraum: gleichzeitige Fehlversuche umgehen die Sperre nicht (höchstens 5 geprüft, die richtige PIN danach 429)', async () => {
+  const heim = tempHome('vorraum-parallel');
+  let v = null;
+  try {
+    await mitProfil(async () => {
+      const { paths, config } = await nurSchluessel(heim.home, '4711');
+      v = await vorraum.oeffnen({ paths, config, port: 0, ki: { id: KI, name: 'Max' }, instanz: 'i', heim: 'h' });
+      const pins = ['0000', '0001', '0002', '0003', '0004', '0005', '0006', '0007', '0008', '0009', '0010'];
+      const unterwegs = pins.map((p) => rufe({ port: v.port, method: 'POST', pfad: '/api/vault/unlock', body: { passphrase: p } }));
+      await new Promise((r) => { setTimeout(r, 50); });
+      unterwegs.push(rufe({ port: v.port, method: 'POST', pfad: '/api/vault/unlock', body: { passphrase: '4711' } }));
+      const antworten = await Promise.all(unterwegs);
+      const geprueft = antworten.filter((r) => r.status === 401).length;
+      assert.ok(geprueft <= 4, `${geprueft} falsche PINs mit 401 ausgewertet: ${antworten.map((r) => r.status).join(' ')}`);
+      assert.equal(antworten[antworten.length - 1].status, 429, 'die richtige PIN in der Pause wird nicht geprüft');
+      assert.equal(antworten.filter((r) => r.status === 200).length, 0);
+    });
+  } finally {
+    if (v) await v.schliessen().catch(() => {});
+    heim.cleanup();
+  }
+});

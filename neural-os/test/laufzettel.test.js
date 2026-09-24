@@ -256,3 +256,77 @@ test('heimKennung: 16 Hex-Zeichen, derselbe Ordner gibt dieselbe Kennung', () =>
     h.cleanup();
   }
 });
+
+/* ------------------------------------------------ Prüfung Runde 1 (S) */
+
+test('Stick kopiert, während er läuft: ein Zettel mit fremdem heim ist verwaist, auch wenn dort jemand antwortet', async () => {
+  const h = heimAnlegen('nos-lz-kopie');
+  const fremdesHeim = 'aaaaaaaaaaaaaaaa';
+  const srv = await fakeServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    // Das ORIGINAL antwortet: dieselbe Instanz, sein eigenes heim.
+    res.end(JSON.stringify({ ok: true, instanz: 'abcdefghijkl', heim: fremdesHeim }));
+  });
+  try {
+    assert.notEqual(lz().heimKennung(h.paths.home), fremdesHeim);
+    schreibe(h.paths, zettel(h.paths, { port: srv.port, url: `${srv.url}/`, heim: fremdesHeim }));
+    const b = await lz().pruefen(h.paths, { pauseMs: 0 });
+    assert.equal(b.zustand, 'verwaist', 'die Kopie darf nicht das Original öffnen');
+    const eigen = await lz().anlegen(h.paths, { instanz: 'kopieinst001' }, { pauseMs: 0 });
+    assert.equal(JSON.parse(fs.readFileSync(h.paths.lock, 'utf8')).instanz, 'kopieinst001');
+    eigen.freigeben();
+  } finally {
+    await srv.close();
+    h.cleanup();
+  }
+});
+
+test('Uhrkorrektur: lebt die PID und antwortet /api/health passend, läuft der Dienst, egal was boot sagt', async () => {
+  const h = heimAnlegen('nos-lz-uhr');
+  const heim = lz().heimKennung(h.paths.home);
+  const vaultLock = path.join(h.paths.vault, '.lock');
+  const srv = await fakeServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, instanz: 'abcdefghijkl', heim }));
+  });
+  try {
+    schreibe(h.paths, zettel(h.paths, { port: srv.port, url: `${srv.url}/` }));
+    fs.writeFileSync(vaultLock, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), scope: 'store' }));
+    // Die Wanduhr springt um 1 h: bootZeit() = Date.now()/1000 - uptime springt mit.
+    const opts = { boot: rechner.bootZeit() + 3600, pauseMs: 0 };
+    const b = await lz().pruefen(h.paths, opts);
+    assert.equal(b.zustand, 'laeuft', JSON.stringify(b));
+    await assert.rejects(() => lz().anlegen(h.paths, { instanz: 'zweiter0000b' }, opts), (err) => err.code === 'LAEUFT_SCHON');
+    assert.ok(fs.existsSync(vaultLock), 'die Tresor-Sperre des laufenden Dienstes bleibt');
+
+    // Ohne passende Antwort bleibt es bei "früherer Start".
+    const tot = await lz().pruefen(h.paths, { boot: rechner.bootZeit() + 3600, pauseMs: 0, gesundheit: async () => null });
+    assert.equal(tot.zustand, 'verwaist');
+    assert.match(tot.grund, /Start/);
+  } finally {
+    await srv.close();
+    h.cleanup();
+  }
+});
+
+test('Zwei Starts sehen denselben verwaisten Zettel: nur einer bekommt ihn, der andere löscht den frischen nicht', async () => {
+  const h = heimAnlegen('nos-lz-race');
+  try {
+    // bereit, PID lebt (wiederverwendet), auf dem Port antwortet nichts Passendes.
+    schreibe(h.paths, zettel(h.paths, { port: 1, instanz: 'verwaist0001' }));
+    const langsam = { pauseMs: 0, gesundheit: () => new Promise((r) => { setTimeout(() => r(null), 300); }) };
+    const a = lz().anlegen(h.paths, { instanz: 'startaaaaaaa' }, langsam);
+    await new Promise((r) => { setTimeout(r, 150); });
+    const b = lz().anlegen(h.paths, { instanz: 'startbbbbbbb' }, langsam);
+    const [ra, rb] = await Promise.allSettled([a, b]);
+    const gewonnen = [ra, rb].filter((r) => r.status === 'fulfilled');
+    assert.equal(gewonnen.length, 1, `beide bekamen den Laufzettel: ${JSON.stringify([ra.status, rb.status])}`);
+    const verloren = [ra, rb].find((r) => r.status === 'rejected');
+    assert.match(verloren.reason.code, /STARTET_SCHON|LAEUFT_SCHON/);
+    const jetzt = JSON.parse(fs.readFileSync(h.paths.lock, 'utf8'));
+    assert.equal(jetzt.instanz, gewonnen[0].value.instanz, 'im Zettel steht der Gewinner');
+    gewonnen[0].value.freigeben();
+  } finally {
+    h.cleanup();
+  }
+});

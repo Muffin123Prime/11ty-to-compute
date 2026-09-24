@@ -128,6 +128,8 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /** Header whose presence proves the request was not made cross-origin. */
 const CSRF_HEADER = 'x-neural-os';
+/** Das Beenden-Recht von `neural-os stop` (siehe stoppGeheimnisSetzen). */
+const STOPP_HEADER = 'x-neural-os-stopp';
 
 /** Host names that always denote this machine. */
 const LOOPBACK_NAMES = new Set(['localhost', '127.0.0.1', '::1', '0:0:0:0:0:0:0:1']);
@@ -646,6 +648,20 @@ function createAuth({ store, config, logger, audit } = {}) {
 
   /** Ab dem ersten Browser, der die PIN eingegeben hat (siehe Kopf). */
   let bindungAktiv = false;
+  /**
+   * Das Beenden-Recht von `neural-os stop` (Laufzettel, Paket S): Wer den
+   * Laufzettel lesen kann, darf beenden, auch ohne PIN-Sitzung. Beenden gibt
+   * nichts preis; unter Windows gibt es sonst keinen sauberen Weg.
+   */
+  let stoppGeheimnis = null;
+  function stoppErlaubt(req, key) {
+    if (!stoppGeheimnis || key !== 'POST /api/system/beenden') return false;
+    const gegeben = req.headers && req.headers[STOPP_HEADER];
+    if (typeof gegeben !== 'string' || !gegeben) return false;
+    const a = Buffer.from(gegeben);
+    const b = Buffer.from(stoppGeheimnis);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
 
   function bindungNoetig(vc) {
     if (!vc || !vc.enabled || !bindungAktiv) return false;
@@ -671,6 +687,7 @@ function createAuth({ store, config, logger, audit } = {}) {
     if (FREI_OHNE_SITZUNG.has(key) || ((method === 'GET' || method === 'HEAD') && !path.startsWith('/api/') && path !== '/api')) {
       return 'frei';
     }
+    if (stoppErlaubt(req, key)) return 'frei';
     throw new NeuralError(
       'PIN_NOETIG',
       vc.state === 'unlocked'
@@ -855,6 +872,11 @@ function createAuth({ store, config, logger, audit } = {}) {
    */
   function bindungEinschalten() {
     bindungAktiv = true;
+  }
+
+  /** Paket S: das Beenden-Recht aus dem Laufzettel (siehe stoppErlaubt). */
+  function stoppGeheimnisSetzen(wert) {
+    stoppGeheimnis = typeof wert === 'string' && wert.length >= 16 ? wert : null;
   }
 
   /** Braucht ein lokaler Browser gerade eine PIN-Sitzung, und hat dieser sie? */
@@ -1084,6 +1106,7 @@ function createAuth({ store, config, logger, audit } = {}) {
     sitzungAusstellen,
     sitzungsZustand,
     bindungEinschalten,
+    stoppGeheimnisSetzen,
     get bindungAktiv() { return bindungAktiv; },
     tokenCookieName: () => tokenCookieName(config),
     sitzungsCookieName: () => sitzungsCookieName(config),
@@ -1115,6 +1138,7 @@ module.exports = {
   kiTeil,
   COOKIE_NAME,
   CSRF_HEADER,
+  STOPP_HEADER,
   LINK_PATH,
   BILDSCHIRM_RECHTE,
   SITZUNG_MAX_MS,

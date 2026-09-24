@@ -968,7 +968,15 @@ async function createServer(ctx = {}) {
         if (!isLoopbackAddress(req.socket && req.socket.remoteAddress)) {
           throw new PermissionError('Die Zustandsabfrage ist nur lokal erreichbar.');
         }
-        sendJson(rc, 200, { ok: true, at: new Date().toISOString(), instanz, heim: heimJetzt() });
+        // Instanz und heim nur unter dem eigenen Namen: Nach DNS-Rebinding
+        // fragte sonst eine fremde Seite heim ab, und heim ist aus dem
+        // Datenpfad nachrechenbar (Prüfung Runde 1). "Lebt" bleibt für jeden
+        // lokalen Aufrufer beantwortbar.
+        let eigenerName = true;
+        try { guardHost(req); } catch { eigenerName = false; }
+        sendJson(rc, 200, eigenerName
+          ? { ok: true, at: new Date().toISOString(), instanz, heim: heimJetzt() }
+          : { ok: true, at: new Date().toISOString() });
         return;
       }
 

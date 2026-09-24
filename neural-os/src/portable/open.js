@@ -99,12 +99,17 @@ function openInBrowser(url, opts = {}) {
       return;
     }
 
-    child.on('error', (err) => done({ opened: false, reason: err && err.message }));
+    // Aufgelöst wird, sobald der Öffner gestartet ist ('spawn') oder nicht
+    // startet ('error'). Der Zeitgeber ist nur Rückfall und hält Node bewusst
+    // am Leben: Mit unref endete der Starter, bevor „Fertig. Dieses Fenster
+    // kann zu.“ geschrieben war (Prüfung Runde 1).
+    const timer = setTimeout(() => done({ opened: true }), opts.timeoutMs || 300);
+    const fertig = (result) => { clearTimeout(timer); done(result); };
+    child.once('spawn', () => fertig({ opened: true }));
+    child.on('error', (err) => fertig({ opened: false, reason: err && err.message }));
     // The opener returns immediately on every platform; waiting for exit would
     // hang on the ones that hand off to a long-lived process.
     child.unref();
-    const timer = setTimeout(() => done({ opened: true }), opts.timeoutMs || 300);
-    if (timer.unref) timer.unref();
   });
 }
 

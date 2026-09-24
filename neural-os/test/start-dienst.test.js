@@ -26,10 +26,10 @@ const BIN = path.join(WURZEL, 'bin', 'neural-os.js');
 /* ------------------------------------------------------------- Werkzeuge */
 
 /** Einen Node-Prozess ohne TTY laufen lassen: stdin zu, stdout/stderr als Rohr. */
-function lauf(args, { env = {}, timeoutMs = 60000 } = {}) {
+function lauf(args, { env = {}, timeoutMs = 60000, vorab = [] } = {}) {
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
-    const kind = spawn(process.execPath, [BIN, ...args], {
+    const kind = spawn(process.execPath, [...vorab, BIN, ...args], {
       cwd: os.tmpdir(),
       env: { ...process.env, NEURAL_OS_LOG_LEVEL: '', ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -340,6 +340,102 @@ test('Stick mit PIN: der Starter endet mit 0, der Browser zeigt den Vorraum, nac
   }
 });
 
+test('stop unter Windows (vorgetäuscht) beendet einen PIN-Stick, im Vorraum wie nach dem Entsperren', async () => {
+  const u = umgebung('nos-s-stopwin');
+  // heimKennung schreibt unter win32 klein: ein Heim ohne Großbuchstaben,
+  // damit Dienst (Linux) und vorgetäuschtes Windows dasselbe heim rechnen.
+  const home = path.join(os.tmpdir(), `nos-s-stopwin-${require('node:crypto').randomBytes(6).toString('hex')}`);
+  fs.mkdirSync(home);
+  const win32 = path.join(path.dirname(u.oeffner), 'win32.js');
+  fs.writeFileSync(win32, "Object.defineProperty(process, 'platform', { value: 'win32' });\n");
+  try {
+    await verschluesseltesHeim(home, '4711', u.env.NEURAL_OS_GERAETE);
+    for (const phase of ['vorraum', 'entsperrt']) {
+      const r = await lauf(['start', '--hintergrund', '--home', home, '--port', '0'], { env: u.env });
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      const z = leseZettel(home);
+      assert.equal(z.zustand, 'gesperrt');
+      assert.equal((await rufe(`http://127.0.0.1:${z.port}/api/health`)).text.includes(z.stopp), false, 'das Beenden-Recht steht nie in /api/health');
+      if (phase === 'entsperrt') {
+        const basis = `http://127.0.0.1:${z.port}`;
+        const ok = await rufe(`${basis}/api/vault/unlock`, { method: 'POST', body: { passphrase: '4711' } });
+        assert.equal(ok.status, 200, ok.text);
+        await bis(() => { const j = leseZettel(home); return j && j.zustand === 'bereit'; }, { ms: 15000, was: 'App bereit' });
+        const ohne = await rufe(`${basis}/api/system/beenden`, { method: 'POST', body: {} });
+        assert.equal(ohne.status, 401, 'ohne Cookie und ohne Beenden-Recht bleibt es bei PIN_NOETIG');
+        const falsch = await rufe(`${basis}/api/system/beenden`, { method: 'POST', body: {}, headers: { 'x-neural-os-stopp': 'falsch' } });
+        assert.equal(falsch.status, 401);
+      }
+      const s = await lauf(['stop', '--home', home], { env: u.env, vorab: ['--require', win32] });
+      assert.equal(s.code, 0, `${phase}: ${s.stdout}${s.stderr}`);
+      assert.match(s.stdout, /beendet/);
+      await bis(() => !lebt(z.pid), { ms: 5000, was: `${phase}: Dienst endet` });
+      assert.ok(!fs.existsSync(path.join(home, '.lock')));
+      assert.ok(!fs.existsSync(path.join(home, 'vault', '.lock')));
+    }
+  } finally {
+    await aufraeumen(home);
+    fs.rmSync(home, { recursive: true, force: true });
+    await u.cleanup();
+  }
+});
+
+test('data/ eines PIN-Sticks auf einen anderen Stick kopiert: schon der Vorraum ist die neue KI, eine PIN genügt', async () => {
+  const u = umgebung('nos-s-datenkopie');
+  const { kiPort } = require('../src/kernel/identitaet');
+  const stick = path.join(u.home, 'STICK-D');
+  const KI_A = 'dev_5a1ad5a1ad5a1ad5a1ad5a1a';
+  const KI_D = 'dev_d0d0d0d0d0d0d0d0d0d0d0d0';
+  try {
+    // Die App liegt auf dem Stick (sonst gibt es keinen Marker), data/ kommt von Stick A.
+    for (const teil of ['bin', 'src', 'web', 'package.json']) fs.cpSync(path.join(WURZEL, teil), path.join(stick, 'app', teil), { recursive: true });
+    fs.writeFileSync(path.join(stick, 'neural-os.portable'), JSON.stringify({ neuralOsPortable: true, dataDir: 'data', kiId: KI_D, name: 'Stick D' }));
+    const daten = path.join(stick, 'data');
+    fs.mkdirSync(daten);
+    await verschluesseltesHeim(daten, '4711', u.env.NEURAL_OS_GERAETE);
+    const cfg = JSON.parse(fs.readFileSync(path.join(daten, 'config.json'), 'utf8'));
+    cfg.server = { ...(cfg.server || {}), port: kiPort(KI_A) };
+    fs.writeFileSync(path.join(daten, 'config.json'), JSON.stringify(cfg));
+
+    const bin = path.join(stick, 'app', 'bin', 'neural-os.js');
+    const r = await new Promise((resolve, reject) => {
+      const kind = spawn(process.execPath, [bin, 'start', '--hintergrund', '--open'], {
+        cwd: os.tmpdir(), env: { ...process.env, NEURAL_OS_LOG_LEVEL: '', ...u.env }, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let out = '';
+      kind.stdout.on('data', (d) => { out += d; });
+      kind.stderr.on('data', (d) => { out += d; });
+      kind.on('error', reject);
+      kind.on('close', (code) => resolve({ code, out }));
+    });
+    assert.equal(r.code, 0, r.out);
+    const neu = JSON.parse(fs.readFileSync(path.join(stick, 'neural-os.portable'), 'utf8')).kiId;
+    assert.ok(neu !== KI_A && neu !== KI_D, `neue Kennung: ${neu}`);
+    const z = leseZettel(daten);
+    assert.equal(z.zustand, 'gesperrt');
+    assert.notEqual(z.port, kiPort(KI_A), 'der Vorraum lauscht nicht auf dem Port (Browser-Ursprung) von Stick A');
+    assert.ok(z.port >= kiPort(neu) && z.port < kiPort(neu) + 20, `Port ${z.port}, kiPort neu ${kiPort(neu)}`);
+
+    const basis = `http://127.0.0.1:${z.port}`;
+    const ok = await rufe(`${basis}/api/vault/unlock`, { method: 'POST', body: { passphrase: '4711' } });
+    assert.equal(ok.status, 200, ok.text);
+    const cookie = [].concat(ok.headers['set-cookie'] || []).map((c) => c.split(';')[0]).find((c) => c.startsWith('nos_s_'));
+    assert.equal(cookie.split('=')[0], `nos_s_${neu.slice(4, 12)}`, 'das Cookie heißt nach der neuen KI');
+    await bis(() => { const j = leseZettel(daten); return j && j.zustand === 'bereit'; }, { ms: 15000, was: 'App bereit' });
+    const notizen = await rufe(`${basis}/api/records?type=note`, { headers: { cookie } });
+    assert.equal(notizen.status, 200, `nach der PIN sofort PIN_NOETIG: ${notizen.text}`);
+    const status = await rufe(`${basis}/api/status`, { headers: { cookie } });
+    assert.equal(status.json.ki.id, neu);
+    assert.match(fs.readFileSync(path.join(daten, 'audit.jsonl'), 'utf8'), /ki\.erneuert/, 'die Erneuerung steht im Audit');
+    const b = await rufe(`${basis}/api/system/beenden`, { method: 'POST', body: {}, headers: { cookie } });
+    assert.equal(b.status, 202, b.text);
+    await bis(() => !lebt(z.pid), { ms: 5000, was: 'Dienst endet' });
+  } finally {
+    await aufraeumen(path.join(stick, 'data'));
+    await u.cleanup();
+  }
+});
+
 test('p1d: SIGHUP an "start" im Vordergrund -> Exit 0, data/.lock und vault/.lock sind weg', async () => {
   if (process.platform === 'win32') return;
   const u = umgebung('nos-s-sighup');
@@ -436,6 +532,59 @@ test('/api/health: {ok, at, instanz, heim}; die Instanz ist je Server fest', asy
   } finally {
     await s.close();
     u.cleanup();
+  }
+});
+
+test('/api/health mit fremdem Host-Kopf (DNS-Rebinding): keine Instanz, kein heim', async () => {
+  const { createServer } = require('../src/http/server');
+  const u = tempHome('nos-s-health-host');
+  const s = await createServer({ config: { server: { host: '127.0.0.1' } }, paths: { home: u.home } });
+  try {
+    await s.listen({ port: 0, host: '127.0.0.1' });
+    const fremd = await rufe(`${s.url}/api/health`, { headers: { host: 'evil.example' } });
+    assert.equal(fremd.status, 200, fremd.text);
+    assert.equal(fremd.json.ok, true);
+    assert.equal(fremd.json.instanz, undefined, 'die Instanz geht an eine fremde Seite');
+    assert.equal(fremd.json.heim, undefined, 'heim (Hash des Datenpfads) geht an eine fremde Seite');
+    assert.doesNotMatch(fremd.text, new RegExp(s.instanz));
+    const lokal = await rufe(`${s.url}/api/health`, { headers: { host: `127.0.0.1:${s.server.address().port}` } });
+    assert.equal(lokal.status, 200);
+    assert.equal(lokal.json.instanz, s.instanz);
+    assert.equal((await rufe(`${s.url}/api/health`, { headers: { host: 'localhost' } })).status, 200);
+  } finally {
+    await s.close();
+    u.cleanup();
+  }
+});
+
+test('echter Öffner statt NEURAL_OS_OEFFNER: „Fertig. Dieses Fenster kann zu.“ steht da, der Öffner bekommt die Adresse', async () => {
+  if (process.platform !== 'linux') return;
+  const u = umgebung('nos-s-oeffner');
+  const heim = require('../src/kernel/laufzettel').heimKennung(u.home);
+  const binOrdner = path.join(path.dirname(u.oeffner), 'bin');
+  fs.mkdirSync(binOrdner, { recursive: true });
+  // Ein Öffner wie xdg-open: startet, übergibt, endet.
+  fs.writeFileSync(path.join(binOrdner, 'xdg-open'), `#!/bin/sh\necho "$1" >> "${u.oeffner}"\n`, { mode: 0o755 });
+  const srv = await fakeServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, at: new Date().toISOString(), instanz: 'attrappe0002', heim }));
+  });
+  try {
+    const url = `${srv.url}/`;
+    fs.writeFileSync(path.join(u.home, '.lock'), JSON.stringify({
+      v: 2, pid: process.pid, rechner: rechner.kennung(), boot: rechner.bootZeit(), seit: new Date().toISOString(),
+      zustand: 'bereit', port: srv.port, url, instanz: 'attrappe0002', heim, version: '0.1.0',
+    }));
+    const r = await lauf(['start', '--hintergrund', '--open', '--home', u.home], {
+      env: { ...u.env, NEURAL_OS_OEFFNER: '', PATH: `${binOrdner}${path.delimiter}${process.env.PATH}` },
+    });
+    assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /Fertig\. Dieses Fenster kann zu\./, `Ausgabe war: ${JSON.stringify(r.stdout)}`);
+    await bis(() => u.geoeffnet().length > 0, { ms: 5000, was: 'Öffner bekommt die Adresse' });
+    assert.deepEqual(u.geoeffnet(), [url]);
+  } finally {
+    await srv.close();
+    await u.cleanup();
   }
 });
 

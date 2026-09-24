@@ -466,8 +466,10 @@ export function aufTag(data, day) {
  * Was an einer SERIE zu aendern ist, wenn eines ihrer Vorkommen von `alt`
  * nach `neu` gezogen wurde und die Antwort "Alle" war: dieselbe Verschiebung
  * fuer den Beginn der Serie, dieselbe neue Dauer -- und wer "jeden Dienstag"
- * auf den Mittwoch zieht, hat danach "jeden Mittwoch". Ausgelassene Tage und
- * das Ende der Serie wandern mit, sonst fielen die falschen Tage aus.
+ * auf den Mittwoch zieht, hat danach "jeden Mittwoch". Ausgelassene Tage
+ * wandern mit, sonst fielen die falschen Tage aus; das genannte Ende ("bis")
+ * bleibt. Laesst sich die Verschiebung nicht als eine Regel schreiben, wirft
+ * sie einen Satz (Error.message).
  */
 export function serienPatch(serie, alt, neu) {
   const allDay = serie.allDay === true || String(serie.start || '').length === 10;
@@ -488,13 +490,67 @@ export function serienPatch(serie, alt, neu) {
   const rec = serie.recurrence;
   if (rec && tage) {
     const r = { ...rec };
+    if (rec.freq === 'weekly' && (rec.interval || 1) > 1) {
+      // Wochen beginnen am Montag. Rutscht bei "alle 2 Wochen" nur ein Teil
+      // der Tage ueber den Montag, laege jeder zweite davon in der falschen
+      // Woche (So 04.10. + Mo 12.10. statt Mo 05.10.) -- das laesst sich mit
+      // EINER Regel nicht sagen. Lieber ein Satz als eine still falsche Serie
+      // (dieselbe Pruefung wie src/kalender/wiederholung.js drehungPasstNicht).
+      const tageListe = Array.isArray(rec.byDay) && rec.byDay.length ? rec.byDay : [WT_CODES[(parseDay(s0.slice(0, 10)).getDay() + 6) % 7]];
+      const wochen = new Set(tageListe.map((c) => Math.floor((WT_CODES.indexOf(c) + tage) / 7)));
+      if (wochen.size > 1) {
+        throw new Error(`„Alle ${rec.interval} Wochen“ lässt sich so nicht als eine Serie verschieben: ein Teil der Tage rutscht über den Montag in die nächste Woche. Bitte nur diesen Termin verschieben oder die Tage einzeln ändern.`);
+      }
+    }
     if (rec.freq === 'weekly' && Array.isArray(rec.byDay) && rec.byDay.length) {
       const shift = ((tage % 7) + 7) % 7;
-      r.byDay = rec.byDay.map((c) => WT_CODES[(WT_CODES.indexOf(c) + shift) % 7]);
+      const gedreht = new Set(rec.byDay.map((c) => WT_CODES[(WT_CODES.indexOf(c) + shift) % 7]));
+      r.byDay = WT_CODES.filter((c) => gedreht.has(c));
     }
-    if (rec.until) r.until = plusTageW(rec.until, tage);
+    // `until` bleibt: "bis 30.10." hat jemand so gesagt; wanderte es mit,
+    // stuende nach "ab jetzt montags" ein Termin nach dem genannten Ende.
     out.recurrence = r;
     if (Array.isArray(serie.exdates) && serie.exdates.length) out.exdates = serie.exdates.map((d) => plusTageW(d, tage));
+  }
+  return out;
+}
+
+/**
+ * Die Wiederholung, wie das Formular sie meint.
+ * @param {string} wahl      '' (keine), 'bisher' oder die id einer Vorgabe
+ * @param {object|null} bisher  die gespeicherte Regel (bei 'bisher')
+ * @param {object|null} vorgabe die Regel der gewaehlten Vorgabe
+ * @param {string} bisTag    Feld "Serie endet am" (leer = kein Ende)
+ *
+ * Ist "bis" gesetzt, gilt es, und eine alte Anzahl ("10-mal") entfaellt:
+ * das Formular zeigt kein Feld fuer die Anzahl, und der Server nimmt nicht
+ * beides -- vorher kam ein 400, den niemand im Formular beheben konnte.
+ */
+export function regelAusFormular(wahl, bisher, vorgabe, bisTag) {
+  if (!wahl) return null;
+  const basis = wahl === 'bisher' ? { ...(bisher || {}) } : { ...(vorgabe || {}) };
+  const r = { freq: basis.freq, interval: basis.interval || 1 };
+  if (basis.freq === 'weekly') r.byDay = Array.isArray(basis.byDay) ? [...basis.byDay] : [];
+  r.until = bisTag && DATE_RE.test(bisTag) ? bisTag : null;
+  r.count = r.until ? null : (wahl === 'bisher' ? basis.count || null : null);
+  return r;
+}
+
+/**
+ * Nur, was im Formular wirklich geaendert wurde. Beginn, Ende und
+ * "ganztaegig" gehoeren zusammen (ein neues Ende ohne den Beginn waere
+ * ein anderer Termin). Warum: schrieb das Formular alle Felder zurueck,
+ * machte es still rueckgaengig, was die KI inzwischen geaendert hatte --
+ * wer nur den Ort nachtraegt, soll Claudes "14:00" nicht auf 10:00
+ * zuruecksetzen.
+ */
+export function geaenderteFelder(anfang, jetzt) {
+  const gleich = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  const zeit = ['start', 'end', 'allDay'];
+  const out = {};
+  if (zeit.some((k) => !gleich(anfang[k], jetzt[k]))) for (const k of zeit) out[k] = jetzt[k];
+  for (const k of Object.keys(jetzt)) {
+    if (!zeit.includes(k) && !gleich(anfang[k], jetzt[k])) out[k] = jetzt[k];
   }
   return out;
 }
@@ -782,6 +838,10 @@ const CSS = `
 .kal__pill-time { flex: none; color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
 .kal__pill-title { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--fg); }
 .kal__day.is-other .kal__pill-title { color: var(--fg-subtle); }
+/* Vergangenes im Monat leiser, wie .kal__entry.is-past: Farbe statt Deckkraft. */
+.kal__pill.is-past .kal__pill-title { color: var(--fg-muted); }
+.kal__pill.is-past::before { background: var(--border-strong); }
+.kal__pill.is-allday.is-past { background: var(--surface-2); }
 .kal__pill:hover .kal__pill-title { text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 2px; }
 .kal__more { padding-left: 6px; font-size: var(--fs-xs); color: var(--fg-subtle); }
 
@@ -1021,7 +1081,21 @@ button.kal__rtag:hover { background: var(--surface-2); }
 .kal__block.is-past { color: var(--fg-muted); }
 .kal__block.is-past::before { background: var(--border-strong); }
 .kal__block.is-past .kal__block-time { color: var(--fg-subtle); }
-.kal__block.is-dragging { opacity: 0.28; }
+.kal__block.is-dragging, .kal__balken.is-dragging { opacity: 0.28; }
+/* Nach dem Aufziehen, solange das Formular offen ist: die gewaehlte Spanne
+   bleibt als Entwurf stehen (gestrichelte Akzentkante), sonst stuende neben
+   dem Formular eine leere Spalte, und man saehe nicht, was man gerade anlegt. */
+.kal__block.is-entwurf {
+  z-index: 4;
+  left: 3px;
+  width: calc(100% - 6px);
+  background: var(--accent-soft);
+  border: 1px dashed var(--accent);
+  pointer-events: none;
+}
+.kal__block.is-entwurf .kal__block-time { flex: none; color: var(--accent-text); font-weight: 500; }
+.kal__when.is-ausgefallen .kal__when-bar { background: var(--border-strong); }
+.kal__when.is-ausgefallen .kal__when-day, .kal__when.is-ausgefallen .kal__when-time { color: var(--fg-muted); text-decoration: line-through; text-decoration-color: var(--border-strong); }
 .kal__block.is-ghost {
   z-index: 5;
   left: 3px;
@@ -1052,7 +1126,10 @@ button.kal__rtag:hover { background: var(--surface-2); }
 }
 .kal__block.is-neu, .kal__balken.is-neu { animation: kal-neu 1.6s var(--ease) 1; }
 @keyframes kal-neu { 0%, 40% { box-shadow: 0 0 0 3px var(--accent-ring); } 100% { box-shadow: 0 0 0 0 transparent; } }
-.kal__grip { position: absolute; left: 0; right: 0; bottom: 0; height: 8px; cursor: ns-resize; touch-action: none; }
+/* touch-action pan-y: mit dem Finger scrollt ein Wisch auch hier; gezogen
+   wird erst nach Halten (siehe onPointerDown), dann haelt gegenScrollen die
+   Seite fest. */
+.kal__grip { position: absolute; left: 0; right: 0; bottom: 0; height: 8px; cursor: ns-resize; touch-action: pan-y; }
 .kal__grip::after { content: ''; position: absolute; left: 50%; bottom: 3px; width: 18px; height: 2px; margin-left: -9px; border-radius: 2px; background: var(--border-strong); opacity: 0; transition: opacity var(--dur-1) var(--ease); }
 .kal__block:hover .kal__grip::after { opacity: 1; }
 /* Die Jetzt-Linie laeuft UNTER den Terminen durch: darueber strich sie die
@@ -1429,6 +1506,8 @@ export default {
       listeTage: LISTE_SCHRITT,
       scrollZiel: 'jetzt',
       neuKey: null,
+      neuZiel: null,
+      entwurf: null,
       pendingReload: false,
     };
     const cleanups = [];
@@ -1740,6 +1819,7 @@ export default {
       if (st.loaded && st.range && st.range.from === bereich.from && st.range.to === bereich.to) st.scrollZiel = null;
       markOpen();
       markNeu();
+      entwurfZeichnen();
     }
 
     /* ---- Monat ---- */
@@ -1788,7 +1868,8 @@ export default {
           ...shown.map((e) => {
             const allDayLike = e.span.allDay || (e.span.firstDay < day && e.span.lastDay > day);
             const time = allDayLike ? '' : timeLabel(e.span, day).replace(/–.*$/, '');
-            return h('span.kal__pill', { 'data-key': e.key, class: allDayLike ? 'is-allday' : '', title: `${timeLabel(e.span, day)} · ${e.data.title}` },
+            // Vergangenes leiser, wie in Woche, Tag, Liste und Kachel.
+            return h('span.kal__pill', { 'data-key': e.key, class: { 'is-allday': allDayLike, 'is-past': isPast(e.span) }, title: `${timeLabel(e.span, day)} · ${e.data.title}` },
               time ? h('span.kal__pill-time', null, text(time)) : null,
               h('span.kal__pill-title', null, text(e.data.title)));
           }),
@@ -1816,7 +1897,12 @@ export default {
       const b = body.getBoundingClientRect();
       if (a.top < m.bottom - 1) return; // nebeneinander: schon zu sehen
       if (a.top + 96 <= b.bottom) return; // Kopf und erste Zeile sind im Bild
-      const ziel = body.scrollTop + (a.top - b.top) - 12;
+      // Nur so weit, dass Kopf und erste Zeile der Liste zu sehen sind -- nie
+      // weiter, als der Monat oben anfaengt: vorher rutschten Wochentagszeile
+      // und erste Woche aus dem Bild (iPad quer, Tipp auf den 29.).
+      const noetig = (a.top + 96) - b.bottom + 8;
+      const hoechstens = Math.max(0, m.top - b.top);
+      const ziel = body.scrollTop + Math.min(noetig, hoechstens);
       const ruhig = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
       body.scrollTo({ top: ziel, behavior: ruhig ? 'auto' : 'smooth' });
     }
@@ -2285,15 +2371,64 @@ export default {
       }
     }
 
+    /**
+     * Der neue Termin: hervorheben und ins Bild holen. Das Ziel gilt ein paar
+     * Sekunden lang fuer JEDES render(): auf dem iPad kam nach "Eintragen"
+     * ein zweites render (Tastatur zu, Ereignisstrom) mitten in das weiche
+     * Scrollen, stellte die alte Lage wieder her, und der Termin stand nur als
+     * Pfeil-Pille oben. Deshalb ohne 'smooth', direkt am Scroller gesetzt.
+     */
     function markNeu() {
-      if (!st.neuKey || !st.loaded) return;
-      const key = st.neuKey;
-      st.neuKey = null;
+      if (st.neuKey && st.loaded) {
+        st.neuZiel = { key: st.neuKey, bis: Date.now() + 3000 };
+        st.neuKey = null;
+      }
+      const z = st.neuZiel;
+      if (!z) return;
+      if (Date.now() > z.bis) {
+        st.neuZiel = null;
+        return;
+      }
       // Schluessel sind "event_…@JJJJ-MM-TT": nichts, was im Selektor maskiert werden muesste.
-      const el = body.querySelector(`[data-key="${key}"]`);
+      const el = body.querySelector(`[data-key="${z.key}"]`);
       if (!el) return;
       el.classList.add('is-neu');
-      if (el.closest('.kal__rscroll')) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      const scroller = el.closest('.kal__rscroll');
+      if (!scroller) return;
+      const r = el.getBoundingClientRect();
+      const sr = scroller.getBoundingClientRect();
+      scroller.scrollTop = Math.max(0, scroller.scrollTop + (r.top - sr.top) - scroller.clientHeight / 2 + r.height / 2);
+      randHinweise(scroller);
+    }
+
+    /**
+     * Der Entwurf nach dem Aufziehen (oder Tippen auf eine freie Stelle):
+     * solange das Formular "Neuer Termin" offen ist, steht die Spanne im
+     * Raster. Er wandert mit, wenn Tag, von oder bis im Formular sich aendern.
+     */
+    function entwurfZeichnen() {
+      for (const alt of body.querySelectorAll('.kal__block.is-entwurf')) alt.remove();
+      const ew = st.entwurf;
+      if (!ew || !st.sheet || st.sheet.kind !== 'neu' || !/^\d{2}:\d{2}$/.test(ew.von || '')) return;
+      const col = body.querySelector(`.kal__rcol[data-day="${ew.day}"]`);
+      if (!col) return;
+      const [vh, vm] = ew.von.split(':').map(Number);
+      const a = vh * 60 + vm;
+      let b = a + 60;
+      if (/^\d{2}:\d{2}$/.test(ew.bis || '')) {
+        const [bh, bm] = ew.bis.split(':').map(Number);
+        b = bh * 60 + bm === 23 * 60 + 59 ? 1440 : bh * 60 + bm;
+        if (b <= a) b = a + 15;
+      }
+      const height = Math.max(20, ((b - a) / 60) * HOUR - 2);
+      col.appendChild(h('div.kal__block.is-entwurf', {
+        'aria-hidden': 'true',
+        class: { 'is-kurz': height < 36 },
+        style: { top: `${(a / 60) * HOUR}px`, height: `${height}px`, '--lane': 0, '--lanes': 1, '--zeilen': String(Math.max(1, Math.floor((height - 26) / 16))) },
+      },
+      h('span.kal__block-text', null,
+        h('span.kal__block-title', null, text((ew.titel || '').trim() || 'Neuer Termin')),
+        h('span.kal__block-time', null, text(`${ew.von}–${b >= 1440 ? '24:00' : minZuHm(b)}`)))));
     }
 
     /* ---------------- Ziehen: verschieben, verlaengern, anlegen ---------------- */
@@ -2373,10 +2508,13 @@ export default {
         ghost: null,
         neu: null,
       };
-      if (kind === 'dauer') {
-        // Kein Textmarkieren, kein Scrollen -- aktiviert wird erst beim Ziehen.
+      if (kind === 'dauer' && !drag.touch) {
+        // Maus: kein Textmarkieren -- aktiviert wird erst beim Ziehen (4 px).
         ev.preventDefault();
       } else if (drag.touch) {
+        // Finger: auch am unteren Rand erst halten. Ein Wisch, der zufaellig
+        // dort beginnt (bei 30-Minuten-Terminen 40 % der Flaeche), scrollt --
+        // vorher verkuerzte er den Termin und fragte "Was verlängern?".
         drag.timer = setTimeout(() => aktivieren(), kind === 'anlegen' ? 450 : 300);
       }
       window.addEventListener('pointermove', onPointerMove);
@@ -2402,7 +2540,7 @@ export default {
       drag.y = ev.clientY;
       if (!drag.active) {
         const weg = Math.hypot(ev.clientX - drag.x0, ev.clientY - drag.y0);
-        if (drag.kind === 'dauer') {
+        if (drag.kind === 'dauer' && !drag.touch) {
           if (weg >= 4) aktivieren();
           return;
         }
@@ -2568,7 +2706,7 @@ export default {
         // Ein Tipp auf eine leere Stelle: dort ein neuer Termin, eine Stunde.
         if (d.kind === 'anlegen' && Math.hypot(ev.clientX - d.x0, ev.clientY - d.y0) < 8) {
           const a = Math.min(23 * 60, Math.floor(d.min0 / 30) * 30);
-          openForm(null, { day: d.days[d.spalte0], von: minZuHm(a), bis: minZuHm(Math.min(a + 60, 23 * 60 + 45)) });
+          openForm(null, { day: d.days[d.spalte0], von: minZuHm(a), bis: minZuHm(Math.min(a + 60, 23 * 60 + 45)), entwurf: true });
         }
         nachholen();
         return;
@@ -2577,10 +2715,11 @@ export default {
       setTimeout(() => { klickSchlucken = false; }, 400);
       const neu = d.neu;
       if (d.kind === 'anlegen') {
+        // Der Geist weicht dem Entwurf, der stehen bleibt, solange das Formular offen ist.
         if (d.ghost) d.ghost.remove();
         const s = whenOf(neu.start);
         const e = whenOf(neu.end);
-        openForm(null, { day: s.day, von: s.hm, bis: e.day > s.day ? '23:59' : e.hm });
+        openForm(null, { day: s.day, von: s.hm, bis: e.day > s.day ? '23:59' : e.hm, entwurf: true });
         nachholen();
         return;
       }
@@ -2629,6 +2768,13 @@ export default {
       });
     }
 
+    /** "verlängern" nur, wenn es laenger wird -- sonst "verkürzen". */
+    function dauerVerb(alt, neu) {
+      const altEnde = alt.end || plusMinuten(alt.start, 60);
+      if (!neu.end) return 'ändern';
+      return neu.end > altEnde ? 'verlängern' : neu.end < altEnde ? 'verkürzen' : 'ändern';
+    }
+
     function schliesseFrage(wahl) {
       if (!dom.frage) return;
       const { karte, resolve } = dom.frage;
@@ -2650,7 +2796,7 @@ export default {
       }
       let wahl = null;
       if (e.recurring) {
-        wahl = await frageSerie(anker, e.data.title, art === 'dauer' ? 'verlängern' : 'verschieben');
+        wahl = await frageSerie(anker, e.data.title, art === 'dauer' ? dauerVerb(alt, neu) : 'verschieben');
         if (!wahl) {
           render();
           return;
@@ -2764,6 +2910,7 @@ export default {
       const notizen = [];
       if (quick.fehler) notizen.push(h('span.kal__quick-note.is-warn', { role: 'alert' }, text(quick.fehler)));
       else if (!r.titel) notizen.push(h('span.kal__quick-note', null, text('Wie heißt der Termin? Einfach dazuschreiben.')));
+      if (r.sperre) notizen.push(h('span.kal__quick-note.is-warn', { role: 'alert' }, text(r.sperre)));
       if (r.hinweis) notizen.push(h('span.kal__quick-note.is-warn', null, text(r.hinweis)));
       if (quick.konflikte.length) {
         const k = quick.konflikte[0];
@@ -2780,7 +2927,8 @@ export default {
           ...notizen),
         h('button.btn.btn--primary.btn--small.kal__quick-go', {
           type: 'button',
-          disabled: quick.busy || !r.titel,
+          // Mit einer Sperre ("endet vor ihrem ersten Termin") wartet Eintragen, bis der Satz stimmt.
+          disabled: quick.busy || !r.titel || !!r.sperre,
           title: 'Eintragen (Enter)',
           onMousedown: (ev) => ev.preventDefault(),
           onClick: () => eintragen(),
@@ -2807,7 +2955,7 @@ export default {
     async function eintragen() {
       const r = quick.ergebnis;
       if (quick.busy) return;
-      if (!r || !r.titel) {
+      if (!r || !r.titel || r.sperre) {
         quick.input.focus();
         return;
       }
@@ -2872,6 +3020,8 @@ export default {
       const hadId = st.sheet && st.sheet.kind !== 'neu';
       const oeffner = st.sheet ? st.sheet.oeffner || st.sheet.key : null;
       st.sheet = null;
+      st.entwurf = null;
+      entwurfZeichnen();
       markOpen();
       if (!keepRoute && hadId && typeof ctx.replaceRoute === 'function') ctx.replaceRoute('#/kalender');
       // Der Fokus geht dorthin zurueck, woher das Blatt kam -- sonst landet er
@@ -2885,6 +3035,12 @@ export default {
 
     function showSheet(kicker, ...content) {
       if (dom.sheet) dom.sheet.remove();
+      // Ein anderes Blatt (Termin geoeffnet, gespeichert) beendet den Entwurf;
+      // openForm setzt ihn danach neu, wenn er gemeint ist.
+      if (st.entwurf) {
+        st.entwurf = null;
+        entwurfZeichnen();
+      }
       const close = h('button.icon-button', { type: 'button', 'aria-label': 'Schließen', title: 'Schließen (Esc)', onClick: () => closeSheet() }, icon(I.close));
       dom.sheet = h('aside.kal__sheet', { role: 'region', 'aria-label': typeof kicker === 'string' ? kicker : 'Termin' },
         h('div.kal__sheet-top', null, h('span.kal__sheet-kicker', null, kicker), close),
@@ -2919,6 +3075,22 @@ export default {
       // ein einzelner Termin -- sonst meldete das Blatt eine Ueberschneidung
       // mit sich selbst, und "Loeschen" fragte nicht "Nur diesen / Alle".
       else if (!occ && res.naechstes) occ = res.naechstes;
+      // Ein Tag, an dem die Serie AUSFAELLT (#/kalender?id=…&am=… von der
+      // Karte "Termin fällt einmal aus"): kein normales Blatt mit Bearbeiten
+      // und Loeschen fuer ein Vorkommen, das es nicht gibt -- "Löschen"
+      // scheiterte dort mit 404. Stattdessen "fällt aus" und "Doch
+      // stattfinden lassen".
+      const ausgefallen = !!occ && !!record.data.recurrence
+        && Array.isArray(record.data.exdates) && record.data.exdates.includes(occ);
+      if (occ && record.data.recurrence && !ausgefallen && !st.byKey.has(`${id}@${occ}`)) {
+        // Nicht geladen: nachsehen, ob die Serie an dem Tag ueberhaupt
+        // stattfindet. Wenn nicht, zur Serie (ihr naechstes Vorkommen).
+        try {
+          const tag = await api.get('/events/zeitraum', { query: { from: occ, to: occ } });
+          if (!st.alive) return;
+          if (!tag.items.some((x) => x.id === id && x.occurrence === occ)) occ = res.naechstes || null;
+        } catch { /* dann eben das angefragte Vorkommen */ }
+      }
       let e = st.byKey.get(`${id}@${occ || ''}`);
       if (!e) {
         const lage = occ ? aufTag(record.data, occ) : null;
@@ -2938,8 +3110,54 @@ export default {
       }
       const vorher = st.sheet;
       st.sheet = { kind: 'detail', id, occurrence: occ, key: e.key, oeffner: ref.key || (vorher && vorher.oeffner) || e.key };
-      renderDetail(res, e);
+      if (ausgefallen) renderAusgefallen(res, e);
+      else renderDetail(res, e);
       if (!fromRoute && typeof ctx.replaceRoute === 'function') ctx.replaceRoute(`#/kalender?id=${id}${occ ? `&am=${occ}` : ''}`);
+    }
+
+    /**
+     * Das Blatt fuer einen ausgefallenen Tag einer Serie: was ausfaellt, und
+     * genau eine Handlung -- "Doch stattfinden lassen" (der Tag verlaesst
+     * exdates wieder). Dazu der Weg zur Serie.
+     */
+    function renderAusgefallen(res, e) {
+      const record = res.record;
+      const serie = record.data;
+      const span = e.span;
+      const pfad = `/events/${encodeURIComponent(record.id)}`;
+      const dayLine = fmt(e.occurrence, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+      const timeLine = span.allDay ? 'ganztägig' : timeLabel(span);
+      const zurueckholen = async (knopf) => {
+        knopf.disabled = true;
+        const altAus = Array.isArray(serie.exdates) ? serie.exdates : [];
+        let res2;
+        try {
+          res2 = await api.patch(pfad, { exdates: altAus.filter((d) => d !== e.occurrence), rev: record.rev });
+        } catch (err) {
+          knopf.disabled = false;
+          toast(`Nicht geändert: ${errorText(err)}`, 'error');
+          return;
+        }
+        if (!st.alive) return;
+        await load();
+        await openDetail({ id: record.id, occurrence: e.occurrence });
+        toast(`„${serie.title}“ findet am ${fmt(e.occurrence, { day: 'numeric', month: 'short' })} doch statt.`, 'success', {
+          action: { label: 'Rückgängig', run: () => rueckgaengig(res2, () => api.patch(pfad, { exdates: altAus })) },
+          timeout: 9000,
+        });
+      };
+      const knopf = h('button.btn.btn--primary', { type: 'button', onClick: () => zurueckholen(knopf) }, icon(I.repeat), text('Doch stattfinden lassen'));
+      showSheet(h('span', null, text('Termin · fällt aus'),
+        serie.source === 'auto' ? h('span.kal__ki', { title: 'Von der KI angelegt' }, icon(I.ki)) : null),
+      h('h2.kal__sheet-title', { tabindex: '-1' }, text(serie.title)),
+      h('div.kal__when.is-ausgefallen', null, h('span.kal__when-bar', { 'aria-hidden': 'true' }),
+        h('div', null, h('span.kal__when-day', null, text(dayLine)), h('span.kal__when-time', null, text(timeLine)))),
+      h('ul.kal__facts', null,
+        h('li.kal__fact', null, icon(I.repeat), h('span', null, text(`Fällt an diesem Tag aus. Sonst: ${wiederholungInWorten(serie.recurrence, serie.start).replace(/\.?$/, '.')}`)))),
+      h('div.kal__actions', null, knopf, h('span.spacer'),
+        h('button.btn.btn--ghost', { type: 'button', onClick: () => openDetail({ id: record.id }) }, text('Zur Serie'))));
+      const title = dom.sheet.querySelector('.kal__sheet-title');
+      if (title && !coarse) title.focus({ preventScroll: true });
     }
 
     function renderDetail(res, e) {
@@ -3170,6 +3388,18 @@ export default {
           try {
             await speichern(input, wahl);
           } catch (err) {
+            if (err && err.frisch && st.alive) {
+              // Mit dem neuen Stand wieder oeffnen, den Satz obendrauf.
+              await load();
+              const eNeu = e ? st.byKey.get(e.key) || (e.recurring ? null : st.byKey.get(`${record.id}@`)) : null;
+              if (e && e.recurring && !eNeu) {
+                await openDetail({ id: record.id });
+                toast(errorText(err), 'error');
+              } else {
+                openForm(err.frisch, { fehler: errorText(err) }, eNeu);
+              }
+              return;
+            }
             showError(errorText(err));
           } finally {
             for (const b of knoepfe) b.disabled = false;
@@ -3240,11 +3470,8 @@ export default {
         const wahl = f.wdh.value;
         if (!wahl) out.recurrence = null;
         else {
-          const basis = wahl === 'bisher' ? { ...rec } : { ...REC_PRESETS.find(([id]) => id === wahl)[2] };
-          const r = { freq: basis.freq, interval: basis.interval || 1 };
-          if (basis.freq === 'weekly') r.byDay = Array.isArray(basis.byDay) ? [...basis.byDay] : [];
-          r.until = f.bisTag.value && DATE_RE.test(f.bisTag.value) ? f.bisTag.value : null;
-          r.count = wahl === 'bisher' ? rec.count || null : null;
+          const vorgabe = wahl === 'bisher' ? null : REC_PRESETS.find(([id]) => id === wahl)[2];
+          const r = regelAusFormular(wahl, rec, vorgabe, f.bisTag.value);
           if (r.until && r.until < tag) {
             f.bisTag.focus();
             return 'Die Serie endet vor ihrem ersten Termin.';
@@ -3253,6 +3480,29 @@ export default {
         }
         out.reminder = f.erinnerung.value === '' ? null : Number(f.erinnerung.value);
         return out;
+      }
+
+      /**
+       * Schicken mit dem geladenen Stand (rev). Hat inzwischen jemand anderes
+       * geaendert (409) und betrifft das keines der Felder, die hier geaendert
+       * wurden, geht es mit dem neuen Stand noch einmal -- Claudes "14:00"
+       * bleibt, der Ort kommt dazu. Betrifft es dieselben Felder, wird nichts
+       * ueberschrieben: das Formular kommt mit dem neuen Stand wieder.
+       */
+      async function mitStand(pfad, felder, sende) {
+        try {
+          return await sende(record.rev);
+        } catch (err) {
+          if (!err || err.status !== 409) throw err;
+          const frisch = await api.get(pfad);
+          const betroffen = [...felder, ...(felder.includes('start') ? ['recurrence', 'exdates'] : [])];
+          const gleich = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+          if (betroffen.every((k) => gleich(serie[k], frisch.record.data[k]))) return sende(frisch.record.rev);
+          const konflikt = new Error(`„${frisch.record.data.title}“ wurde inzwischen geändert (etwa von der KI) – jetzt ${zeitTeil(frisch.record.data, new Date())}. `
+            + 'Deine Änderung ist noch nicht gespeichert: bitte prüfen und noch einmal speichern.');
+          konflikt.frisch = frisch;
+          throw konflikt;
+        }
       }
 
       async function speichern(input, wahl) {
@@ -3269,10 +3519,19 @@ export default {
           toast(`„${res2.record.data.title}“ eingetragen.`, 'success', { action: { label: 'Rückgängig', run: () => rueckgaengig(res2, zurueck) }, timeout: 9000 });
         } else {
           const pfad = `/events/${encodeURIComponent(record.id)}`;
+          const aenderung = geaenderteFelder(anfang, input);
+          if (!Object.keys(aenderung).length) {
+            // Nichts geaendert: nichts schicken (und nichts ueberschreiben).
+            await openDetail(e || { id: record.id });
+            return;
+          }
           if (serienEdit && wahl === 'nur') {
-            const { recurrence, ...ohne } = input;
+            // Nur das Geaenderte: den Rest (auch den Tag) nimmt der Server
+            // vom Vorkommen, wie die Serie JETZT ist.
+            const { recurrence, ...ohne } = aenderung;
+            if (!Object.keys(ohne).length) throw new Error('Die Wiederholung gilt für die ganze Serie – dafür „Alle Termine“ wählen.');
             const altAus = Array.isArray(serie.exdates) ? serie.exdates : [];
-            res2 = await api.patch(pfad, ohne, { query: nurDieses(e) });
+            res2 = await mitStand(pfad, Object.keys(ohne), (rev) => api.patch(pfad, { ...ohne, rev }, { query: nurDieses(e) }));
             const neuId = res2.record && res2.record.id;
             zurueck = async () => {
               if (neuId && neuId !== record.id) await api.del(`/events/${encodeURIComponent(neuId)}`);
@@ -3280,19 +3539,21 @@ export default {
             };
             ziel = { id: neuId || record.id, occurrence: null };
           } else {
-            const patch = { ...input };
-            if (serienEdit) {
+            const patch = { ...aenderung };
+            if (serienEdit && Object.prototype.hasOwnProperty.call(aenderung, 'start')) {
               // Tag oder Uhrzeit am Vorkommen geaendert: dieselbe Verschiebung fuer die ganze Serie.
               const alt = { start: alsWand(data.start), end: data.end ? alsWand(data.end) : null };
               const sp = serienPatch(serie, alt, { start: input.start, end: input.end });
               patch.start = sp.start;
               patch.end = sp.end;
-              if (f.wdh.value === 'bisher' && sp.recurrence) patch.recurrence = { ...sp.recurrence, until: input.recurrence ? input.recurrence.until : null };
+              if (f.wdh.value === 'bisher' && sp.recurrence) {
+                patch.recurrence = { ...sp.recurrence, until: input.recurrence ? input.recurrence.until : null, count: input.recurrence ? input.recurrence.count : null };
+              }
               if (sp.exdates) patch.exdates = sp.exdates;
             }
             const vorher = {};
             for (const key of Object.keys(patch)) vorher[key] = serie[key] === undefined ? null : serie[key];
-            res2 = await api.patch(pfad, patch);
+            res2 = await mitStand(pfad, Object.keys(aenderung), (rev) => api.patch(pfad, { ...patch, rev }));
             zurueck = () => api.patch(pfad, vorher);
             ziel = { id: record.id, occurrence: serienEdit && e.occurrence ? addDays(e.occurrence, versatzTage(patch)) : null };
           }
@@ -3311,9 +3572,24 @@ export default {
         return patch.start && serie.start ? tageZwischen(String(alsWand(serie.start)).slice(0, 10), String(patch.start).slice(0, 10)) : 0;
       }
 
+      // Der Stand beim Oeffnen: verglichen wird beim Speichern (geaenderteFelder).
+      const anfangWert = record ? collect() : null;
+      const anfang = anfangWert && typeof anfangWert === 'object' ? anfangWert : {};
       const oeffner = (st.sheet && st.sheet.oeffner) || (e ? e.key : null);
       st.sheet = { kind: record ? 'bearbeiten' : 'neu', id: record ? record.id : null, key: e ? e.key : null, oeffner };
       showSheet(record ? 'Termin bearbeiten' : 'Neuer Termin', form);
+      if (vor.fehler) showError(vor.fehler);
+      if (!record && vor.entwurf) {
+        // Der Entwurf im Raster folgt dem Formular (Tag, von, bis, Titel).
+        st.entwurf = { day: f.day.value, von: f.von.value, bis: f.bis.value, titel: f.title.value };
+        const folgen = () => {
+          if (!st.entwurf) return;
+          st.entwurf = { day: f.day.value, von: f.von.value, bis: f.bis.value, titel: f.title.value };
+          entwurfZeichnen();
+        };
+        for (const feld of [f.day, f.von, f.bis, f.title]) feld.addEventListener('input', folgen);
+        entwurfZeichnen();
+      }
       if (!coarse) f.title.focus();
       else if (!record) f.title.focus();
     }

@@ -427,3 +427,46 @@ test('Startinhalte: kein "Online"-Schalter, kein Ollama, und die Ableitung ände
     cleanup();
   }
 });
+
+/* ------------------------------------------------ Prüfung Runde 1 (I) */
+
+test('Zwilling mit PIN: [Diesen Stick eigenständig machen] behält die PIN-Sitzung dieses Browsers', async () => {
+  const stick = tempStick('eigenstaendig-pin');
+  const profil = tempHome('eigene-ki-profil');
+  const vorher = process.env.NEURAL_OS_GERAETE;
+  process.env.NEURAL_OS_GERAETE = profil.home;
+  let app = null;
+  const keks = (r) => [].concat(r.headers['set-cookie'] || []).map((c) => c.split(';')[0]).find((c) => c.startsWith('nos_s_')) || null;
+  try {
+    app = await starteAufStick(stick);
+    await mitServer(app, async (base) => {
+      const pin = await request(base, 'POST', '/api/vault/pin', { pin: '4711' }, { 'x-neural-os': '1' });
+      assert.equal(pin.status, 200, pin.text);
+      const alt = keks(pin);
+      assert.ok(alt, 'die PIN stellt eine Sitzung aus');
+      assert.equal((await request(base, 'GET', '/api/records?type=note', undefined, { cookie: alt })).status, 200);
+      const alteId = app.ki.id;
+
+      const e = await request(base, 'POST', '/api/kopplung/eigenstaendig', {}, { 'x-neural-os': '1', cookie: alt });
+      assert.equal(e.status, 200, e.text);
+      assert.notEqual(app.ki.id, alteId, 'neue Kennung');
+      const neu = keks(e);
+      assert.ok(neu, 'der Browser, der den Knopf gedrückt hat, bekommt die Sitzung der neuen Kennung');
+      assert.equal(neu.split('=')[0], `nos_s_${app.ki.id.slice(4, 12)}`);
+      const danach = await request(base, 'GET', '/api/records?type=note', undefined, { cookie: neu });
+      assert.equal(danach.status, 200, `nach "eigenständig" sofort PIN_NOETIG: ${danach.text}`);
+      assert.equal((await request(base, 'GET', '/api/records?type=note')).status, 401, 'ohne Cookie weiter keine Daten');
+
+      // Wer keine Sitzung hatte, bekommt auch keine.
+      const fremd = await request(base, 'POST', '/api/kopplung/eigenstaendig', {}, { 'x-neural-os': '1' });
+      assert.equal(fremd.status, 401);
+      assert.equal(keks(fremd), null);
+    });
+  } finally {
+    if (app) await app.close().catch(() => {});
+    if (vorher === undefined) delete process.env.NEURAL_OS_GERAETE;
+    else process.env.NEURAL_OS_GERAETE = vorher;
+    profil.cleanup();
+    stick.cleanup();
+  }
+});

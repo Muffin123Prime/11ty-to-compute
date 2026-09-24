@@ -105,7 +105,7 @@ const MAX_VORKOMMEN = 2000;
  * zeichnet ihn auch die Wochenansicht. Als Punkt ohne Dauer ueberschnitte
  * "10 Uhr Zahnarzt" nie etwas, auch nicht "10 bis 11 Uhr Training".
  */
-const OHNE_ENDE_MS = 60 * 60000;
+const OHNE_ENDE_MIN = 60;
 
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -135,7 +135,7 @@ function parseWhen(value) {
   if (m) {
     const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
     if (!validDay(y, mo, d)) return null;
-    return { kind: 'date', day: s, ms: new Date(y, mo - 1, d).getTime(), midnight: true, wand: `${s}T00:00:00` };
+    return { kind: 'date', day: s, ms: new Date(y, mo - 1, d).getTime(), wm: Date.UTC(y, mo - 1, d) / 60000, midnight: true, wand: `${s}T00:00:00` };
   }
   m = LOCAL_RE.exec(s);
   if (m) {
@@ -145,6 +145,7 @@ function parseWhen(value) {
       kind: 'local',
       day: `${m[1]}-${m[2]}-${m[3]}`,
       ms: new Date(y, mo - 1, d, hh, mi, ss).getTime(),
+      wm: Date.UTC(y, mo - 1, d, hh, mi, ss) / 60000,
       midnight: hh === 0 && mi === 0 && ss === 0,
       // Die Wandzeit als vergleichbarer Text. `ms` taugt dafuer nicht: am
       // 29.03. gibt es 02:00-02:59 in Berlin nicht, `new Date` macht daraus
@@ -163,6 +164,7 @@ function parseWhen(value) {
       kind: 'zoned',
       day: dayString(local),
       ms,
+      wm: Date.UTC(local.getFullYear(), local.getMonth(), local.getDate(), local.getHours(), local.getMinutes(), local.getSeconds()) / 60000,
       midnight: local.getHours() === 0 && local.getMinutes() === 0 && local.getSeconds() === 0,
     };
   }
@@ -202,7 +204,7 @@ function spanOf(data) {
     lastDay = end.day;
     if (end.kind !== 'date' && end.midnight && end.day > start.day) lastDay = addDays(end.day, -1);
   }
-  return { firstDay: start.day, lastDay, startMs: start.ms, endMs: end ? end.ms : null };
+  return { firstDay: start.day, lastDay, startMs: start.ms, endMs: end ? end.ms : null, startWm: start.wm };
 }
 
 /* ------------------------------------------------------------------ */
@@ -223,14 +225,70 @@ function liveOfType(store, id, type) {
   return record && record.type === type ? record : null;
 }
 
-/** Aus `{data:{…}}` oder einem flachen Objekt nur die bekannten Felder. */
+/**
+ * Deutsche (und naheliegende) Namen, die jemand statt der Feldnamen schickt.
+ * Nur fuer den Satz im Fehler -- angenommen wird der Name weiterhin nicht.
+ */
+const FELD_HILFE = {
+  titel: 'title', beginn: 'start', anfang: 'start', ende: 'end', endee: 'end', endTime: 'end', startTime: 'start',
+  ort: 'location', notiz: 'body', beschreibung: 'body', ganztaegig: 'allDay', ganztägig: 'allDay',
+  wiederholung: 'recurrence', erinnerung: 'reminder', ausnahmen: 'exdates', projekt: 'projectId', chat: 'chatId',
+};
+
+/**
+ * Felder, die neben den Terminfeldern im Koerper stehen duerfen: `rev` (der
+ * Stand, den das Formular geladen hat -- siehe updateEvent) und `data` als
+ * Huelle.
+ */
+const STEUER_FELDER = new Set(['rev']);
+
+/**
+ * Aus `{data:{…}}` oder einem flachen Objekt die Terminfelder.
+ *
+ * Ein unbekanntes Feld ist ein Fehler, kein stilles Weglassen: aus
+ * `{ende: '…'}` wurde sonst ein Termin OHNE Ende, aus `{ort: 'Praxis'}` einer
+ * ohne Ort -- und niemand erfuhr, warum. Die Wiederholung (recurrence)
+ * lehnt Zusatzfelder genauso ab, die Werkzeuge der KI auch.
+ */
 function eventInput(body) {
-  const source = body && Object.prototype.hasOwnProperty.call(body, 'data') ? asObject(body.data, 'Das Feld "data"') : body;
+  const huelle = body && Object.prototype.hasOwnProperty.call(body, 'data');
+  const source = huelle ? asObject(body.data, 'Das Feld "data"') : body;
+  const pruefen = (obj, erlaubt) => {
+    for (const key of Object.keys(obj)) {
+      if (erlaubt(key)) continue;
+      const richtig = FELD_HILFE[key];
+      throw new ValidationError(`Unbekanntes Feld „${String(key).slice(0, 40)}“${richtig ? ` – hier heißt es „${richtig}“` : ''}. `
+        + `Erlaubt sind: ${EVENT_FIELDS.join(', ')}.`);
+    }
+  };
+  pruefen(source, (k) => EVENT_FIELDS.includes(k) || (!huelle && STEUER_FELDER.has(k)));
+  if (huelle) pruefen(body, (k) => k === 'data' || STEUER_FELDER.has(k));
   const out = {};
   for (const key of EVENT_FIELDS) {
     if (Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined) out[key] = source[key];
   }
   return out;
+}
+
+/**
+ * Der Stand, auf dem eine Aenderung beruht (`rev` im Koerper), oder null.
+ * Nur eine ganze Zahl zaehlt; alles andere ist ein Fehler, damit ein
+ * vertipptes "rev" nicht still die Pruefung abschaltet.
+ */
+function revAus(body) {
+  if (!body || !Object.prototype.hasOwnProperty.call(body, 'rev') || body.rev === null) return null;
+  if (!Number.isInteger(body.rev) || body.rev < 0) throw new ValidationError('"rev" muss eine ganze Zahl sein (der geladene Stand des Termins).');
+  return body.rev;
+}
+
+/**
+ * Steuerzeichen raus, ausser Tab und Zeilenumbruch. Ein \u0000 im Titel
+ * steht sonst unsichtbar im Kalender und in der Kalenderdatei, die das
+ * iPad dann ablehnen oder abschneiden kann (RFC 5545 3.3.11 erlaubt in
+ * TEXT keine Steuerzeichen). \v und \f sind Trennungen: ein Leerzeichen.
+ */
+function ohneSteuerzeichen(text) {
+  return String(text).replace(/[\u000B\u000C]/g, ' ').replace(/[\u0000-\u0008\u000E-\u001F\u007F]/g, '');
 }
 
 /**
@@ -257,7 +315,7 @@ function checkEvent(store, merged, opts = {}) {
   if (typeof merged.title !== 'string' || !merged.title.trim()) {
     throw new ValidationError('Ein Termin braucht einen Titel.');
   }
-  out.title = merged.title.trim().replace(/\s+/g, ' ');
+  out.title = ohneSteuerzeichen(merged.title).trim().replace(/\s+/g, ' ');
   if (out.title.length > 500) throw new ValidationError('Der Titel ist zu lang (höchstens 500 Zeichen).');
 
   if (merged.allDay !== undefined && typeof merged.allDay !== 'boolean') {
@@ -300,7 +358,8 @@ function checkEvent(store, merged, opts = {}) {
     }
     if (typeof value !== 'string') throw new ValidationError(`"${key}" muss ein Text sein.`);
     if (value.length > max) throw new ValidationError(`"${key}" ist zu lang (höchstens ${max} Zeichen).`);
-    out[key] = key === 'location' ? value.trim() : value;
+    const sauber = ohneSteuerzeichen(value);
+    out[key] = key === 'location' ? sauber.trim() : sauber;
   }
 
   const bestand = opts.bestand || {};
@@ -400,6 +459,7 @@ function refuseDayAsTime(input, start) {
 function updateEvent(store, id, patch, opts = {}) {
   const existing = liveOfType(store, id, 'event');
   if (!existing) throw notFound('Diesen Termin gibt es nicht (mehr).');
+  standPruefen(existing, opts.rev);
   const input = asObject(patch, 'Die Änderung');
   for (const key of ['source', 'chatId']) {
     if (Object.prototype.hasOwnProperty.call(input, key) && input[key] !== existing.data[key]) {
@@ -427,6 +487,23 @@ function updateEvent(store, id, patch, opts = {}) {
   }
   if (!Object.keys(changed).length) return existing;
   return store.update(existing.id, changed);
+}
+
+/**
+ * Beruht die Aenderung auf dem aktuellen Stand? `rev` ist der Stand, den das
+ * Formular geladen hat. Weicht er ab, hat inzwischen jemand anderes
+ * geaendert -- die KI im Chat, ein zweites Geraet --, und ein Formular, das
+ * seine alten Werte zurueckschreibt, machte das still rueckgaengig (Claude
+ * hatte dem Nutzer "14:00" schon bestaetigt, danach stand wieder 10:00 da).
+ * Ohne `rev` (die KI, Ziehen, aeltere Aufrufer) gilt wie bisher: wer zuletzt
+ * schreibt, gewinnt.
+ */
+function standPruefen(existing, rev) {
+  if (rev === null || rev === undefined || existing.rev === rev) return;
+  const d = existing.data || {};
+  throw new NeuralError('CONFLICT',
+    `„${d.title}“ wurde inzwischen geändert (etwa von der KI oder auf einem anderen Gerät). Bitte den Termin neu laden und die Änderung noch einmal machen.`,
+    { status: 409, details: { rev: existing.rev, record: existing } });
 }
 
 /**
@@ -501,10 +578,24 @@ function aendernAb(store, serie, tag, input, opts = {}) {
   if (input.allDay === true && !has(input, 'end')) merged.end = null;
   const data = checkEvent(store, merged, { bestand: serie.data });
   const altRegel = w.regelPruefen(teil.alt.recurrence, s0);
+  // Per `?nur` verlegte Vorkommen ab `tag` gehoeren zur Fortsetzung: sie
+  // haengen danach an der NEUEN Serie. Sonst blieb nach "Training loeschen"
+  // (die Fortsetzung) das eine verlegte Training stehen, weil es noch auf die
+  // alte Serie zeigte. Ihr Tag wandert so, wie die Ausnahmen der neuen Serie
+  // gewandert sind (serieVerschieben schiebt exdates mit).
+  const versatz = w.tageZwischen(tag, data.start.slice(0, 10));
+  const neueAus = new Set(data.exdates || []);
+  const verlegte = store.all('event').filter((r) => r.data && r.data.ausSerie
+    && r.data.ausSerie.id === serie.id && typeof r.data.ausSerie.tag === 'string' && r.data.ausSerie.tag >= tag);
   return store.transaction(() => gemeinsam(() => {
     const alt = store.update(serie.id, { recurrence: altRegel, exdates: teil.alt.exdates });
     const record = store.create('event', { ...data, fortsetzungVon: { id: serie.id, ab: tag }, ...stempelVon(opts) });
-    return { record, alt };
+    for (const r of verlegte) {
+      const alterTag = r.data.ausSerie.tag;
+      const neuerTag = !neueAus.has(alterTag) && neueAus.has(w.plusTage(alterTag, versatz)) ? w.plusTage(alterTag, versatz) : alterTag;
+      store.update(r.id, { ausSerie: { id: record.id, tag: neuerTag } });
+    }
+    return { record, alt, umgehaengt: verlegte.length };
   }));
 }
 
@@ -618,17 +709,20 @@ function eventsInRange(store, from, to, { max = MAX_VORKOMMEN } = {}) {
     if (w.istSerie(record.data)) {
       for (const tag of w.vorkommenImZeitraum(record.data, from, to, { max })) {
         const eintrag = vorkommenEintrag(record, tag);
-        out.push({ eintrag, ms: spanOf(eintrag.data).startMs });
+        out.push({ eintrag, wm: spanOf(eintrag.data).startWm });
       }
     } else {
       const span = spanOf(record.data);
       if (!span) continue; // ein unlesbarer Altbestand: nicht erfinden, wohin er gehoert
       if (span.firstDay > to || span.lastDay < from) continue;
-      out.push({ eintrag: einzelEintrag(record), ms: span.startMs });
+      out.push({ eintrag: einzelEintrag(record), wm: span.startWm });
     }
     if (out.length > max) throw zuViele();
   }
-  out.sort((a, b) => (a.ms - b.ms)
+  // Nach Wandzeit, nicht nach Millisekunden: am 29.03. gibt es 02:30 in
+  // Berlin nicht, `new Date` macht 03:30 daraus -- und "Nachtdienst 02:30"
+  // stuende nach "Kaffee 03:15". Gespeichert ist die Wandzeit; so wird sortiert.
+  out.sort((a, b) => (a.wm - b.wm)
     || String(a.eintrag.data.title).localeCompare(String(b.eintrag.data.title), 'de')
     || (a.eintrag.id < b.eintrag.id ? -1 : a.eintrag.id > b.eintrag.id ? 1 : 0));
   return out.map((x) => x.eintrag);
@@ -657,15 +751,20 @@ function recordsInRange(store, from, to) {
 /* Ueberschneidungen                                                   */
 /* ------------------------------------------------------------------ */
 
-/** [Beginn, Ende) eines Eintrags mit Uhrzeit in ms; null fuer ganztaegige. */
+/**
+ * [Beginn, Ende) eines Eintrags mit Uhrzeit in Wandminuten; null fuer
+ * ganztaegige. Wandzeit statt Millisekunden aus demselben Grund wie beim
+ * Sortieren: "02:30-02:50" am 29.03. wuerde in ms zu 03:30-03:50 und
+ * ueberschnitte "03:35 Kaffee", obwohl er laut Uhr um 02:50 endet.
+ */
 function fenster(data) {
   if (data.allDay) return null;
   const start = parseWhen(data.start);
   if (!start || start.kind === 'date') return null;
   const end = parseWhen(data.end);
-  let e = end && end.kind !== 'date' ? end.ms : start.ms + OHNE_ENDE_MS;
-  if (e <= start.ms) e = start.ms + OHNE_ENDE_MS;
-  return { s: start.ms, e };
+  let e = end && end.kind !== 'date' ? end.wm : start.wm + OHNE_ENDE_MIN;
+  if (e <= start.wm) e = start.wm + OHNE_ENDE_MIN;
+  return { s: start.wm, e };
 }
 
 /**
@@ -696,12 +795,13 @@ function ueberschneidungen(store, { start, end = null, ohne = null } = {}) {
   }
 
   if (qe && qe.kind === 'date') throw new ValidationError('Ein Zeitraum mit Uhrzeit braucht auch beim Ende eine Uhrzeit.');
-  const s = qs.ms;
-  let e = qe ? qe.ms : s + OHNE_ENDE_MS;
+  const s = qs.wm;
+  let e = qe ? qe.wm : s + OHNE_ENDE_MIN;
   if (e < s) throw new ValidationError('Das Ende liegt vor dem Beginn.');
-  if (e === s) e = s + OHNE_ENDE_MS;
+  if (e === s) e = s + OHNE_ENDE_MIN;
   const firstDay = qs.day;
-  const lastDay = dayString(new Date(e - 1));
+  // Wandminuten -> Tag: als UTC gelesen, denn so wurden sie gebildet.
+  const lastDay = new Date((e - 1) * 60000).toISOString().slice(0, 10);
   if (daysBetween(firstDay, lastDay) > MAX_RANGE_DAYS) throw new ValidationError(`Der Zeitraum ist zu lang (höchstens ${MAX_RANGE_DAYS} Tage).`);
   // Einen Tag frueher anfangen: ein Termin, der gestern Abend begann und
   // heute frueh endet, liegt nur mit seinem Ende im gefragten Tag.
@@ -838,16 +938,26 @@ function lightNote(record) {
  * NAECHSTEN Vorkommen -- "naechster Termin: Training, 7. Januar 2025" waere
  * fuer eine Serie, die jede Woche stattfindet, eine falsche Auskunft.
  */
-function lightEvent(record, heute = dayString(new Date())) {
+function lightEvent(record, heute = dayString(new Date()), now = Date.now()) {
   const data = record.data || {};
   let { start, end } = data;
   let occurrence = null;
   const serie = w.istSerie(data);
   if (serie) {
-    const tag = w.naechstesVorkommen(data, heute);
-    if (tag) {
-      ({ start, end } = w.aufTagLegen(data, tag));
+    // Das naechste Vorkommen, das noch nicht VORBEI ist -- nach Uhrzeit,
+    // nicht nur nach Tag. Sonst nannte ein Projekt um 21 Uhr das Training
+    // von heute 19 Uhr als "naechsten Termin", die Uebersicht filterte es als
+    // vergangen weg, und die laufende Serie verschwand ganz bis morgen.
+    const spanne = w.spanneTage(data);
+    let ab = heute;
+    for (let i = 0; i < 8; i += 1) {
+      const tag = w.naechstesVorkommen(data, ab);
+      if (!tag) break;
+      const lage = w.aufTagLegen(data, tag);
+      ({ start, end } = lage);
       occurrence = tag;
+      if (endeMs({ ...data, ...lage }) >= now) break;
+      ab = w.plusTage(tag, 1 + spanne);
     }
   }
   return {
@@ -862,6 +972,14 @@ function lightEvent(record, heute = dayString(new Date())) {
     occurrence,
     updatedAt: record.updatedAt,
   };
+}
+
+/** Wann ein Termin vorbei ist (ms): sein Ende, ganztaegig der Folgetag, ohne Ende sein Beginn. */
+function endeMs(e) {
+  const span = spanOf(e);
+  if (!span) return -Infinity;
+  if (span.endMs !== null) return span.endMs;
+  return e.allDay ? parseWhen(addDays(span.lastDay, 1)).ms : span.startMs;
 }
 
 function lightTask(record) {
@@ -897,7 +1015,7 @@ function describeProject(bucket, now = Date.now(), full = false) {
   const chats = [...bucket.chats.values()].sort(byUpdatedDesc);
   const notes = [...bucket.note.values()].sort(byUpdatedDesc);
   const heute = dayString(new Date(now));
-  const events = [...bucket.event.values()].map((r) => lightEvent(r, heute)).sort(eventOrder);
+  const events = [...bucket.event.values()].map((r) => lightEvent(r, heute, now)).sort(eventOrder);
   const tasks = [...bucket.task.values()].map(lightTask).sort(taskOrder);
 
   let zuletzt = project.updatedAt;
@@ -905,12 +1023,7 @@ function describeProject(bucket, now = Date.now(), full = false) {
     if (record.updatedAt > zuletzt) zuletzt = record.updatedAt;
   }
 
-  const upcoming = events.filter((e) => {
-    const span = spanOf(e);
-    if (!span) return false;
-    const endMs = span.endMs !== null ? span.endMs : (e.allDay ? parseWhen(addDays(span.lastDay, 1)).ms : span.startMs);
-    return endMs >= now;
-  });
+  const upcoming = events.filter((e) => endeMs(e) >= now);
 
   const out = {
     id: project.id,
@@ -1066,7 +1179,9 @@ function register(router) {
   router.post('/api/events', async (rc) => {
     rc.requireCapability('write');
     const store = need(rc.ctx.store, 'Der Speicher');
-    const input = eventInput(asObject(await rc.body()));
+    const koerper = asObject(await rc.body());
+    const input = eventInput(koerper);
+    if (koerper.rev !== undefined) throw new ValidationError('"rev" gibt es nur beim Ändern eines Termins.');
     const stand = verlaufStand(rc);
     const record = createEvent(store, input);
     return { record, rueckgaengig: rueckgaengigFuer(rc, record.id, stand) };
@@ -1106,9 +1221,10 @@ function register(router) {
     rc.requireCapability('write');
     const store = need(rc.ctx.store, 'Der Speicher');
     const nur = nurParam(rc.query);
-    const input = eventInput(asObject(await rc.body()));
+    const koerper = asObject(await rc.body());
+    const input = eventInput(koerper);
     const stand = verlaufStand(rc);
-    const record = updateEvent(store, rc.params.id, input, { nur });
+    const record = updateEvent(store, rc.params.id, input, { nur, rev: revAus(koerper) });
     const out = { record, rueckgaengig: rueckgaengigFuer(rc, record.id, stand) };
     // Nur ein Vorkommen: die Antwort ist der NEUE Einzeltermin (Vertrag C);
     // die Serie danach steht daneben, damit niemand sie neu laden muss.
@@ -1204,5 +1320,6 @@ module.exports = {
   eventsInRange,
   recordsInRange,
   ueberschneidungen,
+  lightEvent,
   MAX_VORKOMMEN,
 };

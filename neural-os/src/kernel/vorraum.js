@@ -192,12 +192,15 @@ async function lauschen(server, host, port, tryPorts) {
  * @param {string} [opts.instanz]  für /api/health (Laufzettel, Paket S)
  * @param {string} [opts.heim]     für /api/health (Laufzettel, Paket S)
  * @param {string} [opts.geraeteOrdner] Ort gemerkter Geräte (Tests)
+ * @param {string} [opts.stopp]    das Beenden-Recht aus dem Laufzettel (Kopf x-neural-os-stopp)
+ * @param {(grund:string)=>any} [opts.beiStopp] wird nach POST /api/system/beenden mit diesem Recht gerufen
  * @returns {Promise<{url:string, port:number, host:string,
  *   entsperrt:Promise<{passphrase:string|null, port:number, sitzung:boolean, gemerkt:boolean}>,
  *   schliessen:()=>Promise<void>}>}
  */
 async function oeffnen({
   paths, config, host = '127.0.0.1', port, tryPorts = 1, ki = {}, instanz = null, heim = null, geraeteOrdner,
+  stopp = null, beiStopp = null,
 } = {}) {
   if (!paths || typeof paths.secrets !== 'string') throw new ValidationError('Der Vorraum braucht paths.secrets.');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new ValidationError('Der Vorraum braucht einen Port.');
@@ -216,6 +219,8 @@ async function oeffnen({
   const urlHost = String(bindHost).includes(':') ? `[${bindHost}]` : bindHost;
 
   const sperre = { fehl: 0, bis: 0 };
+  /** Die Warteschlange der PIN-Versuche: immer genau einer in Prüfung. */
+  let versuche = Promise.resolve();
   let belegterPort = null;
   let geschlossen = false;
   let aufgeloest = false;
@@ -359,6 +364,27 @@ async function oeffnen({
       json(req, res, 400, fehlerJson('VALIDATION_FAILED', 'Es ist keine PIN eingerichtet; es gibt nichts zu entsperren.'));
       return;
     }
+    // Ein Versuch nach dem anderen (Prüfung Runde 1): Nebeneinander hätte
+    // eine falsche PIN, eingereiht hinter die richtige, ungeprüft "offen"
+    // gesehen, und gleichzeitige Fehlversuche wären alle an der Pause vorbei
+    // ausgewertet worden. Pause und Zustand gelten erst, wenn DIESER Versuch
+    // an der Reihe ist.
+    const vorgaenger = versuche;
+    let freigeben;
+    versuche = new Promise((r) => { freigeben = r; });
+    try {
+      await vorgaenger;
+      await versuchen(req, res, body, passphrase);
+    } finally {
+      freigeben();
+    }
+  }
+
+  async function versuchen(req, res, body, passphrase) {
+    if (geschlossen) {
+      json(req, res, 503, fehlerJson('SERVER_CLOSING', 'Der Server wird gerade beendet.'));
+      return;
+    }
     const rest = pauseS();
     if (rest > 0) {
       json(req, res, 429, fehlerJson('ZU_OFT_FALSCH', 'Zu oft falsch. Kurz warten.', { wartenS: rest }));
@@ -407,6 +433,28 @@ async function oeffnen({
     json(req, res, 200, { state: 'unlocked', enabled: true, reloaded: false, sitzung: true, gemerkt });
   }
 
+  /**
+   * POST /api/system/beenden, nur mit dem Beenden-Recht aus dem Laufzettel
+   * (`neural-os stop`; unter Windows wäre SIGTERM ein TerminateProcess).
+   * Ohne Recht bleibt es beim Vorraum: 423.
+   */
+  function beendenAnfrage(req, res) {
+    const gegeben = req.headers[authMod.STOPP_HEADER || 'x-neural-os-stopp'];
+    const recht = typeof stopp === 'string' && stopp && typeof gegeben === 'string'
+      && Buffer.byteLength(gegeben) === Buffer.byteLength(stopp)
+      && crypto.timingSafeEqual(Buffer.from(gegeben), Buffer.from(stopp));
+    if (!recht || typeof beiStopp !== 'function' || !req.headers[CSRF_HEADER]) { gesperrtJson(req, res); return; }
+    let geplant = false;
+    const planen = () => {
+      if (geplant) return;
+      geplant = true;
+      setTimeout(() => { Promise.resolve().then(() => beiStopp('stop')).catch(() => {}); }, 50);
+    };
+    res.once('finish', planen);
+    res.once('close', planen);
+    json(req, res, 202, { ok: true, danach: process.platform === 'darwin' ? 'auswerfen' : 'abziehen' });
+  }
+
   async function bearbeiten(req, res) {
     if (geschlossen) {
       json(req, res, 503, fehlerJson('SERVER_CLOSING', 'Der Server wird gerade beendet.'));
@@ -453,6 +501,7 @@ async function oeffnen({
     if (pfad === '/api/status' && lesen) { json(req, res, 200, status()); return; }
     if (pfad === '/api/vault' && lesen) { json(req, res, 200, tresor()); return; }
     if (pfad === '/api/vault/unlock' && methode === 'POST') { await entsperren(req, res); return; }
+    if (pfad === '/api/system/beenden' && methode === 'POST') { beendenAnfrage(req, res); return; }
     if (pfad === PFAD && lesen) { seiteSenden(req, res, 200); return; }
     const api = pfad === '/api' || pfad.startsWith('/api/');
     if (lesen && (!api || istNavigation(req))) { seiteSenden(req, res, 423); return; }
