@@ -280,6 +280,67 @@ export function rasterBloecke(items, { hour = 48, minPx = 20 } = {}) {
 }
 
 /**
+ * Wie gleichzeitige Termine in einer ENGEN Spalte liegen (unter ~60 px je
+ * Spur, siehe engeSpalten): gestaffelt wie Karten -- der spaetere liegt
+ * eingerueckt oben auf dem frueheren.
+ *
+ * Das geht nur, wenn der spaetere mindestens eine Titelzeile (`titelPx`)
+ * nach dem frueheren beginnt. Beginnt er darin ("Rueckruf" 17:45-18:15,
+ * "Tauschboerse" ab 18:00), schnitt seine Karte die Titelzeile des frueheren
+ * quer durch. Dann:
+ *  - ist der fruehere kurz (hoechstens zwei Titelzeilen) und bleibt beim
+ *    spaeteren darunter Platz fuer eine Zeile, liegt der FRUEHERE vorn
+ *    (`vorn`), und der Text des spaeteren beginnt unter ihm (`abstand` px);
+ *  - sonst liegen die beiden Spuren nebeneinander (`neben`), schmal, aber
+ *    ohne sich zu verdecken.
+ * Die Lage nach der Uhrzeit bleibt in jedem Fall, wie sie ist.
+ *
+ * @param {{id:string, top:number, height:number, lane:number, lanes:number, gruppe:number}[]} bloecke  aus rasterBloecke
+ * @param {{titelPx?:number}} [opts]
+ * @returns {Map<string, {neben:boolean, vorn:boolean, abstand:number}>}
+ */
+export function staffelPlan(bloecke, { titelPx = 22 } = {}) {
+  const plan = new Map(bloecke.map((b) => [b.id, { neben: false, vorn: false, abstand: 0 }]));
+  const gruppen = new Map();
+  for (const b of bloecke) {
+    if (b.lanes < 2) continue;
+    if (!gruppen.has(b.gruppe)) gruppen.set(b.gruppe, []);
+    gruppen.get(b.gruppe).push(b);
+  }
+  for (const liste of gruppen.values()) {
+    // Eng sichtbar sind die ersten zwei Spuren; die dritte wird zu "+n".
+    const sicht = liste.filter((b) => b.lane < 2);
+    let neben = false;
+    const vorn = new Set();
+    const abstand = new Map();
+    for (const b of sicht) {
+      for (const a of sicht) {
+        if (a.lane >= b.lane) continue;
+        const aEnde = a.top + a.height;
+        if (b.top >= aEnde || a.top >= b.top + b.height) continue; // beruehren sich nicht
+        if (b.top - a.top >= titelPx) continue; // die Titelzeile von a bleibt frei
+        const rest = b.height - (aEnde - b.top);
+        if (a.top <= b.top && a.height <= 2 * titelPx && rest >= titelPx) {
+          vorn.add(a.id);
+          abstand.set(b.id, Math.max(abstand.get(b.id) || 0, Math.ceil(aEnde - b.top)));
+        } else {
+          neben = true;
+        }
+      }
+    }
+    for (const b of liste) {
+      const p = plan.get(b.id);
+      if (neben) p.neben = true;
+      else {
+        p.vorn = vorn.has(b.id);
+        p.abstand = abstand.get(b.id) || 0;
+      }
+    }
+  }
+  return plan;
+}
+
+/**
  * Das neue Ende beim Ziehen am unteren Rand -- RELATIV zur Bewegung: wer den
  * Anfasser nicht bewegt, aendert nichts. (Vorher galt die Minute unter dem
  * Zeiger: ein Tipp in die obere Haelfte des 16-px-Anfassers kuerzte den
@@ -320,6 +381,24 @@ export function scrollAnfang(bloecke, topMin, maxZurueck = 120) {
     top = Math.min(...schnitt.map((b) => b.startMin));
   }
   return Math.max(0, top);
+}
+
+/**
+ * Welche Termine einer Spalte ganz ausserhalb des Bildes liegen -- ueber
+ * (`oben`) und unter (`unten`) dem sichtbaren Ausschnitt, in Pixeln des
+ * Rasters. Fuer den leisen Hinweis am Rand ("10:00 Beete …"): ohne ihn sah
+ * man nach dem Blaettern "2 Termine" und nur einen davon.
+ *
+ * @param {{top:number, height:number}[]} bloecke
+ * @returns {{oben:object|null, unten:object|null}}  der erste verborgene je Seite, mit `n` = wie viele
+ */
+export function randTermine(bloecke, oben, unten, rand = 4) {
+  const ueber = bloecke.filter((b) => b.top + b.height <= oben + rand).sort((a, b) => a.top - b.top);
+  const unter = bloecke.filter((b) => b.top >= unten - rand).sort((a, b) => a.top - b.top);
+  return {
+    oben: ueber.length ? { ...ueber[0], n: ueber.length } : null,
+    unten: unter.length ? { ...unter[0], n: unter.length } : null,
+  };
 }
 
 /** Eine Zeitangabe als Wandzeit: "YYYY-MM-DD" oder "YYYY-MM-DDTHH:MM" (Zone -> Ortszeit). */
@@ -505,6 +584,8 @@ const GLYPH = {
   ki: '<path d="M10 2.5c.7 4.1 2.4 5.8 6.5 6.5-4.1.7-5.8 2.4-6.5 6.5-.7-4.1-2.4-5.8-6.5-6.5 4.1-.7 5.8-2.4 6.5-6.5z" fill="currentColor" stroke="none"/>',
   ics: '<rect x="3.6" y="4.6" width="12.8" height="11.8" rx="2.2"/><path d="M3.6 8.2h12.8M7.2 3.2v2.8M12.8 3.2v2.8M10 10.4v4M8 12.4h4"/>',
   enter: '<path d="M15.4 5.2v4.4a2 2 0 0 1-2 2H5.2"/><path d="m8 8.6-3 3 3 3"/>',
+  hoch: '<path d="m5.5 12.2 4.5-4.5 4.5 4.5"/>',
+  runter: '<path d="m5.5 7.8 4.5 4.5 4.5-4.5"/>',
 };
 
 const CSS = `
@@ -878,6 +959,11 @@ button.kal__rtag:hover { background: var(--surface-2); }
 @container (max-width: 104px) {
   .kal__block-bis { display: none; }
 }
+/* Sehr schmal: die leisen Zeichen (Serie, KI) weichen, statt halb
+   abgeschnitten neben der Uhrzeit zu haengen ("18:00 ◂"). Sie stehen im Blatt. */
+@container (max-width: 64px) {
+  .kal__block-time > .kal__wdh, .kal__block-time > .kal__ki { display: none; }
+}
 .kal__block.is-kurz { padding-top: 1px; padding-bottom: 1px; }
 .kal__block.is-kurz .kal__block-text { flex-direction: row; align-items: center; gap: 6px; }
 .kal__block.is-kurz .kal__block-title { flex: 0 1 auto; -webkit-line-clamp: 1; white-space: nowrap; text-overflow: ellipsis; display: block; }
@@ -894,6 +980,17 @@ button.kal__rtag:hover { background: var(--surface-2); }
 }
 .kal__rcol.is-eng .kal__block.is-geteilt:hover { z-index: 8; }
 .kal__rcol.is-eng .kal__block.is-dritte { display: none; }
+/* Beginnt der spaetere IN der Titelzeile des frueheren (staffelPlan): */
+/* ... ist der fruehere kurz, liegt er vorn, und der Text darunter beginnt unter ihm; */
+.kal__rcol.is-eng .kal__block.is-geteilt.is-vorn { z-index: 4; }
+/* Der fruehere liegt ganz oben auf, verschwinden kann er nicht -- der spaetere
+   braucht deshalb nur einen Hauch Einzug und behaelt fast die ganze Breite fuer
+   seinen Titel (mit 38 % blieben "Saatgut / - / Taus…"). */
+.kal__rcol.is-eng .kal__block.is-geteilt.is-unter { left: calc(var(--lane) * 10px + 3px); width: calc(100% - var(--lane) * 10px - 6px); }
+.kal__rcol.is-eng .kal__block.is-geteilt.is-unter .kal__block-text { margin-top: var(--abstand, 0px); }
+.kal__rcol.is-eng .kal__block.is-geteilt.is-unter .kal__block-title { -webkit-line-clamp: var(--zeilen-unter, var(--zeilen, 1)); }
+/* ... sonst nebeneinander, halb und halb -- schmal, aber keiner verdeckt den anderen. */
+.kal__rcol.is-eng .kal__block.is-geteilt.is-neben { left: calc(var(--lane) * 50% + 3px); width: calc(50% - 6px); z-index: 1; }
 /* Eng: weniger Rand im Block, jeder Buchstabe zaehlt. */
 .kal__rcol.is-eng .kal__block.is-geteilt { gap: 4px; padding-right: 3px; }
 .kal__mehr {
@@ -940,6 +1037,19 @@ button.kal__rtag:hover { background: var(--surface-2); }
    Spanne "17:30–18:00" den Geist, und man sieht nicht, WAS man zieht. */
 .kal__block.is-ghost.is-kurz .kal__block-bis { display: none; }
 .kal__block.is-ghost.is-kurz .kal__block-title { flex: 1 1 0; }
+/* Dauer aendern und Aufziehen: gewaehlt wird das ENDE -- es steht immer da,
+   auch in schmalen Spalten (vorher blendete die Container-Regel oben es aus,
+   und man sah beim Ziehen nur "17:15"). Der feste Beginn tritt zurueck. Ist
+   der Geist nur eine Zeile hoch, weicht der Titel: man weiss, was man zieht. */
+.kal__block.is-ghost.is-spanne { gap: 5px; padding-right: 4px; }
+.kal__block.is-ghost.is-spanne .kal__block-time { flex-wrap: wrap; }
+.kal__block.is-ghost.is-spanne .kal__block-time > span:first-child { color: var(--fg-muted); font-weight: 400; }
+.kal__block.is-ghost.is-spanne .kal__block-bis,
+.kal__block.is-ghost.is-spanne.is-kurz .kal__block-bis { display: inline; flex: none; overflow: visible; color: var(--accent-text); font-weight: 600; }
+.kal__block.is-ghost.is-spanne.is-kurz .kal__block-title { display: none; }
+@container (max-width: 76px) {
+  .kal__block.is-ghost.is-spanne .kal__block-time > span:first-child { display: none; }
+}
 .kal__block.is-neu, .kal__balken.is-neu { animation: kal-neu 1.6s var(--ease) 1; }
 @keyframes kal-neu { 0%, 40% { box-shadow: 0 0 0 3px var(--accent-ring); } 100% { box-shadow: 0 0 0 0 transparent; } }
 .kal__grip { position: absolute; left: 0; right: 0; bottom: 0; height: 8px; cursor: ns-resize; touch-action: none; }
@@ -953,6 +1063,45 @@ button.kal__rtag:hover { background: var(--surface-2); }
 .kal__now.is-fern { border-top-width: 1px; opacity: 0.35; }
 .kal__now.is-fern::before { display: none; }
 body.kal-zieht, body.kal-zieht * { cursor: grabbing !important; }
+/* Termine ausserhalb des Bildes: ein leiser Hinweis am Rand der Spalte
+   (randHinweise). Klebt oben bzw. unten im Ausschnitt, 0 px hoch. */
+.kal__rand { position: sticky; z-index: 6; display: grid; height: 0; pointer-events: none; }
+.kal__rand.is-oben { top: 0; }
+.kal__rand.is-unten { bottom: 0; }
+.kal__rand-zelle { position: relative; min-width: 0; container-type: inline-size; }
+.kal__rand-knopf {
+  position: absolute;
+  left: 3px;
+  max-width: calc(100% - 6px);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 22px;
+  padding: 0 6px 0 3px;
+  font: inherit;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-full);
+  box-shadow: var(--shadow-1);
+  cursor: pointer;
+  pointer-events: auto;
+  white-space: nowrap;
+}
+.kal__rand.is-oben .kal__rand-knopf { top: 4px; }
+.kal__rand.is-unten .kal__rand-knopf { bottom: 4px; }
+.kal__rand-knopf svg { flex: none; width: 14px; height: 14px; color: var(--accent-text); }
+.kal__rand-zeit { flex: none; font-variant-numeric: tabular-nums; color: var(--fg); }
+.kal__rand-titel { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.kal__rand-mehr { flex: none; color: var(--fg-subtle); }
+.kal__rand-knopf:hover { color: var(--fg); border-color: var(--border-strong); }
+.kal__rand-knopf:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+/* Schmale Spalte: nur Uhrzeit und Anzahl ("09:00 · +1") statt "09:00 Z…". */
+@container (max-width: 104px) {
+  .kal__rand-titel { display: none; }
+}
 
 /* ---- Tag: der kleine Monat daneben ---- */
 .kal__seite { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
@@ -1122,6 +1271,11 @@ body.kal-zieht, body.kal-zieht * { cursor: grabbing !important; }
   .kal__switch { min-height: var(--tap-min); }
   .kal__form .input, .kal__form .select { height: var(--tap-min); }
   .kal__lfuss a { display: inline-flex; align-items: center; min-height: var(--tap-min); }
+  /* "In Kalender übernehmen (.ics)" ist DER Knopf fuer das iPad (Vertrag D) -- 44 px hoch, nicht 22. */
+  .kal__fact-ics, .kal__fact a { display: inline-flex; align-items: center; min-height: var(--tap-min); }
+  .kal__fact.is-link { align-items: center; }
+  .kal__fact.is-link > svg { margin-top: 0; }
+  .kal__rand-knopf { height: 32px; }
   .kal__day:active, .kal__entry:active .kal__entry-card, .kal__block:active { background: var(--surface-3); }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -1176,7 +1330,7 @@ function errorText(err) {
  * ohne `nur` zu senden: api.js laesst leere Werte weg, und ohne `nur` gilt
  * die Aenderung -- oder das Loeschen -- fuer die ganze Serie.
  */
-function nurDieses(e) {
+export function nurDieses(e) {
   const tag = e && e.occurrence;
   if (typeof tag !== 'string' || !DATE_RE.test(tag)) {
     throw new Error('Welcher Tag der Serie gemeint ist, fehlt – es wurde nichts geändert.');
@@ -1246,6 +1400,10 @@ export default {
     // Block so hoch wie seine Dauer (mindestens 30 px = eine halbe Stunde),
     // und was darunter nicht passt, steht daneben (rasterBloecke).
     const MIN_BLOCK = coarse ? 30 : 20;
+    // Die Titelzeile eines Blocks: Rand 1 + Innenabstand 4 + eine Zeile (11,5 px x 1,35).
+    // Beginnt ein anderer Termin darin, darf er sie in der engen Staffel nicht verdecken (staffelPlan).
+    const TITEL_PX = 22;
+    const bewegungsarm = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     const today = () => toDay(new Date());
     // Die Adresse darf Ansicht und Tag vorgeben (#/kalender?ansicht=tag&tag=…),
@@ -1410,6 +1568,10 @@ export default {
 
     function move(step) {
       if (st.mode === 'liste') return;
+      // Neue Tage, neue Termine: zum ersten Termin (bzw. zu "jetzt") scrollen,
+      // statt die alte Hoehe zu behalten -- sonst lag "Beete 10:00" nach dem
+      // Blaettern ueber dem Rand, und nichts wies darauf hin.
+      st.scrollZiel = 'jetzt';
       if (st.mode === 'tag') {
         st.cursor = addDays(st.cursor, step);
         st.selected = st.cursor;
@@ -1446,6 +1608,8 @@ export default {
       const otherMonth = st.mode === 'monat' && day.slice(0, 7) !== st.cursor.slice(0, 7);
       if (otherMonth) st.cursor = day;
       const draussen = day < range.from || day > range.to || otherMonth;
+      // Ein anderer Tag im Raster: dort beginnen, wo seine Termine sind.
+      if (st.mode === 'tag' || (st.mode === 'woche' && draussen)) st.scrollZiel = 'jetzt';
       render();
       if (draussen) load();
       if (focus) {
@@ -1567,9 +1731,13 @@ export default {
       if (next) {
         if (st.scrollZiel === 'jetzt' || keepScroll === null) scrollZurStunde(next);
         else next.scrollTop = keepScroll;
+        randHinweise(next);
       }
       if (st.mode === 'liste' || st.mode === 'monat') body.scrollTop = st.scrollZiel === 'jetzt' ? 0 : keepBody;
-      if (st.loaded) st.scrollZiel = null;
+      // Erst wenn die Termine der GEZEIGTEN Tage da sind, ist das Ziel erreicht:
+      // beim Blaettern zeichnet render() zuerst ohne sie, dann nach dem Laden.
+      const bereich = aktuellerRange();
+      if (st.loaded && st.range && st.range.from === bereich.from && st.range.to === bereich.to) st.scrollZiel = null;
       markOpen();
       markNeu();
     }
@@ -1854,6 +2022,7 @@ export default {
         }
         const byId = new Map(timed.map((x) => [x.id, x]));
         const bloecke = rasterBloecke(timed, { hour: HOUR, minPx: MIN_BLOCK });
+        const staffel = staffelPlan(bloecke, { titelPx: TITEL_PX });
         // Mehr als zwei Termine gleichzeitig in einer schmalen Spalte: statt
         // vier blauer Striche und "W…" die ersten zwei gestaffelt und ein
         // "+n", das den Tag zeigt (nur sichtbar, wenn die Spalte eng ist).
@@ -1890,11 +2059,29 @@ export default {
           const zeilen = kurz ? 1 : Math.max(1, Math.floor((innen - 16 - (mitOrt ? 16 : 0)) / 16));
           const label = timeLabel(e.span, day);
           const [von, bis] = label.includes('–') ? label.split('–') : [label, ''];
+          const lage = staffel.get(item.id) || { neben: false, vorn: false, abstand: 0 };
+          // Liegt der fruehere vorn, beginnt der Text hier unter ihm -- dann passen weniger Zeilen.
+          const zeilenUnter = Math.max(1, Math.floor((innen - lage.abstand - 16 - (mitOrt ? 16 : 0)) / 16));
           col.appendChild(h('button.kal__block', {
             type: 'button',
             'data-key': e.key,
-            class: { 'is-past': isPast(e.span), 'is-kurz': kurz, 'is-geteilt': item.lanes > 1, 'is-dritte': item.lanes > 2 && item.lane >= 2 },
-            style: { top: `${top}px`, height: `${height}px`, '--lane': item.lane, '--lanes': item.lanes, '--zeilen': zeilen },
+            class: {
+              'is-past': isPast(e.span),
+              'is-kurz': kurz,
+              'is-geteilt': item.lanes > 1,
+              'is-dritte': item.lanes > 2 && item.lane >= 2,
+              'is-neben': lage.neben,
+              'is-vorn': lage.vorn,
+              'is-unter': lage.abstand > 0,
+            },
+            style: {
+              top: `${top}px`,
+              height: `${height}px`,
+              '--lane': item.lane,
+              '--lanes': item.lanes,
+              '--zeilen': zeilen,
+              ...(lage.abstand > 0 ? { '--abstand': `${lage.abstand}px`, '--zeilen-unter': zeilenUnter } : {}),
+            },
             title: `${label} · ${e.data.title}${e.data.location ? ` · ${e.data.location}` : ''}`,
             'aria-label': `${label}, ${e.data.title}${e.data.location ? `, ${e.data.location}` : ''}${istKi(e) ? ', von der KI' : ''}`,
             onClick: (ev) => { if (!schlucken(ev)) openDetail(e); },
@@ -1920,8 +2107,73 @@ export default {
       }
       stunden.addEventListener('pointerdown', (ev) => onPointerDown(ev, { days, stunden }));
 
+      // Leise Hinweise am oberen und unteren Rand jeder Spalte: dort liegen
+      // Termine ausserhalb des Bildes (randHinweise fuellt sie beim Scrollen).
+      // Klebend (sticky) und 0 px hoch -- sie verschieben das Raster nicht.
+      const randZeile = (seite) => h(`div.kal__rand.is-${seite}`, { style: { gridTemplateColumns: cols } },
+        h('span', { 'aria-hidden': 'true' }),
+        ...days.map((day) => h('span.kal__rand-zelle', { 'data-day': day })));
+      const scroller = h('div.kal__rscroll', null, randZeile('oben'), stunden, randZeile('unten'));
+      let randFrame = 0;
+      scroller.addEventListener('scroll', () => {
+        if (randFrame) return;
+        randFrame = requestAnimationFrame(() => { randFrame = 0; randHinweise(scroller); });
+      }, { passive: true });
       return h('section.kal__raster', { 'aria-label': n === 1 ? 'Tag' : 'Woche', 'data-tage': n },
-        kopf, ganz, h('div.kal__rscroll', null, stunden));
+        kopf, ganz, scroller);
+    }
+
+    /**
+     * Die Hinweise am Rand neu setzen: je Spalte der erste Termin, der ganz
+     * ueber bzw. unter dem Ausschnitt liegt, und wie viele es sind. Antippen
+     * scrollt zu ihm. Gemessen an den gezeichneten Bloecken, also genau das,
+     * was man sehen wuerde.
+     */
+    function randHinweise(scroller) {
+      if (!scroller || !scroller.isConnected) return;
+      const oben = scroller.scrollTop;
+      const unten = oben + scroller.clientHeight;
+      for (const col of scroller.querySelectorAll('.kal__rcol')) {
+        const day = col.dataset.day;
+        const bloecke = [...col.querySelectorAll('.kal__block:not(.is-ghost)')].map((el) => ({
+          top: el.offsetTop,
+          height: el.offsetHeight,
+          key: el.dataset.key,
+          label: el.getAttribute('aria-label') || '',
+        }));
+        const r = randTermine(bloecke, oben, unten);
+        for (const seite of ['oben', 'unten']) {
+          const zelle = scroller.querySelector(`.kal__rand.is-${seite} .kal__rand-zelle[data-day="${day}"]`);
+          if (!zelle) continue;
+          const b = r[seite];
+          const alt = zelle.firstChild;
+          if (!b) {
+            if (alt) clear(zelle);
+            continue;
+          }
+          const e = st.byKey.get(b.key);
+          const zeit = e ? timeLabel(e.span, day).split('–')[0] : '';
+          const titel = e ? e.data.title : '';
+          const kennung = `${b.key}|${b.n}|${zeit}`;
+          if (alt && alt.dataset.kennung === kennung) continue;
+          clear(zelle);
+          const mehr = b.n > 1 ? ` · +${b.n - 1}` : '';
+          zelle.appendChild(h('button.kal__rand-knopf', {
+            type: 'button',
+            'data-kennung': kennung,
+            title: `${b.n === 1 ? 'Ein Termin' : `${b.n} Termine`} ${seite === 'oben' ? 'weiter oben' : 'weiter unten'} – hinscrollen`,
+            'aria-label': `${b.n === 1 ? 'Ein Termin' : `${b.n} Termine`} ${seite === 'oben' ? 'weiter oben' : 'weiter unten'}: ${b.label}`,
+            onClick: () => {
+              const ziel = Math.max(0, b.top - (seite === 'oben' ? 12 : Math.max(12, scroller.clientHeight - b.height - 12)));
+              scroller.scrollTo({ top: ziel, behavior: bewegungsarm() ? 'auto' : 'smooth' });
+            },
+          },
+          icon(seite === 'oben' ? I.hoch : I.runter),
+          h('span.kal__rand-zeit', null, text(zeit)),
+          h('span.kal__rand-titel', null, text(`${titel}`)),
+          mehr ? h('span.kal__rand-mehr', null, text(mehr)) : null));
+        }
+      }
     }
 
     /**
@@ -1956,7 +2208,7 @@ export default {
       liste.style.marginRight = leiste > 0 ? `-${leiste}px` : '';
     }
     if (typeof ResizeObserver === 'function') {
-      const ro = new ResizeObserver(() => { engeSpalten(); listeBuendig(); });
+      const ro = new ResizeObserver(() => { engeSpalten(); listeBuendig(); randHinweise(body.querySelector('.kal__rscroll')); });
       ro.observe(body);
       cleanups.push(() => ro.disconnect());
     }
@@ -2247,10 +2499,15 @@ export default {
       const colIndex = d.days.indexOf(zielTag);
       if (!d.ghost) {
         // Beim Ziehen zaehlt die Uhrzeit: sie steht vorn, der Titel danach.
-        d.ghost = h('div.kal__block.is-ghost', { 'aria-hidden': 'true', style: { '--lane': 0, '--lanes': 1 } },
-          h('span.kal__block-text', null,
-            h('span.kal__block-time'),
-            h('span.kal__block-title', null, text(d.e ? d.e.data.title : 'Neuer Termin'))));
+        d.ghost = h('div.kal__block.is-ghost', {
+          'aria-hidden': 'true',
+          // Beim Aendern der Dauer und beim Aufziehen wird das Ende gewaehlt: es steht immer im Geist.
+          class: { 'is-spanne': d.kind === 'dauer' || d.kind === 'anlegen' },
+          style: { '--lane': 0, '--lanes': 1 },
+        },
+        h('span.kal__block-text', null,
+          h('span.kal__block-time'),
+          h('span.kal__block-title', null, text(d.e ? d.e.data.title : 'Neuer Termin'))));
       }
       if (colIndex === -1) {
         d.ghost.remove();
@@ -2283,17 +2540,25 @@ export default {
       return d;
     }
 
-    function abbrechen() {
+    function abbrechen({ zeigerUnten = true } = {}) {
       const d = aufraeumenZiehen();
       if (!d) return;
       if (d.ghost) d.ghost.remove();
       if (d.el) d.el.classList.remove('is-dragging');
-      if (d.active) klickSchlucken = true;
+      if (d.active) {
+        // Geschluckt wird nur der Klick, der zum Loslassen DIESES Ziehens
+        // gehoert. Vorher blieb das Schlucken nach Escape stehen, und der
+        // naechste Klick irgendwo im Kalender ("Nächste Woche") ging verloren.
+        klickSchlucken = true;
+        const frei = () => setTimeout(() => { klickSchlucken = false; }, 400);
+        if (zeigerUnten) window.addEventListener('pointerup', frei, { once: true, capture: true });
+        else frei();
+      }
       nachholen();
     }
 
     function onPointerCancel(ev) {
-      if (drag && ev.pointerId === drag.pointerId) abbrechen();
+      if (drag && ev.pointerId === drag.pointerId) abbrechen({ zeigerUnten: false });
     }
 
     async function onPointerUp(ev) {
@@ -2715,13 +2980,13 @@ export default {
       }
       // Die Kalenderdatei als leise Zeile statt als dritter Knopf: drei Knoepfe
       // passten nicht in eine Zeile, und "Loeschen" stand allein darunter.
-      facts.appendChild(h('li.kal__fact', null, icon(I.ics),
+      facts.appendChild(h('li.kal__fact.is-link', null, icon(I.ics),
         h('a.kal__fact-ics', {
           href: `/api/events/${encodeURIComponent(record.id)}/ics`,
           title: 'Als Kalenderdatei – auf dem iPad: „Zum Kalender hinzufügen“',
         }, text('In Kalender übernehmen (.ics)'))));
       if (res.projekt) {
-        facts.appendChild(h('li.kal__fact', null, icon(I.projects),
+        facts.appendChild(h('li.kal__fact.is-link', null, icon(I.projects),
           h('span', null, text('Projekt '), h('a', { href: `#/projects?id=${encodeURIComponent(res.projekt.id)}` }, text(res.projekt.name)))));
       }
       // Gleichzeitig: aus dem, was ohnehin geladen ist -- keine eigene Anfrage.
@@ -3162,7 +3427,7 @@ export default {
     cleanups.push(() => clearInterval(tick));
     cleanups.push(() => clearTimeout(reloadTimer));
     cleanups.push(() => clearTimeout(konfliktTimer));
-    cleanups.push(() => { if (drag) abbrechen(); });
+    cleanups.push(() => { if (drag) abbrechen({ zeigerUnten: false }); });
     cleanups.push(() => document.body.classList.remove('kal-zieht'));
 
     this._cleanup = () => {

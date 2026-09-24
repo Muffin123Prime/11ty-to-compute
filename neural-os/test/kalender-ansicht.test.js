@@ -396,6 +396,63 @@ test('Erinnerung ueber die Zeitumstellung: „1 Tag vorher“ ist der Vortag zur
   }
 });
 
+/* --------------------------------------------------- Nachbesserung Runde 2 */
+
+test('staffelPlan: beginnt der spaetere IN der Titelzeile des frueheren, verdeckt er sie nicht mehr', async () => {
+  const k = await load('kalender');
+  // Pruefer-Fall: "Rueckruf Werkstatt" 17:45-18:15 und "Saatgut-Tauschboerse" 18:00-20:00 bei 48 px je Stunde.
+  const b = k.rasterBloecke([
+    { id: 'rueckruf', startMin: 1065, endMin: 1095 },
+    { id: 'saatgut', startMin: 1080, endMin: 1200 },
+  ], { hour: 48, minPx: 20 });
+  const plan = k.staffelPlan(b, { titelPx: 22 });
+  // Frueher: gestaffelt, der spaetere oben -- seine Karte schnitt "Rueckruf W…" quer durch.
+  assert.equal(plan.get('rueckruf').vorn, true, 'der kurze fruehere liegt vorn');
+  assert.equal(plan.get('saatgut').abstand, 10, 'der Text des spaeteren beginnt unter ihm (22 px - 12 px Versatz)');
+  assert.equal(plan.get('saatgut').neben, false);
+  // Zwei lange, die fast gleichzeitig beginnen: nebeneinander.
+  const lang = k.staffelPlan(k.rasterBloecke([
+    { id: 'a', startMin: 1080, endMin: 1200 },
+    { id: 'b', startMin: 1090, endMin: 1180 },
+  ], { hour: 48, minPx: 20 }), { titelPx: 22 });
+  assert.equal(lang.get('a').neben, true);
+  assert.equal(lang.get('b').neben, true);
+  // Beginnt der spaetere eine halbe Stunde spaeter, bleibt die Staffel (der Titel des frueheren ist frei).
+  const frei = k.staffelPlan(k.rasterBloecke([
+    { id: 'zahnarzt', startMin: 540, endMin: 600 },
+    { id: 'telefonat', startMin: 570, endMin: 615 },
+  ], { hour: 48, minPx: 20 }), { titelPx: 22 });
+  assert.deepEqual([...frei.values()].map((x) => [x.neben, x.vorn, x.abstand]), [[false, false, 0], [false, false, 0]]);
+  // Ein einzelner Termin bekommt nichts.
+  assert.deepEqual(k.staffelPlan(k.rasterBloecke([{ id: 'x', startMin: 600, endMin: 660 }]), {}).get('x'), { neben: false, vorn: false, abstand: 0 });
+});
+
+test('randTermine: was ueber und unter dem Ausschnitt liegt, wird genannt -- der erste und wie viele', async () => {
+  const k = await load('kalender');
+  const bloecke = [
+    { key: 'beete', top: 480, height: 70 }, // 10:00-11:30 bei 48 px je Stunde
+    { key: 'post', top: 400, height: 46 },
+    { key: 'training', top: 864, height: 70 }, // 18:00
+    { key: 'sichtbar', top: 600, height: 48 },
+  ];
+  const r = k.randTermine(bloecke, 576, 840); // Ausschnitt 12:00-17:30
+  assert.equal(r.oben.key, 'post', 'der frueheste ueber dem Rand');
+  assert.equal(r.oben.n, 2);
+  assert.equal(r.unten.key, 'training');
+  assert.equal(r.unten.n, 1);
+  assert.deepEqual(k.randTermine(bloecke, 0, 2000), { oben: null, unten: null }, 'alles im Bild: kein Hinweis');
+  // Ein angeschnittener Termin ist zu sehen -- kein Hinweis fuer ihn.
+  assert.equal(k.randTermine([{ key: 'halb', top: 560, height: 60 }], 576, 840).oben, null);
+});
+
+test('nurDieses: ohne Tag des Vorkommens wird abgebrochen, nie ohne ?nur gesendet (sonst traefe es die ganze Serie)', async () => {
+  const k = await load('kalender');
+  assert.deepEqual(k.nurDieses({ occurrence: '2026-10-06' }), { nur: '2026-10-06' });
+  for (const e of [{ occurrence: null }, { occurrence: '' }, {}, null, { occurrence: '6.10.' }]) {
+    assert.throws(() => k.nurDieses(e), /Welcher Tag der Serie gemeint ist, fehlt/);
+  }
+});
+
 /* --------------------------------------------------- Notizwand, Projekte */
 
 test('Notizen: Herkunft und Zeitstempel in Worten', async () => {

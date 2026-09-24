@@ -77,9 +77,11 @@ goto :kein_node
 
 :probe
 rem Nicht annehmen, dass es laeuft - ausprobieren. Scheitert schon das, ist
-rem genau das das Ergebnis dieses Probelaufs.
+rem genau das das Ergebnis dieses Probelaufs. Jeder Code ausser 0 zaehlt:
+rem Ein Absturz meldet einen negativen Code, und "if errorlevel 1" hiesse
+rem nur "1 oder mehr" - der Probelauf ginge dann still zu.
 "%NODE%" -e "" >nul 2>&1
-if errorlevel 1 goto :gesperrt
+if not "%ERRORLEVEL%"=="0" goto :gesperrt
 
 echo.
 echo   Probelauf startet ...
@@ -87,7 +89,7 @@ echo.
 rem Hinter dem Ordner steht ein Punkt: Ein Backslash direkt vor dem
 rem schliessenden Anfuehrungszeichen wuerde es fuer Node maskieren.
 "%NODE%" "%SKRIPT%" --start --ort "%HIER%."
-if errorlevel 1 goto :fehler
+if not "%ERRORLEVEL%"=="0" goto :fehler
 exit /b 0
 
 :gesperrt

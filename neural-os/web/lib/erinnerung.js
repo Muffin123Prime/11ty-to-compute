@@ -202,9 +202,17 @@ export async function mitteilungSchalten(an) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Der Hinweis oben rechts                                              */
+/* Der Hinweis im Kopf                                                  */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Wo die Karte steht: in der freien Mitte der Kopfzeile, zwischen Titel und
+ * den Knoepfen rechts (platzieren() misst sie). Frueher lag sie fest oben
+ * rechts -- auf dem iPad genau auf "Suchen" und "Übersicht ausklappen", am
+ * Laptop auf dem Kopf der Agenten-Kachel, und beides war bis zum Schliessen
+ * gesperrt. Unten rechts laege sie auf dem Senden-Knopf des Chats. Ist der
+ * Kopf zu schmal (Telefon), bleibt sie oben rechts.
+ */
 const CSS = `
 .erin {
   position: fixed;
@@ -217,6 +225,15 @@ const CSS = `
   width: min(360px, calc(100vw - var(--sp-4)));
   pointer-events: none;
 }
+/* Im Kopf: eine Zeile, so hoch wie ein Knopf -- "In 12 Min · Rückruf … · Büro". */
+.erin.is-kopf { right: auto; }
+.erin.is-kopf .erin__card { padding: 4px 4px 4px 12px; align-items: center; }
+.erin.is-kopf .erin__bar { align-self: stretch; }
+.erin.is-kopf .erin__text { flex-direction: row; align-items: center; gap: 8px; min-height: 30px; }
+.erin.is-kopf .erin__titel { flex: 0 1 auto; min-width: 0; font-size: var(--fs-sm); }
+.erin.is-kopf .erin__wann { flex: none; }
+.erin.is-kopf .erin__ort { flex: none; max-width: 35%; font-size: var(--fs-xs); }
+.erin.is-kopf .erin__ort::before { content: '· '; }
 .erin__card {
   display: grid;
   grid-template-columns: 3px minmax(0, 1fr) auto;
@@ -249,11 +266,18 @@ const CSS = `
 }
 .erin__wann { font-size: var(--fs-xs); font-weight: 500; letter-spacing: 0.02em; color: var(--accent-text); font-variant-numeric: tabular-nums; }
 .erin__titel { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--fs-base); color: var(--fg); }
+/* Der Ort ist Inhalt, keine Zierde: dieselbe Stufe wie im Kalender (4,5:1 auf der Karte, hell wie dunkel). */
+.erin__card { --fg-subtle: #8a8d93; }
+:root[data-theme="light"] .erin__card { --fg-subtle: #62656e; }
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] .erin__card { --fg-subtle: #62656e; }
+}
 .erin__ort { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--fs-sm); color: var(--fg-subtle); }
 .erin__text:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); border-radius: var(--r-1); }
 .erin__close { align-self: center; }
 @media (pointer: coarse) {
   .erin__text { min-height: var(--tap-min); }
+  .erin.is-kopf .erin__text { min-height: 36px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .erin__card { animation: none; }
@@ -311,6 +335,59 @@ export function starteErinnerungen({ api, bus, navigate } = {}) {
   const box = h('div.erin', { role: 'status', 'aria-live': 'polite', 'aria-label': 'Erinnerungen' });
   document.body.appendChild(box);
 
+  /**
+   * Die Karte in die freie Mitte der Kopfzeile legen: rechts vom Titel,
+   * links von den Knoepfen (Suchen, Übersicht, was eine Ansicht dort
+   * einhaengt). Neu gemessen bei jeder Aenderung am Kopf und am Fenster.
+   */
+  function platzieren() {
+    const kopf = document.getElementById('topbar');
+    const r = kopf ? kopf.getBoundingClientRect() : null;
+    let frei = null;
+    if (r && r.width > 0 && r.height > 0) {
+      let links = r.left + 16;
+      for (const el of kopf.querySelectorAll('.topbar__expand, .topbar__title')) {
+        const q = el.getBoundingClientRect();
+        if (q.width > 0) links = Math.max(links, q.right + 16);
+      }
+      let rechts = r.right - 12;
+      for (const el of kopf.querySelectorAll('.topbar__slot, .topbar__right')) {
+        const q = el.getBoundingClientRect();
+        if (q.width > 0) rechts = Math.min(rechts, q.left - 16);
+      }
+      if (rechts - links >= 260) frei = { links, rechts, mitte: r.top + r.height / 2 };
+    }
+    box.classList.toggle('is-kopf', !!frei);
+    if (!frei) {
+      for (const k of ['left', 'width', 'top']) box.style.removeProperty(k);
+      return;
+    }
+    const breite = Math.min(440, frei.rechts - frei.links);
+    box.style.width = `${Math.round(breite)}px`;
+    // Rechtsbuendig an den Knoepfen -- dort, wo der Blick nach "was ist los" hingeht.
+    box.style.left = `${Math.round(frei.rechts - breite)}px`;
+    const erste = box.firstElementChild;
+    const hoehe = erste ? erste.getBoundingClientRect().height : 38;
+    box.style.top = `${Math.round(frei.mitte - hoehe / 2)}px`;
+  }
+  let platzFrame = 0;
+  const neuPlatzieren = () => {
+    if (platzFrame) return;
+    platzFrame = requestAnimationFrame(() => { platzFrame = 0; if (offen.size) platzieren(); });
+  };
+  window.addEventListener('resize', neuPlatzieren);
+  let kopfBeobachter = null;
+  let groesseBeobachter = null;
+  const kopfEl = document.getElementById('topbar');
+  if (kopfEl && typeof MutationObserver === 'function') {
+    kopfBeobachter = new MutationObserver(neuPlatzieren);
+    kopfBeobachter.observe(kopfEl, { childList: true, subtree: true, characterData: true });
+  }
+  if (kopfEl && typeof ResizeObserver === 'function') {
+    groesseBeobachter = new ResizeObserver(neuPlatzieren);
+    groesseBeobachter.observe(kopfEl);
+  }
+
   async function laden() {
     if (laeuft) return laeuft;
     const heute = heuteTag();
@@ -364,6 +441,7 @@ export function starteErinnerungen({ api, bus, navigate } = {}) {
     box.appendChild(card);
     offen.set(e.key, { eintrag: e, node: card, wann });
     beschriften();
+    platzieren();
 
     if (mitteilungAn() && !mitgeteilt.has(e.key)) {
       mitgeteilt.set(e.key, Date.now());
@@ -424,6 +502,10 @@ export function starteErinnerungen({ api, bus, navigate } = {}) {
       clearInterval(takt);
       clearTimeout(bald);
       for (const off of offs) { try { off(); } catch { /* weiter */ } }
+      window.removeEventListener('resize', neuPlatzieren);
+      if (kopfBeobachter) kopfBeobachter.disconnect();
+      if (groesseBeobachter) groesseBeobachter.disconnect();
+      cancelAnimationFrame(platzFrame);
       box.remove();
     },
     zeige,

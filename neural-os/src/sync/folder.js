@@ -456,6 +456,9 @@ function createFolderSync(deps = {}) {
       return state;
     }
     state = decodeState(raw);
+    // Aus der Zeit vor der PIN: Fingerabdrücke jedes Satzes nicht länger im
+    // Klartext neben einem verschlüsselten Tresor.
+    if (raw.length && raw[0] === 0x7b && vault.enabled && vault.state === 'unlocked') saveState();
     return state;
   }
 
@@ -758,7 +761,8 @@ function createFolderSync(deps = {}) {
     const { lines, count } = collectLocal(report);
     const partner = empfaenger.map((e) => ({ id: e.id, name: typeof e.name === 'string' ? e.name : null }))
       .sort((a, b) => (a.id < b.id ? -1 : 1));
-    const inhalt = sha256(`${lines.join('\n')}\n#${JSON.stringify(partner)}`).slice(0, 24);
+    // Der eigene Name steht im Manifest: ein neuer Name ist ein neuer Stand.
+    const inhalt = sha256(`${lines.join('\n')}\n#${JSON.stringify(partner)}\n#${deviceName()}`).slice(0, 24);
 
     const s = loadState();
     const zielStand = s.ziele[zielKey] && typeof s.ziele[zielKey] === 'object' ? s.ziele[zielKey] : null;
@@ -1848,6 +1852,17 @@ function createFolderSync(deps = {}) {
     }
   }
 
+  /**
+   * Eine PIN kam dazu: den Stand sofort versiegelt neu schreiben.
+   * @returns {boolean} ob etwas geschrieben wurde
+   */
+  function neuVersiegeln() {
+    if (!vault.enabled || vault.state !== 'unlocked') return false;
+    if (!state && !fs.existsSync(statePath)) return false;
+    loadState();
+    return saveState();
+  }
+
   /** Nach `identitaet.erneuern()`: sync-folder.json ist weg, der Speicherstand auch. */
   function vergessen() {
     state = null;
@@ -1867,6 +1882,7 @@ function createFolderSync(deps = {}) {
     inspect,
     fremdesPostfach,
     eigenesEntfernen,
+    neuVersiegeln,
     vergessen,
 
     /** Exposed for tests and the API layer; not part of the contract. */

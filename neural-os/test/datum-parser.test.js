@@ -219,6 +219,62 @@ fall('Praktikum Montag bis Freitag', { titel: 'Praktikum', start: '2026-09-28', 
 fall('jeden Montag bis Freitag Frühdienst', { titel: 'Frühdienst', recurrence: WOECHENTLICH(['MO', 'TU', 'WE', 'TH', 'FR']) }, DO);
 fall('montags bis freitags Frühdienst', { recurrence: WOECHENTLICH(['MO', 'TU', 'WE', 'TH', 'FR']) }, DO);
 
+/* ------------------------------------------------ Nachbesserung Runde 2 */
+// Jeder Fall stand vorher falsch im Kalender (Uhr: Do 24.09.2026, 10:05 -- DO von oben).
+// Mit Minuten geschrieben ist es 24-Stunden-Zeit: Zug und Flug frueh am Morgen.
+fall('Flug nach Mallorca 17.10. 6:15', { titel: 'Flug nach Mallorca', start: '2026-10-17T06:15' }, DO);
+fall('Zug morgen 5:50', { titel: 'Zug', start: '2026-09-25T05:50' }, DO);
+fall('Kurs 5:30-7', { start: '2026-09-25T05:30', end: '2026-09-25T07:00' }, DO);
+fall('Termin 3 bis 4:30', { start: '2026-09-24T15:00', end: '2026-09-24T16:30' }, DO); // das Ende folgt dem Beginn
+fall('Kaffee um 3', { start: '2026-09-24T15:00' }, DO); // ohne Minuten bleibt es nachmittags
+// "heute/morgen/uebermorgen in N Tagen/Wochen": von dort weitergezaehlt, ohne Rest im Titel.
+fall('Zahnarzt heute in einer Woche', { titel: 'Zahnarzt', start: '2026-10-01' }, DO);
+fall('morgen in einer Woche Friseur um 10', { titel: 'Friseur', start: '2026-10-02T10:00' }, DO);
+fall('heute in 8 Tagen Zahnarzt', { titel: 'Zahnarzt', start: '2026-10-02' }, DO);
+fall('übermorgen in einer Woche Kino', { titel: 'Kino', start: '2026-10-03' }, DO);
+fall('morgen in zwei Wochen Arzt', { titel: 'Arzt', start: '2026-10-09' }, DO);
+// "bis <Datum>" ohne Anfang: eine Frist an diesem Tag, kein Block ab heute.
+fall('Abgabe bis 15.11.', { titel: 'Abgabe', start: '2026-11-15', end: null, allDay: true }, DO);
+fall('Steuererklärung bis 31.7.', { titel: 'Steuererklärung', start: '2027-07-31', end: null }, DO);
+fall('Rechnung bezahlen bis zum 30.', { titel: 'Rechnung bezahlen', start: '2026-09-30', end: null }, DO);
+fall('ab heute bis 16.10. Urlaub', { titel: 'Urlaub', start: '2026-09-24', end: '2026-10-16' }, DO); // mit Anfang ein Zeitraum
+fall('jeden Montag bis 20.12. Kurs', { start: '2026-09-28', recurrence: WOECHENTLICH(['MO'], { until: '2026-12-20' }) }, DO);
+// Das Jahr nur am Ende gilt fuer beide.
+fall('Tagung 5.11.-7.11.2027', { titel: 'Tagung', start: '2027-11-05', end: '2027-11-07' }, DO);
+fall('Tagung vom 5.11. bis 7.11.2027', { titel: 'Tagung', start: '2027-11-05', end: '2027-11-07' }, DO);
+fall('Urlaub 28.12.-3.1.2027', { start: '2026-12-28', end: '2027-01-03' }, DO);
+// Ordnungszahl mit Punkt vor einer Zeiteinheit: ein Rhythmus, nicht "jeden Monat am 2.".
+fall('Putzen jede 2. Woche', { titel: 'Putzen', recurrence: { freq: 'weekly', interval: 2, byDay: [], until: null, count: null } }, DO);
+fall('Zeitschrift jeden 3. Monat', { titel: 'Zeitschrift', recurrence: { freq: 'monthly', interval: 3, until: null, count: null } }, DO);
+fall('Laufen jeden 2. Tag 7 Uhr', { titel: 'Laufen', recurrence: { freq: 'daily', interval: 2, until: null, count: null } }, DO);
+fall('Filter wechseln jeden 2. Monat 10 Uhr', { titel: 'Filter wechseln', recurrence: { freq: 'monthly', interval: 2, until: null, count: null } }, DO);
+// "jeden ersten Freitag im Monat": keine falsche Serie, kein stiller Einzeltermin -- der naechste solche Tag mit Hinweis.
+fall('Stammtisch jeden ersten Freitag im Monat 19 Uhr', { titel: 'Stammtisch', start: '2026-10-02T19:00', recurrence: null,
+  hinweis: 'Nur der 2.10. – „jeden ersten Freitag im Monat“ kann der Kalender nicht wiederholen.' }, DO);
+fall('Stammtisch jeden 1. Freitag', { titel: 'Stammtisch', start: '2026-10-02', recurrence: null }, DO);
+fall('Elternbeirat jeden zweiten Donnerstag im Monat', { titel: 'Elternbeirat', start: '2026-10-08', recurrence: null }, DO);
+fall('Kehrwoche jeden letzten Freitag im Monat', { titel: 'Kehrwoche', start: '2026-09-25', recurrence: null }, DO);
+fall('Müll jeden zweiten Donnerstag', { recurrence: WOECHENTLICH(['TH'], { interval: 2 }) }, DO); // ohne "im Monat" bleibt es alle 2 Wochen
+// Wochentag und Tageszeit in einem Wort.
+fall('Kino Freitagabend 20 Uhr', { titel: 'Kino', start: '2026-09-25T20:00' }, DO);
+fall('Oma Samstagnachmittag 15 Uhr', { titel: 'Oma', start: '2026-09-26T15:00' }, DO);
+fall('Kino am Freitagabend', { titel: 'Kino', start: '2026-09-25T19:00' }, DO);
+fall('Brunch Sonntagmorgen', { titel: 'Brunch', start: '2026-09-27T08:00' }, DO);
+fall('Arzt Montagvormittag', { titel: 'Arzt', start: '2026-09-28T10:00' }, DO);
+fall('Tanzen freitagabends', { titel: 'Tanzen', start: '2026-09-25T19:00', recurrence: WOECHENTLICH(['FR']) }, DO);
+// Ende an einem spaeteren Tag: die Nacht endet frueh am Morgen.
+fall('Nachtschicht 2.10. 22 Uhr bis 3.10. 6 Uhr', { start: '2026-10-02T22:00', end: '2026-10-03T06:00' }, DO);
+fall('Party 31.12. 22 Uhr bis 1.1. 2 Uhr', { start: '2026-12-31T22:00', end: '2027-01-01T02:00' }, DO);
+fall('Feier 3.10. 20 Uhr bis 4.10. 3 Uhr', { end: '2026-10-04T03:00' }, DO);
+fall('Tagung vom 3.10. 10 Uhr bis 4.10. 3 Uhr', { end: '2026-10-04T15:00' }, DO); // ueber einen ganzen Tag: nachmittags
+// "14:30h", "16.00h", und "16.45" (45 kann kein Monat sein).
+fall('Treffen morgen 14:30h', { titel: 'Treffen', start: '2026-09-25T14:30', allDay: false }, DO);
+fall('Zahnarzt um 9:00h', { titel: 'Zahnarzt', start: '2026-09-25T09:00' }, DO);
+fall('Meeting 16.00h', { titel: 'Meeting', start: '2026-09-24T16:00' }, DO);
+fall('Zahnarzt 16.45', { titel: 'Zahnarzt', start: '2026-09-24T16:45' }, DO);
+fall('Zahnarzt 9.30', { titel: 'Zahnarzt', start: '2026-09-25T09:30' }, DO);
+fall('Termin 12.10', null, DO); // 12. Oktober oder 12:10 -- lieber nichts raten
+
 /* ------------------------------------------------ Vorschau und Worte */
 
 test('beschreibe: die Vorschau unter dem Feld', async () => {

@@ -81,6 +81,32 @@ function getChatRecord(rc, id) {
   return mustGet(need(rc.ctx.store, 'Der Speicher'), id, 'chat');
 }
 
+/**
+ * Warum ein Rückgängig abgelehnt wird, weil ein Satz danach noch einmal
+ * geändert wurde -- und von WEM. War es die KI selbst in einem späteren
+ * Lauf ("verschieb den Zahnarzt auf Freitag"), ist nichts vom Nutzer in
+ * Gefahr; dann soll die Meldung den Weg nennen: erst die spätere Karte
+ * zurücknehmen. `details.runId` sagt der Oberfläche, welche Karte das ist.
+ */
+function spaeterGeaendert(store, id, fremd) {
+  const titel = titelVon(store, id);
+  const actor = fremd.actor || {};
+  // Nur ein Urheber am EREIGNIS ist sicher die KI. Ein Eintrag, der die
+  // runId bloss über den Stempel am Satz trägt (`via: 'stempel'`), ist
+  // meist deine eigene Änderung am KI-Termin (src/store/history.js, actorOf).
+  if (actor.kind === 'agent' && actor.via !== 'stempel') {
+    const lauf = actor.runId ? store.get(actor.runId) : null;
+    const was = lauf && lauf.type === 'run' && lauf.data ? String(lauf.data.result || lauf.data.titel || '').trim() : '';
+    return new NeuralError('RUECKGAENGIG_NICHT_MOEGLICH',
+      `„${titel}“ wurde danach noch einmal von der KI geändert${was ? ` („${was.slice(0, 120)}“)` : ''}. `
+        + 'Nimm zuerst diese spätere Änderung zurück, dann geht auch diese.',
+      { status: 409, details: { id, seq: fremd.seq, von: 'agent', runId: actor.runId || null } });
+  }
+  return new NeuralError('RUECKGAENGIG_NICHT_MOEGLICH',
+    `„${titel}“ wurde seitdem geändert. Ich nehme es nicht zurück, damit deine Änderung nicht verloren geht.`,
+    { status: 409, details: { id, seq: fremd.seq, von: actor.kind || null } });
+}
+
 function register(router) {
   router.get('/api/chats', (rc) => {
     rc.requireCapability('read');
@@ -323,11 +349,7 @@ function register(router) {
     for (const [id, liste] of saetze) {
       const aeltester = Math.min(...liste.map((e) => e.seq));
       const fremd = alle.find((e) => e.id === id && e.seq > aeltester && !e.undone && !vomLauf(e));
-      if (fremd) {
-        throw new NeuralError('RUECKGAENGIG_NICHT_MOEGLICH',
-          `„${titelVon(store, id)}“ wurde seitdem geändert. Ich nehme es nicht zurück, damit deine Änderung nicht verloren geht.`,
-          { status: 409, details: { id, seq: fremd.seq } });
-      }
+      if (fremd) throw spaeterGeaendert(store, id, fremd);
       const juengster = liste[0];
       if (!juengster.canUndo) {
         throw new NeuralError('RUECKGAENGIG_NICHT_MOEGLICH', juengster.reason || 'Das lässt sich nicht mehr zurücknehmen.', {

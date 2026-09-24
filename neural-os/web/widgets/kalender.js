@@ -25,12 +25,14 @@ const STYLE_ID = 'nos-kachel-kalender';
 const MAX_ROWS = 3;
 
 const CSS = `
-/* Leise Schrift mit Inhalt (Ort, "+ 3 weitere") braucht 4,5:1 -- dieselbe
-   Stufe wie im Kalender (web/views/kalender.js), hell wie dunkel. */
-.kwk__list, .kwk__more, .kwk__next { --fg-subtle: #8a8d93; }
-:root[data-theme="light"] :is(.kwk__list, .kwk__more, .kwk__next) { --fg-subtle: #62656e; }
+/* Leise Schrift mit Inhalt (Ort, "+ 3 weitere", das Datum im Kachelkopf)
+   braucht 4,5:1 -- dieselbe Stufe wie im Kalender (web/views/kalender.js),
+   hell wie dunkel. Das Datum "Heute, 24. Sept." steht im Kopf, den die
+   Schale zeichnet (.tile__meta); erreicht wird er ueber data-tile. */
+.kwk__list, .kwk__more, .kwk__next, [data-tile="kalender"] .tile__meta { --fg-subtle: #8a8d93; }
+:root[data-theme="light"] :is(.kwk__list, .kwk__more, .kwk__next, [data-tile="kalender"] .tile__meta) { --fg-subtle: #62656e; }
 @media (prefers-color-scheme: light) {
-  :root[data-theme="system"] :is(.kwk__list, .kwk__more, .kwk__next) { --fg-subtle: #62656e; }
+  :root[data-theme="system"] :is(.kwk__list, .kwk__more, .kwk__next, [data-tile="kalender"] .tile__meta) { --fg-subtle: #62656e; }
 }
 .kwk__list { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
 .kwk__row {

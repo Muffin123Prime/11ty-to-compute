@@ -956,49 +956,71 @@ function createWerkzeuge({ store, bus, logger } = {}) {
    * Felder, die abweichen, werden am vorhandenen Termin ergaenzt (als
    * Agentenaenderung, also rueckgaengig zu machen), und Claude erfaehrt,
    * was ergaenzt wurde. Eine vorhandene Notiz wird nie ueberschrieben.
+   *
+   * Trifft der Aufruf ein SPAETERES Vorkommen einer Serie ("am 3.11.
+   * Training 19 bis 21 Uhr in Halle 5"), gelten die Abweichungen nur fuer
+   * diesen Tag: das Vorkommen wird geloest (wie termin_aendern mit nur_am),
+   * die Serie bleibt. Frueher wurden Ende, Ort und Erinnerung hier still
+   * verworfen, und Claude bestaetigte dem Nutzer, was nicht im Kalender stand.
    */
   function schonDa(treffer, w, lauf) {
     const { rec, erstes } = treffer;
     const d = rec.data || {};
     const startTag = String(d.start || '').slice(0, 10);
+    // Das Vorkommen, das gemeint ist: bei einem spaeteren Vorkommen dessen
+    // Lage, sonst der Termin selbst. "wann" und der Vergleich beziehen sich
+    // darauf -- nicht auf den Beginn der Serie Wochen vorher.
+    const tag = erstes ? null : w.start.slice(0, 10);
+    const lage = tag ? wdh.aufTagLegen(d, tag) : { start: d.start, end: d.end || null };
     const patch = {};
     const ergaenzt = [];
-    if (erstes) {
-      const endeNeu = w.ende && !(w.ganztaegig && w.ende === w.start) ? w.ende : null;
-      if (endeNeu && endeNeu !== (d.end || null)) { patch.end = endeNeu; ergaenzt.push('Ende'); }
-      if (w.ort && w.ort !== (d.location || '')) { patch.location = w.ort; ergaenzt.push('Ort'); }
-      if (w.notiz && !String(d.body || '').trim()) { patch.body = w.notiz; ergaenzt.push('Notiz'); }
-      if (w.wiederholung && regelSchluessel(w.wiederholung, startTag) !== regelSchluessel(d.recurrence, startTag)) {
-        patch.recurrence = w.wiederholung;
-        ergaenzt.push('Wiederholung');
-      }
-      if (w.erinnerung !== null && w.erinnerung !== d.reminder) { patch.reminder = w.erinnerung; ergaenzt.push('Erinnerung'); }
-    } else if (w.wiederholung && regelSchluessel(w.wiederholung, startTag) !== regelSchluessel(d.recurrence, startTag)) {
+    if (!erstes && w.wiederholung && regelSchluessel(w.wiederholung, startTag) !== regelSchluessel(d.recurrence, startTag)) {
       // Ein Vorkommen einer ANDEREN Serie: eine neue Serie ab hier ist gemeint.
       return null;
     }
-    const nachher = ergaenzt.length
-      ? alsAgent(lauf, 'kalender', () => kalender.updateEvent(store, rec.id, patch))
-      : rec;
+    const endeNeu = w.ende && !(w.ganztaegig && w.ende === w.start) ? w.ende : null;
+    if (endeNeu && endeNeu !== (lage.end || null)) { patch.end = endeNeu; ergaenzt.push('Ende'); }
+    if (w.ort && w.ort !== (d.location || '')) { patch.location = w.ort; ergaenzt.push('Ort'); }
+    if (w.notiz && !String(d.body || '').trim()) { patch.body = w.notiz; ergaenzt.push('Notiz'); }
+    if (erstes && w.wiederholung && regelSchluessel(w.wiederholung, startTag) !== regelSchluessel(d.recurrence, startTag)) {
+      patch.recurrence = w.wiederholung;
+      ergaenzt.push('Wiederholung');
+    }
+    if (w.erinnerung !== null && w.erinnerung !== d.reminder) { patch.reminder = w.erinnerung; ergaenzt.push('Erinnerung'); }
+    const stempel = { runId: lauf.runId || undefined, agentId: AGENT_ID };
+    let nachher = rec;
+    if (ergaenzt.length) {
+      nachher = alsAgent(lauf, 'kalender', () => kalender.updateEvent(store, rec.id, patch, tag ? { nur: tag, stempel } : {}));
+    }
     const kurzform = terminKurz(nachher);
+    const wann = tag && !ergaenzt.length ? spanneDeutsch(lage.start, lage.end) : kurzform.wann;
     const ueber = ergaenzt.length ? ueberschneidungenFuer(nachher) : [];
     const liste = ergaenzt.join(', ');
+    const serieWorte = tag ? wdh.inWorten(d.recurrence, startTag) : '';
+    let hinweis;
+    if (tag && ergaenzt.length) {
+      hinweis = `Das ist ein Vorkommen der Serie „${kurz(d.title, 60)}“ (${serieWorte}). Nur für diesen Tag übernommen: ${liste}. `
+        + 'Es ist jetzt ein eigener Termin mit neuer id; die Serie bleibt, wie sie war.';
+    } else if (ergaenzt.length) {
+      hinweis = `Stand schon im Kalender (gleicher Titel und Beginn). Nicht doppelt angelegt, sondern ergänzt: ${liste}.`;
+    } else {
+      hinweis = erstes ? 'Stand schon genau so im Kalender; nichts doppelt angelegt.'
+        : `Das ist schon ein Vorkommen der Serie „${kurz(d.title, 60)}“ (${serieWorte}); nichts doppelt angelegt.`;
+    }
     return {
       inhalt: {
         ok: true,
         schonDa: true,
         id: nachher.id,
-        wann: kurzform.wann,
+        ...(tag ? { vorkommen: tag, serie: rec.id } : {}),
+        wann,
         ...(kurzform.wiederholung ? { wiederholung: kurzform.wiederholung } : {}),
         ergaenzt,
         ...(ergaenzt.length ? { ueberschneidungen: ueber } : {}),
-        hinweis: ergaenzt.length
-          ? `Stand schon im Kalender (gleicher Titel und Beginn). Nicht doppelt angelegt, sondern ergänzt: ${liste}.`
-          : (erstes ? 'Stand schon genau so im Kalender; nichts doppelt angelegt.'
-            : 'Das ist schon ein Vorkommen dieser Serie; nichts doppelt angelegt.'),
+        hinweis,
       },
       ergebnis: ergaenzt.length
-        ? `${kurz(w.titel, 50)} ergänzt (${liste}) · ${kurzform.wann}${kurzform.wiederholung ? ` · ${kurzform.wiederholung}` : ''}`
+        ? `${kurz(w.titel, 50)} ergänzt (${liste}${tag ? ', nur dieses Mal' : ''}) · ${kurzform.wann}${kurzform.wiederholung ? ` · ${kurzform.wiederholung}` : ''}`
         : `Stand schon im Kalender: ${w.titel}, ${zeitDeutsch(w.start)}`,
       produced: ergaenzt.length ? [nachher.id] : [],
     };

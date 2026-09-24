@@ -1019,6 +1019,70 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
     await warte(300);
   }
 
+  /* --- beim Verlaengern zeigt der Geist das Ende, das man gerade waehlt --- */
+  if (probe) {
+    const block = page.locator('.kal__block', { hasText: 'Probe beim Zahnarzt' }).first();
+    await block.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+    const box = await block.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height - 3);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height - 3 + stunde, { steps: 6 });
+    const geist = await page.evaluate(() => {
+      const g = document.querySelector('.kal__block.is-ghost');
+      if (!g) return null;
+      const bis = g.querySelector('.kal__block-bis');
+      const r = bis ? bis.getBoundingClientRect() : null;
+      const gr = g.getBoundingClientRect();
+      return { bis: bis ? bis.textContent : '', breite: Math.round(gr.width), sichtbar: !!r && r.width > 0 && getComputedStyle(bis).display !== 'none' && r.right <= gr.right + 1 };
+    });
+    await page.keyboard.press('Escape');
+    await page.mouse.up();
+    await warte(900);
+    check(!!geist && geist.sichtbar && geist.bis === '–11:30', 'Beim Verlängern zeigt der Geist das neue Ende, auch in einer schmalen Spalte',
+      geist ? `Ende „${geist.bis}“, sichtbar: ${geist.sichtbar}, Geist ${geist.breite} px` : 'kein Geist');
+    check(store.get(probe.id).data.end === `${heute}T10:30`, 'Escape bricht das Ziehen ab – nichts geändert', store.get(probe.id).data.end);
+  }
+
+  /* --- Blaettern: die Termine der neuen Woche stehen im Bild --- */
+  {
+    const in7 = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 7);
+    const tag7 = `${in7.getFullYear()}-${pad(in7.getMonth() + 1)}-${pad(in7.getDate())}`;
+    const frueh = createEvent(store, { title: 'Frühe Probe', start: `${tag7}T06:00`, end: `${tag7}T06:45` });
+    await store.flush();
+    await page.locator('.kal__nav button').last().click();
+    await warte(1400);
+    const lage = await page.evaluate((key) => {
+      const sc = document.querySelector('.kal__rscroll');
+      const el = document.querySelector(`.kal__block[data-key="${key}@"]`);
+      if (!sc || !el) return null;
+      const s = sc.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
+      return { imBild: r.top >= s.top - 1 && r.bottom <= s.bottom + 1, scrollTop: Math.round(sc.scrollTop) };
+    }, frueh.id);
+    check(!!lage && lage.imBild, 'Eine Woche weiter: der erste Termin der neuen Woche (06:00) steht im Bild, statt über dem Rand',
+      lage ? `scrollTop ${lage.scrollTop}` : 'Termin nicht gefunden');
+    // Liegt ein Termin ausserhalb des Ausschnitts, sagt es ein Hinweis am Rand der Spalte.
+    await page.evaluate(() => { const sc = document.querySelector('.kal__rscroll'); sc.scrollTop = sc.scrollHeight; });
+    await warte(400);
+    const hinweis = (await page.locator(`.kal__rand.is-oben .kal__rand-zelle[data-day="${tag7}"] .kal__rand-knopf`).innerText().catch(() => '')).replace(/\s+/g, ' ');
+    check(/06:00/.test(hinweis), 'Nach unten gescrollt: oben in der Spalte steht „06:00 …“ als Hinweis', hinweis || 'kein Hinweis');
+    await page.locator('.kal__rand.is-oben .kal__rand-knopf').first().click().catch(() => {});
+    await warte(900);
+    const zurueck = await page.evaluate((key) => {
+      const sc = document.querySelector('.kal__rscroll');
+      const el = document.querySelector(`.kal__block[data-key="${key}@"]`);
+      if (!sc || !el) return false;
+      const s = sc.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
+      return r.top >= s.top - 1 && r.bottom <= s.bottom + 1;
+    }, frueh.id);
+    check(zurueck, 'und der Hinweis scrollt beim Antippen zu ihm');
+    store.remove(frueh.id);
+    await store.flush();
+    await page.getByRole('button', { name: /^Heute$/ }).click();
+    await warte(1000);
+  }
+
   /* --- am unteren Rand ziehen verlaengert --- */
   if (probe) {
     const block = page.locator('.kal__block', { hasText: 'Probe beim Zahnarzt' }).first();
@@ -1071,7 +1135,7 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
   await warte(900);
   check(await page.locator('.kal__weeks').count() === 1, 'Taste M zurück zum Monat');
 
-  /* --- Erinnerung oben rechts, solange Neural OS offen ist --- */
+  /* --- Erinnerung im Kopf, solange Neural OS offen ist --- */
   const bald = new Date(Date.now() + 10 * 60000);
   const wandzeit = (t) => `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T${pad(t.getHours())}:${pad(t.getMinutes())}`;
   store.create('event', { title: 'Erinnerungs-Probe', start: wandzeit(bald), end: wandzeit(new Date(bald.getTime() + 30 * 60000)), location: 'Flur', reminder: 15 });
@@ -1079,11 +1143,47 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
   await warte(1800);
   const karte = page.locator('.erin__card', { hasText: 'Erinnerungs-Probe' });
   const karteText = (await karte.innerText().catch(() => '')).replace(/\s+/g, ' ');
-  check(await karte.count() === 1 && /In \d+ Min/.test(karteText), 'Eine Erinnerung erscheint oben rechts, ohne Neuladen', karteText.slice(0, 80));
+  check(await karte.count() === 1 && /In \d+ Min/.test(karteText), 'Eine Erinnerung erscheint im Kopf, ohne Neuladen', karteText.slice(0, 80));
   if (await karte.count()) {
+    // Sie liegt in der freien Mitte des Kopfes -- nicht auf "Suchen", "Übersicht" oder einer Kachel.
+    const verdeckt = await page.evaluate(() => {
+      const k = document.querySelector('.erin__card');
+      return [...document.querySelectorAll('button, a, input, [role="button"]')]
+        .filter((el) => !k.contains(el) && el.getBoundingClientRect().width > 0)
+        .filter((el) => {
+          const q = el.getBoundingClientRect();
+          const x = q.x + q.width / 2;
+          const y = q.y + q.height / 2;
+          if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return false;
+          const hit = document.elementFromPoint(x, y);
+          return hit && k.contains(hit);
+        })
+        .map((el) => (el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 30));
+    });
+    check(!verdeckt.length, 'Die Erinnerung verdeckt keinen Knopf (Suchen, Übersicht, Kacheln)', verdeckt.join(' · ') || 'nichts verdeckt');
     await karte.getByRole('button', { name: 'Erinnerung schließen' }).click();
     await warte(300);
     check(await karte.count() === 0, 'und geht mit dem Kreuz wieder weg');
+  }
+
+  /* --- iPad: "In Kalender übernehmen (.ics)" ist ein Fingerziel (Vertrag D) --- */
+  if (probe) {
+    const ipad = await page.context().browser().newContext({ viewport: { width: 1180, height: 820 }, hasTouch: true });
+    try {
+      const p2 = await ipad.newPage();
+      await p2.goto(`${base}/#/kalender?id=${probe.id}`, { waitUntil: 'domcontentloaded' });
+      await p2.waitForTimeout(900);
+      await dismissWelcome(p2);
+      await p2.locator('.kal__sheet .kal__fact-ics').first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+      const mass = await p2.evaluate(() => [...document.querySelectorAll('.kal__sheet .kal__fact-ics, .kal__sheet .kal__fact a')]
+        .filter((el) => el.getBoundingClientRect().width > 0)
+        .map((el) => ({ text: el.textContent.trim().slice(0, 30), h: Math.round(el.getBoundingClientRect().height) })));
+      const zuKlein = mass.filter((x) => x.h < 44);
+      check(mass.length > 0 && !zuKlein.length, 'iPad: „In Kalender übernehmen (.ics)“ und die Links im Blatt sind mindestens 44 px hoch',
+        mass.map((x) => `${x.text}: ${x.h} px`).join(' · ') || 'kein Link im Blatt');
+    } finally {
+      await ipad.close();
+    }
   }
 
   /* --- die Kachel "Kalender", live --- */

@@ -95,7 +95,9 @@ export function zielVon(id, typ, extra = {}) {
   const art = typ || String(id || '').split('_')[0];
   const q = encodeURIComponent(id);
   switch (art) {
-    case 'event': return `#/kalender?id=${q}`;
+    // `am`: ein einzelnes Vorkommen einer Serie -- der Kalender oeffnet
+    // dann diesen Tag statt des Serienbeginns (web/views/kalender.js).
+    case 'event': return `#/kalender?id=${q}${/^\d{4}-\d{2}-\d{2}$/.test(extra.am || '') ? `&am=${extra.am}` : ''}`;
     case 'note': return `#/notes?id=${q}`;
     case 'project': return `#/projects?id=${q}`;
     case 'task': return extra.projectId ? `#/projects?id=${encodeURIComponent(extra.projectId)}` : '#/projects';
@@ -166,7 +168,7 @@ export function wirkungZeilen(wirkung) {
       aktion: w.aktion,
       label,
       detail,
-      href: w.aktion === 'geloescht' ? null : zielVon(w.id, w.typ, { projectId: w.projectId }),
+      href: w.aktion === 'geloescht' ? null : zielVon(w.id, w.typ, { projectId: w.projectId, am: w.am }),
       symbol: art.symbol,
       geloescht: w.aktion === 'geloescht',
     });

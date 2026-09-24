@@ -481,6 +481,28 @@ function pruefeBat(datei, { knoten }) {
     assert.ok(!/^echo\b/i.test(z), `${datei}: echo in einem Klammerblock: ${z}`);
     if (/%[A-Z_]+%/.test(z)) assert.match(z, /^(set "|if (not )?exist ")/i, `${datei}: %VAR% ungeschützt im Block: ${z}`);
   }
+
+  // Zeile für Zeile, wie cmd.exe sie liest.
+  const befehle = zeilen.filter((z) => z && !/^rem\b/i.test(z) && !z.startsWith('::'));
+  const marken = new Set(zeilen.filter((z) => /^:[a-z_]+$/i.test(z)).map((z) => z.slice(1).toLowerCase()));
+  for (const z of befehle) {
+    // Jeder Sprung hat sein Ziel; ein fehlendes bricht die Datei mitten im Lauf ab.
+    for (const m of z.matchAll(/\bgoto\s+:?([a-z_]+)/gi)) {
+      assert.ok(marken.has(m[1].toLowerCase()), `${datei}: goto ohne Marke: ${z}`);
+    }
+    // Jeder Pfad in Anführungszeichen: Leerzeichen, "(", ")" und "&" im
+    // Ordnernamen ("Stick (2)", "C:\Users\Jan & Eva") trennen sonst.
+    for (const m of z.matchAll(/%(HIER|NODE|APP|USERPROFILE|SystemRoot)%|%~dp0|%%~[a-z]*[A-Z]\b/gi)) {
+      const davor = (z.slice(0, m.index).match(/"/g) || []).length;
+      assert.ok(davor % 2 === 1, `${datei}: Pfad ohne Anführungszeichen: ${z}`);
+    }
+    // Ein echo mit Klammer, "&", "|", "<" oder ">" wäre ein zweiter Befehl oder ein Blockende.
+    if (/^echo\b/i.test(z)) assert.ok(!/[&|<>]/.test(z.replace(/"[^"]*"/g, '')), `${datei}: Steuerzeichen im echo: ${z}`);
+  }
+  // cmd.exe setzt %-Ausdrücke auch in rem-Zeilen ein; ein ungültiges %~ bricht ab.
+  for (const z of zeilen.filter((x) => /^rem\b/i.test(x))) {
+    assert.ok(!z.includes('%'), `${datei}: % in einer rem-Zeile: ${z}`);
+  }
   // Pausen und Fehlertexte: die Sätze aus Teil 1.8, so weit sie hier stehen.
   for (const satz of knoten) assert.ok(text.includes(satz), `${datei}: "${satz}" fehlt`);
   return text;

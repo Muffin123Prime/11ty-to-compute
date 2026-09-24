@@ -11,7 +11,7 @@ const { createFolderSync, DEVICE_ID_RE } = require('./folder');
 const { withActor } = require('../kernel/actor');
 const { schreibeDauerhaft } = require('../kernel/dateien');
 const { PORTABLE_MARKER, gleicherPfad } = require('../kernel/paths');
-const { NeuralError, ValidationError, StorageError, asNeuralError } = require('../kernel/errors');
+const { NeuralError, ValidationError, StorageError, LockedError, asNeuralError } = require('../kernel/errors');
 
 /**
  * Koppeln (Bauplan 2.8): Zwei oder mehr Sticks teilen ihr Wissen und bleiben
@@ -282,6 +282,15 @@ function createKopplung(deps = {}) {
 
   const ich = () => identitaet.id;
   const meinPin = () => !!(vaultCrypto && vaultCrypto.enabled);
+  /**
+   * Gesperrter Tresor: Angebote lassen sich nicht öffnen, kopplungen.json
+   * nicht schreiben. Dann bleibt alles liegen, wie es ist, bis entsperrt ist;
+   * weggeworfen wird nichts.
+   */
+  const tresorGesperrt = () => meinPin() && vaultCrypto.state === 'locked';
+  const nichtGesperrt = () => {
+    if (tresorGesperrt()) throw new LockedError('Der Tresor ist gesperrt.');
+  };
 
   function laden() {
     if (zustand) return zustand;
@@ -293,8 +302,9 @@ function createKopplung(deps = {}) {
       zustand = leerZustand();
       return zustand;
     }
+    const klartext = roh.length > 0 && roh[0] === 0x7b;
     try {
-      const text = roh.length && roh[0] === 0x7b ? roh.toString('utf8') : vaultCrypto.decryptBuffer(roh).toString('utf8');
+      const text = klartext ? roh.toString('utf8') : vaultCrypto.decryptBuffer(roh).toString('utf8');
       zustand = normalisieren(JSON.parse(text));
       unlesbar = false;
     } catch (err) {
@@ -304,6 +314,11 @@ function createKopplung(deps = {}) {
       if (e.code === 'VAULT_LOCKED') return leerZustand();
       log.warn(`${DATEI} ließ sich nicht öffnen (${e.message}); diese KI gilt vorerst als ungekoppelt.`);
       zustand = leerZustand();
+      return zustand;
+    }
+    // Aus der Zeit vor der PIN: die Paarschlüssel nicht länger im Klartext.
+    if (klartext && meinPin() && !tresorGesperrt()) {
+      try { sichern(); } catch (err) { log.warn(err.message); }
     }
     return zustand;
   }
@@ -395,7 +410,32 @@ function createKopplung(deps = {}) {
     };
     bus.on('ki.erneuert', beiErneuerung);
     bus.on('kopplung.zweiFassungen', beiFassung);
-    abmelden.push(() => bus.off('ki.erneuert', beiErneuerung), () => bus.off('kopplung.zweiFassungen', beiFassung));
+    bus.on('vault.encrypted', neuVersiegeln);
+    abmelden.push(
+      () => bus.off('ki.erneuert', beiErneuerung),
+      () => bus.off('kopplung.zweiFassungen', beiFassung),
+      () => bus.off('vault.encrypted', neuVersiegeln),
+    );
+  }
+
+  /**
+   * Eine PIN kam dazu (Einstellungen: "PIN festlegen"): Paarschlüssel und der
+   * Abgleich-Stand liegen ab sofort versiegelt auf dem Stick, nicht erst beim
+   * nächsten Schreiben. Synchron, damit die Antwort der Route es schon zeigt.
+   */
+  function neuVersiegeln() {
+    if (!meinPin() || tresorGesperrt()) return;
+    if (fs.existsSync(datei)) {
+      laden();
+      if (!unlesbar) {
+        try { sichern(); } catch (err) { log.warn(err.message); }
+      }
+    }
+    try {
+      folder.neuVersiegeln();
+    } catch (err) {
+      log.warn(`Der Abgleich-Stand ließ sich nicht versiegeln: ${asNeuralError(err).message}`);
+    }
   }
 
   /** Eine Warteschlange statt Fehlern: jeder Vorgang wartet, bis der vorige fertig ist. */
@@ -596,9 +636,27 @@ function createKopplung(deps = {}) {
     return !!(info && info.kiId === id);
   }
 
+  /**
+   * Ist das der eigene Stick? Erst über den Pfad, dann über die Markerdatei
+   * selbst (Gerät und Dateinummer): Derselbe Stick unter einem zweiten
+   * Einhängepunkt ist kein Zwilling. Nicht unter Windows: Dort ist `dev` die
+   * Seriennummer des Laufwerks, und die trägt auch ein Stick, der Byte für
+   * Byte geklont wurde – genau ein Zwilling. Zweite Pfade (subst, Ordner als
+   * Laufwerk) löst dort schon realpath auf.
+   */
   async function istSelbst(dir) {
     if (!portable) return false;
-    return gleicherPfad(await echterPfad(dir), await echterPfad(portable.root));
+    if (gleicherPfad(await echterPfad(dir), await echterPfad(portable.root))) return true;
+    if (plattform === 'win32') return false;
+    try {
+      const [a, b] = await Promise.all([
+        dateisystem.stat(path.join(dir, PORTABLE_MARKER)),
+        dateisystem.stat(path.join(portable.root, PORTABLE_MARKER)),
+      ]);
+      return !!(a && b && a.ino && a.ino === b.ino && a.dev === b.dev);
+    } catch {
+      return false;
+    }
   }
 
   async function pruefePunkt(punkt, mitLeeren) {
@@ -722,6 +780,7 @@ function createKopplung(deps = {}) {
   }
 
   async function koppelnIntern(ziel, pin) {
+    nichtGesperrt();
     const z = laden();
     if (z.zwilling) throw new NeuralError('KOPPLUNG_ZWILLING', 'Zwei Sticks tragen dieselbe KI.', { status: 409 });
     const b = await stickAn(ziel);
@@ -767,8 +826,8 @@ function createKopplung(deps = {}) {
     };
     try {
       z.partner = z.partner.filter((p) => p.id !== b.id).concat(eintrag);
-      sichern();
       try {
+        sichern();
         const angebot = { v: 1, von: ich(), name: identitaet.name, an: b.id, schluessel: eintrag.schluessel, at: nowIso() };
         const inhalt = tresorB
           ? { v: 1, versiegelt: tresorB.encryptBuffer(Buffer.from(JSON.stringify(angebot), 'utf8')).toString('base64') }
@@ -848,7 +907,9 @@ function createKopplung(deps = {}) {
 
   async function annehmenIntern() {
     const out = { angenommen: [], entkoppelt: [], abgelehnt: 0 };
-    if (!eigenesSync) return out;
+    if (!eigenesSync || tresorGesperrt()) return out;
+    laden();
+    if (unlesbar) return out;
     const dir = path.join(eigenesSync, 'koppeln');
     let namen;
     try {
@@ -864,6 +925,14 @@ function createKopplung(deps = {}) {
         if (!angebot) {
           out.abgelehnt++;
           loeschen(datei);
+          continue;
+        }
+        // Schon wieder zurückgezogen (entkoppelt, bevor ich lief): still weg.
+        const zurueck = path.join(dir, `${von}.entkoppelt`);
+        if (namen.includes(`${von}.entkoppelt`) && entkoppeltGueltig(zurueck, { id: von, schluessel: angebot.schluessel })) {
+          loeschen(datei);
+          loeschen(zurueck);
+          loeschen(path.join(eigenesSync, von));
           continue;
         }
         const z = laden();
@@ -901,6 +970,9 @@ function createKopplung(deps = {}) {
         sichern();
         loeschen(path.join(eigenesSync, von));
         loeschen(datei);
+        // Mein Postfach auf seinem Stick liest niemand mehr.
+        const s = steckt.get(von);
+        if (s && (await traegt(s.pfad, von))) loeschen(path.join(s.sync, ich()));
         steckt.delete(von);
         neuer.delete(von);
         gabelungen.delete(von);
@@ -917,6 +989,8 @@ function createKopplung(deps = {}) {
     loeschen(path.join(stick.sync, ich()));
     const ordner = ordnerAnlegen(ordnerAnlegen(stick.pfad, 'sync'), 'koppeln');
     schreibeDauerhaft(path.join(ordner, `${ich()}.entkoppelt`), `${JSON.stringify(nachricht)}\n`);
+    // Ein Angebot, das dort noch wartet, ist damit zurückgezogen.
+    loeschen(path.join(ordner, `${ich()}.angebot`));
   }
 
   async function ausstehendeZustellen() {
@@ -950,6 +1024,7 @@ function createKopplung(deps = {}) {
    */
   function entkoppeln(id) {
     return einreihen(async () => {
+      nichtGesperrt();
       const z = laden();
       const p = z.partner.find((x) => x.id === id);
       if (!p) throw new NeuralError('NOT_FOUND', 'Diese Kopplung gibt es nicht.', { status: 404 });
@@ -1002,6 +1077,7 @@ function createKopplung(deps = {}) {
    */
   function eigenstaendig() {
     return einreihen(async () => {
+      nichtGesperrt();
       const selbst = ich();
       try {
         await finden();
@@ -1049,6 +1125,10 @@ function createKopplung(deps = {}) {
     };
     laeuft = true;
     try {
+      if (tresorGesperrt()) {
+        bericht.gesperrt = true;
+        return bericht;
+      }
       await annehmenIntern();
       const z = laden();
       if (!z.partner.length && !z.ausstehend.length) return bericht;
@@ -1170,7 +1250,7 @@ function createKopplung(deps = {}) {
   }
 
   async function suchlauf() {
-    if (beendet || laeuft) return;
+    if (beendet || laeuft || tresorGesperrt()) return;
     try {
       if (hatAngebote()) {
         await abgleichen({ grund: 'angebot' });
@@ -1188,11 +1268,18 @@ function createKopplung(deps = {}) {
     }
   }
 
+  /**
+   * Eine Änderung an einem Satz, der reist, oder ein neuer Name dieser KI
+   * (er steht im Postfach): 20 s nach der letzten davon abgleichen.
+   */
   function beiAenderung(evt) {
-    if (beendet || !evt || typeof evt.name !== 'string' || !evt.name.startsWith('record.')) return;
-    const p = evt.payload || {};
-    if (p.actor && p.actor.kind === 'sync') return;
-    if (!merge.isSyncable(p.type)) return;
+    if (beendet || !evt || typeof evt.name !== 'string') return;
+    if (evt.name !== 'ki.umbenannt') {
+      if (!evt.name.startsWith('record.')) return;
+      const p = evt.payload || {};
+      if (p.actor && p.actor.kind === 'sync') return;
+      if (!merge.isSyncable(p.type)) return;
+    }
     if (!laden().partner.length) return;
     if (ruheTimer) clearTimeout(ruheTimer);
     ruheTimer = setTimeout(() => {

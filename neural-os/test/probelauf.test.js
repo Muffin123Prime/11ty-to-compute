@@ -24,7 +24,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const { test, tempHome } = require('./harness');
 
 const WURZEL = path.join(__dirname, '..');
@@ -79,11 +79,12 @@ function hat(obj, pfad) {
   return true;
 }
 
-/** Einen Node-Prozess ohne TTY laufen lassen: stdin zu, stdout/stderr als Rohr. */
-function lauf(args, { cwd = os.tmpdir(), env = {}, timeoutMs = 60000 } = {}) {
+/** Einen Node-Prozess ohne TTY laufen lassen: stdin zu, stdout/stderr als Rohr.
+ * `programm` ersetzt Node, etwa durch eine Node auf dem Test-Stick oder `sh`. */
+function lauf(args, { cwd = os.tmpdir(), env = {}, timeoutMs = 60000, programm = process.execPath } = {}) {
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
-    const kind = spawn(process.execPath, args, {
+    const kind = spawn(programm, args, {
       cwd,
       env: { ...process.env, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -392,7 +393,7 @@ test('Die Starter im Projektordner sind die Vorlagen, byte-genau (.bat ASCII mit
   }
   assert.ok(text.includes('--start'));
   // Erfolgsweg: Fenster zu, ohne pause (das prüft ja gerade die erste Frage).
-  assert.match(text, /--start[^\r\n]*\r\nif errorlevel 1 goto :fehler\r\nexit \/b 0\r\n/);
+  assert.match(text, /--start[^\r\n]*\r\nif not "%ERRORLEVEL%"=="0" goto :fehler\r\nexit \/b 0\r\n/);
 
   const cmd = fs.readFileSync(PROJEKT_CMD);
   assert.ok(cmd.equals(fs.readFileSync(VORLAGE_CMD)), 'Probelauf - Mac.command weicht von der Vorlage ab');
@@ -401,6 +402,117 @@ test('Die Starter im Projektordner sind die Vorlagen, byte-genau (.bat ASCII mit
   assert.ok(!sh.includes('\r'));
   assert.ok(fs.statSync(PROJEKT_CMD).mode & 0o111, 'Probelauf - Mac.command ist nicht ausführbar');
   assert.ok(fs.statSync(VORLAGE_CMD).mode & 0o111, 'probelauf-macos.command ist nicht ausführbar');
+});
+
+/**
+ * Die .bat Zeile für Zeile, wie cmd.exe sie liest. Ein cmd.exe gibt es hier
+ * nicht; die Regeln sind dieselben wie für die Starter aus Paket S
+ * (test/start-dienst.test.js) und fassen die Fallen, die sonst erst am
+ * fremden Rechner auffielen.
+ */
+test('Die .bat Zeile für Zeile wie cmd.exe: Sprungziele, Anführungszeichen, Blöcke, rem, jeder Code außer 0 ist ein Fehler', () => {
+  const text = fs.readFileSync(VORLAGE_BAT, 'latin1');
+  const zeilen = text.split('\r\n').map((z) => z.trim());
+  const istRem = (z) => /^rem(\s|$)/i.test(z) || z.startsWith('::');
+  const befehle = zeilen.filter((z) => z && !istRem(z));
+  const marken = new Set(zeilen.filter((z) => /^:[a-z_]+$/i.test(z)).map((z) => z.slice(1).toLowerCase()));
+
+  // cmd.exe setzt %-Ausdrücke auch in rem-Zeilen ein (ein ungültiges %~
+  // bricht ab), und ein ^ am Zeilenende hängt die nächste Zeile an.
+  for (const z of zeilen.filter(istRem)) {
+    assert.ok(!z.includes('%'), `% in einer rem-Zeile: ${z}`);
+    assert.ok(!z.endsWith('^'), `^ am Ende einer rem-Zeile: ${z}`);
+  }
+  let tiefe = 0;
+  for (const z of befehle) {
+    for (const m of z.matchAll(/\bgoto\s+:?([a-z_]+)/gi)) {
+      assert.ok(marken.has(m[1].toLowerCase()), `goto ohne Marke: ${z}`);
+    }
+    // Leerzeichen, "(", ")" und "&" im Ordnernamen ("Stick (2)", "Jan & Eva") trennen sonst.
+    for (const m of z.matchAll(/%(HIER|NODE|SKRIPT|USERPROFILE)%|%~dp0|%%~[a-z]*[A-Z]\b/gi)) {
+      const davor = (z.slice(0, m.index).match(/"/g) || []).length;
+      assert.ok(davor % 2 === 1, `Pfad ohne Anführungszeichen: ${z}`);
+    }
+    if (tiefe > 0 && !/^\)/.test(z)) {
+      // Im Klammerblock schlösse eine ")" im Text oder im eingesetzten Pfad den Block.
+      assert.ok(!/^echo\b/i.test(z), `echo in einem Klammerblock: ${z}`);
+      if (/%[A-Z_]+%/i.test(z)) assert.match(z, /^(set "|if (not )?exist ")/i, `%VAR% ungeschützt im Block: ${z}`);
+    }
+    if (/^echo\b/i.test(z)) assert.ok(!/[&|<>]/.test(z.replace(/"[^"]*"/g, '')), `Steuerzeichen im echo: ${z}`);
+    if (/\($/.test(z)) tiefe++;
+    if (/^\)/.test(z)) tiefe--;
+    assert.ok(tiefe >= 0, `Klammer zu ohne Klammer auf: ${z}`);
+  }
+  assert.equal(tiefe, 0, 'Klammerblock nicht geschlossen');
+
+  // Nach jedem Node-Aufruf zählt jeder Code außer 0. Ein Absturz meldet unter
+  // Windows einen negativen Code (0xC0000135 = -1073741515), und
+  // "if errorlevel 1" heißt ">= 1": Der Probelauf ginge dann still zu.
+  const aufrufe = [];
+  befehle.forEach((z, i) => { if (/^"%NODE%"/i.test(z)) aufrufe.push(i); });
+  assert.equal(aufrufe.length, 2, 'die Probe mit -e "" und der Start');
+  for (const i of aufrufe) {
+    assert.match(befehle[i + 1], /^if not "%ERRORLEVEL%"=="0" goto :[a-z_]+$/i, `nach ${befehle[i]}`);
+  }
+  assert.equal(befehle[aufrufe[0] + 1], 'if not "%ERRORLEVEL%"=="0" goto :gesperrt');
+  assert.ok(text.includes('Dieser Rechner laesst keine Programme vom Stick starten.'));
+});
+
+test('Die .command und das Skript im Probe.app sind POSIX-sh (dash -n); eine gesperrte Laufzeit ergibt den Satz aus 1.3', async () => {
+  const shell = ['/usr/bin/dash', '/bin/dash', '/bin/sh'].find((s) => fs.existsSync(s));
+  const stick = tempStick();
+  try {
+    pl().aufStick(stick.root);
+    const probe = path.join(stick.basis, 'Probe.app', 'Contents', 'MacOS', 'probe');
+    for (const datei of [VORLAGE_CMD, PROJEKT_CMD, probe]) {
+      const r = spawnSync(shell, ['-n', datei], { encoding: 'utf8' });
+      assert.equal(r.status, 0, `${shell} -n ${datei}: ${r.stderr}`);
+    }
+    // Eine Laufzeit, die nicht starten darf: der Satz aus 1.3, das Fenster bleibt (Exit 1).
+    for (const plat of ['darwin-x64', 'darwin-arm64']) {
+      const node = path.join(stick.basis, 'runtime', plat, 'node');
+      fs.writeFileSync(node, '#!/bin/sh\nexit 1\n');
+      fs.chmodSync(node, 0o755);
+    }
+    const r = await lauf([path.join(stick.root, 'Probelauf - Mac.command')], { programm: shell, cwd: stick.root, timeoutMs: 20000 });
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.ok(r.stdout.includes('macOS hat den Start blockiert: Systemeinstellungen › Datenschutz & Sicherheit › Dennoch öffnen.'), r.stdout);
+    assert.ok(!r.stdout.includes('Probelauf startet'), 'nach der gescheiterten Probe startet nichts');
+  } finally {
+    stick.cleanup();
+  }
+});
+
+test('Das Ergebnis sagt, ob die Node vom Stick lief; nur dann beantwortet es "Programme vom Stick erlaubt?"', async () => {
+  const sticks = tempHome('probe-sticks');
+  try {
+    const stick = path.join(sticks.home, 'STICK');
+    const laufzeit = path.join(stick, 'Inhalt', 'runtime', 'linux-x64');
+    fs.mkdirSync(laufzeit, { recursive: true });
+    // Die Node dieses Tests als Laufzeit auf dem Stick (fest verlinkt, sonst kopiert).
+    const node = path.join(laufzeit, 'node');
+    try {
+      fs.linkSync(process.execPath, node);
+    } catch {
+      fs.copyFileSync(process.execPath, node);
+      fs.chmodSync(node, 0o755);
+    }
+    const vomStick = await lauf([SKRIPT, '--trocken', '--ort', stick, '--suche-in', sticks.home], { programm: node });
+    assert.equal(vomStick.code, 0, vomStick.stderr);
+    const e1 = JSON.parse(vomStick.stdout);
+    assert.equal(e1.system.nodeVomStick, true);
+    assert.match(pl().ergebnisText(e1).split('\n')[1], /· Node v[\d.]+ vom Stick$/);
+
+    // Ein Starter, dem die Laufzeit fehlt, nimmt ein installiertes Node.
+    const fremd = await lauf([SKRIPT, '--trocken', '--ort', stick, '--suche-in', sticks.home]);
+    assert.equal(fremd.code, 0, fremd.stderr);
+    const e2 = JSON.parse(fremd.stdout);
+    assert.equal(e2.system.nodeVomStick, false);
+    assert.match(pl().ergebnisText(e2).split('\n')[1], /· Node v[\d.]+ nicht vom Stick$/);
+    assert.ok(!JSON.stringify(e1).includes(sticks.home), 'kein Pfad im Ergebnis');
+  } finally {
+    sticks.cleanup();
+  }
 });
 
 test('Ort ohne Wechseldatenträger: gemessen wird auf dem eingesteckten Stick, PROBELAUF ist danach weg', async () => {

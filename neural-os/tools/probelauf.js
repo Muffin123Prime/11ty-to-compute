@@ -547,6 +547,7 @@ function systemInfo() {
     version: os.release(),
     arch: process.arch,
     node: process.version,
+    nodeVomStick: null,
     bootZeit: bootZeit(),
     uptimeS: Math.round(os.uptime()),
     bootZeitAbweichungS: null,
@@ -887,6 +888,9 @@ async function wechselInfo(ctx, e) {
 function messortWaehlen(ctx, info, e) {
   const aufbau = aufbauVon(ctx.ort);
   const ortIstStick = info.ortWechsel === true || !!aufbau;
+  // Fehlt dem Stick die Laufzeit für dieses System, nehmen die Starter ein
+  // installiertes Node. Dann sagt der Lauf nichts über "Programme vom Stick".
+  e.system.nodeVomStick = ortIstStick && innerhalb(echt(process.execPath), echt(ctx.ort));
   e.ort = {
     art: ortIstStick ? 'stick' : istProjektordner(ctx.ort) ? 'projektordner' : 'ordner',
     wechseldatentraeger: info.ortWechsel,
@@ -1258,7 +1262,8 @@ function systemZeile(e) {
   const s = e.system || {};
   const name = s.os === 'win32' ? 'Windows' : s.os === 'darwin' ? 'macOS' : s.os === 'linux' ? 'Linux' : String(s.os || '?');
   const version = s.os === 'darwin' && e.mac && e.mac.version ? e.mac.version : s.version;
-  return 'System: ' + name + ' ' + (version || '?') + ' · ' + (s.arch || '?') + ' · Node ' + (s.node || '?');
+  const herkunft = s.nodeVomStick === true ? ' vom Stick' : s.nodeVomStick === false ? ' nicht vom Stick' : '';
+  return 'System: ' + name + ' ' + (version || '?') + ' · ' + (s.arch || '?') + ' · Node ' + (s.node || '?') + herkunft;
 }
 
 function ortZeile(e) {

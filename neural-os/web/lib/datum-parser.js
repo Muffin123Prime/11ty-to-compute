@@ -21,6 +21,15 @@
  *   14:30 bzw. 15:00: wer einen Termin eintraegt, meint fast nie drei Uhr
  *   nachts. Ab 7 bleibt es beim Vormittag ("um 9" ist 09:00). Wer es anders
  *   meint, sagt "nachts", "frueh" oder "morgens" -- oder schreibt "03:00".
+ *   Mit Minuten ("6:15", "5.50") ist es die 24-Stunden-Schreibweise und
+ *   bleibt, wie es dasteht: nachmittags schreibt man 18:15. Der Zug um 5:50
+ *   und der Flug um 6:15 stuenden sonst zwoelf Stunden zu spaet im Kalender.
+ * - **"bis 15.11." ohne Anfang ist eine Frist** an diesem Tag, kein Block ab
+ *   heute -- sonst laege "Steuererklaerung bis 31.7." zehn Monate lang auf
+ *   jedem Tag. Ein Zeitraum braucht seinen Anfang ("ab heute bis …").
+ * - **"jeden ersten Freitag im Monat"** kennt die Serie nicht (Vertrag A hat
+ *   kein BYSETPOS). Daraus wird der naechste solche Tag als EIN Termin, mit
+ *   einem Hinweis -- nie still eine falsche Serie ("alle 2 Wochen").
  * - **Uhrzeit ohne Tag:** heute, wenn sie noch kommt, sonst morgen.
  * - **Tag ohne Uhrzeit:** ganztaegig. Ohne Endzeit dauert ein Termin 1 Stunde.
  * - **"Montag"** ist der naechste Montag, heute eingeschlossen; **"naechsten
@@ -133,6 +142,18 @@ const WT_ALLE = `(?:${WT_VOLL}|mo|di|mi|do|fr|sa|so)\\.?`;
 const WT_PLURAL = 'montags|dienstags|mittwochs|donnerstags|freitags|samstags|sonntags';
 const MONAT_RE = '(januar|jan|februar|feb|märz|maerz|mär|mrz|april|apr|mai|juni|jun|juli|jul|august|aug|september|sept|sep|oktober|okt|november|nov|dezember|dez)\\.?';
 const TEIL_RE = '(früh|frueh|morgens|vormittags?|mittags?|nachmittags?|abends?|nachts?)';
+/** Tageszeit, an einen Wochentag geklebt: "Freitagabend", "Sonntagmorgen" (so schreibt man es laut Duden). */
+const TEIL_GLUE = '(?:morgen|vormittag|nachmittag|mittag|abend|nacht)';
+
+/** "abend" -> "abends" usw.: die Tageszeit in der Form, die umrechnen() kennt. */
+function teilAus(w) {
+  if (w.startsWith('vor')) return 'vormittags';
+  if (w.startsWith('nachm')) return 'nachmittags';
+  if (w.startsWith('mittag')) return 'mittags';
+  if (w.startsWith('abend')) return 'abends';
+  if (w.startsWith('nacht')) return 'nachts';
+  return 'morgens';
+}
 
 const rx = (src) => new RegExp(src, 'giu');
 
@@ -214,6 +235,8 @@ export function parse(text, jetzt = new Date()) {
     fest: null, // {day, min} aus "in 30 Minuten"
     relWoche: false, // relTag stammt aus "in N Wochen": ein Wochentag gilt dann in DIESER Woche
     wtSpanne: null, // {von, bis} aus "Montag bis Freitag" (ohne "jeden")
+    imMonat: null, // {n, index} aus "jeden ersten Freitag im Monat" (n = -1: der letzte)
+    relVonTag: false, // relTag stammt aus heute/morgen/uebermorgen: "in einer Woche" rechnet von dort weiter
     kaputt: false,
   };
 
@@ -269,6 +292,18 @@ export function parse(text, jetzt = new Date()) {
       : w === 'vormittag' ? 'vormittags' : w === 'mittag' ? 'mittags'
         : w === 'nachmittag' ? 'nachmittags' : w === 'abend' ? 'abends' : 'nachts';
   });
+  // "jeden ersten Freitag im Monat", "jeden 1. Freitag", "jeden letzten
+  // Freitag": der n-te Wochentag eines Monats. Das kann die Serie nicht
+  // (siehe oben); erkannt wird es trotzdem, damit weder "alle 2 Wochen" noch
+  // ein stiller Einzeltermin mit "jeden ersten" im Titel daraus wird.
+  nimm(rx(`${B0}jede[nrs]?\\s+(erste[nrs]?|zweite[nrs]?|dritte[nrs]?|vierte[nrs]?|letzte[nrs]?|[1-4]\\.)\\s*(${WT_VOLL})(\\s+(?:im|des|eines|jedes|jeden)\\s+monats?)?${B1}`), (m) => {
+    const w = m[1];
+    const n = /^letzt/.test(w) ? -1 : /^\d/.test(w) ? Number(w[0]) : (/^erst/.test(w) ? 1 : ordnung(w));
+    // "jeden zweiten Donnerstag" OHNE "im Monat" heisst alle 2 Wochen (Regel darunter).
+    if (!m[3] && n !== 1 && n !== -1) return false;
+    f.imMonat = { n, index: wtIndex(m[2]) };
+    return undefined;
+  });
   // "jeden 2. Donnerstag" wie "jeden zweiten Donnerstag": alle 2 Wochen -- nicht monatlich am 2.
   nimm(rx(`${B0}jede[nrs]?\\s+([2-4])\\.\\s*(${WT_VOLL})${B1}`), (m) => {
     setzeRec('weekly', Number(m[1]), [wtIndex(m[2])]);
@@ -276,10 +311,12 @@ export function parse(text, jetzt = new Date()) {
   nimm(rx(`${B0}jede[nrs]?\\s+${ORD}\\s+(${WT_VOLL})${B1}`), (m) => {
     setzeRec('weekly', ordnung(m[1]) || 1, [wtIndex(m[2])]);
   });
-  nimm(rx(`${B0}(?:alle|jede[nrs]?)\\s+(?:${ZAHL}|${ORD})\\s+(tag(?:e|en)?|woche(?:n)?|monat(?:e|en)?|jahr(?:e|en)?)${B1}`), (m) => {
-    const n = m[1] ? zahl(m[1]) : ordnung(m[2]);
+  // "alle 2 Wochen", "jede zweite Woche" -- und "jede 2. Woche", "jeden 3. Monat"
+  // (die Ordnungszahl mit Punkt; frueher wurde daraus "jeden Monat am 2.").
+  nimm(rx(`${B0}(?:alle|jede[nrs]?)\\s+(?:${ZAHL}|${ORD}|(\\d{1,2})\\.)\\s*(tag(?:e|en)?|woche(?:n)?|monat(?:e|en)?|jahr(?:e|en)?)${B1}`), (m) => {
+    const n = m[1] ? zahl(m[1]) : m[2] ? ordnung(m[2]) : Number(m[3]);
     if (!n || n > 99) return false;
-    setzeRec({ t: 'daily', w: 'weekly', m: 'monthly', j: 'yearly' }[m[3][0]], n);
+    setzeRec({ t: 'daily', w: 'weekly', m: 'monthly', j: 'yearly' }[m[4][0]], n);
     return undefined;
   });
   nimm(rx(`${B0}jede[nrs]?\\s+(tag|woche|monat|jahr)${B1}`), (m) => {
@@ -297,12 +334,17 @@ export function parse(text, jetzt = new Date()) {
     const tage = [m[1], ...(m[2] || '').split(/\s*(?:,|und|&|\+)\s*/)].filter(Boolean).map(wtIndex);
     setzeRec('weekly', 1, tage);
   });
+  // "freitagabends", "sonntagmorgens": jede Woche an diesem Tag zu dieser Tageszeit.
+  nimm(rx(`${B0}(${WT_VOLL})(${TEIL_GLUE})s${B1}`), (m) => {
+    setzeRec('weekly', 1, [wtIndex(m[1])]);
+    if (!f.teil) f.teil = teilAus(m[2]);
+  });
   nimm(rx(`${B0}(${WT_PLURAL})((?:\\s*(?:,|und|&|\\+)\\s*(?:${WT_PLURAL}))*)${B1}`), (m) => {
     const tage = [m[1], ...(m[2] || '').split(/\s*(?:,|und|&|\+)\s*/)].filter(Boolean).map(wtIndex);
     setzeRec('weekly', 1, tage);
   });
   // "jeden 15." -- monatlich an diesem Tag.
-  nimm(rx(`${B0}jede[nrs]?\\s+(\\d{1,2})\\.(?:\\s+(?:des|im)\\s+monats?)?(?!\\d)(?!\\s*(?:${WT_VOLL}))`), (m, a) => {
+  nimm(rx(`${B0}jede[nrs]?\\s+(\\d{1,2})\\.(?:\\s+(?:des|im)\\s+monats?)?(?!\\d)(?!\\s*(?:${WT_VOLL}|tag|woche|monat|jahr))`), (m, a) => {
     const d = Number(m[1]);
     if (d < 1 || d > 31) return false;
     setzeRec('monthly');
@@ -415,20 +457,37 @@ export function parse(text, jetzt = new Date()) {
   nimm(rx(`${B0}(?:ab\\s+)?(übermorgen|uebermorgen|morgen|heute)${B1}`), (m) => {
     if (f.relTag) return false;
     f.relTag = plusTage(heute, m[1] === 'heute' ? 0 : m[1] === 'morgen' ? 1 : 2);
+    f.relVonTag = true;
     return undefined;
   });
+  // "in 3 Tagen", "in einer Woche" -- auch nach heute/morgen/uebermorgen:
+  // "morgen in einer Woche" ist der Tag eine Woche nach morgen, nicht morgen
+  // (und "einer Woche" bleibt nicht im Titel stehen).
   nimm(rx(`${B0}in\\s+${ZAHL}\\s+(tag(?:en)?|woche(?:n)?|monat(?:en)?)${B1}`), (m) => {
     const n = zahl(m[1]);
-    if (!n || f.relTag) return false;
-    if (m[2].startsWith('t')) f.relTag = plusTage(heute, n);
+    if (!n || (f.relTag && !f.relVonTag)) return false;
+    const ab = f.relTag || heute;
+    if (m[2].startsWith('t')) f.relTag = plusTage(ab, n);
     else if (m[2].startsWith('w')) {
-      f.relTag = plusTage(heute, 7 * n);
-      f.relWoche = true;
-    } else f.relTag = plusMonate(heute, n);
+      f.relTag = plusTage(ab, 7 * n);
+      f.relWoche = !f.relVonTag;
+    } else f.relTag = plusMonate(ab, n);
+    f.relVonTag = false;
     return undefined;
   });
 
   /* ---- 5. Wochentage ---- */
+  // "Freitagabend", "am Samstagnachmittag", "naechsten Sonntagmorgen": Tag und
+  // Tageszeit in einem Wort. Frueher blieb das Wort im Titel und der Termin
+  // landete mit Uhrzeit HEUTE.
+  nimm(rx(`${B0}(?:(am|ab)\\s+)?(?:(nächste[nrs]?|naechste[nrs]?|kommende[nrs]?|übernächste[nrs]?|uebernaechste[nrs]?|diese[nrs]?)\\s+)?(${WT_VOLL})(${TEIL_GLUE})${B1}`), (m) => {
+    if (f.wt) return false;
+    let mod = 0;
+    if (m[2]) mod = /^(ü|ue)ber/.test(m[2]) ? 2 : /^diese/.test(m[2]) ? 0 : 1;
+    f.wt = { index: wtIndex(m[3]), mod };
+    if (!f.teil) f.teil = teilAus(m[4]);
+    return undefined;
+  });
   // "Montag bis Freitag" (ohne "jeden", siehe Schritt 1): eine Spanne ganzer Tage.
   nimm(rx(`${B0}(?:(?:von|vom)\\s+)?(${WT_VOLL})\\s*(?:-|–|bis)\\s*(${WT_VOLL})${B1}`), (m) => {
     if (f.wt || f.wtSpanne) return false;
@@ -457,7 +516,9 @@ export function parse(text, jetzt = new Date()) {
     if (m[4] === 'und' && m[1] !== 'zwischen') return false;
     const [h, mi, h2, mi2] = [Number(m[2]), Number(m[3] || 0), Number(m[5]), Number(m[6] || 0)];
     if (h > 24 || h2 > 24 || mi > 59 || mi2 > 59) return false;
-    f.spanne = { h: h % 24, min: mi, literal: literal(m[2]), h2: h2 % 24, min2: mi2, literal2: literal(m[5]) };
+    // Mit Minuten geschrieben ("5:30-7") ist der Beginn 24-Stunden-Zeit (siehe oben);
+    // das Ende richtet sich wie immer nach dem Beginn (endeNach).
+    f.spanne = { h: h % 24, min: mi, literal: literal(m[2]) || m[3] !== undefined, h2: h2 % 24, min2: mi2, literal2: literal(m[5]) };
     return undefined;
   });
   const STUNDE = `(\\d{1,2}|${Object.keys(ZAHLWORT).sort((x, y) => y.length - x.length).join('|')})`;
@@ -479,7 +540,9 @@ export function parse(text, jetzt = new Date()) {
   nimm(rx(`${B0}(?:um|gegen|ab)\\s+(${Object.keys(ZAHLWORT).join('|')})(?:\\s+uhr)?${B1}`), (m, a) => {
     f.zeiten.push({ a, h: zahl(m[1]), min: 0, literal: false });
   });
-  nimm(rx(`${B0}(\\d{1,2}):(\\d{2})${B1}`), (m, a) => zeit(a, m[1], m[2]));
+  // "14:30", auch "14:30h" und "16.00h" (mit "h" ist auch der Punkt eindeutig eine Uhrzeit).
+  nimm(rx(`${B0}(\\d{1,2}):(\\d{2})(?:\\s*h)?${B1}`), (m, a) => zeit(a, m[1], m[2]));
+  nimm(rx(`${B0D}(\\d{1,2})\\.(\\d{2})\\s*h${B1}`), (m, a) => zeit(a, m[1], m[2]));
   // "16h", "16h30", "um 16h": eine Uhrzeit. Als Dauer nur mit "für" ("für 2h",
   // Schritt 8) oder wenn schon eine andere Uhrzeit dasteht ("10 Uhr 2h").
   nimm(rx(`(?<![\\p{L}\\d.,]|für\\s|fuer\\s)(?:(um|ab|gegen)\\s+)?(\\d{1,2})h(\\d{2})?${B1}`), (m, a, b) => {
@@ -496,9 +559,10 @@ export function parse(text, jetzt = new Date()) {
             : w.startsWith('abend') ? 'abends' : 'nachts';
     return zeit(a, m[2], m[3]);
   });
-  // "Arzt 14.10. 9.30": neben einem Tag ist "9.30" die Uhrzeit.
+  // "Arzt 14.10. 9.30": neben einem Tag ist "9.30" die Uhrzeit -- und ohne
+  // Tag dann, wenn die zweite Zahl kein Monat sein kann ("Zahnarzt 16.45").
   nimm(rx(`${B0D}(\\d{1,2})\\.(\\d{2})(?![\\d.]|\\s*(?:uhr))`), (m, a) => {
-    if (!f.daten.length && !f.relTag && !f.wt) return false;
+    if (!f.daten.length && !f.relTag && !f.wt && Number(m[2]) <= 12) return false;
     return zeit(a, m[1], m[2]);
   });
 
@@ -506,7 +570,10 @@ export function parse(text, jetzt = new Date()) {
     const h = Number(hs);
     const mi = Number(ms || 0);
     if (h > 24 || mi > 59) return false;
-    f.zeiten.push({ a, h: h % 24, min: mi, literal: literal(hs) });
+    // `literal`: so gemeint, wie es dasteht ("15", "09"). `mitMinuten`: "6:15" --
+    // als Beginn die 24-Stunden-Schreibweise (siehe oben). Als ENDE nach einem
+    // Beginn entscheidet weiter endeNach ("3 bis 4:30" endet um 16:30).
+    f.zeiten.push({ a, h: h % 24, min: mi, literal: literal(hs), mitMinuten: ms !== undefined && ms !== null && ms !== '' });
     return undefined;
   }
 
@@ -554,7 +621,7 @@ export function parse(text, jetzt = new Date()) {
 
   /* ================= Zusammensetzen ================= */
 
-  const erkannt = f.daten.length || f.relTag || f.wt || f.wtSpanne || f.zeiten.length || f.spanne || f.rec || f.ganztags || f.fest || (f.teil && f.relTag);
+  const erkannt = f.daten.length || f.relTag || f.wt || f.wtSpanne || f.zeiten.length || f.spanne || f.rec || f.ganztags || f.fest || f.imMonat || (f.teil && f.relTag);
   if (!erkannt) return null;
 
   // Daten in Textreihenfolge: das erste ist der Beginn, eines nach "bis" oder
@@ -572,6 +639,14 @@ export function parse(text, jetzt = new Date()) {
     }
   }
 
+  // "5.11.-7.11.2027": steht das Jahr nur am Ende, gilt es auch fuer den
+  // Anfang (sonst dauerte die Tagung vom 5.11.2026 bis zum 7.11.2027). Laege
+  // der Anfang dann nach dem Ende ("28.12.-3.1.2027"), ist es das Jahr davor.
+  if (startDaten && endeDaten && !startDaten.y && endeDaten.y && startDaten.m && !endeDaten.nurTag) {
+    const [ey, em, ed] = [endeDaten.y, endeDaten.m, endeDaten.d];
+    const vorEnde = startDaten.m < em || (startDaten.m === em && startDaten.d <= ed);
+    startDaten = { ...startDaten, y: vorEnde ? ey : ey - 1 };
+  }
   let tag = null;
   let hinweis = null;
   if (startDaten) {
@@ -583,7 +658,21 @@ export function parse(text, jetzt = new Date()) {
     bisTag = aufloesen(endeDaten, tag || heute);
     if (!bisTag) return null;
   }
+  // "Abgabe bis 15.11." -- ohne Anfang eine Frist an diesem Tag (siehe oben).
+  // Mit einem Anfang ("ab heute bis", "Montag bis 16.10.") oder als Ende
+  // einer Serie ("jeden Montag bis 20.12.") bleibt es ein Ende.
+  if (endeDaten && !startDaten && !f.relTag && !f.wt && !f.wtSpanne && !f.rec && !f.imMonat) {
+    tag = bisTag;
+    bisTag = null;
+  }
   if (!tag && f.relTag) tag = f.relTag;
+  if (f.imMonat && !tag) {
+    // Der naechste n-te (oder letzte) Wochentag eines Monats, heute eingeschlossen.
+    tag = imMonatNaechster(f.imMonat, heute);
+    const [, mm, dd] = tag.split('-').map(Number);
+    const welcher = f.imMonat.n === -1 ? 'letzten' : ['ersten', 'zweiten', 'dritten', 'vierten'][f.imMonat.n - 1];
+    hinweis = `Nur der ${dd}.${mm}. – „jeden ${welcher} ${WOCHENTAGE[f.imMonat.index]} im Monat“ kann der Kalender nicht wiederholen.`;
+  }
   if (f.wtSpanne && !tag) {
     // "Montag bis Freitag": ab dem naechsten Montag (heute eingeschlossen) bis zum Freitag danach.
     tag = plusTage(heute, (f.wtSpanne.von - wochentag(heute) + 7) % 7);
@@ -635,11 +724,11 @@ export function parse(text, jetzt = new Date()) {
   } else if (f.zeiten.length) {
     f.zeiten.sort((x, y) => x.a - y.a);
     const z = f.zeiten[0];
-    startMin = umrechnen(z.h, z.min, z.literal, teil);
+    startMin = umrechnen(z.h, z.min, z.literal || z.mitMinuten, teil);
     if (f.zeiten[1]) {
       const z2 = f.zeiten[1];
       endeMin = bisTag && bisTag > (tag || heute)
-        ? umrechnen(z2.h, z2.min, z2.literal, null)
+        ? endeAmSpaeterenTag(startMin, tageZwischen(tag || heute, bisTag), z2)
         : endeNach(startMin, z2.h, z2.min, z2.literal, teil);
     }
   } else if (teil) {
@@ -749,6 +838,38 @@ function endeNach(startMin, h, min, istLiteral, teil) {
   const passt = kandidaten.filter((k) => k > startMin).sort((x, y) => x - y);
   if (passt.length) return passt[0];
   return h * 60 + min + 1440;
+}
+
+/**
+ * Das Ende an einem SPAETEREN Tag ("22 Uhr bis 3.10. 6 Uhr"). Am Folgetag
+ * ist eine kleine Stunde frueh am Morgen, wenn der Termin dann hoechstens
+ * zwoelf Stunden dauert -- die Nachtschicht endet um 6, nicht um 18 Uhr.
+ * Sonst (die Tagung "10 Uhr bis 4.10. 3 Uhr", mehrere Tage) gilt die Regel
+ * fuer kleine Stunden wie beim Beginn: nachmittags.
+ */
+function endeAmSpaeterenTag(startMin, tage, z2) {
+  const frueh = z2.h * 60 + z2.min;
+  if (tage === 1 && !z2.literal && z2.h >= 1 && z2.h <= 6 && 1440 - startMin + frueh <= 720) return frueh;
+  return umrechnen(z2.h, z2.min, z2.literal || z2.mitMinuten, null);
+}
+
+/** Der naechste n-te Wochentag eines Monats ab `ab` (n = -1: der letzte). */
+function imMonatNaechster({ n, index }, ab) {
+  const [y, m] = ab.split('-').map(Number);
+  for (let k = 0; k < 14; k++) {
+    const yy = y + Math.floor((m - 1 + k) / 12);
+    const mm = ((m - 1 + k) % 12) + 1;
+    let kandidat;
+    if (n === -1) {
+      const letzter = tagAus(yy, mm + 1, 0);
+      kandidat = plusTage(letzter, -((wochentag(letzter) - index + 7) % 7));
+    } else {
+      const erster = tagAus(yy, mm, 1);
+      kandidat = plusTage(erster, ((index - wochentag(erster) + 7) % 7) + 7 * (n - 1));
+    }
+    if (kandidat >= ab && Number(kandidat.slice(5, 7)) === mm) return kandidat;
+  }
+  return ab;
 }
 
 function plusMonate(day, n) {

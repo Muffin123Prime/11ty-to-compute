@@ -10,6 +10,12 @@
  * 2. Ein Termin aus einem geloeschten Chat oder Projekt liess sich nicht
  *    mehr verschieben, obwohl Chat und Projekt gar nicht geaendert wurden.
  * 3. Ein leeres `?nur=` wirkte auf die GANZE Serie; DELETE loeschte sie.
+ * 4. termin_anlegen auf ein SPAETERES Vorkommen einer Serie verwarf Ende,
+ *    Ort und Erinnerung still und nannte als "wann" den Serienbeginn.
+ * 5. Ein abgelehntes Rueckgaengig sagte "deine Aenderung", obwohl die KI
+ *    selbst spaeter geaendert hatte, und nannte keinen Weg.
+ * 6. Die Karte "Termin faellt einmal aus" zeigte den Serienbeginn, und
+ *    "Oeffnen" fuehrte dorthin statt zum ausgefallenen Tag.
  */
 
 const assert = require('node:assert/strict');
@@ -213,4 +219,141 @@ test('Ein leeres ?nur= betrifft nie die ganze Serie: PATCH und DELETE antworten 
     assert.equal(ok.status, 200, ok.text);
     assert.equal(ok.json.ausgelassen, '2026-10-06');
   });
+});
+
+/* ------------------------------------------------ 4. Doppel-Sperre bei einem SPAETEREN Vorkommen */
+
+test('termin_anlegen auf ein spaeteres Vorkommen einer Serie: Ende, Ort und Erinnerung gelten fuer diesen Tag, nichts wird verschluckt', async () => {
+  await withApp(async ({ app, store }) => {
+    const vorherTz = process.env.TZ;
+    process.env.TZ = 'Europe/Berlin';
+    try {
+      const { createWerkzeuge } = require('../src/models/werkzeuge');
+      const kalender = require('../src/http/api/events');
+      const wz = createWerkzeuge({ store, bus: app.bus });
+      const chat = store.create('chat', { title: 'Termine' });
+      let n = 0;
+      const rufe = (name, input) => {
+        const r = wz.ausfuehren({ id: `t${++n}`, name, input }, undefined, { chatId: chat.id });
+        return { fehler: r.toolResult.is_error === true, inhalt: JSON.parse(r.toolResult.content), runId: (r.ereignisse[0] || {}).runId };
+      };
+      const serie = rufe('termin_anlegen', {
+        titel: 'Training', start: '2026-09-29T18:00', ende: '2026-09-29T19:30', ganztaegig: false, ort: 'Halle 3',
+        wiederholung: { rhythmus: 'woechentlich', bis: '2026-12-22' },
+      }).inhalt;
+      const am = (tag) => kalender.eventsInRange(store, tag, tag).filter((x) => x.data.title === 'Training')
+        .map((x) => ({ id: x.id, start: x.data.start, end: x.data.end, ort: x.data.location, erinnerung: x.data.reminder, serie: x.recurring }));
+
+      // Genau so, wie es schon im Kalender steht: nichts doppelt, und "wann" nennt DIESEN Tag.
+      const gleich = rufe('termin_anlegen', { titel: 'Training', start: '2026-10-13T18:00', ende: '2026-10-13T19:30', ganztaegig: false });
+      assert.equal(gleich.fehler, false, JSON.stringify(gleich.inhalt));
+      assert.equal(gleich.inhalt.schonDa, true);
+      assert.deepEqual(gleich.inhalt.ergaenzt, []);
+      assert.match(gleich.inhalt.wann, /^Di\. 13\.10\.2026, 18:00–19:30/, `vorher stand hier der Serienbeginn 29.09.: ${gleich.inhalt.wann}`);
+      assert.equal(store.count('event'), 1);
+
+      // Abweichend: der 06.10. bekommt Ende, Ort und Erinnerung -- nur dieser Tag.
+      const b = rufe('termin_anlegen', { titel: 'Training', start: '2026-10-06T18:00', ende: '2026-10-06T20:00', ganztaegig: false, ort: 'Halle 5', erinnerung_minuten: 60 });
+      assert.equal(b.fehler, false, JSON.stringify(b.inhalt));
+      assert.deepEqual(b.inhalt.ergaenzt, ['Ende', 'Ort', 'Erinnerung'], 'vorher: [] -- still verworfen');
+      assert.equal(b.inhalt.vorkommen, '2026-10-06');
+      assert.equal(b.inhalt.serie, serie.id);
+      assert.match(b.inhalt.wann, /^Di\. 06\.10\.2026, 18:00–20:00/);
+      assert.match(b.inhalt.hinweis, /Nur für diesen Tag übernommen: Ende, Ort, Erinnerung/);
+      const tag = am('2026-10-06');
+      assert.equal(tag.length, 1, JSON.stringify(tag));
+      assert.deepEqual({ ...tag[0], id: undefined }, { id: undefined, start: '2026-10-06T18:00', end: '2026-10-06T20:00', ort: 'Halle 5', erinnerung: 60, serie: false });
+      assert.deepEqual(am('2026-10-20').map((x) => [x.end, x.ort, x.erinnerung, x.serie]), [['2026-10-20T19:30', 'Halle 3', null, true]], 'die Serie bleibt, wie sie war');
+
+      // Rueckgaengig nimmt beides zurueck: der 06.10. ist wieder ein Vorkommen der Serie.
+      const eintrag = app.history.list({ limit: 50 }).items.find((e) => e.id === b.inhalt.id && !e.undone);
+      await app.history.undo(eintrag.seq);
+      assert.deepEqual(am('2026-10-06').map((x) => [x.id, x.ort, x.serie]), [[serie.id, 'Halle 3', true]]);
+    } finally {
+      if (vorherTz === undefined) delete process.env.TZ;
+      else process.env.TZ = vorherTz;
+    }
+  });
+});
+
+/* ------------------------------------------------ 5. Rueckgaengig, das die KI selbst blockiert */
+
+test('Rueckgaengig der ersten Karte, nachdem die KI den Termin spaeter selbst geaendert hat: die Meldung nennt die KI und den Weg', async () => {
+  await withApp(async ({ app, store, base }) => {
+    const { createWerkzeuge } = require('../src/models/werkzeuge');
+    const wz = createWerkzeuge({ store, bus: app.bus });
+    const chat = store.create('chat', { title: 'Termine' });
+    const lauf1 = wz.ausfuehren({ id: 'a', name: 'termin_anlegen', input: { titel: 'Zahnarzt', start: '2026-10-01T15:00', ganztaegig: false } }, undefined, { chatId: chat.id });
+    const id = JSON.parse(lauf1.toolResult.content).id;
+    const lauf2 = wz.ausfuehren({ id: 'b', name: 'termin_aendern', input: { id, start: '2026-10-02T09:00' } }, undefined, { chatId: chat.id });
+    const runId2 = lauf2.ereignisse[0].runId;
+
+    const r = await request(base, 'POST', `/api/chats/${chat.id}/rueckgaengig`, { runId: lauf1.ereignisse[0].runId });
+    assert.equal(r.status, 409, r.text);
+    const fehler = r.json.error;
+    assert.doesNotMatch(fehler.message, /deine Änderung/, 'es war nicht der Nutzer');
+    assert.match(fehler.message, /von der KI geändert/);
+    assert.match(fehler.message, /Zahnarzt → Fr\. 02\.10\.2026/, 'die spaetere Karte wird genannt');
+    assert.match(fehler.message, /Nimm zuerst diese spätere Änderung zurück/);
+    assert.equal(fehler.details.runId, runId2);
+    assert.equal(fehler.details.von, 'agent');
+
+    // Hat der NUTZER danach geaendert, bleibt es beim Schutz seiner Aenderung.
+    const lauf3 = wz.ausfuehren({ id: 'c', name: 'termin_anlegen', input: { titel: 'Friseur', start: '2026-10-05T10:00', ganztaegig: false } }, undefined, { chatId: chat.id });
+    const friseur = JSON.parse(lauf3.toolResult.content).id;
+    assert.equal((await request(base, 'PATCH', `/api/events/${friseur}`, { start: '2026-10-05T11:00' })).status, 200);
+    const u = await request(base, 'POST', `/api/chats/${chat.id}/rueckgaengig`, { runId: lauf3.ereignisse[0].runId });
+    assert.equal(u.status, 409, u.text);
+    assert.match(u.json.error.message, /damit deine Änderung nicht verloren geht/);
+  });
+});
+
+/* ------------------------------------------------ 6. Karte "faellt einmal aus" */
+
+test('Karte „Termin fällt einmal aus“ nennt den ausgefallenen Tag, und „Öffnen“ führt dorthin', async () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { starten, B, antwort } = require('./claude-statist');
+  const { home, cleanup } = tempHome('nos-kal-r2-karte');
+  const statist = await starten();
+  let app = null;
+  try {
+    const { createApp } = require('../src/app');
+    app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false, claudeBasis: statist.url });
+    const server = await app.listen();
+    const base = `http://127.0.0.1:${server.server.address().port}`;
+    assert.equal((await request(base, 'POST', '/api/claude/schluessel', { schluessel: statist.schluessel })).status, 200);
+    const chatId = (await request(base, 'POST', '/api/chats', { title: 'Termine' })).json.record.id;
+    const serie = (await request(base, 'POST', '/api/events', {
+      title: 'Training', start: '2026-09-29T18:00', end: '2026-09-29T19:30', recurrence: { freq: 'weekly', until: '2026-12-22' },
+    })).json.record;
+    statist.weiter(
+      antwort(B.start(), B.werkzeug(0, 'toolu_aus', 'termin_loeschen', { id: serie.id, nur_am: '2026-10-06' }), B.ende('tool_use')),
+      antwort(B.start(), B.text(0, 'Am Dienstag, 6. Oktober fällt das Training aus.'), B.ende('end_turn')),
+    );
+    const r = await request(base, 'POST', `/api/chats/${chatId}/messages`, { inhalt: 'das Training am 6.10. fällt aus' });
+    const agent = r.text.split('\n\n').filter((b) => b.startsWith('event: agent'))
+      .map((b) => JSON.parse(b.split('\n').find((z) => z.startsWith('data: ')).slice(6)))
+      .find((e) => e.zustand === 'fertig');
+    assert.ok(agent && agent.wirkung, r.text.slice(0, 400));
+    const [w] = agent.wirkung;
+    assert.equal(w.aktion, 'ausgelassen');
+    assert.equal(w.start, '2026-10-06T18:00', 'vorher: 2026-09-29T18:00, der Beginn der Serie');
+    assert.equal(w.end, '2026-10-06T19:30');
+    assert.equal(w.am, '2026-10-06');
+
+    // Die Zeile im Chat (web/lib/agenten.js): Tag und Ziel.
+    const dir = fs.mkdtempSync(path.join(home, 'lib-'));
+    fs.copyFileSync(path.join(__dirname, '..', 'web', 'lib', 'agenten.js'), path.join(dir, 'agenten.mjs'));
+    const lib = await import(path.join(dir, 'agenten.mjs'));
+    const [zeile] = lib.wirkungZeilen(agent.wirkung);
+    assert.equal(zeile.label, 'Termin fällt einmal aus');
+    assert.match(zeile.detail, /^Di, 6\. Okt · 18:00 · Training · Serie$/);
+    assert.equal(zeile.href, `#/kalender?id=${encodeURIComponent(serie.id)}&am=2026-10-06`);
+    assert.equal(lib.zielVon(serie.id, 'event', { am: 'kein Tag' }), `#/kalender?id=${encodeURIComponent(serie.id)}`);
+  } finally {
+    if (app) await app.close().catch(() => {});
+    await statist.close();
+    cleanup();
+  }
 });

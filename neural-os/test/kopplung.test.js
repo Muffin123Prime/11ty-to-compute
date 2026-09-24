@@ -1134,6 +1134,200 @@ test('HTTP /api/kopplung: nur für den Besitzer, Suche, Koppeln, Abgleichen, Ent
   });
 });
 
+/* ------------------------------------------------ Tresor gesperrt, PIN später, Name */
+
+/** Eine Anfrage an eine laufende App, als Besitzer (X-Neural-OS). */
+function rufeAn(port, method, pfad, body) {
+  const http = require('node:http');
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
+    const req = http.request({
+      method, host: '127.0.0.1', port, path: pfad,
+      headers: { 'x-neural-os': '1', ...(payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}) },
+    }, (res) => {
+      const teile = [];
+      res.on('data', (c) => teile.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(teile).toString('utf8');
+        let json = null;
+        try { json = JSON.parse(text); } catch { /* kein JSON */ }
+        resolve({ status: res.statusCode, json, text });
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+test('Tresor gesperrt: Angebot und Entkoppel-Nachricht bleiben liegen, nichts wird geschrieben; nach dem Entsperren wird angenommen', async () => {
+  await welt(async (w) => {
+    kopplungMod();
+    const A = w.stick('a');
+    const B = w.stick('b');
+    const C = w.stick('c');
+    for (const s of [A, B, C]) w.welt.add(s.root);
+    const appA = await w.start(A, { name: 'Max', pin: '1111' });
+    let appB = await w.start(B, { name: 'Lena', pin: '2222' });
+    const appC = await w.start(C, { name: 'Tom', pin: '3333' });
+    await koppeln(appC, appB, B, '2222');
+    await appB.kopplung.abgleichen();
+    const idB = appB.identitaet.id;
+    await w.stop(appB);
+
+    // B läuft nicht: C entkoppelt, A bietet an.
+    await appC.kopplung.entkoppeln(idB);
+    await appA.kopplung.koppeln({ root: B.root, pin: '2222' });
+    const angebot = path.join(B.sync, 'koppeln', `${appA.identitaet.id}.angebot`);
+    const entkoppelt = path.join(B.sync, 'koppeln', `${appC.identitaet.id}.entkoppelt`);
+    assert.ok(fs.existsSync(angebot) && fs.existsSync(entkoppelt));
+
+    // B startet und wird gesperrt, bevor die Kopplung ihren Stand gelesen hat.
+    appB = await w.start(B, { pin: '2222' });
+    appB.vaultCrypto.lock();
+    const kopplungenVorher = fs.readFileSync(path.join(B.data, 'kopplungen.json'));
+    const r = await appB.kopplung.annehmen();
+    assert.deepEqual(r, { angenommen: [], entkoppelt: [], abgelehnt: 0 });
+    const ab = await appB.kopplung.abgleichen();
+    assert.equal(ab.uebernommen, 0);
+    assert.ok(fs.existsSync(angebot), 'ein versiegeltes Angebot wurde weggeworfen, weil der Tresor gesperrt war');
+    assert.ok(fs.existsSync(entkoppelt), 'die Entkoppel-Nachricht wurde weggeworfen, weil der Tresor gesperrt war');
+    assert.ok(fs.readFileSync(path.join(B.data, 'kopplungen.json')).equals(kopplungenVorher), 'kopplungen.json wurde im gesperrten Zustand angefasst');
+    await assert.rejects(() => appB.kopplung.koppeln({ root: A.root, pin: '1111' }), (err) => err.code === 'VAULT_LOCKED');
+
+    // Entsperrt: beides wird erledigt.
+    await appB.vaultCrypto.unlock('2222');
+    const r2 = await appB.kopplung.annehmen();
+    assert.deepEqual(r2.angenommen.map((p) => p.name), ['Max']);
+    assert.deepEqual(r2.entkoppelt, [appC.identitaet.id]);
+    assert.deepEqual(appB.kopplung.status().partner.map((p) => p.name), ['Max']);
+    assert.equal(fs.existsSync(angebot), false);
+    assert.equal(fs.existsSync(entkoppelt), false);
+  });
+});
+
+test('PIN nach dem Koppeln: kopplungen.json und sync-folder.json werden sofort versiegelt, der Abgleich läuft weiter', async () => {
+  await welt(async (w) => {
+    kopplungMod();
+    const A = w.stick('a');
+    const B = w.stick('b');
+    w.welt.add(A.root);
+    w.welt.add(B.root);
+    const appA = await w.start(A, { name: 'Max' });
+    const appB = await w.start(B, { name: 'Lena' });
+    await koppeln(appA, appB, B);
+    appA.store.create('note', { title: 'vor der PIN', body: 'a' });
+    for (const app of [appA, appB, appA]) await app.kopplung.abgleichen();
+    const kDatei = path.join(A.data, 'kopplungen.json');
+    const sDatei = path.join(A.data, 'sync-folder.json');
+    const schluessel = JSON.parse(fs.readFileSync(kDatei, 'utf8')).partner[0].schluessel;
+    assert.equal(fs.readFileSync(sDatei)[0], 0x7b, 'Vorbedingung: ohne PIN liegt der Stand im Klartext');
+
+    // "PIN festlegen" in den Einstellungen, über die echte Route.
+    const server = await appA.listen();
+    const pin = await rufeAn(server.server.address().port, 'POST', '/api/vault/pin', { pin: '8642' });
+    assert.equal(pin.status, 200, pin.text);
+
+    const kRoh = fs.readFileSync(kDatei);
+    assert.notEqual(kRoh[0], 0x7b, 'kopplungen.json liegt nach dem Festlegen der PIN weiter im Klartext');
+    assert.equal(kRoh.includes(schluessel), false, 'der Paarschlüssel steht im Klartext auf dem Stick');
+    assert.equal(JSON.parse(appA.vaultCrypto.decryptBuffer(kRoh).toString('utf8')).partner[0].schluessel, schluessel);
+    const sRoh = fs.readFileSync(sDatei);
+    assert.notEqual(sRoh[0], 0x7b, 'sync-folder.json liegt nach dem Festlegen der PIN weiter im Klartext');
+    assert.ok(JSON.parse(appA.vaultCrypto.decryptBuffer(sRoh).toString('utf8')).devices[appB.identitaet.id]);
+
+    const n = appB.store.create('note', { title: 'nach der PIN', body: 'b' });
+    await appB.kopplung.abgleichen();
+    const r = await appA.kopplung.abgleichen();
+    assert.equal(r.konflikte, 0);
+    assert.equal(notiz(appA, n.id), 'b');
+  });
+});
+
+test('Name dieser KI reist mit: nach dem Umbenennen schreibt A von selbst neu, B zeigt den neuen Namen', async () => {
+  await welt(async (w) => {
+    kopplungMod();
+    const A = w.stick('a');
+    const B = w.stick('b');
+    w.welt.add(A.root);
+    w.welt.add(B.root);
+    const appB = await w.start(B, { name: 'Lena' });
+    const appA = await createApp({
+      home: A.data, appDir: A.appDir, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false,
+      kopplung: { einhaengepunkte: () => [...w.welt], zeiten: { startMs: 10, suchlaufMs: 60000, ruheMs: 50 } },
+    });
+    try {
+      appA.identitaet.umbenennen('Max');
+      await appA.kopplung.koppeln({ root: B.root });
+      await appB.kopplung.annehmen();
+      await appB.kopplung.abgleichen();
+      assert.equal(partnerVon(appB, appA.identitaet.id).name, 'Max');
+      const vorher = generationAuf(B.sync, appA.identitaet.id);
+
+      // So benennt POST /api/ki/name um: Identität, dann das Ereignis.
+      appA.identitaet.umbenennen('Moritz');
+      appA.bus.publish('ki.umbenannt', { id: appA.identitaet.id, name: 'Moritz' });
+      await bis(() => generationAuf(B.sync, appA.identitaet.id) > vorher, 5000, 'neues Postfach nach dem Umbenennen');
+      await appB.kopplung.abgleichen();
+      assert.equal(partnerVon(appB, appA.identitaet.id).name, 'Moritz');
+    } finally {
+      await appA.close();
+    }
+  });
+});
+
+test('Entkoppeln, bevor B angenommen hat: B ist danach nicht gekoppelt und zeigt keinen Hinweis', async () => {
+  await welt(async (w) => {
+    kopplungMod();
+    const A = w.stick('a');
+    const B = w.stick('b');
+    await kiAnlegen(B, 'Lena');
+    w.welt.add(A.root);
+    w.welt.add(B.root);
+    const appA = await w.start(A, { name: 'Max' });
+    const angenommen = [];
+    await appA.kopplung.koppeln({ root: B.root });
+    const angebot = path.join(B.sync, 'koppeln', `${appA.identitaet.id}.angebot`);
+    const kopie = fs.readFileSync(angebot);
+    await appA.kopplung.entkoppeln(appA.kopplung.status().partner[0].id);
+    assert.equal(fs.existsSync(angebot), false, 'das Angebot bleibt liegen, obwohl A entkoppelt hat');
+    // Auch wenn das Wegräumen nicht gelang: Angebot und Rückzug liegen beide da.
+    fs.writeFileSync(angebot, kopie);
+
+    const appB = await w.start(B);
+    appB.bus.on('kopplung.angenommen', (e) => angenommen.push(e.payload));
+    const r = await appB.kopplung.annehmen();
+    assert.deepEqual(r.angenommen, []);
+    const st = appB.kopplung.status();
+    assert.equal(st.partner.length, 0);
+    assert.equal(st.hinweis, null, 'B meldet eine Kopplung, die es nicht mehr gibt');
+    assert.deepEqual(angenommen, []);
+    const rest = fs.existsSync(path.join(B.sync, 'koppeln')) ? fs.readdirSync(path.join(B.sync, 'koppeln')) : [];
+    assert.deepEqual(rest, []);
+  });
+});
+
+test('finden(): der eigene Stick unter einem zweiten Pfad ist kein Zwilling', async () => {
+  await welt(async (w) => {
+    kopplungMod();
+    const A = w.stick('a');
+    const zweiter = `${A.root}-zweiter-pfad`;
+    fs.symlinkSync(A.root, zweiter, 'dir');
+    try {
+      // Wie ein zweiter Einhängepunkt desselben Datenträgers: realpath löst ihn nicht auf.
+      const dateisystem = { ...fs.promises, realpath: (p) => (String(p).startsWith(zweiter) ? Promise.resolve(p) : fs.promises.realpath(p)) };
+      w.welt.add(A.root);
+      w.welt.add(zweiter);
+      const appA = await w.start(A, { name: 'Max', dateisystem });
+      const gef = await appA.kopplung.finden({ leer: true });
+      assert.deepEqual(gef.map((g) => g.pfad), [], 'A findet sich selbst');
+      assert.equal(appA.kopplung.status().selbst.zwilling, false, 'A hält sich selbst für einen Zwilling');
+    } finally {
+      fs.unlinkSync(zweiter);
+    }
+  });
+});
+
 test('beideBehalten: dieselbe Entscheidung auf beiden Seiten, Kopie mit 32 Zeichen, keine Kopie einer Kopie', () => {
   const basis = { type: 'note', createdAt: 'x', updatedAt: 'x', deletedAt: null, rev: 1 };
   const a = { ...basis, id: 'note_aaaaaaaaaaaaaaaaaaaaaaaa', data: { title: 'Einkaufsliste', body: 'A' } };

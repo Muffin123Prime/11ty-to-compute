@@ -55,6 +55,7 @@
 
 const anbieter = require('./providers/anthropic');
 const { createWerkzeuge, DEFINITIONEN, istEigenesWerkzeug, ungueltigErgebnis } = require('./werkzeuge');
+const wdh = require('../kalender/wiederholung');
 const {
   NeuralError,
   ValidationError,
@@ -910,13 +911,22 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
    * geschah ("Termin eingetragen · Do, 25. Sep · 15:00"), auch wenn der
    * Termin später verschoben wird. "Öffnen" führt zum heutigen Stand.
    */
-  function schnappschuss(rec, aktion) {
+  function schnappschuss(rec, aktion, am = null) {
     const d = rec.data || {};
     const s = { id: rec.id, typ: rec.type, aktion, titel: '' };
     if (rec.type === 'event') {
       s.titel = d.title;
       s.start = d.start || null;
       s.end = d.end || null;
+      // Ein einzelnes Vorkommen einer Serie ("das Training am 6.10. faellt
+      // aus"): die Karte nennt DIESEN Tag, und "Oeffnen" fuehrt dorthin --
+      // nicht zum Beginn der Serie Wochen vorher.
+      if (am && wdh.istSerie(d) && wdh.gueltigerTag(am)) {
+        const lage = wdh.aufTagLegen(d, am);
+        s.start = lage.start;
+        s.end = lage.end;
+        s.am = am;
+      }
       s.ganztaegig = d.allDay === true;
       if (d.location) s.ort = String(d.location).slice(0, 200);
       if (d.recurrence && d.recurrence.freq) s.serie = true;
@@ -952,7 +962,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       }
       if (block.name === 'termin_loeschen' && block.input && typeof block.input.id === 'string') {
         const rec = store.get(block.input.id, { includeDeleted: true });
-        if (rec && rec.type === 'event') aus.push(schnappschuss(rec, rec.deletedAt ? 'geloescht' : 'ausgelassen'));
+        const am = typeof block.input.nur_am === 'string' ? block.input.nur_am : null;
+        if (rec && rec.type === 'event') aus.push(schnappschuss(rec, rec.deletedAt ? 'geloescht' : 'ausgelassen', rec.deletedAt ? null : am));
       }
     } catch (err) {
       log.warn(`Wirkung von ${block.name} nicht lesbar: ${err && err.message}`);
