@@ -21,12 +21,31 @@
  *   byte-identical to the file a folder export writes, so it can be imported
  *   again. Attached blobs are not part of a single JSON file; the response
  *   header says so instead of quietly dropping them.
+ *
+ * PIN (Entscheidung des Nutzers, Abstimmung mit dem Stick-Bauplan, Paket V)
+ * -----------------------------------------------------------------------
+ * - `POST /api/vault/pin {pin, merken}` richtet die PIN ein: 4 bis 6 Ziffern,
+ *   Verschlüsselung über dieselbe `initialise` wie bisher, danach wird alles
+ *   Vorhandene neu geschrieben -- auch der Claude-Schlüssel, der in einer
+ *   eigenen Datei liegt.
+ * - `POST /api/vault/unlock {passphrase, merken}` bleibt der eine Weg zum
+ *   Entsperren (Feldname und Pflichtkopf wie im Bauplan). Nach 5 falschen
+ *   Versuchen gibt es 30 s Pause: 429 "Zu oft falsch. Kurz warten.";
+ *   falsch ist 401 "Falsche PIN.". Richtig setzt das Sitzungs-Cookie dieses
+ *   Browsers (src/http/auth.js). Ist schon offen (anderer Browser, gemerktes
+ *   Gerät), wird die PIN trotzdem geprüft -- "ist doch offen" ist kein Beweis.
+ * - Die Sperre zählt pro laufender KI, nicht pro Browser: wer rät, kann den
+ *   Browser wechseln.
+ * - "Dieses Gerät merken" legt den Schlüssel im Benutzerprofil ab (siehe
+ *   src/store/vaultcrypto.js), je KI-Kennung (`config.sync.deviceId`).
  */
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const { ValidationError, NeuralError } = require('../../kernel/errors');
+const vaultcryptoMod = require('../../store/vaultcrypto');
 const {
   need,
   needMethod,
@@ -73,35 +92,390 @@ function stateOf(rc) {
   return out;
 }
 
-/** Re-read the vault through the (now available) key, if the store can. */
+/**
+ * Re-read the vault through the (now available) key, if the store can.
+ *
+ * Ohne `reload` ist das kein Problem mehr, das man melden müsste: ein
+ * verschlüsselter Tresor lässt sich heute nur ENTSPERRT öffnen (createApp
+ * scheitert sonst), die Sätze liegen also schon im Speicher. Gesperrt wird
+ * danach nur das Schreiben; Entsperren gibt es zurück.
+ */
 async function reloadStore(rc) {
   const store = rc.ctx.store;
-  if (!store || typeof store.reload !== 'function') {
-    return {
-      reloaded: false,
-      hint: 'Der Speicher kann die Daten nicht im laufenden Betrieb neu einlesen. Starte Neural OS neu, damit der entsperrte Vault gelesen wird.',
-    };
-  }
+  if (!store || typeof store.reload !== 'function') return { reloaded: false };
   await store.reload();
   return { reloaded: true };
+}
+
+/* ------------------------------------------------------------------ PIN */
+
+const PIN_FEHL_MAX = 5;
+const PIN_PAUSE_MS = 30 * 1000;
+/** Pro laufender KI (ctx), nicht pro Browser. */
+const SPERREN = new WeakMap();
+
+function sperreVon(ctx) {
+  let s = SPERREN.get(ctx);
+  if (!s) {
+    s = { fehl: 0, bis: 0 };
+    SPERREN.set(ctx, s);
+  }
+  return s;
+}
+
+function pauseNoetig(rc) {
+  const s = sperreVon(rc.ctx);
+  const rest = s.bis - Date.now();
+  if (rest > 0) {
+    throw new NeuralError('ZU_OFT_FALSCH', 'Zu oft falsch. Kurz warten.', {
+      status: 429,
+      details: { wartenS: Math.ceil(rest / 1000) },
+    });
+  }
+}
+
+/**
+ * Eine PIN prüfen oder damit entsperren -- mit Zählung. Wirft 401/429 wie im
+ * Bauplan; jede andere Ausnahme (beschädigte Datei) geht unverändert weiter.
+ */
+async function mitZaehlung(rc, fn) {
+  pauseNoetig(rc);
+  const s = sperreVon(rc.ctx);
+  try {
+    const r = await fn();
+    s.fehl = 0;
+    return r;
+  } catch (err) {
+    if (err && err.code === 'VAULT_LOCKED') {
+      s.fehl += 1;
+      audit(rc, 'vault.pin.falsch', { fehl: s.fehl });
+      if (s.fehl >= PIN_FEHL_MAX) {
+        s.fehl = 0;
+        s.bis = Date.now() + PIN_PAUSE_MS;
+        throw new NeuralError('ZU_OFT_FALSCH', 'Zu oft falsch. Kurz warten.', {
+          status: 429,
+          details: { wartenS: Math.ceil(PIN_PAUSE_MS / 1000) },
+        });
+      }
+      const art = rc.ctx.vaultCrypto && typeof rc.ctx.vaultCrypto.art === 'function' ? rc.ctx.vaultCrypto.art() : 'pin';
+      throw new NeuralError('FALSCHE_PIN', art === 'passphrase' ? 'Falsche Passphrase.' : 'Falsche PIN.', {
+        status: 401,
+        details: { uebrig: PIN_FEHL_MAX - s.fehl },
+      });
+    }
+    throw err;
+  }
+}
+
+function pinLesen(value, feld = 'pin') {
+  if (typeof value !== 'string' || !vaultcryptoMod.istPin(value)) {
+    throw new ValidationError(`Die PIN besteht aus ${vaultcryptoMod.MIN_PIN} bis ${vaultcryptoMod.MAX_PIN} Ziffern.`, { feld });
+  }
+  return value;
+}
+
+/**
+ * Die Kennung dieser KI. Fehlt sie noch, wird sie hier angelegt -- im selben
+ * Format wie src/kernel/identitaet.js, das eine gültige Kennung übernimmt.
+ */
+function kiIdSicherstellen(rc) {
+  const config = rc.ctx.config || {};
+  const vorhanden = vaultcryptoMod.kiIdAus(config);
+  if (vorhanden) return vorhanden;
+  const { neueKiId } = require('../../kernel/identitaet');
+  const id = neueKiId();
+  if (typeof rc.ctx.saveConfig === 'function') {
+    rc.ctx.saveConfig({ sync: { deviceId: id } });
+  } else {
+    config.sync = { ...(config.sync || {}), deviceId: id };
+  }
+  return id;
+}
+
+function geraetMerken(rc) {
+  const crypto = rc.ctx.vaultCrypto;
+  const kiId = kiIdSicherstellen(rc);
+  let name = 'Dieser Rechner';
+  try { name = os.hostname() || name; } catch { /* bleibt */ }
+  const r = crypto.merken({ kiId, name });
+  audit(rc, 'vault.geraet.gemerkt', { eintrag: r.id });
+  publish(rc, 'vault.geraet', { gemerkt: true });
+  return r;
+}
+
+/** Set-Cookie für diesen Browser, wenn eine PIN-Sitzung nötig ist. */
+function sitzungSetzen(rc) {
+  const auth = rc.ctx.auth;
+  if (!auth || typeof auth.sitzungAusstellen !== 'function') return false;
+  const cookie = auth.sitzungAusstellen();
+  if (!cookie) return false;
+  rc.res.setHeader('Set-Cookie', cookie);
+  return true;
+}
+
+/**
+ * Der Claude-Schlüssel liegt in einer eigenen Datei neben dem Speicher. Wird
+ * die PIN eingerichtet, muss auch er versiegelt werden -- sonst läge der
+ * teuerste Zugang als einziger im Klartext neben einem verschlüsselten Tresor.
+ * (src/models/claude.js versiegelt ihn sonst erst beim nächsten Lesen nach
+ * einem Neustart.) Format wie dort: {v:1, versiegelt, inhalt:base64}.
+ */
+function claudeNachversiegeln(rc) {
+  const vault = rc.ctx.paths && rc.ctx.paths.vault;
+  const crypto = rc.ctx.vaultCrypto;
+  if (!vault || !crypto || typeof crypto.encryptBuffer !== 'function') return false;
+  const datei = path.join(vault, 'claude-schluessel.json');
+  let huelle;
+  try {
+    huelle = JSON.parse(fs.readFileSync(datei, 'utf8'));
+  } catch {
+    return false;
+  }
+  if (!huelle || huelle.versiegelt || typeof huelle.inhalt !== 'string') return false;
+  const klar = Buffer.from(huelle.inhalt, 'base64');
+  const neu = { v: 1, versiegelt: true, inhalt: crypto.encryptBuffer(klar).toString('base64') };
+  const tmp = `${datei}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(neu), { mode: 0o600 });
+  fs.renameSync(tmp, datei);
+  klar.fill(0);
+  return true;
+}
+
+/**
+ * Der Änderungsverlauf (history.jsonl) schreibt neue Zeilen versiegelt, alte
+ * bleiben, wie sie sind -- also im Klartext, samt der früheren Fassung jeder
+ * geänderten Notiz (gemessen: test/ipad-pin.test.js fand die Notiz dort).
+ * Hier werden die Klartext-Zeilen ersetzt. Alles synchron in einem Zug:
+ * src/store/history.js hängt Zeilen ebenfalls synchron an und hält keinen
+ * Dateideskriptor offen, dazwischen kann also nichts verloren gehen.
+ * Eine Zeile, die mit "{" beginnt, ist Klartext (dieselbe Regel wie dort).
+ */
+function verlaufVersiegeln(rc) {
+  const crypto = rc.ctx.vaultCrypto;
+  const history = rc.ctx.history;
+  const datei = (history && typeof history.file === 'string' && history.file)
+    || (rc.ctx.paths && rc.ctx.paths.vault ? path.join(rc.ctx.paths.vault, 'history.jsonl') : null);
+  if (!datei || !crypto || typeof crypto.encryptLine !== 'function') return 0;
+  let roh;
+  try {
+    roh = fs.readFileSync(datei, 'utf8');
+  } catch {
+    return 0;
+  }
+  let ersetzt = 0;
+  const zeilen = roh.split('\n').map((zeile) => {
+    const t = zeile.trim();
+    if (!t || t.charCodeAt(0) !== 0x7b) return zeile;
+    ersetzt += 1;
+    return crypto.encryptLine(t);
+  });
+  if (!ersetzt) return 0;
+  const tmp = `${datei}.tmp-pin-${process.pid}`;
+  fs.writeFileSync(tmp, zeilen.join('\n'), { mode: 0o600 });
+  fs.renameSync(tmp, datei);
+  return ersetzt;
+}
+
+/**
+ * Angehängte Dateien liegen unter ihrem SHA-256 des KLARTEXTS
+ * (src/store/engine.js). Vor der PIN geschriebene bleiben sonst im Klartext
+ * liegen -- und wären danach sogar unlesbar, weil `files.read` sie
+ * entschlüsseln will. Der Name verrät, welche es sind: stimmt der Hash des
+ * Inhalts mit dem Namen überein, ist es Klartext (versiegelte Dateien haben
+ * eine zufällige IV und damit nie diesen Hash).
+ */
+function dateienVersiegeln(rc) {
+  const crypto = rc.ctx.vaultCrypto;
+  const ordner = rc.ctx.paths && rc.ctx.paths.files;
+  if (!ordner || !crypto || typeof crypto.encryptBuffer !== 'function') return 0;
+  const nodeCrypto = require('node:crypto');
+  let anzahl = 0;
+  let faecher = [];
+  try { faecher = fs.readdirSync(ordner, { withFileTypes: true }); } catch { return 0; }
+  for (const fach of faecher) {
+    if (!fach.isDirectory() || !/^[0-9a-f]{2}$/.test(fach.name)) continue;
+    const dir = path.join(ordner, fach.name);
+    for (const name of fs.readdirSync(dir)) {
+      if (!/^[0-9a-f]{64}$/.test(name)) continue;
+      const pfad = path.join(dir, name);
+      const inhalt = fs.readFileSync(pfad);
+      if (nodeCrypto.createHash('sha256').update(inhalt).digest('hex') !== name) continue;
+      const tmp = path.join(dir, `.tmp-pin-${process.pid}-${name.slice(0, 8)}`);
+      fs.writeFileSync(tmp, crypto.encryptBuffer(inhalt), { mode: 0o600 });
+      fs.renameSync(tmp, pfad);
+      anzahl += 1;
+    }
+  }
+  return anzahl;
+}
+
+/** Alles, was neben dem Satz-Speicher liegt, nachversiegeln. Meldet, was es tat. */
+function nebendateienVersiegeln(rc) {
+  const out = { claude: false, verlauf: 0, dateien: 0, probleme: [] };
+  for (const [feld, fn] of [['claude', claudeNachversiegeln], ['verlauf', verlaufVersiegeln], ['dateien', dateienVersiegeln]]) {
+    try {
+      out[feld] = fn(rc);
+    } catch (err) {
+      out.probleme.push(`${feld}: ${err && err.message}`);
+      rc.log.warn(`Nachversiegeln (${feld}) gescheitert: ${err && err.message}`);
+    }
+  }
+  return out;
+}
+
+/** Was die Einstellungen über den Schutz wissen müssen. Nie Schlüsselmaterial. */
+function schutzVon(rc) {
+  const crypto = rc.ctx.vaultCrypto;
+  const auth = rc.ctx.auth;
+  if (!crypto) return { verfuegbar: false };
+  const eingerichtet = !!crypto.enabled;
+  const sperre = sperreVon(rc.ctx);
+  const besitzer = !!(rc.identity && rc.identity.kind === 'owner');
+  let geraete = [];
+  if (eingerichtet && typeof crypto.geraete === 'function') {
+    try { geraete = crypto.geraete(); } catch { geraete = []; }
+  }
+  return {
+    verfuegbar: true,
+    eingerichtet,
+    art: eingerichtet && typeof crypto.art === 'function' ? crypto.art() : null,
+    zustand: crypto.state,
+    entsperrtDurch: crypto.entsperrtDurch || null,
+    diesesGeraetGemerkt: eingerichtet && typeof crypto.geraetGemerkt === 'function' ? crypto.geraetGemerkt() : false,
+    geraete,
+    // Ein Pfad auf diesem Rechner geht nur den Menschen an der Tastatur etwas an.
+    geraeteOrdner: besitzer && typeof crypto.geraeteOrdner === 'function' ? crypto.geraeteOrdner() : null,
+    sitzung: auth && typeof auth.sitzungsZustand === 'function' ? auth.sitzungsZustand(rc.req) : { noetig: false, vorhanden: false },
+    pauseS: Math.max(0, Math.ceil((sperre.bis - Date.now()) / 1000)),
+  };
 }
 
 function register(router) {
   router.get('/api/vault', (rc) => {
     rc.requireCapability('read');
-    return stateOf(rc);
+    return { ...stateOf(rc), schutz: schutzVon(rc) };
   });
 
+  /**
+   * Entsperren -- oder, wenn schon offen, diesen Browser an die PIN binden.
+   * Body: { passphrase, merken? }. Antwort 200 | 401 "Falsche PIN." | 429.
+   */
   router.post('/api/vault/unlock', async (rc) => {
     rc.requireOwner('Das Entsperren des Vaults');
     const crypto = cryptoOf(rc);
     const body = asObject(await rc.body());
     const passphrase = requireString(body.passphrase, 'passphrase', { max: 1024, trim: false });
-    await crypto.unlock(passphrase);
-    const reload = await reloadStore(rc);
-    audit(rc, 'vault.unlock', { via: 'http', reloaded: reload.reloaded });
-    publish(rc, 'vault.unlocked', { at: new Date().toISOString() });
-    return { ...stateOf(rc), ...reload };
+    if (!crypto.enabled) {
+      throw new ValidationError('Es ist keine PIN eingerichtet; es gibt nichts zu entsperren.');
+    }
+    const warGesperrt = crypto.state !== 'unlocked';
+    await mitZaehlung(rc, () => (warGesperrt ? crypto.unlock(passphrase) : crypto.pruefen(passphrase)));
+    const reload = warGesperrt ? await reloadStore(rc) : { reloaded: false };
+    let gemerkt = null;
+    if (body.merken === true) gemerkt = geraetMerken(rc);
+    const sitzung = sitzungSetzen(rc);
+    audit(rc, 'vault.unlock', { via: 'http', reloaded: reload.reloaded, warGesperrt, sitzung, gemerkt: !!gemerkt });
+    if (warGesperrt) publish(rc, 'vault.unlocked', { at: new Date().toISOString() });
+    return { ...stateOf(rc), ...reload, sitzung, gemerkt: !!gemerkt, schutz: schutzVon(rc) };
+  });
+
+  /** PIN einrichten: { pin, merken? }. Verschlüsselt alles Vorhandene. */
+  router.post('/api/vault/pin', async (rc) => {
+    rc.requireOwner('Das Einrichten der PIN');
+    const crypto = needMethod(rc.ctx.vaultCrypto, 'initialise', 'Die Vault-Verschlüsselung');
+    const body = asObject(await rc.body());
+    const pin = pinLesen(body.pin);
+    if (crypto.enabled) {
+      throw new ValidationError('Es gibt schon eine PIN. Sie lässt sich unter „PIN ändern“ ersetzen.');
+    }
+    await crypto.initialise(pin);
+    let rewritten = null;
+    const store = rc.ctx.store;
+    if (store && typeof store.compact === 'function') {
+      try {
+        rewritten = await store.compact();
+      } catch (err) {
+        throw new NeuralError(
+          'ENCRYPTION_INCOMPLETE',
+          `Die PIN ist eingerichtet, die vorhandenen Daten konnten aber nicht neu geschrieben werden: ${err && err.message}. `
+          + 'Bis das gelingt, liegt ein Teil davon weiterhin unverschlüsselt auf dem Stick.',
+          { status: 500 },
+        );
+      }
+    }
+    const neben = nebendateienVersiegeln(rc);
+    if (neben.probleme.length) {
+      throw new NeuralError(
+        'ENCRYPTION_INCOMPLETE',
+        `Die PIN ist eingerichtet, aber nicht alles ließ sich versiegeln: ${neben.probleme.join('; ')}.`,
+        { status: 500, details: neben },
+      );
+    }
+    if (typeof rc.ctx.saveConfig === 'function') {
+      try {
+        rc.ctx.saveConfig({ security: { encryption: { enabled: true } } });
+      } catch (err) {
+        rc.log.warn(`Die Einstellung konnte nicht gespeichert werden: ${err && err.message}`);
+      }
+    }
+    let gemerkt = null;
+    if (body.merken === true) gemerkt = geraetMerken(rc);
+    const sitzung = sitzungSetzen(rc);
+    audit(rc, 'vault.pin.eingerichtet', { rewritten, neben, gemerkt: !!gemerkt });
+    publish(rc, 'vault.encrypted', { at: new Date().toISOString() });
+    return {
+      ...stateOf(rc), rewritten, claudeVersiegelt: neben.claude, verlaufVersiegelt: neben.verlauf,
+      dateienVersiegelt: neben.dateien, sitzung, gemerkt: !!gemerkt, schutz: schutzVon(rc),
+    };
+  });
+
+  /** PIN ändern: { alt, neu }. Der falsche alte Wert zählt als Fehlversuch. */
+  router.post('/api/vault/pin/aendern', async (rc) => {
+    rc.requireOwner('Das Ändern der PIN');
+    const crypto = needMethod(rc.ctx.vaultCrypto, 'changePassphrase', 'Die Vault-Verschlüsselung');
+    const body = asObject(await rc.body());
+    const alt = requireString(body.alt, 'alt', { max: 1024, trim: false });
+    const neu = pinLesen(body.neu, 'neu');
+    await mitZaehlung(rc, () => crypto.changePassphrase(alt, neu));
+    const sitzung = sitzungSetzen(rc);
+    audit(rc, 'vault.pin.geaendert', {});
+    publish(rc, 'vault.pin', { geaendert: true });
+    return { ...stateOf(rc), sitzung, schutz: schutzVon(rc) };
+  });
+
+  /** Diesen Rechner merken: { pin }. Die PIN wird geprüft, auch wenn offen ist. */
+  router.post('/api/vault/geraet', async (rc) => {
+    rc.requireOwner('Das Merken dieses Geräts');
+    const crypto = needMethod(rc.ctx.vaultCrypto, 'merken', 'Die Vault-Verschlüsselung');
+    const body = asObject(await rc.body());
+    const pin = requireString(body.pin, 'pin', { max: 1024, trim: false });
+    if (!crypto.enabled) throw new ValidationError('Ohne PIN gibt es nichts zu merken.');
+    await mitZaehlung(rc, () => (crypto.state === 'unlocked' ? crypto.pruefen(pin) : crypto.unlock(pin)));
+    geraetMerken(rc);
+    return { ...stateOf(rc), schutz: schutzVon(rc) };
+  });
+
+  /** Diesen Rechner vergessen. Nimmt Vertrauen weg, braucht deshalb keine PIN. */
+  router.delete('/api/vault/geraet', (rc) => {
+    rc.requireOwner('Das Vergessen dieses Geräts');
+    const crypto = needMethod(rc.ctx.vaultCrypto, 'vergessen', 'Die Vault-Verschlüsselung');
+    const r = crypto.vergessen();
+    // Wer eben noch als gemerktes Gerät lief, braucht ab jetzt eine Sitzung.
+    sitzungSetzen(rc);
+    audit(rc, 'vault.geraet.vergessen', r);
+    publish(rc, 'vault.geraet', { gemerkt: false });
+    return { ...r, ...stateOf(rc), schutz: schutzVon(rc) };
+  });
+
+  /** Alle gemerkten Rechner vergessen -- auch die, die gerade nicht da sind. */
+  router.delete('/api/vault/geraete', (rc) => {
+    rc.requireOwner('Das Vergessen der Geräte');
+    const crypto = needMethod(rc.ctx.vaultCrypto, 'alleVergessen', 'Die Vault-Verschlüsselung');
+    const r = crypto.alleVergessen();
+    sitzungSetzen(rc);
+    audit(rc, 'vault.geraete.vergessen', r);
+    publish(rc, 'vault.geraet', { gemerkt: false, alle: true });
+    return { ...r, ...stateOf(rc), schutz: schutzVon(rc) };
   });
 
   router.post('/api/vault/lock', (rc) => {
@@ -117,7 +491,8 @@ function register(router) {
     rc.requireOwner('Das Einschalten der Verschlüsselung');
     const crypto = needMethod(rc.ctx.vaultCrypto, 'initialise', 'Die Vault-Verschlüsselung');
     const body = asObject(await rc.body());
-    const passphrase = requireString(body.passphrase, 'passphrase', { min: 8, max: 1024, trim: false });
+    // Die Länge entscheidet vaultcrypto (PIN aus 4-6 Ziffern oder >= 8 Zeichen).
+    const passphrase = requireString(body.passphrase, 'passphrase', { max: 1024, trim: false });
     if (crypto.enabled) {
       throw new ValidationError('Der Vault ist bereits verschlüsselt. Zum Wechseln der Passphrase gibt es einen eigenen Weg.');
     }
@@ -147,9 +522,11 @@ function register(router) {
         rc.log.warn(`Die Einstellung konnte nicht gespeichert werden: ${err && err.message}`);
       }
     }
+    const neben = nebendateienVersiegeln(rc);
+    const sitzung = sitzungSetzen(rc);
     audit(rc, 'vault.encrypt', { via: 'http', rewritten });
     publish(rc, 'vault.encrypted', { at: new Date().toISOString() });
-    return { ...stateOf(rc), rewritten };
+    return { ...stateOf(rc), rewritten, neben, sitzung };
   });
 
   router.post('/api/backup/export', async (rc) => {

@@ -122,6 +122,21 @@ function dauer(minuten) {
  * dort TRIGGER:-PT15H). Mitternacht zu nehmen hiesse, jemanden um 0 Uhr an
  * einen Geburtstag zu erinnern.
  */
+/*
+ * Zur Zeitumstellung, damit niemand es fuer ein Versehen haelt:
+ * - Mit Uhrzeit: "1 Tag vorher" wird "-P1D" -- ein KALENDERtag (RFC 5545
+ *   3.3.6), also am Vortag zur selben Wandzeit, auch ueber den 25.10.
+ *   hinweg. Die Oberflaeche rechnet genauso (ausloeseMs in
+ *   web/lib/erinnerung.js). Minuten und Stunden sind genaue Dauern, hier wie
+ *   dort.
+ * - Ganztaegig: "-PT15H" (1 Tag vorher) liegt ganz am Vorabend und kreuzt
+ *   nie eine Umstellung. "PT9H" (am Tag selbst) kreuzt die Nacht; eine
+ *   streng rechnende App kaeme am Umstellungstag auf 8 oder 10 Uhr. Die
+ *   Kalender-App des iPads schreibt fuer "am Tag des Ereignisses (9:00)"
+ *   selbst genau diese Form und liest sie als 9 Uhr Wandzeit -- genau wie
+ *   die Oberflaeche. Eine absolute Zeit (VALUE=DATE-TIME) waere nur in UTC
+ *   erlaubt und wiederholte sich bei Serien nicht.
+ */
 function ausloeser(minuten, ganztaegig = false) {
   const vorher = ganztaegig ? minuten - 9 * 60 : minuten;
   if (vorher === 0) return 'PT0S';
@@ -149,7 +164,12 @@ function rrule(regel, art) {
  * @param {{id:string, data:object, createdAt?:string, updatedAt?:string}} record
  */
 function veventZeilen(record, { jetzt = Date.now() } = {}) {
-  const d = record.data || {};
+  const roh = record.data || {};
+  // Aeltere Serien, deren Beginn auf keinem ihrer Wochentage liegt: DTSTART
+  // zaehlt nach RFC 5545 immer als Vorkommen, also auf das erste echte legen
+  // (neue Termine speichert die Route schon so, siehe checkEvent).
+  const lage = w.istSerie(roh) ? w.beginnAufVorkommen(roh) : null;
+  const d = lage ? { ...roh, ...lage } : roh;
   const ganz = d.allDay === true;
   const start = zeitEigenschaft(d.start, ganz);
   if (!start) return [];

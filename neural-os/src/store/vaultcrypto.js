@@ -2,8 +2,10 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { LockedError, StorageError, ValidationError } = require('../kernel/errors');
+const { schreibeDauerhaft } = require('../kernel/dateien');
 
 /**
  * Vault encryption at rest.
@@ -46,6 +48,36 @@ const { LockedError, StorageError, ValidationError } = require('../kernel/errors
  * no recovery. It is written to a temp file, fsynced, renamed, and the
  * directory entry is fsynced too -- a crash mid-write can leave the old file
  * or the new one, never a truncated one.
+ *
+ * PIN statt Passphrase (Entscheidung des Nutzers)
+ * -----------------------------------------------
+ * `MIN_PASSPHRASE = 8` bleibt für frei gewählten Text: Dort ist die Länge das
+ * Einzige, was ein Wörterbuch aufhält. Zusätzlich gilt eine PIN aus 4 bis 6
+ * Ziffern -- und nur Ziffern. Eine 5-Buchstaben-Passphrase ("hallo") bleibt
+ * abgewiesen, denn sie ist schwächer als sie aussieht; eine PIN ist ehrlich
+ * das, was sie ist. Was sie kostet, wurde gemessen und steht in der
+ * Oberfläche: scrypt N=2^17, r=8, p=1 braucht auf einem Kern eines 2,8-GHz-
+ * Xeon 0,44-0,47 s je Versuch (128 MB). Alle 10.000 vierstelligen PINs sind
+ * damit in etwa 75 Minuten durchprobiert, alle 1.000.000 sechsstelligen in
+ * etwa 5 Tagen auf einem Kern. Eine PIN hält Neugierige ab, keinen Profi mit
+ * Zeit. N wird dafür nicht erhöht: 2^18 verdoppelt beides, die Wartezeit des
+ * Nutzers bei jedem Start und die des Angreifers -- das ändert an diesem Satz
+ * nichts, kostet aber 256 MB auf jedem Schullaptop.
+ *
+ * Dieses Gerät merken
+ * -------------------
+ * Auf dem eigenen Laptop soll die PIN nicht bei jedem Start gefragt werden.
+ * Dafür liegt NICHT die PIN und NICHT der Datenschlüssel auf dem Rechner,
+ * sondern ein zufälliger Geräteschlüssel (32 Byte) im Benutzerprofil, AUSSERHALB
+ * des Sticks. Auf dem Stick steht in secrets.json nur der Datenschlüssel,
+ * mit diesem Geräteschlüssel verpackt. Folgen:
+ *  - Laptop allein (ohne Stick): ein Schlüssel zu nichts.
+ *  - Stick allein: ohne PIN verschlossen, wie ohne Merken.
+ *  - "Alle gemerkten Geräte vergessen" löscht die Einträge auf dem Stick;
+ *    ab da ist jede Datei auf jedem Laptop wertlos, auch auf einem, der
+ *    gerade nicht angeschlossen ist.
+ * Der Name des Geräts ist mit dem Datenschlüssel versiegelt, damit ein
+ * Finder des Sticks nicht liest, an welchen Rechnern er steckte.
  */
 
 const SECRETS_VERSION = 1;
@@ -61,6 +93,25 @@ const SALT_BYTES = 16;
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
 const MIN_PASSPHRASE = 8;
+/** Eine PIN: nur Ziffern, 4 bis 6 Stellen (siehe Kopf). */
+const MIN_PIN = 4;
+const MAX_PIN = 6;
+const PIN_RE = /^[0-9]{4,6}$/;
+
+/** Dateiname eines gemerkten Geräts: die KI-Kennung, nichts, was einen Pfad bilden könnte. */
+const KI_ID_RE = /^[A-Za-z0-9_-]{4,64}$/;
+const GERAETE_VERSION = 1;
+/** Mehr gemerkte Rechner als das sind keine "eigenen" mehr, sondern ein Leck. */
+const MAX_GERAETE = 16;
+/** Abgeleitet aus dem Datenschlüssel; nur für die Sitzungsbindung (auth.js). */
+const SITZUNG_INFO = Buffer.from('neural-os:pin-sitzung:v1', 'utf8');
+
+/**
+ * Jede Instanz unter ihrer Konfiguration, damit src/http/auth.js die
+ * Verschlüsselung findet, ohne dass src/app.js sie ihm reichen muss. Eine
+ * WeakMap, damit ein beendeter Testlauf nichts festhält.
+ */
+const INSTANZEN = new WeakMap();
 
 /** Sealed under the KEK to prove a passphrase before touching the data key. */
 const KEY_CHECK_PLAINTEXT = Buffer.from('neural-os:vault:v1', 'utf8');
@@ -127,27 +178,90 @@ function zero(buf) {
   if (Buffer.isBuffer(buf)) buf.fill(0);
 }
 
+/** Eine PIN aus 4 bis 6 Ziffern? */
+function istPin(value) {
+  return typeof value === 'string' && PIN_RE.test(value);
+}
+
 function assertPassphrase(value, label = 'Passphrase') {
   if (typeof value !== 'string') throw new ValidationError(`${label} muss eine Zeichenkette sein.`);
+  if (istPin(value)) return;
   if (value.length < MIN_PASSPHRASE) {
     // A KDF cost of 2^17 buys nothing against a four-character passphrase;
     // the length floor is the only part of this that stops a dictionary.
-    throw new ValidationError(`${label} muss mindestens ${MIN_PASSPHRASE} Zeichen lang sein.`);
+    // Die einzige Ausnahme ist eine erklärte PIN aus Ziffern (siehe Kopf).
+    throw new ValidationError(
+      `${label} muss eine PIN aus ${MIN_PIN} bis ${MAX_PIN} Ziffern sein oder mindestens ${MIN_PASSPHRASE} Zeichen lang.`,
+    );
   }
 }
 
 /**
- * @param {{paths:object, config:object}} deps
+ * Wo "Dieses Gerät merken" seinen Schlüssel ablegt: im Benutzerprofil dieses
+ * Rechners, nie auf dem Stick.
+ *
+ * Windows: %LOCALAPPDATA%, nicht %APPDATA%. "Dieses Gerät" heißt dieser
+ * Rechner; ein Roaming-Profil im Schulnetz würde den Schlüssel sonst auf
+ * jeden Rechner der Schule mitnehmen und auf einem Server ablegen.
+ * `NEURAL_OS_GERAETE` überschreibt den Ort (Tests, Sonderfälle).
+ * @returns {string}
+ */
+function geraeteOrdner(env = process.env, platform = process.platform) {
+  if (env.NEURAL_OS_GERAETE) return path.resolve(env.NEURAL_OS_GERAETE);
+  const heim = (() => {
+    try { return os.homedir(); } catch { return ''; }
+  })();
+  if (platform === 'win32') {
+    const basis = env.LOCALAPPDATA || env.APPDATA || (heim ? path.join(heim, 'AppData', 'Local') : '');
+    return path.join(basis, 'NeuralOS', 'geraete');
+  }
+  if (platform === 'darwin') {
+    return path.join(heim, 'Library', 'Application Support', 'NeuralOS', 'geraete');
+  }
+  const xdg = env.XDG_CONFIG_HOME && path.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : path.join(heim, '.config');
+  return path.join(xdg, 'neural-os', 'geraete');
+}
+
+/** Die KI-Kennung aus der Konfiguration, falls sie als Dateiname taugt. */
+function kiIdAus(config) {
+  const id = config && config.sync && typeof config.sync === 'object' ? config.sync.deviceId : null;
+  return typeof id === 'string' && KI_ID_RE.test(id) ? id : null;
+}
+
+function b64url(buf) {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function istVersiegelt(v) {
+  return !!v && typeof v === 'object' && typeof v.iv === 'string' && typeof v.tag === 'string' && typeof v.ct === 'string';
+}
+
+/**
+ * @param {{paths:object, config:object, geraet?:boolean, geraeteOrdner?:string}} deps
+ *   `geraet: false` schaltet das Entsperren über ein gemerktes Gerät ab
+ *   (Werkzeuge, die bewusst die PIN verlangen). `geraeteOrdner` ersetzt den
+ *   Ort im Benutzerprofil (Tests).
  * @returns {object} VaultCrypto
  */
-function createVaultCrypto({ paths, config } = {}) {
+function createVaultCrypto({ paths, config, geraet: geraetErlaubt = true, geraeteOrdner: ordnerVorgabe } = {}) {
   if (!paths || typeof paths.secrets !== 'string') {
     throw new ValidationError('createVaultCrypto benoetigt paths.secrets.');
   }
   const secretsPath = paths.secrets;
+  const ordnerGeraete = () => (ordnerVorgabe ? path.resolve(ordnerVorgabe) : geraeteOrdner());
 
   /** @type {Buffer|null} the unwrapped data key; null means locked. */
   let dataKey = null;
+  /**
+   * Womit entsperrt wurde: 'pin' (PIN oder Passphrase), 'geraet' (gemerkter
+   * Rechner) oder null (gesperrt). auth.js bindet den Browser nur, wenn NICHT
+   * über das gemerkte Gerät entsperrt wurde -- auf dem eigenen Laptop soll
+   * nichts fragen, auf einem fremden schon.
+   * @type {'pin'|'geraet'|null}
+   */
+  let entsperrtDurch = null;
+  /** Aus dem Datenschlüssel abgeleitet, solange entsperrt. */
+  let sitzungsKey = null;
   /** Cached because `enabled` is read on every single encrypted line; a stat
    *  syscall per log line would dominate the store's write path. */
   let secretsPresent = fileExists(secretsPath);
@@ -230,6 +344,11 @@ function createVaultCrypto({ paths, config } = {}) {
       }
     }
     if (problems.length) throw new StorageError(`secrets.json ist beschaedigt: ${problems.join('; ')}`);
+    // Gemerkte Geräte sind eine Bequemlichkeit. Ein beschädigter Eintrag darf
+    // das Entsperren mit der PIN nie verhindern, also wird er übergangen.
+    s.geraete = Array.isArray(s.geraete)
+      ? s.geraete.filter((g) => g && typeof g.id === 'string' && istVersiegelt(g.wrappedKey))
+      : [];
     return s;
   }
 
@@ -344,7 +463,18 @@ function createVaultCrypto({ paths, config } = {}) {
       if (!secretsPresent) return out;
       try {
         const s = readSecrets();
-        return { ...out, kdf: s.kdf, N: s.N, r: s.r, p: s.p, createdAt: s.createdAt ?? null, updatedAt: s.updatedAt ?? null };
+        return {
+          ...out,
+          kdf: s.kdf,
+          N: s.N,
+          r: s.r,
+          p: s.p,
+          art: s.art === 'pin' ? 'pin' : 'passphrase',
+          entsperrtDurch: dataKey ? entsperrtDurch : null,
+          gemerkteGeraete: s.geraete.length,
+          createdAt: s.createdAt ?? null,
+          updatedAt: s.updatedAt ?? null,
+        };
       } catch (err) {
         return { ...out, problem: err.message };
       }
@@ -377,6 +507,10 @@ function createVaultCrypto({ paths, config } = {}) {
           salt: salt.toString('base64'),
           keyCheck,
           wrappedKey,
+          // Nur für die Wortwahl ("PIN" oder "Passphrase"). Wer den Stick
+          // findet, probiert ohnehin zuerst Ziffern; die Länge steht nirgends.
+          art: istPin(passphrase) ? 'pin' : 'passphrase',
+          geraete: [],
           createdAt: now,
           updatedAt: now,
         });
@@ -386,8 +520,7 @@ function createVaultCrypto({ paths, config } = {}) {
       } finally {
         zero(kek);
       }
-      if (dataKey) zero(dataKey);
-      dataKey = key;
+      setzeSchluessel(key, 'pin');
       markConfigEnabled();
       return true;
     },
@@ -424,8 +557,7 @@ function createVaultCrypto({ paths, config } = {}) {
         const kek = await deriveAndVerify(passphrase, secrets);
         try {
           const key = unwrapDataKey(kek, secrets);
-          if (dataKey) zero(dataKey);
-          dataKey = key;
+          setzeSchluessel(key, 'pin');
         } finally {
           zero(kek);
         }
@@ -443,6 +575,11 @@ function createVaultCrypto({ paths, config } = {}) {
         zero(dataKey);
         dataKey = null;
       }
+      if (sitzungsKey) {
+        zero(sitzungsKey);
+        sitzungsKey = null;
+      }
+      entsperrtDurch = null;
     },
 
     /**
@@ -531,6 +668,7 @@ function createVaultCrypto({ paths, config } = {}) {
           salt: salt.toString('base64'),
           keyCheck,
           wrappedKey,
+          art: istPin(nextPassphrase) ? 'pin' : 'passphrase',
           createdAt: secrets.createdAt ?? new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         });
@@ -540,22 +678,276 @@ function createVaultCrypto({ paths, config } = {}) {
       } finally {
         zero(newKek);
       }
-      if (dataKey && dataKey !== key) zero(dataKey);
-      dataKey = key;
+      // Wer über das gemerkte Gerät entsperrt hatte, bleibt es: die PIN zu
+      // ändern macht aus dem eigenen Laptop keinen fremden.
+      setzeSchluessel(key, entsperrtDurch === 'geraet' ? 'geraet' : 'pin');
       markConfigEnabled();
       return true;
     },
+
+    /* ---------------------------------------------------------- PIN & Geräte */
+
+    /** Womit entsperrt wurde: 'pin', 'geraet' oder null. */
+    get entsperrtDurch() {
+      return dataKey ? entsperrtDurch : null;
+    },
+
+    /**
+     * Die PIN prüfen, ohne etwas zu ändern -- auch wenn schon entsperrt ist.
+     * Gebraucht, wenn ein zweiter Browser dieselbe laufende KI benutzen will
+     * oder ein Gerät gemerkt werden soll: dort reicht "ist doch offen" nicht.
+     * @throws {LockedError} falsche PIN
+     */
+    async pruefen(passphrase) {
+      if (!isEnabled() || !secretsPresent) {
+        throw new ValidationError('Der Vault ist nicht verschluesselt; es gibt keine PIN zu pruefen.');
+      }
+      assertPassphrase(passphrase);
+      const secrets = readSecrets();
+      const kek = await deriveAndVerify(passphrase, secrets);
+      zero(kek);
+      return true;
+    },
+
+    /** 'pin' oder 'passphrase' -- nur für die Wortwahl der Oberfläche. */
+    art() {
+      if (!secretsPresent) return null;
+      try {
+        return readSecrets().art === 'pin' ? 'pin' : 'passphrase';
+      } catch {
+        return null;
+      }
+    },
+
+    /** Der Ordner im Benutzerprofil, in dem gemerkte Geräte liegen. */
+    geraeteOrdner() {
+      return ordnerGeraete();
+    },
+
+    /**
+     * Ist DIESER Rechner für diese KI gemerkt (und passt der Eintrag noch)?
+     * @param {string} [kiId] Vorgabe: config.sync.deviceId
+     */
+    geraetGemerkt(kiId = kiIdAus(config)) {
+      const datei = geraetDateiLesen(kiId);
+      if (!datei || !secretsPresent) return false;
+      try {
+        return readSecrets().geraete.some((g) => g.id === datei.eintrag);
+      } catch {
+        return false;
+      }
+    },
+
+    /**
+     * Diesen Rechner merken. Verlangt einen entsperrten Tresor.
+     * @param {{kiId:string, name?:string}} opts
+     * @returns {{id:string, datei:string}}
+     */
+    merken({ kiId, name } = {}) {
+      requireUnlocked();
+      if (!secretsPresent) throw new ValidationError('Ohne PIN gibt es nichts zu merken.');
+      if (typeof kiId !== 'string' || !KI_ID_RE.test(kiId)) throw new ValidationError('Die Kennung dieser KI fehlt oder ist ungueltig.');
+      const secrets = readSecrets();
+      const vorher = geraetDateiLesen(kiId);
+      const uebrig = secrets.geraete.filter((g) => !vorher || g.id !== vorher.eintrag);
+      if (uebrig.length >= MAX_GERAETE) {
+        throw new ValidationError(`Es sind schon ${MAX_GERAETE} Geräte gemerkt. Bitte zuerst alle vergessen.`);
+      }
+      const geraetKey = crypto.randomBytes(KEY_BYTES);
+      const id = `g_${b64url(crypto.randomBytes(9))}`;
+      const angelegt = new Date().toISOString();
+      const anzeige = String(name || '').slice(0, 80) || 'Dieser Rechner';
+      const eintrag = {
+        id,
+        wrappedKey: seal(geraetKey, dataKey),
+        name: seal(dataKey, Buffer.from(anzeige, 'utf8')),
+        angelegt,
+      };
+      const ordner = ordnerGeraete();
+      const datei = path.join(ordner, `${kiId}.json`);
+      // Erst die Datei auf dem Rechner, dann der Eintrag auf dem Stick:
+      // scheitert der zweite Schritt, wird die Datei wieder entfernt, und
+      // es bleibt nie ein Eintrag ohne Schlüssel zurück.
+      try {
+        fs.mkdirSync(ordner, { recursive: true, mode: 0o700 });
+        schreibeDauerhaft(datei, JSON.stringify({
+          v: GERAETE_VERSION, kiId, eintrag: id, schluessel: geraetKey.toString('base64'), angelegt,
+        }) + '\n');
+      } catch (err) {
+        zero(geraetKey);
+        throw new StorageError(`Der Schlüssel konnte auf diesem Rechner nicht abgelegt werden: ${err.message}`);
+      }
+      zero(geraetKey);
+      try {
+        writeSecrets({ ...secrets, geraete: [...uebrig, eintrag], updatedAt: angelegt });
+      } catch (err) {
+        try { fs.unlinkSync(datei); } catch { /* war nie da */ }
+        throw err;
+      }
+      // Ab jetzt gilt dieser Rechner als gemerkt, nicht erst nach dem
+      // nächsten Start: wer ihn eben gemerkt hat, will hier nicht mehr gefragt werden.
+      entsperrtDurch = 'geraet';
+      return { id, datei };
+    },
+
+    /**
+     * Diesen Rechner vergessen: Datei im Profil und Eintrag auf dem Stick.
+     * @returns {{entfernt:boolean}}
+     */
+    vergessen({ kiId = kiIdAus(config) } = {}) {
+      const datei = geraetDateiLesen(kiId);
+      let entfernt = false;
+      if (datei) {
+        if (secretsPresent) {
+          const secrets = readSecrets();
+          const rest = secrets.geraete.filter((g) => g.id !== datei.eintrag);
+          if (rest.length !== secrets.geraete.length) {
+            writeSecrets({ ...secrets, geraete: rest, updatedAt: new Date().toISOString() });
+          }
+        }
+        try { fs.unlinkSync(datei.pfad); entfernt = true; } catch { /* schon weg */ }
+      }
+      if (entfernt && entsperrtDurch === 'geraet') entsperrtDurch = 'pin';
+      return { entfernt };
+    },
+
+    /**
+     * Alle gemerkten Geräte auf dem Stick streichen. Wirkt auch für Rechner,
+     * die gerade nicht da sind: ihre Datei öffnet danach nichts mehr.
+     * @returns {{entfernt:number}}
+     */
+    alleVergessen({ kiId = kiIdAus(config) } = {}) {
+      let anzahl = 0;
+      if (secretsPresent) {
+        const secrets = readSecrets();
+        anzahl = secrets.geraete.length;
+        if (anzahl) writeSecrets({ ...secrets, geraete: [], updatedAt: new Date().toISOString() });
+      }
+      const datei = geraetDateiLesen(kiId);
+      if (datei) {
+        try { fs.unlinkSync(datei.pfad); } catch { /* schon weg */ }
+      }
+      if (entsperrtDurch === 'geraet') entsperrtDurch = 'pin';
+      return { entfernt: anzahl };
+    },
+
+    /**
+     * Die gemerkten Geräte. Namen nur, wenn entsperrt (sie sind versiegelt).
+     * @returns {Array<{id:string, name:string|null, angelegt:string|null, diesesGeraet:boolean}>}
+     */
+    geraete({ kiId = kiIdAus(config) } = {}) {
+      if (!secretsPresent) return [];
+      let secrets;
+      try {
+        secrets = readSecrets();
+      } catch {
+        return [];
+      }
+      const hier = geraetDateiLesen(kiId);
+      return secrets.geraete.map((g) => {
+        let name = null;
+        if (dataKey && istVersiegelt(g.name)) {
+          try { name = open(dataKey, g.name).toString('utf8'); } catch { name = null; }
+        }
+        return { id: g.id, name, angelegt: typeof g.angelegt === 'string' ? g.angelegt : null, diesesGeraet: !!hier && hier.eintrag === g.id };
+      });
+    },
+
+    /**
+     * HMAC-SHA256 über `nachricht` mit einem aus dem Datenschlüssel
+     * abgeleiteten Schlüssel. Damit bindet auth.js einen Browser an das
+     * Entsperren: jeder Prozess, der diesen Tresor geöffnet hat (auch der
+     * spätere Vorraum), kann das Siegel ausstellen und prüfen, und nach
+     * einem Neustart gilt es weiter -- ohne dass irgendwo eine Sitzungsliste
+     * liegt. Gesperrt gibt es kein Siegel.
+     * @param {string} nachricht
+     * @returns {Buffer}
+     */
+    sitzungsSiegel(nachricht) {
+      requireUnlocked();
+      if (!sitzungsKey) {
+        sitzungsKey = Buffer.from(crypto.hkdfSync('sha256', dataKey, Buffer.alloc(0), SITZUNG_INFO, KEY_BYTES));
+      }
+      return crypto.createHmac('sha256', sitzungsKey).update(String(nachricht), 'utf8').digest();
+    },
   };
 
+  function setzeSchluessel(key, wie) {
+    if (dataKey && dataKey !== key) zero(dataKey);
+    if (sitzungsKey) {
+      zero(sitzungsKey);
+      sitzungsKey = null;
+    }
+    dataKey = key;
+    entsperrtDurch = wie;
+  }
+
+  /** @returns {{kiId:string, eintrag:string, schluessel:Buffer, pfad:string}|null} */
+  function geraetDateiLesen(kiId) {
+    if (typeof kiId !== 'string' || !KI_ID_RE.test(kiId)) return null;
+    const pfad = path.join(ordnerGeraete(), `${kiId}.json`);
+    let roh;
+    try {
+      roh = JSON.parse(fs.readFileSync(pfad, 'utf8'));
+    } catch {
+      return null;
+    }
+    if (!roh || roh.v !== GERAETE_VERSION || roh.kiId !== kiId || typeof roh.eintrag !== 'string' || typeof roh.schluessel !== 'string') return null;
+    const schluessel = Buffer.from(roh.schluessel, 'base64');
+    if (schluessel.length !== KEY_BYTES) return null;
+    return { kiId, eintrag: roh.eintrag, schluessel, pfad };
+  }
+
+  /**
+   * Beim Erzeugen: ist dieser Rechner gemerkt, öffnet sich der Tresor ohne
+   * PIN. Synchron und ohne scrypt (der Geräteschlüssel ist zufällig, nicht
+   * erraten), damit src/app.js den Speicher direkt danach lesen kann. Jeder
+   * Fehler hier heißt nur "nicht gemerkt" -- dann fragt eben die PIN.
+   */
+  function perGeraetEntsperren() {
+    if (!geraetErlaubt || !secretsPresent || dataKey) return;
+    const datei = geraetDateiLesen(kiIdAus(config));
+    if (!datei) return;
+    try {
+      const secrets = readSecrets();
+      const eintrag = secrets.geraete.find((g) => g.id === datei.eintrag);
+      if (!eintrag) return;
+      const key = open(datei.schluessel, eintrag.wrappedKey);
+      if (key.length !== KEY_BYTES) {
+        zero(key);
+        return;
+      }
+      setzeSchluessel(key, 'geraet');
+    } catch {
+      /* passt nicht (mehr) -- dann eben die PIN */
+    } finally {
+      zero(datei.schluessel);
+    }
+  }
+
+  perGeraetEntsperren();
+  if (config && typeof config === 'object') INSTANZEN.set(config, api);
   return api;
+}
+
+/** Die Instanz, die zu dieser Konfiguration erzeugt wurde (für auth.js). */
+function instanzFuer(config) {
+  return config && typeof config === 'object' ? INSTANZEN.get(config) || null : null;
 }
 
 module.exports = {
   createVaultCrypto,
+  instanzFuer,
+  istPin,
+  geraeteOrdner,
+  kiIdAus,
   SECRETS_VERSION,
   SCRYPT,
   ALGORITHM,
   IV_BYTES,
   TAG_BYTES,
   MIN_PASSPHRASE,
+  MIN_PIN,
+  MAX_PIN,
+  PIN_RE,
 };

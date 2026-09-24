@@ -1087,6 +1087,86 @@ async function checkVaultAndBackup(app) {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  /**
+   * PIN und iPad in einer eigenen Anwendung: das Einrichten verschlüsselt den
+   * Tresor, und das Merken legt einen Schlüssel ins Profil. Beides darf die
+   * Prüf-Anwendung oben nicht verändern -- und nicht das echte Profil.
+   */
+  async function mitEigenerApp(fn) {
+    const { createApp } = require('../src/app');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-pin-'));
+    const profil = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-pin-profil-'));
+    const vorher = process.env.NEURAL_OS_GERAETE;
+    process.env.NEURAL_OS_GERAETE = profil;
+    let a = null;
+    try {
+      a = await createApp({ home: tmp, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false });
+      const server = await a.listen();
+      return await fn(a, server.server.address().port);
+    } finally {
+      if (a) await a.close().catch(() => {});
+      if (vorher === undefined) delete process.env.NEURAL_OS_GERAETE;
+      else process.env.NEURAL_OS_GERAETE = vorher;
+      fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(profil, { recursive: true, force: true });
+    }
+  }
+
+  await check('PIN: 4-6 Ziffern verschlüsseln alles, falsch heißt 401, fünfmal falsch 30 s Pause', async () => mitEigenerApp(async (a, port) => {
+    a.store.create('note', { title: 'Prüf-Kanarienvogel' });
+    await a.store.flush();
+    const kurz = await request('POST', '/api/vault/pin', { pin: '12' }, {}, port);
+    assert(kurz.status === 400, `eine zweistellige PIN wurde nicht abgewiesen (HTTP ${kurz.status})`);
+    const gesetzt = await request('POST', '/api/vault/pin', { pin: '2468' }, {}, port);
+    assert(gesetzt.status === 200, `PIN einrichten: HTTP ${gesetzt.status} ${gesetzt.text.slice(0, 160)}`);
+    const log = fs.readdirSync(a.paths.log).map((f) => fs.readFileSync(path.join(a.paths.log, f), 'utf8')).join('');
+    assert(!log.includes('Prüf-Kanarienvogel'), 'nach der PIN steht die Notiz noch im Klartext im Protokoll');
+    const antworten = [];
+    for (let i = 0; i < 5; i++) antworten.push((await request('POST', '/api/vault/unlock', { passphrase: `135${i}` }, {}, port)).status);
+    assert(antworten.join() === '401,401,401,401,429', `erwartet 4× 401 und dann 429, bekam ${antworten.join(', ')}`);
+    return 'eingerichtet, Klartext weg, 4× „Falsche PIN.", dann „Zu oft falsch. Kurz warten."';
+  }));
+
+  // Mit der Prüf-Anwendung selbst: sie läuft wie im Alltag gehärtet und
+  // offline -- genau dort muss das Lauschen im WLAN trotzdem gehen.
+  await check('iPad verbinden: im WLAN ohne Neustart, ein Einmal-Link wird zum Cookie', async () => {
+    const lan = Object.values(os.networkInterfaces()).flat().find((i) => i && (i.family === 'IPv4' || i.family === 4) && !i.internal);
+    if (!lan) return unklar('Dieser Rechner hat keine Netzadresse außer 127.0.0.1 -- ein zweites Gerät lässt sich hier nicht spielen.');
+    const a = app;
+    const port = PORT;
+    a.lanAdressen = () => [{ adresse: lan.address, schnittstelle: 'Prüfung' }];
+    try {
+      const an = await request('POST', '/api/ipad', {}, {}, port);
+      assert(an.status === 200 && an.json.link, `einschalten: HTTP ${an.status} ${an.text.slice(0, 160)}`);
+      const link = new URL(an.json.link);
+      // Das "iPad" ist ein Aufruf aus diesem Prozess; die Härtung gilt
+      // prozessweit und hielte ihn für eine Verbindung ins Netz. Ein echtes
+      // iPad ist ein anderes Gerät -- deshalb der interne Kontext der Schleuse.
+      const { runInternal } = require('../src/net/gate');
+      const vomIpad = (p, headers = {}) => runInternal(() => new Promise((resolve, reject) => {
+        const req = http.request({ host: lan.address, port: Number(link.port), path: p, headers: { host: link.host, ...headers } }, (res) => {
+          res.resume();
+          res.on('end', () => resolve(res));
+        });
+        req.on('error', reject);
+        req.end();
+      }));
+      const ohne = await vomIpad('/api/records');
+      assert(ohne.statusCode === 401, `ohne Anmeldung kam das Gerät durch (HTTP ${ohne.statusCode})`);
+      const ein = await vomIpad(`${link.pathname}${link.search}`);
+      assert(ein.statusCode === 303 && ein.headers.location === '/', `der Link wurde nicht getauscht (HTTP ${ein.statusCode})`);
+      const cookie = [].concat(ein.headers['set-cookie'] || [])[0].split(';')[0];
+      const mit = await vomIpad('/api/records', { cookie });
+      assert(mit.statusCode === 200, `mit dem Cookie: HTTP ${mit.statusCode}`);
+      const nochmal = await vomIpad(`${link.pathname}${link.search}`);
+      assert(nochmal.statusCode === 410, `derselbe Link galt ein zweites Mal (HTTP ${nochmal.statusCode})`);
+      return `${lan.address}:${link.port} neben 127.0.0.1:${port}, Netzmodus ${a.config.network.mode}, Link einmal eingelöst`;
+    } finally {
+      await request('DELETE', '/api/ipad', undefined, {}, port).catch(() => {});
+      delete a.lanAdressen;
+    }
+  });
 }
 
 async function checkModules() {

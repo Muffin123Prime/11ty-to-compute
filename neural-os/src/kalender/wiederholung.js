@@ -404,6 +404,126 @@ function aufTagLegen(daten, tag) {
   return out;
 }
 
+/**
+ * Der erste Tag, den die Regel ueberhaupt erzeugt (VOR dem Auslassen), oder
+ * null, wenn sie nie stattfindet (etwa "Montag und Mittwoch" mit einem Ende
+ * am Sonntag davor).
+ */
+function ersterTag(startTag, regel) {
+  const r = erzeugen(startTag, regel).next();
+  return r.done ? null : tagText(r.value);
+}
+
+/**
+ * Liegt der Beginn einer Serie auf keinem ihrer Tage ("Werktags" an einem
+ * Samstag angelegt, "Montag und Mittwoch" an einem Donnerstag), wird er auf
+ * das erste echte Vorkommen gelegt.
+ *
+ * Warum: RFC 5545 (3.3.10) zaehlt DTSTART IMMER als erstes Vorkommen. Bliebe
+ * der Beginn am Samstag stehen, zeigte das iPad nach dem Import einen
+ * Samstagstermin, den Neural OS nicht zeigt, und die KI bestaetigte dem
+ * Nutzer einen Tag, an dem nichts im Kalender steht. Die Menge der
+ * Vorkommen aendert sich dadurch nicht (auch nicht bei `count`): der
+ * falsche Beginn wurde nie erzeugt.
+ *
+ * @returns {{start:string, end:string|null}|null}  null = der Beginn stimmt schon
+ */
+function beginnAufVorkommen(daten) {
+  const s = wandzeitLesen(daten && daten.start);
+  if (!s || !daten.recurrence) return null;
+  const erster = ersterTag(s.tag, daten.recurrence);
+  if (!erster || erster === s.tag) return null;
+  return aufTagLegen(daten, erster);
+}
+
+/** Wochentage um `tage` weiterdrehen, in Normreihenfolge. */
+function wochentageDrehen(byDay, tage) {
+  const shift = ((tage % 7) + 7) % 7;
+  const gedreht = new Set(byDay.map((t) => WOCHENTAGE[(WOCHENTAGE.indexOf(t) + shift) % 7]));
+  return WOCHENTAGE.filter((t) => gedreht.has(t));
+}
+
+/**
+ * Die GANZE Serie so verschieben, wie ein Vorkommen verschoben wurde.
+ *
+ * "Das Training ist ab jetzt um 19 Uhr": die KI kennt aus termine_lesen nur
+ * das Vorkommen vom 29.09. und schickt dessen neue Zeit. Wuerde diese Zeit
+ * zum neuen BEGINN der Serie, verschwaenden alle frueheren Vorkommen, und
+ * eine Serie mit fester Anzahl liefe laenger. Stattdessen wird die Serie um
+ * denselben Abstand verschoben -- Beginn, Anzahl und Ende bleiben, nur die
+ * Lage aendert sich. Dieselbe Rechnung wie "Alle" beim Ziehen in der
+ * Kalenderansicht (serienPatch in web/views/kalender.js).
+ *
+ * Gerechnet wird mit Tagen und Uhrzeit-Text, nicht mit Millisekunden: ein
+ * Vorkommen nach der Zeitumstellung verschiebt die Serie trotzdem um genau
+ * eine Stunde Wandzeit.
+ *
+ * @param {object} daten     die Serie
+ * @param {string} bezugTag  der Tag des Vorkommens, auf das sich `neu` bezieht
+ * @param {{start:string, end?:string|null}} neu  neue Lage DIESES Vorkommens
+ *   (`end` weggelassen = die Serie behaelt ihr Ende unveraendert)
+ * @returns {{start:string, end?:string|null, recurrence?:object, exdates?:string[]}}
+ */
+function serieVerschieben(daten, bezugTag, neu) {
+  const s0 = wandzeitLesen(daten.start);
+  const offset = tageZwischen(bezugTag, s0.tag);
+  const schieben = (text) => {
+    if (text === null || text === undefined) return text;
+    const z = wandzeitLesen(text);
+    return z ? `${plusTage(z.tag, offset)}${z.zeit}` : text;
+  };
+  const out = { start: schieben(neu.start) };
+  if (neu.end !== undefined) out.end = schieben(neu.end);
+  const neuTag = wandzeitLesen(out.start);
+  const tage = neuTag ? tageZwischen(s0.tag, neuTag.tag) : 0;
+  const regel = daten.recurrence;
+  if (tage && regel && typeof regel === 'object') {
+    const r = { ...regel };
+    if (r.freq === 'weekly' && Array.isArray(r.byDay) && r.byDay.length) r.byDay = wochentageDrehen(r.byDay, tage);
+    if (r.until) r.until = plusTage(r.until, tage);
+    out.recurrence = r;
+    if (Array.isArray(daten.exdates) && daten.exdates.length) out.exdates = daten.exdates.map((d) => plusTage(d, tage));
+  }
+  return out;
+}
+
+/**
+ * Eine Serie an einem Vorkommen teilen ("ab jetzt um 19 Uhr"): die alte
+ * endet am Vortag, eine neue beginnt an `tag`. Was vorbei ist, bleibt so,
+ * wie es war -- der Kalender soll nicht behaupten, das Training im September
+ * sei schon um 19 Uhr gewesen.
+ *
+ * `count` zaehlt nach der Norm auch ausgelassene Vorkommen; die neue Serie
+ * bekommt, was von der alten Anzahl noch uebrig ist, damit "zehnmal"
+ * insgesamt zehnmal bleibt.
+ *
+ * @returns {{alt:{recurrence:object, exdates:string[]}, neu:{start:string, end:string|null, recurrence:object, exdates:string[]}}}
+ */
+function abTagTeilen(daten, tag) {
+  const s0 = wandzeitLesen(daten.start).tag;
+  const regel = daten.recurrence;
+  let vorher = 0;
+  if (regel.count) {
+    const grenze = tagZahl(tag);
+    for (const d of erzeugen(s0, regel)) {
+      if (d >= grenze) break;
+      vorher += 1;
+    }
+  }
+  const ausnahmen = Array.isArray(daten.exdates) ? daten.exdates : [];
+  return {
+    alt: {
+      recurrence: { ...regel, until: plusTage(tag, -1), count: null },
+      exdates: ausnahmen.filter((d) => d < tag),
+    },
+    neu: {
+      ...aufTagLegen(daten, tag),
+      recurrence: { ...regel, count: regel.count ? Math.max(1, regel.count - vorher) : null },
+      exdates: ausnahmen.filter((d) => d >= tag),
+    },
+  };
+}
+
 /* --------------------------------------------------------- In Worten */
 
 const TAG_LANG = { MO: 'Montag', TU: 'Dienstag', WE: 'Mittwoch', TH: 'Donnerstag', FR: 'Freitag', SA: 'Samstag', SU: 'Sonntag' };
@@ -467,6 +587,10 @@ module.exports = {
   istVorkommen,
   naechstesVorkommen,
   aufTagLegen,
+  ersterTag,
+  beginnAufVorkommen,
+  serieVerschieben,
+  abTagTeilen,
   inWorten,
   datumDeutsch,
 };

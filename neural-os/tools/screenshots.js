@@ -363,7 +363,7 @@ async function los(page, base, view, warten = 1000) {
       await step(`Kalender: ${name} (hell)`, async () => { await shot(p, `kalender-${name}-hell`); });
       await c.close();
     }
-    for (const [mode, name] of [['woche', 'woche'], ['monat', 'monat'], ['liste', 'liste']]) {
+    for (const [mode, name] of [['woche', 'woche'], ['monat', 'monat'], ['tag', 'tag'], ['liste', 'liste']]) {
       const { c, p } = await mach('dark', { breite: 1180, hoehe: 820, finger: true });
       await p.addInitScript((m) => { try { localStorage.setItem('neural-os:kalender-ansicht', m); } catch { /* egal */ } }, mode);
       await los(p, base, 'kalender', 1400);
@@ -440,39 +440,34 @@ async function los(page, base, view, warten = 1000) {
   }
 
   /* ==================================================== 6 · Agenten */
+  //
+  // Die Ansicht "Agenten" ist die Hintergrundaktivitaet (wer arbeitet, wie
+  // lange, was entstand) -- Agenten anlegen und einstellen gibt es nicht
+  // mehr. Der Chat mit Claude, Rueckfragen und die Karten "Termin
+  // eingetragen" fotografiert tools/chat-beweis.js, denn dafuer braucht es
+  // einen Statisten an Anthropics Stelle; hier gibt es keinen Schluessel.
   {
     const { c, p } = await mach('light');
     await los(p, base, 'agents', 1600);
-    await step('Agent: Grunddaten', async () => {
-      await klick(p, /Wissensgärtner/, { warten: 1200 });
-      await shot(p, 'agent-wissensgaertner-hell');
+    await step('Agenten: Hintergrundaktivität', async () => {
+      await p.locator('.agv__abschnitt').first().waitFor({ timeout: 4000 });
+      await shot(p, 'agenten-hintergrund-hell');
     });
-    for (const [ueberschrift, name] of [
-      ['Berechtigungen', 'agent-berechtigungen-hell'],
-      ['Netzberechtigung', 'agent-netzberechtigung-hell'],
-      ['Werkzeuge dieses Agenten', 'agent-werkzeuge-hell'],
-      ['Laufhistorie', 'agent-laufhistorie-hell'],
-    ]) {
-      await step(`Agent: ${ueberschrift}`, async () => {
-        const traf = await p.evaluate((t) => {
-          const h = [...document.querySelectorAll('h2,h3')].find((x) => x.textContent.trim().startsWith(t));
-          if (!h) return false;
-          h.scrollIntoView({ block: 'start' });
-          return true;
-        }, ueberschrift);
-        if (!traf) throw new Error(`Überschrift „${ueberschrift}“ nicht gefunden`);
-        await p.waitForTimeout(700);
-        await shot(p, name);
-      });
-    }
-    await step('Agent: Start ohne Modell', async () => {
-      // „Agent starten“ ist ohne Modell abgeschaltet. Genau das soll man sehen.
-      await p.evaluate(() => {
-        const b = [...document.querySelectorAll('button')].find((x) => /Agent starten/.test(x.textContent));
-        if (b) b.scrollIntoView({ block: 'center' });
-      });
-      await p.waitForTimeout(600);
-      await shot(p, 'agent-start-ohne-modell-hell');
+    await step('Agenten: ein Lauf aufgeklappt', async () => {
+      const lauf = p.locator('.agv__lauf').first();
+      await lauf.waitFor({ timeout: 4000 });
+      await lauf.locator('summary').click();
+      await p.waitForTimeout(700);
+      await shot(p, 'agenten-lauf-offen-hell');
+    });
+    await c.close();
+  }
+  {
+    const { c, p } = await mach('dark');
+    await los(p, base, 'chat', 1400);
+    await step('Chat ohne Claude: „Verbinde Claude“', async () => {
+      await p.locator('.cv-verbinden').waitFor({ timeout: 4000 });
+      await shot(p, 'chat-verbinde-claude-dunkel');
     });
     await c.close();
   }

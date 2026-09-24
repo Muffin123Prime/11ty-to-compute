@@ -135,7 +135,7 @@ function parseWhen(value) {
   if (m) {
     const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
     if (!validDay(y, mo, d)) return null;
-    return { kind: 'date', day: s, ms: new Date(y, mo - 1, d).getTime(), midnight: true };
+    return { kind: 'date', day: s, ms: new Date(y, mo - 1, d).getTime(), midnight: true, wand: `${s}T00:00:00` };
   }
   m = LOCAL_RE.exec(s);
   if (m) {
@@ -146,6 +146,10 @@ function parseWhen(value) {
       day: `${m[1]}-${m[2]}-${m[3]}`,
       ms: new Date(y, mo - 1, d, hh, mi, ss).getTime(),
       midnight: hh === 0 && mi === 0 && ss === 0,
+      // Die Wandzeit als vergleichbarer Text. `ms` taugt dafuer nicht: am
+      // 29.03. gibt es 02:00-02:59 in Berlin nicht, `new Date` macht daraus
+      // 03:xx -- und 02:45 laege dann NACH 03:00.
+      wand: `${m[1]}-${m[2]}-${m[3]}T${pad(hh)}:${pad(mi)}:${pad(ss)}`,
     };
   }
   m = ZONED_RE.exec(s);
@@ -174,6 +178,15 @@ function daysBetween(a, b) {
   const [ay, am, ad] = a.split('-').map(Number);
   const [by, bm, bd] = b.split('-').map(Number);
   return Math.round((Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86400000);
+}
+
+/**
+ * Liegt `b` vor `a`? Zwei Wandzeiten werden als Wandzeit verglichen (siehe
+ * `wand` oben), sonst als Zeitpunkt.
+ */
+function liegtVor(b, a) {
+  if (a.wand && b.wand) return b.wand < a.wand;
+  return b.ms < a.ms;
 }
 
 /**
@@ -271,7 +284,7 @@ function checkEvent(store, merged, opts = {}) {
       out.end = end.day === start.day ? null : end.day;
     } else {
       if (end.kind === 'date') throw new ValidationError('Ein Termin mit Uhrzeit braucht auch beim Ende eine Uhrzeit.');
-      if (end.ms < start.ms) throw new ValidationError('Das Ende liegt vor dem Beginn.');
+      if (liegtVor(end, start)) throw new ValidationError('Das Ende liegt vor dem Beginn.');
       out.end = String(merged.end).trim();
     }
   }
@@ -311,11 +324,26 @@ function checkEvent(store, merged, opts = {}) {
 
   // Wiederholung. Die Regel haengt am Tag des Beginns ("monatlich" heisst:
   // am selben Tag des Monats wie der erste Termin).
-  if (merged.recurrence !== undefined && merged.recurrence !== null && w.hatZone(out.start)) {
+  // Das Ende zaehlt mit: ein Vorkommen erbt Beginn UND Ende der Serie, und
+  // ein Ende mit Zone laesst sich nicht auf einen anderen Tag legen -- jedes
+  // Vorkommen stuende sonst ohne Ende da.
+  if (merged.recurrence !== undefined && merged.recurrence !== null && (w.hatZone(out.start) || w.hatZone(out.end))) {
     throw new ValidationError('Eine Serie braucht die Uhrzeit vor Ort ("JJJJ-MM-TTTHH:MM") – '
       + 'ein Zeitpunkt mit Zone würde bei jeder Zeitumstellung um eine Stunde wandern.');
   }
   out.recurrence = w.regelPruefen(merged.recurrence, out.start.slice(0, 10));
+  if (out.recurrence) {
+    // Beginn auf das erste echte Vorkommen legen (siehe beginnAufVorkommen):
+    // sonst zeigen iPad und Neural OS verschiedene Tage.
+    if (!w.ersterTag(out.start.slice(0, 10), out.recurrence)) {
+      throw new ValidationError('Mit diesen Wochentagen findet die Serie bis zu ihrem Ende nie statt.');
+    }
+    const lage = w.beginnAufVorkommen(out);
+    if (lage) {
+      out.start = lage.start;
+      out.end = lage.end;
+    }
+  }
   // Ausnahmen gibt es nur an Serien; wird aus einer Serie ein einzelner
   // Termin, verlieren sie ihren Sinn.
   out.exdates = out.recurrence ? w.ausnahmenPruefen(merged.exdates) : [];
@@ -440,10 +468,50 @@ function aendernAm(store, serie, tag, input, opts = {}) {
 }
 
 /**
+ * Eine Serie ab einem Vorkommen aendern (Werkzeug termin_aendern mit
+ * `ab_am`, "ab jetzt um 19 Uhr"): die alte Serie endet am Vortag, eine neue
+ * mit den Aenderungen beginnt an `tag`. Beide Schreibvorgaenge in einer
+ * Transaktion und einer Verlaufsgruppe -- ein "rueckgaengig" stellt die
+ * alte Serie wieder her und nimmt die neue weg.
+ *
+ * `input` bezieht sich auf die NEUE Serie, deren erstes Vorkommen `tag` ist
+ * (der Aufrufer rechnet Verschiebungen mit w.serieVerschieben vorher aus).
+ * Ist `tag` schon der Beginn der Serie, gibt es nichts zu teilen: dann
+ * aendert sich die ganze Serie.
+ *
+ * @returns {{record:object, alt:object|null}}  die neue Serie und die alte danach
+ */
+function aendernAb(store, serie, tag, input, opts = {}) {
+  vorkommenPruefen(serie, tag);
+  if (has(input, 'recurrence') && input.recurrence === null) {
+    throw new ValidationError('„Ab einem Tag“ gibt es nur mit Wiederholung – ohne Wiederholung wäre es ein einzelner Termin.');
+  }
+  const s0 = w.wandzeitLesen(serie.data.start).tag;
+  if (tag === s0) return { record: updateEvent(store, serie.id, input, opts), alt: null };
+  const teil = w.abTagTeilen(serie.data, tag);
+  const merged = { ...serie.data, ...teil.neu, ...input };
+  refuseDayAsTime(input, merged.start);
+  if (input.allDay === true && !has(input, 'end')) merged.end = null;
+  const data = checkEvent(store, merged, { geerbteChatId: serie.data.chatId || null });
+  const altRegel = w.regelPruefen(teil.alt.recurrence, s0);
+  return store.transaction(() => gemeinsam(() => {
+    const alt = store.update(serie.id, { recurrence: altRegel, exdates: teil.alt.exdates });
+    const record = store.create('event', { ...data, fortsetzungVon: { id: serie.id, ab: tag }, ...stempelVon(opts) });
+    return { record, alt };
+  }));
+}
+
+/**
  * Einen Termin loeschen (weich; POST /api/records/:id/restore holt ihn
  * zurueck) -- oder mit `nur` genau ein Vorkommen einer Serie auslassen.
  *
- * @returns {{record:object, ausgelassen:string|null}}
+ * Eine GANZE Serie nimmt ihre verschobenen Vorkommen mit (die per `?nur`
+ * geloesten Einzeltermine mit `ausSerie.id`), so wie der Kalender auf dem
+ * iPad eine Serie samt ihren Ausnahmen loescht. Sonst stuende nach "Training
+ * loeschen" noch das eine verlegte Training im Kalender, und niemand wuesste,
+ * warum. Alles in einer Verlaufsgruppe: "rueckgaengig" holt alles zurueck.
+ *
+ * @returns {{record:object, ausgelassen:string|null, mitgeloescht:object[]}}
  */
 function deleteEvent(store, id, opts = {}) {
   const existing = liveOfType(store, id, 'event');
@@ -451,9 +519,15 @@ function deleteEvent(store, id, opts = {}) {
   if (opts.nur !== undefined && opts.nur !== null && opts.nur !== '') {
     vorkommenPruefen(existing, opts.nur);
     const exdates = w.ausnahmenPruefen([...(Array.isArray(existing.data.exdates) ? existing.data.exdates : []), opts.nur]);
-    return { record: store.update(existing.id, { exdates }), ausgelassen: opts.nur };
+    return { record: store.update(existing.id, { exdates }), ausgelassen: opts.nur, mitgeloescht: [] };
   }
-  return { record: store.remove(existing.id), ausgelassen: null };
+  const ausnahmen = store.all('event').filter((r) => r.id !== existing.id
+    && r.data && r.data.ausSerie && r.data.ausSerie.id === existing.id);
+  if (!ausnahmen.length) return { record: store.remove(existing.id), ausgelassen: null, mitgeloescht: [] };
+  return store.transaction(() => gemeinsam(() => {
+    const mitgeloescht = ausnahmen.map((r) => store.remove(r.id));
+    return { record: store.remove(existing.id), ausgelassen: null, mitgeloescht };
+  }));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1009,8 +1083,13 @@ function register(router) {
     // Ohne `nur` weich geloescht: POST /api/records/:id/restore holt ihn zurueck.
     // Mit `nur` bleibt die Serie und laesst nur diesen Tag aus.
     const stand = verlaufStand(rc);
-    const { record, ausgelassen } = deleteEvent(store, rc.params.id, { nur: strParam(rc.query, 'nur', 20) || null });
-    return { record, ausgelassen, rueckgaengig: rueckgaengigFuer(rc, record.id, stand) };
+    const { record, ausgelassen, mitgeloescht } = deleteEvent(store, rc.params.id, { nur: strParam(rc.query, 'nur', 20) || null });
+    return {
+      record,
+      ausgelassen,
+      mitgeloescht: mitgeloescht.map((r) => ({ id: r.id, title: r.data.title, start: r.data.start })),
+      rueckgaengig: rueckgaengigFuer(rc, record.id, stand),
+    };
   });
 
   /* --------------------------------------------------------- Notizen */
@@ -1080,6 +1159,7 @@ module.exports = {
   updateEvent,
   deleteEvent,
   aendernAm,
+  aendernAb,
   parseWhen,
   spanOf,
   eventsInRange,

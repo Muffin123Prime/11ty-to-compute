@@ -65,6 +65,33 @@ export function beginnMs(start) {
   return Number.isFinite(ms) ? ms : null;
 }
 
+/**
+ * Wann die Erinnerung kommt -- in WANDZEIT gerechnet: "1 Tag vorher" heisst
+ * am Vortag zur selben Uhrzeit, auch wenn dazwischen die Uhr umgestellt
+ * wurde (25.10.: ein Tag hat dann 25 Stunden). So liest auch die
+ * Kalenderdatei es (TRIGGER:-P1D ist nach RFC 5545 3.3.6 ein Kalendertag,
+ * keine 24 Stunden), und so zeigt es das iPad nach dem Import. Minuten und
+ * Stunden sind dagegen genaue Dauern, auf beiden Seiten.
+ *
+ * Ganztaegig: neun Uhr Wandzeit, am Tag selbst bzw. n Tage davor.
+ */
+export function ausloeseMs(start, reminder) {
+  const min = Number(reminder);
+  if (!Number.isFinite(min)) return null;
+  const s = String(start || '').trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?)?$/.exec(s);
+  if (!m) {
+    // Ein fester Zeitpunkt mit Zone: dort gibt es keine Wandzeit zu wahren.
+    const b = beginnMs(s);
+    return b === null ? null : b - min * 60000;
+  }
+  const tage = Math.floor(min / 1440);
+  const rest = min - tage * 1440;
+  const stunde = m[4] !== undefined ? +m[4] : GANZTAGS_STUNDE;
+  const minute = m[5] !== undefined ? +m[5] : 0;
+  return new Date(+m[1], +m[2] - 1, +m[3] - tage, stunde, minute).getTime() - rest * 60000;
+}
+
 /** Die Felder eines Elements aus /api/events/zeitraum -- Satz oder Vorkommen. */
 function felder(item) {
   const data = item && item.data && typeof item.data === 'object' ? item.data : (item || {});
@@ -93,7 +120,8 @@ export function faellige(items, jetzt, erledigt = new Set()) {
     if (f.reminder === null || f.reminder === undefined || !Number.isFinite(Number(f.reminder))) continue;
     const startMs = beginnMs(f.start);
     if (startMs === null) continue;
-    const fireMs = startMs - Number(f.reminder) * 60000;
+    const fireMs = ausloeseMs(f.start, f.reminder);
+    if (fireMs === null) continue;
     if (jetzt < fireMs || jetzt > startMs + NACHLAUF_MS) continue;
     // Start und Vorlauf im Schluessel: wer den Termin verschiebt, wird neu erinnert.
     const key = `${f.id}|${f.occurrence || ''}|${f.start}|${f.reminder}`;

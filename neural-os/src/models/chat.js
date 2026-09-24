@@ -45,6 +45,12 @@
  * 6. **Herkunft kommt von der Schleuse.** `usedNetwork`/`networkTargets`
  *    werden aus den `network.attempt`-Ereignissen gesammelt, die die Schleuse
  *    während dieses Zuges für diesen Chat veröffentlicht.
+ *
+ * 7. **Neu antworten und Bearbeiten verwerfen, statt umzuschreiben.** Was
+ *    überholt ist, wandert in den Papierkorb (Ereignis `verworfen {ids}`),
+ *    und ein ganz normaler neuer Zug beginnt. Was die KI im verworfenen Zug
+ *    angelegt hat, bleibt stehen: es ist eine eigene Handlung mit eigenem
+ *    "Rückgängig" (`wirkung` am Agenten-Ereignis), kein Teil des Textes.
  */
 
 const anbieter = require('./providers/anthropic');
@@ -112,6 +118,11 @@ const SYSTEM_FEST = [
   'Bei Planungen (Reise, Lernplan, Fest, Projekt …) stell zuerst mit rueckfrage die eine Frage, die den Plan am meisten verändert, mit kurzen Antworten zum Antippen. Frag nicht, was schon im Gespräch steht.',
   '',
   'Für aktuelle Fakten, Nachrichten, Preise, Öffnungszeiten und alles nach deinem Wissensstand benutze die Websuche. Erfinde nichts; wenn du etwas nicht weißt oder nicht finden kannst, sag es.',
+  '',
+  // Die Oberflaeche macht aus ```prompt / ```text eine Karte mit eigenem
+  // "Kopieren" (web/lib/markdown.js, kopierKarten). Ohne diesen Satz landet
+  // die Einleitung ("Hier ist dein Prompt:") mit in der Zwischenablage.
+  'Will der Nutzer einen Prompt, eine Nachricht, eine E-Mail oder einen anderen Text zum Weiterverwenden, steht genau dieser Text allein in einem Block ```prompt (bzw. ```text) – ohne Einleitung im Block –, damit er ihn mit einem Tipp kopieren kann. Rückfragen stellst du über das Werkzeug rueckfrage mit 2–5 kurzen Optionen.',
 ].join('\n');
 
 /* --------------------------------------------------------------- Helfer */
@@ -578,7 +589,18 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     const agentMelden = (e) => {
       if (!e) return;
       const i = t.agenten.findIndex((a) => a.id === e.id);
+      const vorher = i >= 0 ? t.agenten[i] : null;
       const kurz = { id: e.id, runId: e.runId || null, rolle: e.rolle, titel: e.titel, zustand: e.zustand, ergebnis: e.ergebnis || null };
+      if (Number.isFinite(e.dauerMs)) kurz.dauerMs = e.dauerMs;
+      // Zusatz (additiv): welches Werkzeug, und was es im Tresor hinterliess.
+      // Ein spaeteres Ereignis desselben Laufs traegt beides nicht immer mit.
+      const werkzeug = e.werkzeug || (vorher && vorher.werkzeug) || null;
+      const wirkung = e.wirkung || (vorher && vorher.wirkung) || null;
+      if (werkzeug) kurz.werkzeug = werkzeug;
+      if (wirkung && wirkung.length) kurz.wirkung = wirkung;
+      // Wo im Text der Agent ansprang -- damit die Oberflaeche seine Karte
+      // an dieser Stelle zeigt und nicht irgendwo am Ende.
+      kurz.beiZeichen = vorher && Number.isFinite(vorher.beiZeichen) ? vorher.beiZeichen : t.text.length;
       if (i >= 0) t.agenten[i] = kurz;
       else t.agenten.push(kurz);
       emit(onEvent, { type: 'agent', ...e });
@@ -750,12 +772,17 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
                 antwort: null,
                 runId: lauf.runId,
                 agentId: lauf.id,
+                // Die Frage steht im Verlauf dort, wo sie gestellt wurde.
+                beiZeichen: t.text.length,
               });
               continue;
             }
             if (istEigenesWerkzeug(b.name)) {
               const res = tools.ausfuehren(b, r.eingabeFehler[b.id], { chatId: chat.id, messageId: assistant.id });
-              for (const e of res.ereignisse) agentMelden(e);
+              const wirkung = wirkungVon(b, res);
+              for (const e of res.ereignisse) {
+                agentMelden({ ...e, werkzeug: b.name, ...(e.zustand === 'fertig' && wirkung.length ? { wirkung } : {}) });
+              }
               ergebnisse.push(res.toolResult);
               continue;
             }
@@ -864,6 +891,73 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
         try { signal.removeEventListener('abort', beiAussen); } catch { /* egal */ }
       }
     }
+  }
+
+  /* ------------------------------------------------- Wirkung im Tresor */
+
+  /** Welche Werkzeuge was im Tresor hinterlassen -- für die Karte in der Antwort. */
+  const AKTION = {
+    termin_anlegen: 'angelegt',
+    termin_aendern: 'geaendert',
+    notiz_anlegen: 'angelegt',
+    merken: 'angelegt',
+    projekt_anpassen: null, // je Satz: neu oder vorhanden
+  };
+
+  /**
+   * Ein Abbild des Satzes, so wie die KI ihn hinterlassen hat. Absichtlich
+   * ein Schnappschuss und keine Verknüpfung: die Karte sagt, was damals
+   * geschah ("Termin eingetragen · Do, 25. Sep · 15:00"), auch wenn der
+   * Termin später verschoben wird. "Öffnen" führt zum heutigen Stand.
+   */
+  function schnappschuss(rec, aktion) {
+    const d = rec.data || {};
+    const s = { id: rec.id, typ: rec.type, aktion, titel: '' };
+    if (rec.type === 'event') {
+      s.titel = d.title;
+      s.start = d.start || null;
+      s.end = d.end || null;
+      s.ganztaegig = d.allDay === true;
+      if (d.location) s.ort = String(d.location).slice(0, 200);
+      if (d.recurrence && d.recurrence.freq) s.serie = true;
+    } else if (rec.type === 'note' || rec.type === 'task') {
+      s.titel = d.title;
+      if (rec.type === 'task' && d.projectId) s.projectId = d.projectId;
+    } else if (rec.type === 'memory') {
+      s.titel = d.text;
+    } else if (rec.type === 'project') {
+      s.titel = d.name;
+    }
+    s.titel = String(s.titel || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    return s;
+  }
+
+  /**
+   * Was ein ausgeführtes Werkzeug angelegt, geändert oder gelöscht hat. Nur
+   * wenn es gelang -- ein gescheiterter Aufruf hat keine Wirkung, und eine
+   * Karte "Termin eingetragen" dazu wäre eine erfundene.
+   */
+  function wirkungVon(block, res) {
+    if (!res || res.ungueltig || !res.toolResult || res.toolResult.is_error) return [];
+    const aus = [];
+    try {
+      const erstes = (res.ereignisse || [])[0] || {};
+      const run = erstes.runId ? store.get(erstes.runId) : null;
+      const beginn = Date.parse((run && run.data && run.data.startedAt) || '') || (Date.now() - (Number(erstes.dauerMs) || 0));
+      for (const id of res.produced || []) {
+        const rec = store.get(id, { includeDeleted: true });
+        if (!rec) continue;
+        const aktion = AKTION[block.name] || (Date.parse(rec.createdAt) >= beginn - 5 ? 'angelegt' : 'geaendert');
+        aus.push(schnappschuss(rec, aktion));
+      }
+      if (block.name === 'termin_loeschen' && block.input && typeof block.input.id === 'string') {
+        const rec = store.get(block.input.id, { includeDeleted: true });
+        if (rec && rec.type === 'event') aus.push(schnappschuss(rec, rec.deletedAt ? 'geloescht' : 'ausgelassen'));
+      }
+    } catch (err) {
+      log.warn(`Wirkung von ${block.name} nicht lesbar: ${err && err.message}`);
+    }
+    return aus.slice(0, 21);
   }
 
   function sucheFehlerSatz(code) {
@@ -986,6 +1080,14 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     }
 
     const effort = effortVon(opts.effort, 'medium');
+    const assistant = antwortAnlegen(chat, ordinal++, effort, onEvent);
+    const basis = verlaufAus([...history, userMessage]);
+    const r = await zug({ chat, assistant, basis, onEvent, signal, effort });
+    return { chat, userMessage, message: r.message, stopReason: r.stopReason };
+  }
+
+  /** Den leeren Antwort-Satz anlegen und melden -- VOR der Anfrage an Claude. */
+  function antwortAnlegen(chat, ordinal, effort, onEvent) {
     const modell = modellFuer(chat);
     const assistant = store.create('message', {
       chatId: chat.id,
@@ -993,7 +1095,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       content: '',
       status: 'streaming',
       model: { provider: 'claude', model: modell },
-      ordinal: ordinal++,
+      ordinal,
       denken: '',
       quellen: [],
       agenten: [],
@@ -1003,8 +1105,129 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     });
     emit(onEvent, { type: 'antwort', record: assistant });
     publish('chat.message', { chatId: chat.id, record: assistant });
+    return assistant;
+  }
 
-    const basis = verlaufAus([...history, userMessage]);
+  /* ------------------------------------- neu antworten und bearbeiten */
+
+  /**
+   * Nachrichten verwerfen, die durch "Neu antworten" oder "Bearbeiten"
+   * überholt sind. In den Papierkorb (soft delete), nicht spurlos: was die KI
+   * dabei angelegt hat (ein Termin), bleibt, wo es ist, und bleibt über
+   * seinen eigenen Knopf rücknehmbar. Eine offene Rückfrage darin wird als
+   * verworfen abgeschlossen, sonst stünde ihr Planungs-Agent ewig auf "läuft".
+   */
+  function verwerfen(nachrichten, onEvent, chatId) {
+    const ids = [];
+    for (const m of nachrichten) {
+      const d = m.data || {};
+      if (d.role === 'assistant' && Array.isArray(d.rueckfragen)) {
+        for (const f of d.rueckfragen) {
+          if (f.zustand !== 'offen' || !f.runId) continue;
+          const e = tools.laufAbschliessen(f.runId, { zustand: 'fertig', ergebnis: 'Verworfen – die Frage wurde neu gestellt' });
+          if (e) emit(onEvent, { type: 'agent', ...e });
+        }
+      }
+      try {
+        store.remove(m.id);
+        ids.push(m.id);
+      } catch (err) {
+        log.warn(`Nachricht ${m.id} nicht verworfen: ${err && err.message}`);
+      }
+    }
+    if (ids.length) {
+      emit(onEvent, { type: 'verworfen', ids });
+      publish('chat.verworfen', { chatId, ids });
+    }
+    return ids;
+  }
+
+  function effortDer(nachrichten, wunsch) {
+    for (let i = nachrichten.length - 1; i >= 0; i--) {
+      const c = nachrichten[i].data && nachrichten[i].data.claude;
+      if (c && EFFORTS.has(c.effort)) return effortVon(wunsch, c.effort);
+    }
+    return effortVon(wunsch, 'medium');
+  }
+
+  /**
+   * Die letzte Antwort neu erzeugen: alles nach der letzten Frage des
+   * Nutzers wird verworfen, und Claude antwortet noch einmal auf genau
+   * dieselbe Nachricht (mit ihrem damaligen Datumssatz -- der Anfang bleibt
+   * gleich, der Cache greift).
+   *
+   * @param {{chatId:string, signal?:AbortSignal, onEvent?:Function, effort?:string}} opts
+   */
+  async function neuAntworten(opts = {}) {
+    const { chatId, signal, onEvent } = opts;
+    const chat = getChat(chatId);
+    if (inflight.has(chat.id)) {
+      throw new ValidationError('Für diesen Chat läuft bereits eine Antwort. Brich sie ab, bevor du neu antworten lässt.');
+    }
+    claude.zugang();
+    const history = historyOf(chat.id);
+    let letzte = -1;
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].data && history[i].data.role === 'user') { letzte = i; break; }
+    }
+    if (letzte < 0) throw new ValidationError('Hier gibt es noch keine Frage, auf die ich neu antworten könnte.');
+    const weg = history.slice(letzte + 1);
+    const effort = effortDer(weg, opts.effort);
+    verwerfen(weg, onEvent, chat.id);
+    const behalten = history.slice(0, letzte + 1);
+    const assistant = antwortAnlegen(chat, nextOrdinal(history), effort, onEvent);
+    const r = await zug({ chat, assistant, basis: verlaufAus(behalten), onEvent, signal, effort });
+    return { chat, message: r.message, stopReason: r.stopReason };
+  }
+
+  /**
+   * Eine eigene Nachricht ändern: alles danach fällt weg, die Nachricht
+   * bekommt den neuen Text (und einen neuen Datumssatz -- sie wird ja jetzt
+   * gestellt), und Claude antwortet neu.
+   *
+   * @param {{chatId:string, messageId:string, content:string, signal?:AbortSignal, onEvent?:Function, effort?:string}} opts
+   */
+  async function bearbeiten(opts = {}) {
+    const { chatId, messageId, content, signal, onEvent } = opts;
+    if (typeof content !== 'string' || !content.trim()) throw new ValidationError('Die Nachricht ist leer.');
+    if (content.length > MAX_CONTENT_CHARS) {
+      throw new ValidationError(`Die Nachricht ist zu lang (${content.length} Zeichen, erlaubt sind ${MAX_CONTENT_CHARS}).`);
+    }
+    let chat = getChat(chatId);
+    if (inflight.has(chat.id)) {
+      throw new ValidationError('Für diesen Chat läuft bereits eine Antwort. Brich sie ab, bevor du etwas änderst.');
+    }
+    const history = historyOf(chat.id);
+    const index = history.findIndex((m) => m.id === messageId);
+    if (index < 0 || !history[index].data || history[index].data.role !== 'user') {
+      throw new NotFoundError(`Nachricht ${messageId}`);
+    }
+    claude.zugang();
+    const alt = history[index];
+    const weg = history.slice(index + 1);
+    const effort = effortDer(weg, opts.effort);
+    verwerfen(weg, onEvent, chat.id);
+
+    const userMessage = store.update(alt.id, {
+      content,
+      bearbeitetAm: new Date().toISOString(),
+      claude: { inhalt: [{ type: 'text', text: heuteSatz() }, { type: 'text', text: content }] },
+    });
+    emit(onEvent, { type: 'nutzer', record: userMessage });
+    publish('chat.message', { chatId: chat.id, record: userMessage });
+
+    // Hiess der Chat nach der ersten Nachricht, heisst er jetzt nach der neuen.
+    const ersteFrage = !history.slice(0, index).some((m) => m.data.role === 'user');
+    const titel = String((chat.data && chat.data.title) || '').trim();
+    if (ersteFrage && titel && titel === firstLine(alt.data.content, 60)) {
+      const neu = firstLine(content, 60);
+      if (neu && neu !== titel) {
+        try { chat = store.update(chat.id, { title: neu }); } catch (err) { log.warn(`Chat-Titel: ${err && err.message}`); }
+      }
+    }
+
+    const assistant = antwortAnlegen(chat, nextOrdinal(history), effort, onEvent);
+    const basis = verlaufAus([...history.slice(0, index), userMessage]);
     const r = await zug({ chat, assistant, basis, onEvent, signal, effort });
     return { chat, userMessage, message: r.message, stopReason: r.stopReason };
   }
@@ -1126,6 +1349,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
 
     send,
     antworten,
+    neuAntworten,
+    bearbeiten,
 
     abort(chatId) {
       const entry = inflight.get(chatId);

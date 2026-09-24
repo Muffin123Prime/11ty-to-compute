@@ -43,6 +43,9 @@ const {
 
 const MAX_CONTENT_CHARS = 200000;
 
+/** Was die Werkzeuge der KI im Tresor schreiben -- nur das nimmt "Rückgängig" zurück. */
+const WIRKUNG_TYPEN = new Set(['event', 'note', 'memory', 'project', 'task']);
+
 /** Fields of a chat the interface may set. */
 const CHAT_FIELDS = ['title', 'model', 'network', 'systemPrompt', 'contextNodeIds', 'agentId', 'pinned'];
 
@@ -58,6 +61,14 @@ function ohneInterna(event) {
   const { claude, ...rest } = r.data;
   void claude;
   return { ...event, record: { ...r, data: rest } };
+}
+
+/** Die Zeile, an der ein Mensch einen Satz erkennt -- für Sätze in Meldungen. */
+function titelVon(store, id) {
+  const rec = store.get(id, { includeDeleted: true });
+  const d = (rec && rec.data) || {};
+  const t = String(d.title || d.name || d.text || id).replace(/\s+/g, ' ').trim();
+  return t.length > 60 ? `${t.slice(0, 59)}…` : t;
 }
 
 function chatService(rc) {
@@ -211,6 +222,149 @@ function register(router) {
   router.post('/api/chats/:id/messages', senden);
   /** Früherer Name. Bleibt, bis keine Ansicht ihn mehr benutzt; gleiche Ereignisse. */
   router.post('/api/chats/:id/send', senden);
+
+  /** Vorab für neu antworten und bearbeiten: verbunden, nicht beschäftigt. */
+  function bereit(rc, chat, record) {
+    if (rc.ctx.claude && typeof rc.ctx.claude.zugang === 'function') rc.ctx.claude.zugang();
+    if (typeof chat.isStreaming === 'function' && chat.isStreaming(record.id)) {
+      throw new ValidationError('Für diesen Chat läuft bereits eine Antwort. Brich sie ab, bevor du etwas änderst.');
+    }
+  }
+
+  /**
+   * Die letzte Antwort neu erzeugen. Körper: { effort? }. Antwortet mit
+   * demselben Ereignisstrom wie das Senden, davor `verworfen {ids}` für die
+   * überholten Nachrichten.
+   */
+  router.post('/api/chats/:id/neu-antworten', async (rc) => {
+    rc.requireCapability('chat');
+    const chat = need(chatService(rc), 'Der Chat-Dienst');
+    if (typeof chat.neuAntworten !== 'function') need(null, 'Das Neu-Antworten');
+    const body = await rc.body();
+    const effort = body && typeof body.effort === 'string' ? body.effort : undefined;
+    const record = getChatRecord(rc, rc.params.id);
+    return strom(rc, record, (svc, signal, onEvent) => svc.neuAntworten({
+      chatId: record.id, signal, onEvent, effort,
+    }), () => {
+      bereit(rc, chat, record);
+      if (!chat.messages(record.id).items.some((m) => m.data.role === 'user')) {
+        throw new ValidationError('Hier gibt es noch keine Frage, auf die ich neu antworten könnte.');
+      }
+    });
+  });
+
+  /**
+   * Eine eigene Nachricht ändern: { inhalt } -- alles danach fällt weg, und
+   * Claude antwortet neu. Ereignisse: verworfen, nutzer (die geänderte
+   * Nachricht), antwort, … , fertig.
+   */
+  router.post('/api/chats/:id/messages/:messageId/bearbeiten', async (rc) => {
+    rc.requireCapability('chat');
+    const chat = need(chatService(rc), 'Der Chat-Dienst');
+    if (typeof chat.bearbeiten !== 'function') need(null, 'Das Bearbeiten');
+    const body = asObject(await rc.body());
+    const roh = body.inhalt !== undefined ? body.inhalt : body.content;
+    const content = requireString(roh, 'inhalt', { max: MAX_CONTENT_CHARS });
+    const record = getChatRecord(rc, rc.params.id);
+    const messageId = rc.params.messageId;
+    return strom(rc, record, (svc, signal, onEvent) => svc.bearbeiten({
+      chatId: record.id, messageId, content, signal, onEvent,
+      effort: typeof body.effort === 'string' ? body.effort : undefined,
+    }), () => {
+      const m = chat.messages(record.id).items.find((x) => x.id === messageId);
+      if (!m || m.data.role !== 'user') throw new NotFoundError(`Nachricht ${messageId}`);
+      bereit(rc, chat, record);
+    });
+  });
+
+  /**
+   * Zurücknehmen, was ein Agent in diesem Chat angelegt, geändert oder
+   * gelöscht hat: { runId }. Über den Änderungsverlauf, also mit genau
+   * dessen Regeln -- hat der Nutzer den Termin seitdem selbst geändert,
+   * wird nichts überschrieben, sondern mit 409 und dem Grund abgelehnt.
+   * Erst werden ALLE Einträge geprüft, dann geschrieben.
+   */
+  router.post('/api/chats/:id/rueckgaengig', async (rc) => {
+    rc.requireCapability('write');
+    const record = getChatRecord(rc, rc.params.id);
+    const body = asObject(await rc.body());
+    const runId = requireString(body.runId, 'runId', { max: 120 });
+    const store = need(rc.ctx.store, 'Der Speicher');
+    const run = store.get(runId);
+    if (!run || run.type !== 'run' || (run.data && run.data.chatId) !== record.id) {
+      throw new NotFoundError(`Lauf ${runId}`);
+    }
+    const verlauf = rc.ctx.history;
+    if (!verlauf || typeof verlauf.undo !== 'function' || typeof verlauf.list !== 'function') {
+      need(null, 'Der Änderungsverlauf', 'Ohne ihn lässt sich nichts zurücknehmen.');
+    }
+    // Neueste zuerst, so liefert list() sie -- abgebaut wird rückwärts.
+    const alle = verlauf.list({ limit: 500 }).items;
+    // Nur, was der Lauf SELBST geschrieben hat (Urheber am Ereignis). Ein
+    // Eintrag, der die runId bloss über den Stempel am Satz trägt
+    // (`via: 'stempel'`), ist eine spätere Änderung von jemand anderem --
+    // meist vom Nutzer, dessen Änderung am KI-Termin sonst als
+    // Agentenänderung durchginge (src/store/history.js, actorOf).
+    const vomLauf = (e) => !!(e.actor && e.actor.runId === runId && e.actor.via !== 'stempel');
+    const eintraege = alle.filter((e) => vomLauf(e) && !e.undone && WIRKUNG_TYPEN.has(e.type));
+    if (!eintraege.length) {
+      if (run.data.zurueckgenommenAm) return { ok: true, runId, schonZurueck: true, am: run.data.zurueckgenommenAm, zurueckgenommen: [] };
+      throw new NeuralError('NICHTS_ZURUECKZUNEHMEN', 'Dieser Agent hat nichts hinterlassen, das sich zurücknehmen ließe.', { status: 409 });
+    }
+    // Erst ALLES prüfen. Je Satz: hat seitdem jemand anderes (meist der
+    // Nutzer) daran etwas geändert, wird nichts überschrieben. Spätere
+    // Schritte DESSELBEN Laufs sind kein Hindernis -- sie werden mit
+    // zurückgenommen, und nur dafür wird `force` benutzt.
+    const saetze = new Map();
+    for (const e of eintraege) {
+      if (!saetze.has(e.id)) saetze.set(e.id, []);
+      saetze.get(e.id).push(e);
+    }
+    for (const [id, liste] of saetze) {
+      const aeltester = Math.min(...liste.map((e) => e.seq));
+      const fremd = alle.find((e) => e.id === id && e.seq > aeltester && !e.undone && !vomLauf(e));
+      if (fremd) {
+        throw new NeuralError('RUECKGAENGIG_NICHT_MOEGLICH',
+          `„${titelVon(store, id)}“ wurde seitdem geändert. Ich nehme es nicht zurück, damit deine Änderung nicht verloren geht.`,
+          { status: 409, details: { id, seq: fremd.seq } });
+      }
+      const juengster = liste[0];
+      if (!juengster.canUndo) {
+        throw new NeuralError('RUECKGAENGIG_NICHT_MOEGLICH', juengster.reason || 'Das lässt sich nicht mehr zurücknehmen.', {
+          status: 409,
+          details: { id, seq: juengster.seq },
+        });
+      }
+    }
+    const erledigt = [];
+    const erledigtSeq = new Set();
+    for (const e of eintraege) {
+      if (erledigtSeq.has(e.seq)) continue;
+      const force = eintraege.some((x) => x.id === e.id && x.seq > e.seq);
+      const r = await verlauf.undo(e.seq, { force });
+      erledigtSeq.add(e.seq);
+      erledigt.push({ id: e.id, typ: e.type, op: e.op, label: e.label });
+      for (const m of (r && r.mitgenommen) || []) if (m.entry) erledigtSeq.add(m.entry.seq);
+    }
+    const am = new Date().toISOString();
+    try { store.update(runId, { zurueckgenommenAm: am }); } catch (err) { rc.log.warn(`Lauf ${runId}: ${err && err.message}`); }
+    // Die Antwort merkt es sich, damit die Karte nach dem Neuladen
+    // "Zurückgenommen" zeigt und nicht wieder einen Knopf anbietet.
+    const messageId = run.data.messageId;
+    const msg = messageId ? store.get(messageId) : null;
+    if (msg && msg.type === 'message' && Array.isArray(msg.data.agenten)) {
+      try {
+        const agenten = msg.data.agenten.map((a) => (a.runId === runId ? { ...a, zurueckgenommen: am } : a));
+        const neu = store.update(msg.id, { agenten });
+        if (rc.ctx.bus && typeof rc.ctx.bus.publish === 'function') {
+          rc.ctx.bus.publish('chat.message', { chatId: record.id, record: ohneInterna({ record: neu }).record });
+        }
+      } catch (err) {
+        rc.log.warn(`Antwort ${messageId}: ${err && err.message}`);
+      }
+    }
+    return { ok: true, runId, am, zurueckgenommen: erledigt };
+  });
 
   /**
    * Eine Rückfrage beantworten: { id, antwort } -- antwort ist der Text der

@@ -42,7 +42,7 @@
  * app writes and what models emit.
  */
 
-import { h, text, frag } from './dom.js';
+import { h, text, frag, icon } from './dom.js';
 
 /* ------------------------------------------------------------------ */
 /* Configuration                                                       */
@@ -778,6 +778,14 @@ function makeContext(options = {}) {
     softBreak: options.softBreak === 'space' ? 'space' : 'br',
     /** Hook so a view can intercept a click (e.g. "Notiz anlegen"). */
     onWikiLink: typeof options.onWikiLink === 'function' ? options.onWikiLink : null,
+    /**
+     * ```prompt / ```text (und E-Mail, Nachricht) als Karte mit eigenem
+     * "Kopieren" oben rechts. Nur wo es gewollt ist (der Chat): in einer
+     * Notiz ist ```text meist einfach Text.
+     */
+    kopierKarten: options.kopierKarten === true,
+    /** Erledigt-Listen als blaue Haken-Kreise wie in der Vorlage statt Kästchen. */
+    hakenKreise: options.hakenKreise === true,
   };
 }
 
@@ -797,7 +805,7 @@ function renderBlocks(blocks, ctx) {
         nodes.push(h('p.md-p', null, renderInlineNodes(parseInline(block.text, ctx), ctx)));
         break;
       case 'code':
-        nodes.push(renderCode(block, ctx));
+        nodes.push(ctx.kopierKarten && kopierArt(block.lang) ? renderKopierKarte(block, kopierArt(block.lang)) : renderCode(block, ctx));
         break;
       case 'quote':
         nodes.push(h('blockquote.md-quote', null, renderBlocks(block.blocks, ctx)));
@@ -824,9 +832,19 @@ function renderList(block, ctx) {
     : null);
   if (block.loose) listNode.classList.add('md-list--loose');
 
-  for (const item of block.items) {
+  let haken = 0;
+  for (const raw of block.items) {
+    const item = ctx.hakenKreise ? hakenLesen(raw, block.ordered) : raw;
     const li = h('li.md-item');
-    if (item.checked !== null) {
+    if (item.checked !== null && ctx.hakenKreise) {
+      haken += 1;
+      li.classList.add('md-item--haken');
+      li.appendChild(h('span.md-haken', {
+        class: item.checked ? 'is-erledigt' : '',
+        role: 'img',
+        'aria-label': item.checked ? 'Erledigt' : 'Offen',
+      }, icon(item.checked ? HAKEN_VOLL : HAKEN_LEER)));
+    } else if (item.checked !== null) {
       li.classList.add('md-item--task');
       li.appendChild(h('input.md-check', {
         type: 'checkbox',
@@ -838,10 +856,33 @@ function renderList(block, ctx) {
     const children = block.loose
       ? renderBlocks(item.blocks, ctx)
       : renderTightItem(item.blocks, ctx);
-    for (const child of children) li.appendChild(child);
+    const inhalt = item.checked !== null && ctx.hakenKreise ? h('span.md-haken__text') : li;
+    for (const child of children) inhalt.appendChild(child);
+    if (inhalt !== li) li.appendChild(inhalt);
     listNode.appendChild(li);
   }
+  // Eine Liste, die nur aus Haken besteht, ist die Erledigt-Liste der Vorlage.
+  if (haken && haken === block.items.length) listNode.classList.add('md-list--haken');
   return listNode;
+}
+
+/** Haken-Kreis (erledigt) und leerer Kreis (offen), in der Linie der App-Symbole. */
+const HAKEN_VOLL = '<circle cx="10" cy="10" r="8.2" fill="currentColor" stroke="none"/><path class="md-haken__zug" d="m6.5 10.3 2.3 2.3 4.7-5.1"/>';
+const HAKEN_LEER = '<circle cx="10" cy="10" r="7.6"/>';
+
+/**
+ * Modelle schreiben "erledigt" nicht nur als `- [x]`, sondern oft als
+ * `- ✅ …` oder `- ✓ …`. Beides soll gleich aussehen -- also wird das
+ * Zeichen am Anfang eines Listenpunkts zum Haken, und das Zeichen selbst
+ * verschwindet aus dem Text.
+ */
+function hakenLesen(item, ordered) {
+  if (item.checked !== null || ordered) return item;
+  const first = item.blocks[0];
+  if (!first || first.type !== 'paragraph') return item;
+  const m = /^(?:\u2705|\u2714\ufe0f?|\u2713|\u2611\ufe0f?)[ \t]*/u.exec(first.text);
+  if (!m || m[0].length === first.text.length) return item;
+  return { checked: true, blocks: [{ ...first, text: first.text.slice(m[0].length) }, ...item.blocks.slice(1)] };
 }
 
 /** In a tight list the first paragraph is unwrapped, everything else is not. */
@@ -901,63 +942,166 @@ function renderCode(block, ctx) {
     block.closed === false
       ? h('span.md-code__warn', { title: 'Der Codeblock wurde nicht geschlossen (fehlende ```-Zeile).' }, text('unvollständig'))
       : null,
-    ctx.copy ? copyButton(block.code) : null);
+    ctx.copy ? kopierKnopf(() => block.code, {
+      klasse: 'md-code__copy',
+      titel: 'Den Codeblock in die Zwischenablage kopieren',
+      markieren: () => code,
+    }) : null);
 
   return h('div.md-code', { dataset: { lang: language || 'text' } }, head, pre);
 }
 
+/* ------------------------------------------------------------------ */
+/* Kopieren                                                            */
+/* ------------------------------------------------------------------ */
+
+const SYMBOL_KOPIEREN = '<rect x="7" y="7" width="9.6" height="9.6" rx="2.2"/><path d="M13 7V5.2A1.8 1.8 0 0 0 11.2 3.4H5.2a1.8 1.8 0 0 0-1.8 1.8v6a1.8 1.8 0 0 0 1.8 1.8H7"/>';
+const SYMBOL_KOPIERT = '<path d="m4.2 10.6 3.9 3.9 7.7-8.9"/>';
+
 /**
- * Copy-to-clipboard with an honest failure mode: when the clipboard is not
- * available the button says so instead of pretending the copy happened.
+ * Text in die Zwischenablage -- auch dort, wo es `navigator.clipboard` nicht
+ * gibt. Das ist kein Randfall: das iPad oeffnet Neural OS ueber
+ * http://<LAN-IP>, und ausserhalb eines sicheren Kontexts (https oder
+ * localhost) fehlt die Schnittstelle ganz. Dann geht es ueber ein
+ * verstecktes Textfeld und `execCommand('copy')` -- veraltet, aber in Safari
+ * und Chromium weiter der einzige Weg ohne sicheren Kontext. Das Feld hat
+ * 16 px, sonst zoomt iOS beim Markieren in die Seite.
+ *
+ * Muss INNERHALB des Klicks aufgerufen werden (Nutzergeste), sonst lehnt
+ * der Browser beides ab.
+ *
+ * @param {string} value
+ * @returns {Promise<boolean>} ob wirklich kopiert wurde
  */
-function copyButton(value) {
-  const button = h('button.md-code__copy', {
+export async function kopieren(value) {
+  const inhalt = String(value ?? '');
+  const api = typeof navigator !== 'undefined' ? navigator.clipboard : null;
+  if (api && typeof api.writeText === 'function') {
+    try {
+      await api.writeText(inhalt);
+      return true;
+    } catch {
+      /* verweigert (Berechtigung, kein Fokus): der alte Weg kann es noch */
+    }
+  }
+  return kopierenAlt(inhalt);
+}
+
+function kopierenAlt(inhalt) {
+  if (typeof document === 'undefined' || typeof document.execCommand !== 'function') return false;
+  const vorher = document.activeElement;
+  const feld = document.createElement('textarea');
+  feld.value = inhalt;
+  feld.setAttribute('readonly', '');
+  feld.setAttribute('aria-hidden', 'true');
+  feld.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px;';
+  document.body.appendChild(feld);
+  let ok = false;
+  try {
+    feld.focus({ preventScroll: true });
+    feld.select();
+    feld.setSelectionRange(0, inhalt.length);
+    ok = document.execCommand('copy') === true;
+  } catch {
+    ok = false;
+  } finally {
+    feld.remove();
+    if (vorher && typeof vorher.focus === 'function') {
+      try { vorher.focus({ preventScroll: true }); } catch { /* weg */ }
+    }
+  }
+  return ok;
+}
+
+/**
+ * Ein Kopierknopf mit ehrlicher Rueckmeldung: "Kopiert" mit Haken fuer zwei
+ * Sekunden -- oder, wenn gar nichts geht, markiert er den Inhalt und sagt
+ * "Markiert – Strg+C", statt so zu tun, als sei kopiert worden.
+ *
+ * @param {() => string} wert   liefert den Text erst beim Klick (der Block kann noch wachsen)
+ * @param {{klasse:string, titel:string, markieren?:() => Node|null}} opts
+ */
+export function kopierKnopf(wert, opts = {}) {
+  const label = h('span', null, text('Kopieren'));
+  const button = h(`button.${opts.klasse || 'md-code__copy'}`, {
     type: 'button',
-    title: 'Den Codeblock in die Zwischenablage kopieren',
-  }, text('Kopieren'));
+    title: opts.titel || 'In die Zwischenablage kopieren',
+    'aria-label': opts.titel || 'In die Zwischenablage kopieren',
+  }, icon(SYMBOL_KOPIEREN), label);
 
   let resetTimer = null;
-  const say = (message, ok) => {
-    button.textContent = '';
-    button.appendChild(text(message));
-    button.classList.toggle('is-ok', ok === true);
-    button.classList.toggle('is-error', ok === false);
+  const zeige = (wort, zustand) => {
+    button.replaceChildren(icon(zustand === 'ok' ? SYMBOL_KOPIERT : SYMBOL_KOPIEREN), h('span', null, text(wort)));
+    button.classList.toggle('is-ok', zustand === 'ok');
+    button.classList.toggle('is-error', zustand === 'fehler');
     if (resetTimer) clearTimeout(resetTimer);
     resetTimer = setTimeout(() => {
-      button.textContent = '';
-      button.appendChild(text('Kopieren'));
+      button.replaceChildren(icon(SYMBOL_KOPIEREN), h('span', null, text('Kopieren')));
       button.classList.remove('is-ok', 'is-error');
-    }, 1800);
+    }, 2000);
   };
 
-  button.addEventListener('click', async () => {
-    try {
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-        await navigator.clipboard.writeText(value);
-        say('Kopiert', true);
-        return;
-      }
-      throw new Error('Zwischenablage nicht verfügbar');
-    } catch (err) {
-      // Fall back to a selection the user can copy by hand, then say what
-      // happened -- silently doing nothing would look like a broken button.
-      const pre = button.closest('.md-code');
-      const target = pre && pre.querySelector('.md-code__text');
-      if (target && typeof window.getSelection === 'function') {
-        const range = document.createRange();
-        range.selectNodeContents(target);
-        const selection = window.getSelection();
-        selection.removeAllRanges();
-        selection.addRange(range);
-        say('Markiert – Strg+C', false);
-        return;
-      }
-      button.title = `Kopieren nicht möglich: ${err && err.message ? err.message : err}`;
-      say('Nicht möglich', false);
+  button.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    const ok = await kopieren(wert());
+    if (ok) {
+      zeige('Kopiert', 'ok');
+      return;
     }
+    // Letzter Ausweg: markieren, damit Strg+C (oder "Kopieren" im Menue) geht.
+    const ziel = typeof opts.markieren === 'function' ? opts.markieren() : null;
+    if (ziel && typeof window.getSelection === 'function') {
+      const range = document.createRange();
+      range.selectNodeContents(ziel);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      zeige('Markiert – Strg+C', 'fehler');
+      return;
+    }
+    zeige('Nicht möglich', 'fehler');
   });
-
   return button;
+}
+
+/** Welche Codeblöcke Texte zum Weiterverwenden sind, und wie ihre Karte heißt. */
+const KOPIER_ARTEN = new Map(Object.entries({
+  prompt: 'Prompt',
+  text: 'Text',
+  txt: 'Text',
+  email: 'E-Mail',
+  'e-mail': 'E-Mail',
+  mail: 'E-Mail',
+  nachricht: 'Nachricht',
+  message: 'Nachricht',
+  brief: 'Brief',
+}));
+
+function kopierArt(lang) {
+  return KOPIER_ARTEN.get(String(lang || '').trim().toLowerCase()) || null;
+}
+
+const SYMBOL_KARTE = '<path d="M5.4 2.7h5.9l3.9 3.9v9.1a1.6 1.6 0 0 1-1.6 1.6H5.4a1.6 1.6 0 0 1-1.6-1.6V4.3a1.6 1.6 0 0 1 1.6-1.6z"/><path d="M11.1 2.9v3.9h3.9M6.8 10.4h6.4M6.8 13.4h4.2"/>';
+
+/**
+ * Der Text zum Weiterverwenden als eigene Karte: Titel links, ein deutliches
+ * "Kopieren" OBEN rechts (man sieht es, ohne bis ans Ende eines langen
+ * Prompts zu rollen), und kopiert wird NUR der Inhalt des Blocks -- nicht
+ * die Einleitung davor, nicht die Erklaerung danach.
+ */
+function renderKopierKarte(block, titel) {
+  const body = h('div.md-copycard__body', null, text(block.code));
+  const kopfRechts = kopierKnopf(() => block.code, {
+    klasse: 'md-copycard__copy',
+    titel: `${titel} kopieren`,
+    markieren: () => body,
+  });
+  return h('div.md-copycard', { dataset: { art: titel } },
+    h('div.md-copycard__head', null,
+      h('span.md-copycard__title', null, icon(SYMBOL_KARTE), h('span', null, text(titel))),
+      block.closed === false ? h('span.md-copycard__warn', null, text('wird noch geschrieben …')) : null,
+      kopfRechts),
+    body);
 }
 
 function renderInlineNodes(nodes, ctx) {
@@ -1749,8 +1893,13 @@ const MARKDOWN_CSS = `
 .md-code__lang { font-size: var(--fs-xs); font-weight: 600; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
 .md-code__warn { font-size: var(--fs-xs); color: var(--warn); }
 .md-code__copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   margin-left: auto;
-  padding: 2px 8px;
+  min-height: 28px;
+  padding: 0 8px;
+  font: inherit;
   font-size: var(--fs-xs);
   color: var(--fg-muted);
   background: none;
@@ -1758,9 +1907,67 @@ const MARKDOWN_CSS = `
   border-radius: var(--r-1);
   cursor: pointer;
 }
+.md-code__copy svg { width: 14px; height: 14px; flex: none; }
 .md-code__copy:hover { color: var(--fg); border-color: var(--border-strong); }
 .md-code__copy.is-ok { color: var(--ok); }
 .md-code__copy.is-error { color: var(--danger); }
+.md-copycard {
+  margin: 0 0 var(--sp-2);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: var(--r-3);
+  overflow: hidden;
+}
+.md-copycard__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 8px 8px 8px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.md-copycard__title { display: inline-flex; align-items: center; gap: 7px; font-size: var(--fs-sm); font-weight: 600; color: var(--accent-text); }
+.md-copycard__title svg { width: 16px; height: 16px; flex: none; }
+.md-copycard__warn { font-size: var(--fs-xs); color: var(--fg-subtle); }
+.md-copycard__copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  min-height: 32px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: var(--r-full);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.md-copycard__copy svg { width: 15px; height: 15px; flex: none; }
+.md-copycard__copy:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.md-copycard__copy.is-ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 55%, transparent); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.md-copycard__copy.is-error { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, transparent); background: none; }
+.md-copycard__body {
+  padding: 12px 14px 14px;
+  font-size: var(--fs-md);
+  line-height: var(--lh);
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.md-list--haken { padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.md-item--haken { display: flex; align-items: flex-start; gap: 10px; list-style: none; margin: 0; }
+.md-list:not(.md-list--haken) > .md-item--haken { margin-left: calc(var(--sp-3) * -1); }
+.md-haken { display: inline-grid; place-items: center; flex: none; width: 20px; height: 20px; margin-top: 1px; color: var(--fg-subtle); }
+.md-haken svg { width: 20px; height: 20px; }
+.md-haken.is-erledigt { color: var(--accent); }
+.md-haken__zug { stroke: var(--accent-fg); stroke-width: 1.8; }
+.md-haken__text { min-width: 0; flex: 1 1 auto; }
+@media (pointer: coarse) {
+  .md-code__copy, .md-copycard__copy { min-height: var(--tap-min); }
+}
 .md-code__body { margin: 0; padding: var(--sp-1) var(--sp-2); overflow-x: auto; }
 .md-code__text { font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.5; white-space: pre; }
 .md-tok--kw { color: var(--accent); font-weight: 600; }
@@ -1779,6 +1986,8 @@ const MARKDOWN_CSS = `
 `;
 
 export default {
+  kopieren,
+  kopierKnopf,
   render: renderMarkdown,
   renderMarkdown,
   renderInline,

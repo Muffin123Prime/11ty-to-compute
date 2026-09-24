@@ -269,14 +269,17 @@ test('a revoked token is rejected and stays on record', async () => {
   }, shareOn);
 });
 
-test('sharing on: no credential means no access, and the session cookie is one', async () => {
+/** Ein Gerät im WLAN, das die LAN-Adresse des Laptops aufruft. */
+const LAN = { remote: '192.168.1.44', host: '192.168.1.5:7777' };
+
+test('sharing on: from outside, no credential means no access, and the session cookie is one', async () => {
   await withAuth('auth-sharing', async ({ auth }) => {
     assert.equal(auth.bootstrapNeeded(), true);
 
-    const none = await auth.middleware(req());
+    const none = await auth.middleware(req(LAN));
     assert.equal(none.ok, false);
     assert.equal(none.error.status, 401);
-    assert.match(none.error.message, /Zugriffstoken/);
+    assert.match(none.error.message, /Token/);
 
     const { token } = await auth.createToken({ label: 'Browser' });
     assert.equal(auth.bootstrapNeeded(), false);
@@ -287,14 +290,46 @@ test('sharing on: no credential means no access, and the session cookie is one',
     assert.match(setCookie, /SameSite=Strict/);
 
     const cookieValue = setCookie.split(';')[0].trim();
-    const res = await auth.middleware(req({ headers: { cookie: `theme=dark; ${cookieValue}` } }));
+    const res = await auth.middleware(req({ ...LAN, headers: { cookie: `theme=dark; ${cookieValue}` } }));
     assert.equal(res.ok, true, res.ok ? '' : res.error && res.error.message);
     assert.equal(res.identity.kind, 'token');
 
     // The cookie is a credential like any other: CSRF still applies to writes.
-    const write = await auth.middleware(req({ method: 'POST', headers: { cookie: cookieValue } }));
+    const write = await auth.middleware(req({ ...LAN, method: 'POST', headers: { cookie: cookieValue } }));
     assert.equal(write.ok, false);
     assert.match(write.error.message, /X-Neural-OS/);
+  }, shareOn);
+});
+
+test('sharing on: this machine stays the owner; an explicit token is measured, an ambient cookie is not', async () => {
+  await withAuth('auth-sharing-lokal', async ({ auth }) => {
+    // Ohne Kopf lokal: Besitzer -- "iPad verbinden" sperrt den Laptop nicht aus.
+    const lokal = await auth.middleware(req());
+    assert.equal(lokal.ok, true, lokal.ok ? '' : lokal.error.message);
+    assert.equal(lokal.identity.kind, 'owner');
+
+    const { token } = await auth.createToken({ label: 'Lesen', permissions: { read: true } });
+    // Ein altes Cookie im Browser des Laptops macht den Menschen an der Tastatur nicht zum Gast.
+    const mitCookie = await auth.middleware(req({ headers: { cookie: `nos_session=${encodeURIComponent(token)}` } }));
+    assert.equal(mitCookie.identity.kind, 'owner');
+    // Wer ausdrücklich ein Token vorzeigt (ein Partner, ein Werkzeug), wird daran gemessen -- auch lokal.
+    const bearer = await auth.middleware(req({ headers: { authorization: `Bearer ${token}` } }));
+    assert.equal(bearer.identity.kind, 'token');
+    const falsch = await auth.middleware(req({ headers: { authorization: 'Bearer nos_x.falsch' } }));
+    assert.equal(falsch.ok, false);
+    assert.equal(falsch.error.status, 401);
+  }, shareOn);
+});
+
+test('a 401 sets WWW-Authenticate so a client knows what to send', async () => {
+  await withAuth('auth-challenge', async ({ auth }) => {
+    const headers = {};
+    const res = await auth.middleware(req(LAN), {
+      headersSent: false,
+      setHeader: (k, v) => { headers[k] = v; },
+    });
+    assert.equal(res.ok, false);
+    assert.equal(headers['WWW-Authenticate'], 'Bearer realm="Neural OS"');
   }, shareOn);
 });
 
@@ -313,17 +348,6 @@ test('sharing on: the health endpoint stays reachable from this machine', async 
   });
 });
 
-test('a 401 sets WWW-Authenticate so a client knows what to send', async () => {
-  await withAuth('auth-challenge', async ({ auth }) => {
-    const headers = {};
-    const res = await auth.middleware(req(), {
-      headersSent: false,
-      setHeader: (k, v) => { headers[k] = v; },
-    });
-    assert.equal(res.ok, false);
-    assert.equal(headers['WWW-Authenticate'], 'Bearer realm="Neural OS"');
-  }, shareOn);
-});
 
 test('createToken validates its input instead of inventing defaults', async () => {
   await withAuth('auth-token-validate', async ({ auth }) => {

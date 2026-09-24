@@ -317,11 +317,15 @@ async function main() {
     await page.goto(`${base}/#/chat?id=${probe.id}`, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(1500);
     const chatText = await page.locator('main').innerText();
-    // Die Offline-KI ist gestrichen; die KI ist Claude. Ohne Schluessel (so
-    // laeuft diese Pruefung) muss der Chat das sagen, statt leer zu bleiben.
-    // Das Muster nimmt beide Fassungen, bis der Chat neu gebaut ist.
-    check(/Claude|Schlüssel|kein lokales Modell|Kein Modell/i.test(chatText),
-      'Ohne KI sagt der Chat warum, statt leer zu bleiben', chatText.replace(/\s+/g, ' ').slice(0, 90));
+    // Die KI ist Claude. Ohne Schluessel (so laeuft diese Pruefung) steht
+    // statt eines leeren Chats die Karte "Verbinde Claude" mit genau EINEM
+    // Feld da. Den ganzen Weg mit Schluessel (Statist), Rueckfragen, Kopieren,
+    // Stopp und Bearbeiten prueft tools/chat-beweis.js im Browser.
+    check(/Verbinde Claude/.test(chatText) && /console\.anthropic\.com/.test(chatText)
+      && await page.locator('.cv-verbinden input').count() === 1,
+    'Ohne Claude: „Verbinde Claude“ mit einem Feld und dem Satz, wo es den Schlüssel gibt', chatText.replace(/\s+/g, ' ').slice(0, 90));
+    check(await page.locator('.cv-composer__feld').count() === 1 && await page.locator('.cv-composer__clip').count() === 1,
+      'Das Eingabefeld ist eine Karte mit Büroklammer und rundem Senden-Knopf');
     check((await page.locator('.topbar__title').innerText()).trim() !== 'Neuer Chat',
       'Der Kopf zeigt bei einem offenen Chat nicht „Neuer Chat“',
       (await page.locator('.topbar__title').innerText()).trim());
@@ -459,6 +463,13 @@ async function main() {
       hmm('GET /api/claude antwortet', 'die Route fehlt noch (Bereich Claude-Unterbau) – der Status sagt deshalb „Online“, nie „verbunden“');
     }
     await page.close();
+
+    /* --------- 10. Einstellungen: PIN per Klick, iPad per QR-Code */
+    // Zuletzt, weil die PIN den Tresor dieser Prüfung verschlüsselt: danach
+    // braucht jeder andere Browser die PIN, und das soll keinen früheren
+    // Abschnitt stören.
+    console.log(`\n${B}10 · Einstellungen: PIN per Klick, iPad per QR-Code${X}`);
+    await pruefeSchutzUndIpad(browser, base, app);
   } finally {
     await browser.close().catch(() => {});
     await app.close().catch(() => {});
@@ -966,6 +977,53 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
     }
   }
 
+  /* --- Serie: "Alle" verschiebt die Serie selbst, nicht nur das Vorkommen --- */
+  {
+    const vor14 = new Date(d.getFullYear(), d.getMonth(), d.getDate() - 14);
+    const beginn = `${vor14.getFullYear()}-${pad(vor14.getMonth() + 1)}-${pad(vor14.getDate())}`;
+    const wtCode = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'][d.getDay()];
+    const alle = createEvent(store, {
+      title: 'Alle-Probe', start: `${beginn}T17:00`, end: `${beginn}T17:45`,
+      recurrence: { freq: 'weekly', interval: 1, byDay: [wtCode], until: null, count: null },
+    });
+    await store.flush();
+    await warte(1500);
+    const heutiges = page.locator(`.kal__block[data-key="${alle.id}@${heute}"]`);
+    if (!(await heutiges.count())) {
+      bad('Eine woechentliche Serie mit Vorgeschichte erscheint heute im Raster', 'nicht gefunden');
+    } else {
+      await ziehe(heutiges, stunde);
+      await warte(600);
+      await page.locator('.kal__frage').getByRole('button', { name: 'Alle' }).click().catch(() => {});
+      await warte(1400);
+      const danach = store.get(alle.id);
+      check(danach.data.start === `${beginn}T18:00` && danach.data.end === `${beginn}T18:45`
+        && termine().filter((t) => t.data.title === 'Alle-Probe').length === 1,
+      '„Alle“: die ganze Serie beginnt eine Stunde später – ab ihrem ersten Tag, ohne Einzeltermin',
+      `${danach.data.start}–${danach.data.end}`);
+    }
+  }
+
+  /* --- am unteren Rand ziehen verlaengert --- */
+  if (probe) {
+    const block = page.locator('.kal__block', { hasText: 'Probe beim Zahnarzt' }).first();
+    await block.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+    const box = await block.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height - 3);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height - 3 + stunde / 2, { steps: 6 });
+    await page.mouse.up();
+    await warte(1300);
+    check(store.get(probe.id).data.end === `${heute}T11:00`, 'Der untere Rand, eine halbe Stunde tiefer gezogen, verlängert bis 11:00',
+      store.get(probe.id).data.end);
+    const rueck = page.locator('.toast', { hasText: 'Probe beim Zahnarzt' }).getByRole('button', { name: 'Rückgängig' });
+    if (await rueck.count()) {
+      await rueck.first().click();
+      await warte(1300);
+    }
+    check(store.get(probe.id).data.end === `${heute}T10:30`, 'und „Rückgängig“ kürzt ihn wieder auf 10:30', store.get(probe.id).data.end);
+  }
+
   /* --- loeschen: ohne Rueckfrage, dafuer mit Rueckgaengig --- */
   if (probe) {
     await page.goto(`${base}/#/kalender?id=${probe.id}`, { waitUntil: 'domcontentloaded' });
@@ -1018,13 +1076,28 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
   await warte(1500);
   const kachel = page.locator('.tile[data-tile="kalender"]');
   const kachelText = (await kachel.innerText().catch(() => '')).replace(/\s+/g, ' ');
-  check(/Heute, /.test(kachelText) && /Rückruf Werkstatt/.test(kachelText),
-    'Die Kachel „Kalender“ zeigt die heutigen Termine', kachelText.slice(0, 90));
-  store.create('event', { title: 'Paket abholen', start: `${heute}T18:00` });
+  // Wie viele Termine heute sind, sagt der Server (Serien je Vorkommen); die
+  // Kachel zeigt davon hoechstens drei -- die noch kommenden zuerst -- und
+  // nennt den Rest. Gezaehlt, nicht nach einem Titel gesucht: welcher Termin
+  // um diese Uhrzeit schon vorbei ist, haengt davon ab, wann die Pruefung laeuft.
+  const heuteZahl = await page.evaluate(async (tag) => {
+    const r = await fetch(`/api/events/zeitraum?from=${tag}&to=${tag}`, { headers: { Accept: 'application/json' } });
+    return r.ok ? (await r.json()).items.length : -1;
+  }, heute);
+  const zeilen = await kachel.locator('.kwk__row').count();
+  const weitere = (await kachel.locator('.kwk__more').innerText().catch(() => '')).trim();
+  check(/Heute, /.test(kachelText) && heuteZahl > 0 && zeilen === Math.min(3, heuteZahl)
+    && (heuteZahl <= 3 ? weitere === '' : weitere.includes(String(heuteZahl - 3))),
+  'Die Kachel „Kalender“ zeigt die heutigen Termine – höchstens drei, der Rest als Zahl',
+  `${zeilen} Zeilen von ${heuteZahl}${weitere ? `, „${weitere}“` : ''}`);
+  // In fuenf Minuten (vor Mitternacht: 23:59) -- noch nicht vorbei, also sichtbar.
+  const gleich = new Date(Date.now() + 5 * 60000);
+  const paketBeginn = gleich.getDate() === d.getDate() ? `${heute}T${pad(gleich.getHours())}:${pad(gleich.getMinutes())}` : `${heute}T23:59`;
+  store.create('event', { title: 'Paket abholen', start: paketBeginn });
   await store.flush();
   await warte(1600);
   check(/Paket abholen/.test(await kachel.innerText().catch(() => '')),
-    'und einen neuen Termin von heute ohne Neuladen');
+    'und einen neuen Termin von heute ohne Neuladen – was gleich kommt, steht vor dem, was vorbei ist', paketBeginn.slice(11));
 
   /* --- Notizwand: Herkunft, anheften, Kachel --- */
   const notiz = store.create('note', { title: 'Fragen für die Werkstatt', body: 'Bremsen prüfen lassen.', source: 'auto', chatId: chat.id });
@@ -1304,6 +1377,107 @@ function messeTippziele(vokabular) {
 }
 
 /** Der Willkommensdialog liegt beim ersten Start über allem. */
+/**
+ * PIN und iPad, so wie ein Mensch sie bedient -- und geprüft, ob es im Tresor
+ * und im Netz wirklich wirkt, nicht nur, ob eine grüne Meldung erscheint.
+ * Gemerkte Geräte landen in einem Wegwerf-Ordner, nie im echten Profil.
+ */
+async function pruefeSchutzUndIpad(browser, base, app) {
+  const profil = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-ui-profil-'));
+  const vorher = process.env.NEURAL_OS_GERAETE;
+  process.env.NEURAL_OS_GERAETE = profil;
+  const kontext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const fehler = [];
+  try {
+    const seite = await kontext.newPage();
+    seite.on('pageerror', (e) => fehler.push(e.message));
+    await seite.goto(`${base}/#/settings`, { waitUntil: 'domcontentloaded' });
+    await seite.waitForTimeout(1200);
+    await dismissWelcome(seite);
+    const gruppen = await seite.locator('.setv__gruppe h2').allInnerTexts();
+    check(['Claude', 'Schutz', 'iPad verbinden', 'Darstellung', 'Netzwerk', 'Speicher'].every((g) => gruppen.includes(g)),
+      'Die Einstellungen haben die sechs ruhigen Gruppen', gruppen.join(' · '));
+    check(await seite.locator('details.setv__mehr:not([open])').count() === 1,
+      'Das Technische liegt eingeklappt unter „Für Fortgeschrittene“');
+
+    // PIN: zweimal dieselbe, dann ist der Tresor wirklich verschlüsselt.
+    await seite.getByRole('button', { name: 'PIN einrichten' }).click();
+    const feld = seite.locator('.setv__pin').first();
+    check(await feld.getAttribute('type') === 'text' && await feld.getAttribute('inputmode') === 'numeric'
+      && await seite.locator('form .setv__pin').count() === 0,
+      'Das PIN-Feld: Ziffern-Tastatur, kein Passwortfeld, kein Formular (der Browser will sie nicht speichern)');
+    await feld.fill('2468');
+    await seite.getByRole('button', { name: 'Weiter' }).click();
+    await seite.locator('.setv__pin').first().fill('2468');
+    const merken = seite.locator('.setv__check input');
+    if (await merken.isChecked()) await merken.uncheck();
+    await seite.getByRole('button', { name: 'PIN einrichten' }).click();
+    await seite.waitForTimeout(2500);
+    check(app.vaultCrypto && app.vaultCrypto.enabled === true && app.vaultCrypto.art() === 'pin',
+      'Ein Klick auf „PIN einrichten“ verschlüsselt den Tresor wirklich', app.vaultCrypto ? app.vaultCrypto.state : 'keine Verschlüsselung');
+    check(/PIN aktiv/.test(await seite.locator('[data-gruppe="schutz"]').innerText()), 'und die Gruppe sagt „PIN aktiv“');
+
+    // Ein zweiter Browser ohne PIN bekommt keine Daten -- und genau hier die PIN-Abfrage.
+    const fremd = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    try {
+      const zweit = await fremd.newPage();
+      await zweit.goto(`${base}/#/settings`, { waitUntil: 'domcontentloaded' });
+      await zweit.waitForTimeout(1500);
+      const antwort = await zweit.evaluate(async () => (await fetch('/api/records?type=note')).status);
+      check(antwort === 401, 'Ein anderer Browser ohne PIN bekommt keine Notizen', `HTTP ${antwort}`);
+      await zweit.locator('.setv__pin').first().fill('1111');
+      await zweit.getByRole('button', { name: 'Entsperren' }).click();
+      await zweit.waitForTimeout(1500);
+      check(/Falsche PIN/.test(await zweit.locator('[data-gruppe="schutz"]').innerText()), 'Eine falsche PIN sagt „Falsche PIN.“');
+      await zweit.locator('.setv__pin').first().fill('2468');
+      await zweit.getByRole('button', { name: 'Entsperren' }).click();
+      await zweit.waitForTimeout(2500);
+      const danach = await zweit.evaluate(async () => (await fetch('/api/records?type=note')).status);
+      check(danach === 200, 'Mit der richtigen PIN ist dieser Browser drin', `HTTP ${danach}`);
+    } finally {
+      await fremd.close().catch(() => {});
+    }
+
+    // iPad: der Knopf öffnet das WLAN ohne Neustart und zeigt einen QR-Code.
+    const lan = Object.values(os.networkInterfaces()).flat().find((i) => i && (i.family === 'IPv4' || i.family === 4) && !i.internal);
+    if (!lan) {
+      hmm('iPad verbinden', 'dieser Rechner hat keine Netzadresse außer 127.0.0.1');
+    } else {
+      app.lanAdressen = () => [{ adresse: lan.address, schnittstelle: 'Prüfung' }];
+      await seite.getByRole('button', { name: 'iPad verbinden', exact: true }).click();
+      await seite.waitForTimeout(1200);
+      const qr = seite.locator('.setv__qr-bild path');
+      const d = (await qr.count()) ? await qr.getAttribute('d') : '';
+      check(d.length > 1000, 'Der Knopf zeigt einen QR-Code', `${(d.match(/M/g) || []).length} dunkle Module`);
+      const link = (await seite.locator('.setv__link').innerText()).trim();
+      check(new URL(link).hostname === lan.address && /\/api\/verbinden\?c=/.test(link),
+        'Der Code führt zur eigenen WLAN-Adresse, mit Einmal-Code', link.replace(/c=.*/, 'c=…'));
+      check(/Warte auf das iPad/.test(await seite.locator('[data-gruppe="ipad"]').innerText()),
+        'Vor dem Scannen steht „Warte auf das iPad“ – nicht schon „verbunden“');
+      // Das "iPad" löst ein. Es ist ein Aufruf aus diesem Prozess; die
+      // prozessweite Härtung würde ihn abweisen, ein echtes iPad nicht.
+      const { runInternal } = require('../src/net/gate');
+      const u = new URL(link);
+      const status = await runInternal(() => new Promise((resolve, reject) => {
+        const http = require('node:http');
+        const req = http.get({ host: u.hostname, port: Number(u.port), path: `${u.pathname}${u.search}`, headers: { host: u.host, 'user-agent': 'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X)' } }, (res) => { res.resume(); resolve(res.statusCode); });
+        req.on('error', reject);
+      }));
+      await seite.waitForTimeout(1500);
+      check(status === 303 && /iPad ist verbunden/.test(await seite.locator('[data-gruppe="ipad"]').innerText()),
+        'Erst nach dem Einlösen steht dort „iPad ist verbunden.“', `HTTP ${status}`);
+      await seite.evaluate(async () => { await fetch('/api/ipad', { method: 'DELETE', headers: { 'x-neural-os': '1' } }); });
+      delete app.lanAdressen;
+    }
+    check(fehler.length === 0, 'Keine Seitenfehler dabei', fehler.slice(0, 2).join(' | '));
+  } finally {
+    await kontext.close().catch(() => {});
+    if (vorher === undefined) delete process.env.NEURAL_OS_GERAETE;
+    else process.env.NEURAL_OS_GERAETE = vorher;
+    fs.rmSync(profil, { recursive: true, force: true });
+  }
+}
+
 async function dismissWelcome(page) {
   try {
     const btn = page.getByRole('button', { name: /Los geht/ });

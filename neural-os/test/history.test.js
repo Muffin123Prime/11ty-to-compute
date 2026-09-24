@@ -463,6 +463,45 @@ test('the undone mark survives a reload', async () => {
   });
 });
 
+test('Rueckgaengig Schritt fuer Schritt rueckwaerts: nach dem juengsten auch das davor, und nach einem Neuladen genauso', async () => {
+  await withHistory('history-kette', async ({ store, history, make }) => {
+    // Termin angelegt, zweimal verschoben -- dann alles rueckwaerts zuruecknehmen.
+    const ev = store.create('event', { title: 'Zahnarzt', start: '2026-10-01T15:00' });
+    store.update(ev.id, { start: '2026-10-02T09:00' });
+    store.update(ev.id, { start: '2026-10-02T11:00' });
+    const [zweite, erste, anlegen] = history.list({ type: 'event' }).items;
+    assert.deepEqual([zweite.op, erste.op, anlegen.op], ['update', 'update', 'create']);
+
+    await history.undo(zweite.seq);
+    assert.equal(store.get(ev.id).data.start, '2026-10-02T09:00');
+    // Vorher: 409 "Fassung 2 -> 4", weil das Zuruecknehmen selbst die Fassung hochzaehlt.
+    assert.equal(history.get(erste.seq).canUndo, true, 'die Aenderung davor ist jetzt wieder die juengste');
+    await history.undo(erste.seq);
+    assert.equal(store.get(ev.id).data.start, '2026-10-01T15:00');
+
+    // Auch ein zweiter Verlauf ueber derselben Datei (Neustart) kennt die Kette.
+    const neu = make();
+    assert.equal(neu.get(anlegen.seq).canUndo, true);
+    await neu.undo(anlegen.seq);
+    assert.equal(store.get(ev.id), null, 'der Termin ist weg');
+  });
+});
+
+test('Die Kette reisst, sobald danach jemand anderes aendert -- und der Grund nennt, wer, ohne Fassungsnummern', async () => {
+  await withHistory('history-kette-fremd', async ({ store, history }) => {
+    const ev = store.create('event', { title: 'Training', start: '2026-10-06T18:00' });
+    store.update(ev.id, { exdates: ['2026-10-13'] });
+    const [aendern, anlegen] = history.list({ type: 'event' }).items;
+    await history.undo(aendern.seq);
+    store.update(ev.id, { location: 'Halle 5' }); // danach: eine neue Aenderung
+    const state = history.get(anlegen.seq);
+    assert.equal(state.canUndo, false);
+    assert.match(state.reason, /von dir erneut geändert/);
+    assert.match(state.reason, /Nimm zuerst diese spätere Änderung zurück/);
+    assert.ok(!/Fassung/.test(state.reason), 'keine technischen Fassungsnummern');
+  });
+});
+
 test('a record changed after the journalled change is not silently overwritten', async () => {
   await withHistory('history-conflict', async ({ store, history }) => {
     const note = store.create('note', { title: 'Alt', body: 'A' });

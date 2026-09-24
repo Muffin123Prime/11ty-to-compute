@@ -249,6 +249,22 @@ test('rangeFor: jede Ansicht laedt genau, was sie zeigt', async () => {
   assert.deepEqual(k.rangeFor('liste', '2026-01-01', 60, '2026-09-23'), { from: '2026-09-23', to: '2026-11-21' });
 });
 
+test('Kachel "Kalender – Heute": ist heute zu viel, weicht zuerst, was schon vorbei ist', async () => {
+  const w = await load('kalender', 'widgets');
+  const z = (id, past) => ({ id, past });
+  const ids = (xs) => xs.map((x) => x.id);
+  assert.deepEqual(ids(w.auswahl([z('a', true), z('b', false)])), ['a', 'b'], 'passt alles hinein: alles, auch Vergangenes');
+  // 15 Uhr: Zahnarzt (9) und Telefonat (9:30) vorbei, Post (15), Dichtung (16:30), Training (18) kommen.
+  const tag = [z('zahnarzt', true), z('telefonat', true), z('post', false), z('dichtung', false), z('training', false)];
+  assert.deepEqual(ids(w.auswahl(tag)), ['post', 'dichtung', 'training'], 'nur, was noch kommt');
+  const abends = [z('zahnarzt', true), z('telefonat', true), z('post', true), z('training', false)];
+  assert.deepEqual(ids(w.auswahl(abends)), ['telefonat', 'post', 'training'], 'Rest aufgefuellt mit den zuletzt vergangenen, Reihenfolge bleibt');
+  const ganzOben = [z('urlaub', false), z('zahnarzt', true), z('post', false), z('training', false), z('kino', false)];
+  assert.deepEqual(ids(w.auswahl(ganzOben)), ['urlaub', 'post', 'training'], 'Ganztaegiges bleibt vorn');
+  assert.deepEqual(ids(w.auswahl([z('a', true), z('b', true), z('c', true), z('d', true)])), ['b', 'c', 'd'], 'alles vorbei: die letzten drei');
+  assert.deepEqual(w.auswahl([]), []);
+});
+
 /* ------------------------------------------------------------ Erinnerung */
 
 test('Erinnerung in Worten', async () => {
@@ -291,6 +307,28 @@ test('Erinnerung: ganztaegig um neun, Texte vor, bei und nach Beginn', async () 
   assert.equal(r.wannText(zehn, zehn - 60 * 60000), 'In 1 Std');
   assert.equal(r.wannText(zehn, zehn - 90 * 60000), 'Heute 10:00');
   assert.equal(r.beginnMs('kaputt'), null);
+});
+
+test('Erinnerung ueber die Zeitumstellung: „1 Tag vorher“ ist der Vortag zur selben Uhrzeit, wie TRIGGER:-P1D in der Kalenderdatei', async () => {
+  const r = await load('erinnerung', 'lib');
+  const vorher = process.env.TZ;
+  process.env.TZ = 'Europe/Berlin';
+  try {
+    // 25.10.2026: die Uhr wird zurueckgestellt, der Tag hat 25 Stunden.
+    assert.equal(r.ausloeseMs('2026-10-25T10:00', 1440), new Date(2026, 9, 24, 10, 0).getTime(),
+      'Sa 24.10. um 10:00 -- nicht um 11:00 (1440 echte Minuten)');
+    // 29.03.2026: vorgestellt. Ganztaegig "Zum Beginn" bleibt neun Uhr Wandzeit.
+    assert.equal(r.ausloeseMs('2026-03-29', 0), new Date(2026, 2, 29, 9, 0).getTime());
+    assert.equal(r.ausloeseMs('2026-03-30', 1440), new Date(2026, 2, 29, 9, 0).getTime());
+    // Minuten bleiben genaue Minuten.
+    assert.equal(r.ausloeseMs('2026-10-25T10:00', 120), new Date(2026, 9, 25, 10, 0).getTime() - 120 * 60000);
+    const faellig = r.faellige([{ id: 'event_x', data: { title: 'X', start: '2026-10-25T10:00', reminder: 1440 } }],
+      new Date(2026, 9, 24, 10, 1).getTime());
+    assert.equal(faellig.length, 1, 'am Vortag um 10:01 ist sie schon da');
+  } finally {
+    if (vorher === undefined) delete process.env.TZ;
+    else process.env.TZ = vorher;
+  }
 });
 
 /* --------------------------------------------------- Notizwand, Projekte */

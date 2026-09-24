@@ -386,6 +386,7 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
         if (target) {
           target.undone = true;
           target.undoneAt = parsed.at || null;
+          if (Number.isFinite(parsed.revNach)) target.revNach = parsed.revNach;
         }
         continue;
       }
@@ -419,6 +420,7 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
       actor: isPlainObject(raw.actor) ? raw.actor : { kind: 'user' },
       undone: raw.undone === true,
       undoneAt: typeof raw.undoneAt === 'string' ? raw.undoneAt : null,
+      revNach: Number.isFinite(raw.revNach) ? raw.revNach : null,
       gruppe: typeof raw.gruppe === 'string' ? raw.gruppe : null,
     };
   }
@@ -488,6 +490,7 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
     if (entry.rev !== null) line.rev = entry.rev;
     if (entry.fromRev !== null) line.fromRev = entry.fromRev;
     if (entry.undoneAt) line.undoneAt = entry.undoneAt;
+    if (Number.isFinite(entry.revNach)) line.revNach = entry.revNach;
     if (entry.gruppe) line.gruppe = entry.gruppe;
     return line;
   }
@@ -582,6 +585,7 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
       actor: actorOf(data, patch, eventActor),
       undone: false,
       undoneAt: null,
+      revNach: null,
       gruppe: offeneGruppe,
     };
 
@@ -700,6 +704,54 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
 
   /* --------------------------------------------------------- undoability */
 
+  /**
+   * Die Fassung, der der heutige Stand eines Satzes GLEICHT.
+   *
+   * Jedes Zuruecknehmen schreibt selbst und zaehlt `rev` hoch. Ohne diese
+   * Rechnung liesse sich deshalb je Satz nur EIN Schritt zuruecknehmen: nach
+   * "Verschieben zurueck" hat der Termin Fassung 3, das Anlegen erwartet
+   * Fassung 1 -- und "Anlegen zurueck" wuerde abgelehnt, obwohl seit dem
+   * Anlegen nichts anderes geschehen ist als die zurueckgenommene Aenderung.
+   * Ein sauber zurueckgenommener Eintrag merkt sich die Fassung, die dabei
+   * entstand (`revNach`); sie steht fuer den Stand VOR ihm (`rev - 1`: jeder
+   * Schreibvorgang zaehlt um genau eins hoch, src/store/engine.js). So geht
+   * es Schritt fuer Schritt rueckwaerts. Hat danach jemand anderes etwas
+   * geaendert, passt keine Kette mehr, und es bleibt beim Nein.
+   */
+  function gleichwertigeFassung(id, rev) {
+    let stand = rev;
+    const gesehen = new Set();
+    for (;;) {
+      if (gesehen.has(stand)) return stand;
+      gesehen.add(stand);
+      let treffer = null;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i];
+        if (e.id === id && e.undone && e.revNach === stand && Number.isFinite(e.rev)) {
+          treffer = e;
+          break;
+        }
+      }
+      if (!treffer || treffer.op === 'create') return stand;
+      stand = treffer.rev - 1;
+    }
+  }
+
+  /** Der naechste noch geltende Eintrag desselben Satzes nach `entry` -- fuer einen Satz, der sagt, WER danach geaendert hat. */
+  function spaeterer(entry) {
+    for (const e of entries) {
+      if (e.seq > entry.seq && e.id === entry.id && !e.undone) return e;
+    }
+    return null;
+  }
+
+  function geaendertGrund(entry) {
+    const danach = spaeterer(entry);
+    if (!danach) return 'Der Eintrag wurde seitdem auf anderem Weg erneut geändert. Das lässt sich nicht mehr gefahrlos zurücknehmen.';
+    const wer = danach.actor && danach.actor.kind === 'agent' ? 'von der KI' : 'von dir';
+    return `Der Eintrag wurde danach ${wer} erneut geändert („${danach.label}“). Nimm zuerst diese spätere Änderung zurück.`;
+  }
+
   /** @returns {{canUndo:boolean, reason:string|null, current:object|null}} */
   function undoability(entry) {
     if (entry.undone) return { canUndo: false, reason: REASON_UNDONE, current: null };
@@ -714,12 +766,8 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
       if (entry.op === 'delete') return { canUndo: true, reason: null, current: null };
       return { canUndo: false, reason: REASON_GONE, current: null };
     }
-    if (Number.isFinite(entry.rev) && current.rev !== entry.rev) {
-      return {
-        canUndo: false,
-        reason: `Der Eintrag wurde seitdem erneut geändert (Fassung ${entry.rev} → ${current.rev}).`,
-        current,
-      };
+    if (Number.isFinite(entry.rev) && current.rev !== entry.rev && gleichwertigeFassung(entry.id, current.rev) !== entry.rev) {
+      return { canUndo: false, reason: geaendertGrund(entry), current };
     }
     return { canUndo: true, reason: null, current };
   }
@@ -813,13 +861,16 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
     return entry;
   }
 
-  function markUndone(entry) {
+  function markUndone(entry, revNach = null) {
     entry.undone = true;
     entry.undoneAt = nowIso();
+    entry.revNach = Number.isFinite(revNach) ? revNach : null;
     // Appended rather than rewritten in place: the journal stays append-only,
     // so a crash here can lose at most this mark, never an entry. `rewrite()`
     // folds the marks back into their entries when it next trims.
-    appendLine({ at: entry.undoneAt, mark: 'undone', seq: entry.seq });
+    const mark = { at: entry.undoneAt, mark: 'undone', seq: entry.seq };
+    if (entry.revNach !== null) mark.revNach = entry.revNach;
+    appendLine(mark);
     maybeTrim();
   }
 
@@ -875,8 +926,12 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
       .sort((a, b) => b.seq - a.seq);
   }
 
-  /** Die echte Umkehrung eines Eintrags, am Journal vorbei. */
-  function umkehren(entry) {
+  /**
+   * Die echte Umkehrung eines Eintrags, am Journal vorbei.
+   * @param {boolean} sauber  ohne `force` pruefbar gewesen -- nur dann steht
+   *   die neue Fassung fuer den Stand davor (siehe gleichwertigeFassung).
+   */
+  function umkehren(entry, sauber = true) {
     let applied;
     switch (entry.op) {
       case 'create': {
@@ -938,7 +993,7 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
         throw refuse(`Unbekannte Änderungsart „${entry.op}".`, { seq: entry.seq });
     }
 
-    markUndone(entry);
+    markUndone(entry, sauber && applied.op !== 'recreate' ? applied.rev : null);
     return applied;
   }
 
@@ -949,9 +1004,13 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
 
     // Erst ALLE pruefen, dann schreiben: eine halb zurueckgenommene Gruppe
     // ist genau der Zustand, den die Gruppe verhindern soll.
+    const sauber = new Set();
     for (const glied of glieder) {
       const state = undoability(glied);
-      if (state.canUndo) continue;
+      if (state.canUndo) {
+        sauber.add(glied.seq);
+        continue;
+      }
       // `force` answers exactly one question -- "ja, ich weiß, dass seitdem
       // etwas anderes passiert ist" -- and nothing else. An entry that is
       // already undone, or whose record is gone, has no inverse left to force.
@@ -968,7 +1027,7 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
     let applied = null;
     const mitgenommen = [];
     for (const glied of glieder) {
-      const ergebnis = umkehren(glied);
+      const ergebnis = umkehren(glied, sauber.has(glied.seq));
       if (glied === entry) applied = ergebnis;
       else mitgenommen.push({ entry: clone(toLine(glied)), applied: ergebnis });
     }

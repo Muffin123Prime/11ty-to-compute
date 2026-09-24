@@ -9,6 +9,11 @@
  * Serien kommen je Vorkommen (Vertrag B: gleiche id, `occurrence`); ein
  * Antippen oeffnet genau dieses Vorkommen (`&am=JJJJ-MM-TT`).
  *
+ * Sind heute mehr Termine als Platz, zeigt die Kachel die, die noch kommen
+ * oder gerade laufen (siehe `auswahl`) -- um 15 Uhr hilft der Zahnarzt von
+ * neun niemandem mehr. Einen Termin der KI erkennt man am selben kleinen
+ * Zeichen wie im Kalender.
+ *
  * Live ueber den Bus (record.* mit Satzart `event`): legt die KI im Chat einen
  * Termin fuer heute an, steht er hier, waehrend die Antwort noch laeuft. Um
  * Mitternacht rueckt die Kachel von selbst auf den neuen Tag.
@@ -46,7 +51,10 @@ const CSS = `
   transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
 }
 .kwk__row:hover .kwk__card { background: var(--surface-2); border-color: var(--border-strong); }
+.kwk__head { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .kwk__title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13.5px; color: var(--fg); }
+.kwk__ki { display: inline-grid; place-items: center; flex: none; color: var(--fg-subtle); }
+.kwk__ki svg { width: 12px; height: 12px; }
 .kwk__sub { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--fs-sm); color: var(--fg-subtle); }
 .kwk__row.is-past { opacity: 0.5; }
 .kwk__more { display: inline-block; margin-top: 10px; font-size: var(--fs-sm); color: var(--fg-subtle); text-decoration: none; }
@@ -68,6 +76,9 @@ function ensureStyle() {
   node.textContent = CSS;
   document.head.appendChild(node);
 }
+
+/** Dasselbe ruhige Zeichen wie im Kalender (web/views/kalender.js): "von der KI". */
+const GLYPH_KI = '<path d="M10 2.5c.7 4.1 2.4 5.8 6.5 6.5-4.1.7-5.8 2.4-6.5 6.5-.7-4.1-2.4-5.8-6.5-6.5 4.1-.7 5.8-2.4 6.5-6.5z" fill="currentColor" stroke="none"/>';
 
 const pad = (n) => String(n).padStart(2, '0');
 const toDay = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -110,9 +121,27 @@ function span(data) {
   return { allDay, start, end, firstDay: start.day, lastDay };
 }
 
+/**
+ * Welche Termine von heute die Kachel zeigt, wenn nicht alle hineinpassen:
+ * zuerst alle, die noch kommen oder laufen, in ihrer Reihenfolge; ist dann
+ * noch Platz, die zuletzt vergangenen davor. Die Reihenfolge bleibt die des
+ * Tages, nur das Vorbei-Sein entscheidet, wer weichen muss.
+ *
+ * @param {{past:boolean}[]} zeilen  nach Beginn sortiert (Ganztaegiges vorn)
+ * @param {number} [max]
+ * @returns {object[]} die sichtbaren, in derselben Reihenfolge
+ */
+export function auswahl(zeilen, max = MAX_ROWS) {
+  if (zeilen.length <= max) return zeilen.slice();
+  const offen = zeilen.filter((z) => !z.past);
+  if (offen.length >= max) return offen.slice(0, max);
+  const vorbei = zeilen.filter((z) => z.past).slice(-(max - offen.length));
+  return zeilen.filter((z) => !z.past || vorbei.includes(z));
+}
+
 export function mount(el, ctx) {
   ensureStyle();
-  const { h, text, clear, icons, tileHead, api, bus, formatDate } = ctx;
+  const { h, text, clear, icon, icons, tileHead, api, bus, formatDate } = ctx;
   let alive = true;
   let token = 0;
   let head = null;
@@ -140,7 +169,7 @@ export function mount(el, ctx) {
     return end < Date.now();
   }
 
-  function render(day, items, error) {
+  function render(day, items, error, chats = {}) {
     clear(body);
     if (error) {
       body.appendChild(h('p.tile__empty', null, text(`Termine nicht abrufbar: ${error}`)));
@@ -165,23 +194,28 @@ export function mount(el, ctx) {
       body.appendChild(h('p.tile__empty', null, text('Heute nichts.')));
     } else {
       const ul = h('ul.kwk__list');
-      for (const { r, s } of heute.slice(0, MAX_ROWS)) {
+      const zeilen = auswahl(heute.map((x) => ({ ...x, past: past(x.s, day) })));
+      for (const { r, s, past: vorbei } of zeilen) {
         const [von, bis] = label(s, day);
-        const sub = r.data.location || (r.data.source === 'auto' ? 'von der KI' : '');
+        const ki = r.data.source === 'auto';
+        const chat = ki && r.data.chatId ? chats[r.data.chatId] : null;
+        const sub = r.data.location || (chat ? `aus „${chat.title}“` : '');
         ul.appendChild(h('li', null, h('a.kwk__row', {
           href: ziel(r),
-          class: past(s, day) ? 'is-past' : '',
-          'aria-label': `${bis ? `${von} bis ${bis}` : von}, ${r.data.title}${r.data.location ? `, ${r.data.location}` : ''}`,
+          class: vorbei ? 'is-past' : '',
+          'aria-label': `${bis ? `${von} bis ${bis}` : von}, ${r.data.title}${r.data.location ? `, ${r.data.location}` : ''}${ki ? ', von der KI' : ''}`,
         },
         h('span.kwk__time', null, h('span', null, text(von)), bis ? h('span', null, text(bis)) : null),
         h('span.kwk__bar', { 'aria-hidden': 'true' }),
         h('span.kwk__card', null,
-          h('span.kwk__title', null, text(r.data.title)),
+          h('span.kwk__head', null,
+            h('span.kwk__title', null, text(r.data.title)),
+            ki ? h('span.kwk__ki', { title: 'Von der KI angelegt' }, icon(GLYPH_KI)) : null),
           sub ? h('span.kwk__sub', null, text(sub)) : null))));
       }
       body.appendChild(ul);
-      if (heute.length > MAX_ROWS) {
-        const rest = heute.length - MAX_ROWS;
+      if (heute.length > zeilen.length) {
+        const rest = heute.length - zeilen.length;
         body.appendChild(h('a.kwk__more', { href: '#/kalender' }, text(`+ ${rest} ${rest === 1 ? 'weiterer' : 'weitere'} heute`)));
       }
     }
@@ -197,7 +231,7 @@ export function mount(el, ctx) {
   }
 
   let shownDay = null;
-  let last = { items: [], error: null };
+  let last = { items: [], error: null, chats: {} };
   async function load() {
     const mine = ++token;
     const day = toDay(new Date());
@@ -209,12 +243,12 @@ export function mount(el, ctx) {
       // Heute und die naechsten zwei Wochen: genug fuer "Als Naechstes".
       const res = await api.get('/events/zeitraum', { query: { from: day, to: addDays(day, 14) } });
       if (!alive || mine !== token) return;
-      last = { items: Array.isArray(res && res.items) ? res.items : [], error: null };
+      last = { items: Array.isArray(res && res.items) ? res.items : [], error: null, chats: (res && res.chats) || {} };
     } catch (err) {
       if (!alive || mine !== token) return;
-      last = { items: [], error: (err && err.message) || 'unbekannter Fehler' };
+      last = { items: [], error: (err && err.message) || 'unbekannter Fehler', chats: {} };
     }
-    render(day, last.items, last.error);
+    render(day, last.items, last.error, last.chats);
   }
 
   let timer = null;
@@ -229,7 +263,7 @@ export function mount(el, ctx) {
   // Einmal die Minute: vergangene Termine werden blass, um Mitternacht kommt der neue Tag.
   const tick = setInterval(() => {
     if (toDay(new Date()) !== shownDay) load();
-    else render(shownDay, last.items, last.error);
+    else render(shownDay, last.items, last.error, last.chats);
   }, 60000);
   // Nach einer abgerissenen Verbindung koennte ein Ereignis fehlen.
   offs.push(bus.on('hello', () => soon()));

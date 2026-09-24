@@ -31,18 +31,56 @@
  * buy nothing: anyone who can run code here can read the vault directly. So
  * loopback + sharing off = owner, no token, exactly as the contract says.
  *
- * Why enabling sharing locks everyone out, deliberately
- * -----------------------------------------------------
- * The moment sharing is on, a credential is required from EVERY client,
- * loopback included. A "loopback is still free" exception would be a
- * permanent bypass for any local process (and for any rebinding attack that
- * slipped past check 1). The consequence is an ordering requirement, and it is
- * a real one, not an oversight: **mint a token first, then enable sharing.**
- * `createToken()` hands back the raw token exactly once; the settings UI is
- * expected to drop it straight into the `nos_session` cookie via
- * `cookieFor()`, so the owner's own browser stays signed in across the
- * switch-over. `bootstrapNeeded()` reports the stuck state in plain German
- * instead of letting the user stare at a 401.
+ * Mit Freigabe bleibt der Rechner selbst der Besitzer (geändert)
+ * ---------------------------------------------------------------
+ * Früher verlangte eingeschaltete Freigabe von JEDEM ein Token, auch von
+ * 127.0.0.1. Damit sperrte "iPad verbinden" den Laptop aus: sein Browser war
+ * danach bestenfalls ein Token-Gast, und Gäste dürfen keine Einstellungen
+ * ändern -- auch nicht die Freigabe wieder ausschalten. Die Begründung
+ * ("sonst ist jeder lokale Prozess Besitzer") trägt nicht: ohne Freigabe ist
+ * er das ohnehin, und die Freigabe öffnet nur einen Weg von AUSSEN.
+ * Die Regel ist jetzt:
+ *  - Wer einen Zugang ausdrücklich vorzeigt (Authorization: Bearer), wird
+ *    daran gemessen, auch lokal -- so prüft sich ein Partner-Gerät selbst.
+ *  - Lokal ohne Kopf ist der Besitzer. Cookies zählen lokal NICHT: sie hängen
+ *    sich von selbst an, und ein altes Cookie darf den Menschen an der
+ *    Tastatur nicht still zum Gast machen.
+ *  - Von aussen ohne Zugang: 401.
+ * Die Host-Prüfung (1) läuft weiter bei jeder Anfrage, und DNS-Rebinding
+ * braucht einen Namen, den sie abweist.
+ *
+ * iPad verbinden: ein Einmal-Code im Link, nie das Token
+ * ------------------------------------------------------
+ * Der QR-Code enthält `/api/verbinden?c=<Einmal-Code>`, 256 Bit, 10 Minuten
+ * gültig, genau einmal einlösbar. Erst beim Einlösen entsteht das eigentliche
+ * Token, und es geht nur als HttpOnly-Cookie an das iPad, danach leitet der
+ * Server mit 303 auf `/` um -- der Code verschwindet aus der Adresszeile und
+ * ist ohnehin verbraucht. Ein Foto des QR-Codes ist danach wertlos. Der Pfad
+ * liegt unter /api/, weil der Service Worker jede andere Navigation aus dem
+ * Zwischenspeicher bedient; der Code käme dort nie am Server an.
+ *
+ * PIN-Sitzung: der Browser, der entsperrt hat
+ * -------------------------------------------
+ * Ist der Tresor mit einer PIN verschlüsselt und wurde er NICHT über ein
+ * gemerktes Gerät geöffnet (also auf einem fremden Rechner), wäre sonst jeder
+ * Prozess auf diesem Rechner über 127.0.0.1 Besitzer ("offene Loopback-Tür",
+ * Bauplan 4.1). Deshalb braucht lokal dann jede Anfrage das Cookie
+ * `nos_s_<KI>`, das nur bekommt, wer die PIN eingegeben hat. Die Bindung
+ * beginnt, sobald in diesem Prozess ein Browser die PIN eingegeben hat (oder
+ * der Vorraum sie mit `bindungEinschalten()` übergibt) -- nicht schon, weil
+ * irgendein Code entsperrt hat: eine Passphrase aus der Umgebung oder ein
+ * Werkzeug, das in-process verschlüsselt, hat keinen Browser, den man binden
+ * könnte, und würde sonst alle aussperren. Sein Siegel ist
+ * ein HMAC mit einem Schlüssel aus dem Datenschlüssel (vaultcrypto
+ * `sitzungsSiegel`): jeder Prozess, der den Tresor geöffnet hat, kann es
+ * ausstellen und prüfen, es übersteht einen Neustart, und nirgends liegt eine
+ * Sitzungsliste. Es gilt 12 Stunden. Ohne Sitzung bleiben nur der Status,
+ * der Zustand des Tresors und das Entsperren erreichbar (plus die
+ * Oberflächendateien, die keine Daten enthalten).
+ *
+ * Cookies tragen die KI-Kennung im Namen: Browser trennen Cookies nicht nach
+ * Port (RFC 6265 §8.5), und zwei Sticks am selben Rechner dürfen einander
+ * nicht die Sitzung reichen.
  *
  * Why the cookie carries a token instead of a session id
  * ------------------------------------------------------
@@ -64,12 +102,14 @@
 const crypto = require('node:crypto');
 
 const {
+  NeuralError,
   ValidationError,
   AuthError,
   NotFoundError,
   PermissionError,
   asNeuralError,
 } = require('../kernel/errors');
+const vaultcrypto = require('../store/vaultcrypto');
 
 /* ------------------------------------------------------------- constants */
 
@@ -100,6 +140,104 @@ const PUBLIC_PATHS = new Set(['/api/health']);
 
 /** A token's `lastUsedAt` is rewritten at most this often, to spare the log. */
 const LAST_USED_INTERVAL_MS = 60000;
+
+/** Der Link aus dem QR-Code (unter /api/, siehe Kopf). */
+const LINK_PATH = '/api/verbinden';
+/** Wie lange ein Einmal-Code gilt, und wie viele gleichzeitig offen sein dürfen. */
+const EINMAL_GUELTIG_MS = 10 * 60 * 1000;
+const EINMAL_MAX = 20;
+/** Cookie-Namen; die KI-Kennung wird angehängt. */
+const TOKEN_COOKIE_PREFIX = 'nos_t_';
+const SITZUNG_COOKIE_PREFIX = 'nos_s_';
+/** Ein Bildschirm-Gerät (iPad) bleibt angemeldet, bis es getrennt wird (Browser-Höchstwert 400 Tage). */
+const TOKEN_COOKIE_MAX_AGE_S = 400 * 24 * 60 * 60;
+/** So lange gilt eine PIN-Sitzung, danach fragt die PIN wieder. */
+const SITZUNG_MAX_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * Was ohne PIN-Sitzung lokal erreichbar bleibt: genug, um die PIN abzufragen
+ * und zu sagen, dass sie fehlt -- nichts, was Daten zeigt.
+ */
+const FREI_OHNE_SITZUNG = new Set([
+  'GET /api/status',
+  'GET /api/vault',
+  'POST /api/vault/unlock',
+]);
+
+/** Die Rechte eines verbundenen Bildschirms (iPad): alles benutzen, nichts einstellen. */
+const BILDSCHIRM_RECHTE = Object.freeze({ read: true, write: true, chat: true, agents: true });
+
+/**
+ * Der Teil der KI-Kennung, der in Cookie-Namen steht. Fehlt die Kennung noch,
+ * trennt wenigstens der Port (jede KI hat ihren eigenen).
+ */
+function kiTeil(config) {
+  const id = config && config.sync && typeof config.sync.deviceId === 'string' ? config.sync.deviceId : '';
+  const m = /^dev_([0-9a-f]{8})/.exec(id);
+  if (m) return m[1];
+  const port = config && config.server && Number(config.server.port);
+  return `p${Number.isInteger(port) && port > 0 ? port : 7777}`;
+}
+
+/** Name des Sitzungs-Cookies einer KI (auch für den späteren Vorraum). */
+function sitzungsCookieName(config) {
+  return `${SITZUNG_COOKIE_PREFIX}${kiTeil(config)}`;
+}
+
+/** Name des Token-Cookies eines verbundenen Bildschirms. */
+function tokenCookieName(config) {
+  return `${TOKEN_COOKIE_PREFIX}${kiTeil(config)}`;
+}
+
+/**
+ * Ein Sitzungs-Cookie ausstellen. Steht als eigene Funktion da, damit der
+ * Vorraum (Bauplan Paket V) nach dem Entsperren dasselbe Cookie setzen kann:
+ * `res.setHeader('Set-Cookie', pinSitzungCookie({config, vaultCrypto}))`.
+ * @returns {string} Set-Cookie-Wert
+ */
+function pinSitzungCookie({ config, vaultCrypto, jetzt = Date.now() } = {}) {
+  if (!vaultCrypto || typeof vaultCrypto.sitzungsSiegel !== 'function') {
+    throw new ValidationError('Ohne Tresor-Verschlüsselung gibt es keine PIN-Sitzung.');
+  }
+  const zeit = Math.floor(jetzt).toString(36);
+  const nonce = b64url(crypto.randomBytes(12));
+  const siegel = b64url(vaultCrypto.sitzungsSiegel(`v1.${zeit}.${nonce}.${kiTeil(config)}`));
+  // 12 Stunden, wie die Prüfung im Server: wer den Browser schließt und
+  // wieder öffnet, während Neural OS weiterläuft, soll nicht neu tippen. Die
+  // Zeit steht zusätzlich im Siegel, weil ein Cookie-Ablauf beim Client liegt.
+  return `${sitzungsCookieName(config)}=v1.${zeit}.${nonce}.${siegel}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(SITZUNG_MAX_MS / 1000)}`;
+}
+
+/** @returns {boolean} */
+function pinSitzungGueltig({ config, vaultCrypto, wert, jetzt = Date.now() } = {}) {
+  if (typeof wert !== 'string' || wert.length > 200) return false;
+  const teile = wert.split('.');
+  if (teile.length !== 4 || teile[0] !== 'v1') return false;
+  const zeit = parseInt(teile[1], 36);
+  if (!Number.isFinite(zeit) || zeit > jetzt + 60000 || jetzt - zeit > SITZUNG_MAX_MS) return false;
+  if (!vaultCrypto || vaultCrypto.state !== 'unlocked') return false;
+  let erwartet;
+  try {
+    erwartet = vaultCrypto.sitzungsSiegel(`v1.${teile[1]}.${teile[2]}.${kiTeil(config)}`);
+  } catch {
+    return false;
+  }
+  const gegeben = Buffer.from(teile[3].replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  return gegeben.length === erwartet.length && crypto.timingSafeEqual(gegeben, erwartet);
+}
+
+/** Eine kleine, selbst gestaltete HTML-Seite ohne Skript (CSP: inline style erlaubt). */
+function kleineSeite(titel, satz) {
+  const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  return '<!doctype html><html lang="de"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    + `<title>${esc(titel)}</title></head>`
+    + '<body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0c0e;color:#e8e9ec;'
+    + 'font:16px/1.5 -apple-system,system-ui,sans-serif">'
+    + '<main style="max-width:30rem;margin:24px;padding:32px;border-radius:20px;background:#15171a;border:1px solid rgba(255,255,255,.08)">'
+    + `<h1 style="font-size:22px;font-weight:600;margin:0 0 12px">${esc(titel)}</h1>`
+    + `<p style="margin:0;color:#a4a8b0">${esc(satz)}</p></main></body></html>`;
+}
 
 /* --------------------------------------------------------------- helpers */
 
@@ -449,16 +587,72 @@ function createAuth({ store, config, logger, audit } = {}) {
 
   /* ---------------------------------------------------------- credentials */
 
-  function credentialFrom(req) {
+  /**
+   * Der vorgezeigte Zugang. Lokal zählt nur der ausdrückliche Kopf (siehe
+   * Kopf dieser Datei), von aussen auch das Cookie des Bildschirm-Geräts und
+   * das alte `nos_session`.
+   */
+  function credentialFrom(req, loopback) {
     const authorization = req.headers && req.headers.authorization;
     if (typeof authorization === 'string' && authorization) {
       const match = /^Bearer\s+(.+)$/i.exec(authorization.trim());
       if (match) return { value: match[1].trim(), via: 'bearer' };
       return { value: null, via: 'unsupported-scheme' };
     }
+    if (loopback) return { value: null, via: null };
     const cookies = parseCookies(req.headers && req.headers.cookie);
+    const eigenes = cookies[tokenCookieName(config)];
+    if (eigenes) return { value: eigenes, via: 'cookie' };
     if (cookies[COOKIE_NAME]) return { value: cookies[COOKIE_NAME], via: 'cookie' };
     return { value: null, via: null };
+  }
+
+  function vault() {
+    return vaultcrypto.instanzFuer(config);
+  }
+
+  /** Ab dem ersten Browser, der die PIN eingegeben hat (siehe Kopf). */
+  let bindungAktiv = false;
+
+  function bindungNoetig(vc) {
+    if (!vc || !vc.enabled || !bindungAktiv) return false;
+    if (config.security && config.security.pinSitzung === false) return false;
+    return vc.entsperrtDurch !== 'geraet';
+  }
+
+  /**
+   * Braucht dieser lokale Besitzer eine PIN-Sitzung, und hat er sie?
+   * @returns {'keine'|'ok'|'frei'} 'keine' = keine Bindung nötig
+   * @throws {NeuralError} PIN_NOETIG (401)
+   */
+  function pinBindung(req) {
+    const vc = vault();
+    if (!bindungNoetig(vc)) return 'keine';
+    const cookies = parseCookies(req.headers && req.headers.cookie);
+    if (pinSitzungGueltig({ config, vaultCrypto: vc, wert: cookies[sitzungsCookieName(config)] })) return 'ok';
+    const method = String(req.method || 'GET').toUpperCase();
+    const path = pathnameOf(req.url);
+    const key = `${method === 'HEAD' ? 'GET' : method} ${path}`;
+    // Die Dateien der Oberfläche enthalten keine Daten; ohne sie gäbe es
+    // nicht einmal die Stelle, an der man die PIN eingibt.
+    if (FREI_OHNE_SITZUNG.has(key) || ((method === 'GET' || method === 'HEAD') && !path.startsWith('/api/') && path !== '/api')) {
+      return 'frei';
+    }
+    throw new NeuralError(
+      'PIN_NOETIG',
+      vc.state === 'unlocked'
+        ? 'Bitte zuerst die PIN eingeben. Dieser Browser hat die KI noch nicht entsperrt.'
+        : 'Der Tresor ist gesperrt. Bitte die PIN eingeben.',
+      { status: 401, details: { ziel: '#/settings', gesperrt: vc.state !== 'unlocked' } },
+    );
+  }
+
+  /** Solange der Tresor gesperrt ist, sieht auch ein verbundenes Gerät nichts. */
+  function tresorOffenFuerGaeste() {
+    const vc = vault();
+    if (vc && vc.enabled && vc.state !== 'unlocked') {
+      throw new NeuralError('VAULT_LOCKED', 'Der Tresor ist gesperrt. Am Laptop mit der PIN entsperren.', { status: 423 });
+    }
   }
 
   async function authenticate(req) {
@@ -474,7 +668,8 @@ function createAuth({ store, config, logger, audit } = {}) {
           { remote: String(remote || '') },
         );
       }
-      return { identity: OWNER, via: 'loopback' };
+      const bindung = pinBindung(req);
+      return { identity: OWNER, via: bindung === 'ok' ? 'pin-sitzung' : 'loopback' };
     }
 
     // Health is the one endpoint a local process may poll without a token, so
@@ -487,19 +682,157 @@ function createAuth({ store, config, logger, audit } = {}) {
       // config.validateConfig already refuses this combination on a non-local
       // bind, so reaching here means loopback-only sharing without auth.
       if (!loopback) throw new PermissionError('Freigabe ohne Token-Authentifizierung ist für entfernte Geräte nicht erlaubt.');
+      pinBindung(req);
       return { identity: OWNER, via: 'loopback-no-token' };
     }
 
-    const credential = credentialFrom(req);
+    const credential = credentialFrom(req, loopback);
     if (!credential.value) {
+      if (loopback) {
+        const bindung = pinBindung(req);
+        return { identity: OWNER, via: bindung === 'ok' ? 'pin-sitzung' : 'loopback' };
+      }
       const hint = bootstrapNeeded()
-        ? ' Es existiert noch kein gültiges Zugriffstoken: lege in den Einstellungen unter "Freigabe" eines an.'
+        ? ' Es ist noch kein Gerät verbunden: am Laptop unter Einstellungen → iPad verbinden den Code anzeigen.'
         : '';
       throw new AuthError(`Für diesen Zugriff wird ein Token benötigt.${hint}`);
     }
 
     const { record } = await verifyToken(credential.value);
+    tresorOffenFuerGaeste();
     return { identity: identityOfToken(record), via: credential.via, tokenId: record.id };
+  }
+
+  /* ------------------------------------------------ Einmal-Code und Link */
+
+  /** @type {Map<string, {bis:number, label:string, beiEinloesung:Function|null}>} */
+  const einmalCodes = new Map();
+
+  function einmalAufraeumen(jetzt = Date.now()) {
+    for (const [code, e] of einmalCodes) if (e.bis <= jetzt) einmalCodes.delete(code);
+  }
+
+  /**
+   * Einen Einmal-Code für den Verbinden-Link ausstellen.
+   * @param {{gueltigMs?:number, label?:string, beiEinloesung?:(info:object)=>void}} [opts]
+   * @returns {{code:string, bis:string, pfad:string}}
+   */
+  function einmalCode(opts = {}) {
+    einmalAufraeumen();
+    while (einmalCodes.size >= EINMAL_MAX) {
+      // Der älteste weicht; mehr offene Codes braucht niemand.
+      einmalCodes.delete(einmalCodes.keys().next().value);
+    }
+    const gueltig = Number.isFinite(opts.gueltigMs) && opts.gueltigMs > 0 ? Math.min(opts.gueltigMs, 60 * 60 * 1000) : EINMAL_GUELTIG_MS;
+    const code = b64url(crypto.randomBytes(32));
+    const bis = Date.now() + gueltig;
+    einmalCodes.set(code, {
+      bis,
+      label: String(opts.label || 'iPad').slice(0, 120),
+      beiEinloesung: typeof opts.beiEinloesung === 'function' ? opts.beiEinloesung : null,
+    });
+    return { code, bis: new Date(bis).toISOString(), pfad: `${LINK_PATH}?c=${code}` };
+  }
+
+  /** Alle offenen Codes verwerfen (Freigabe aus). */
+  function einmalCodesVerwerfen() {
+    einmalCodes.clear();
+  }
+
+  function sendeSeite(res, status, titel, satz) {
+    const body = kleineSeite(titel, satz);
+    res.writeHead(status, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Content-Length': Buffer.byteLength(body),
+    });
+    res.end(body);
+  }
+
+  /**
+   * GET /api/verbinden?c=… -- den Einmal-Code gegen ein Token-Cookie tauschen
+   * und sofort auf `/` umleiten. Antwortet selbst (303 oder eine kleine Seite).
+   */
+  async function verbinden(req, res) {
+    let code = '';
+    try {
+      code = new URL(req.url, 'http://x.invalid').searchParams.get('c') || '';
+    } catch { /* bleibt leer */ }
+    einmalAufraeumen();
+    const eintrag = code && code.length <= 64 ? einmalCodes.get(code) : null;
+    if (!eintrag) {
+      writeAudit('auth.link.denied', { remote: (req.socket && req.socket.remoteAddress) || null });
+      sendeSeite(res, 410, 'Dieser Code gilt nicht mehr',
+        'Er ist abgelaufen oder wurde schon benutzt. Am Laptop unter Einstellungen → iPad verbinden einen neuen Code anzeigen und noch einmal scannen.');
+      return;
+    }
+    // Einmal heißt einmal: auch wenn gleich etwas schiefgeht.
+    einmalCodes.delete(code);
+    const remote = (req.socket && req.socket.remoteAddress) || '';
+    if (!isLoopbackAddress(remote) && !sharingEnabled()) {
+      sendeSeite(res, 403, 'Freigabe ist aus', 'Am Laptop ist die Verbindung für das iPad gerade ausgeschaltet.');
+      return;
+    }
+    const agent = String((req.headers && req.headers['user-agent']) || '');
+    const geraet = /iPad/.test(agent) ? 'iPad' : /iPhone/.test(agent) ? 'iPhone' : /Macintosh/.test(agent) ? 'Mac' : /Android/.test(agent) ? 'Android' : 'Gerät';
+    const datum = new Date().toLocaleDateString('de-DE', { day: 'numeric', month: 'short' });
+    const { token, record } = await createToken({
+      label: `${eintrag.label === 'iPad' ? geraet : eintrag.label} · verbunden am ${datum}`,
+      permissions: BILDSCHIRM_RECHTE,
+      art: 'bildschirm',
+    });
+    // Lax statt Strict: der erste Aufruf kommt aus der Kamera-App, und die
+    // Umleitung danach soll das Cookie sicher mitnehmen. Gegen fremde Seiten
+    // schützt weiterhin der Pflichtkopf X-Neural-OS bei jeder Änderung.
+    res.writeHead(303, {
+      'Set-Cookie': `${tokenCookieName(config)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${TOKEN_COOKIE_MAX_AGE_S}`,
+      Location: '/',
+      'Cache-Control': 'no-store',
+      'Content-Length': 0,
+    });
+    res.end();
+    writeAudit('auth.link.ok', { tokenId: record.id, remote });
+    if (eintrag.beiEinloesung) {
+      try {
+        eintrag.beiEinloesung({ token: record, remote, geraet });
+      } catch (err) {
+        log.warn(`Rückmeldung nach dem Verbinden gescheitert: ${err && err.message}`);
+      }
+    }
+  }
+
+  /**
+   * Set-Cookie für die PIN-Sitzung dieses Browsers (nach richtiger PIN).
+   * @returns {string|null} null, wenn keine Bindung nötig ist
+   */
+  function sitzungAusstellen() {
+    const vc = vault();
+    if (!vc || !vc.enabled || vc.state !== 'unlocked') return null;
+    const cookie = pinSitzungCookie({ config, vaultCrypto: vc });
+    // Ab jetzt gibt es einen Browser, der die PIN kennt -- alle anderen
+    // brauchen sie auch.
+    bindungAktiv = true;
+    return cookie;
+  }
+
+  /**
+   * Für den Vorraum (Bauplan Paket V): der Browser hat die PIN dort
+   * eingegeben und sein Cookie von dort bekommen; dieser Prozess soll ihn
+   * binden, als hätte er es selbst ausgestellt.
+   */
+  function bindungEinschalten() {
+    bindungAktiv = true;
+  }
+
+  /** Braucht ein lokaler Browser gerade eine PIN-Sitzung, und hat dieser sie? */
+  function sitzungsZustand(req) {
+    const vc = vault();
+    if (!bindungNoetig(vc)) return { noetig: false, vorhanden: false };
+    const cookies = parseCookies(req && req.headers && req.headers.cookie);
+    return {
+      noetig: true,
+      vorhanden: pinSitzungGueltig({ config, vaultCrypto: vc, wert: cookies[sitzungsCookieName(config)] }),
+    };
   }
 
   /* ----------------------------------------------------------- middleware */
@@ -507,9 +840,11 @@ function createAuth({ store, config, logger, audit } = {}) {
   /**
    * Run every check for one request.
    *
-   * Never throws and never writes a body: it returns a verdict so the server
-   * stays in charge of the response shape. `res`, when given, only receives a
-   * `WWW-Authenticate` hint on a 401.
+   * Never throws. It returns a verdict so the server stays in charge of the
+   * response shape -- with one exception: the link from the QR code
+   * (`/api/verbinden`) is answered here directly (303 or a small page), which
+   * the server recognises by `res.headersSent`. `res`, otherwise, only
+   * receives a `WWW-Authenticate` hint on a 401.
    *
    * @param {import('node:http').IncomingMessage} req
    * @param {import('node:http').ServerResponse} [res]
@@ -523,6 +858,10 @@ function createAuth({ store, config, logger, audit } = {}) {
     const path = pathnameOf(req.url);
     try {
       checkHost(req);
+      if (path === LINK_PATH && method === 'GET' && res && typeof res.writeHead === 'function') {
+        await verbinden(req, res);
+        return { ok: true, identity: { kind: 'link', permissions: {} }, via: 'link' };
+      }
       checkCsrf(req);
       const result = await authenticate(req);
       if (result.identity.kind === 'token') {
@@ -539,7 +878,7 @@ function createAuth({ store, config, logger, audit } = {}) {
         host: (req.headers && req.headers.host) || null,
         remote: (req.socket && req.socket.remoteAddress) || null,
       });
-      if (error.status === 401 && res && typeof res.setHeader === 'function' && !res.headersSent) {
+      if (error.status === 401 && error.code !== 'PIN_NOETIG' && res && typeof res.setHeader === 'function' && !res.headersSent) {
         try {
           res.setHeader('WWW-Authenticate', 'Bearer realm="Neural OS"');
         } catch { /* the response may already be committed */ }
@@ -584,8 +923,10 @@ function createAuth({ store, config, logger, audit } = {}) {
     const salt = crypto.randomBytes(16).toString('hex');
     const hash = await scrypt(secret, salt, KDF.keyLen, KDF);
 
+    const art = opts.art === 'bildschirm' ? 'bildschirm' : 'token';
     const record = store.create('token', {
       label,
+      art,
       hash: hash.toString('hex'),
       salt,
       selector,
@@ -627,6 +968,7 @@ function createAuth({ store, config, logger, audit } = {}) {
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
       label: d.label || '',
+      art: d.art === 'bildschirm' ? 'bildschirm' : 'token',
       permissions: d.permissions || {},
       expiresAt: d.expiresAt || null,
       lastUsedAt: d.lastUsedAt || null,
@@ -704,6 +1046,14 @@ function createAuth({ store, config, logger, audit } = {}) {
 
   return {
     middleware,
+    einmalCode,
+    einmalCodesVerwerfen,
+    sitzungAusstellen,
+    sitzungsZustand,
+    bindungEinschalten,
+    get bindungAktiv() { return bindungAktiv; },
+    tokenCookieName: () => tokenCookieName(config),
+    sitzungsCookieName: () => sitzungsCookieName(config),
     createToken,
     revokeToken,
     listTokens,
@@ -723,8 +1073,16 @@ function createAuth({ store, config, logger, audit } = {}) {
 
 module.exports = {
   createAuth,
+  pinSitzungCookie,
+  pinSitzungGueltig,
+  sitzungsCookieName,
+  tokenCookieName,
+  kiTeil,
   COOKIE_NAME,
   CSRF_HEADER,
+  LINK_PATH,
+  BILDSCHIRM_RECHTE,
+  SITZUNG_MAX_MS,
   KDF,
   /** Exposed for tests only. */
   __internals: { hostnameOf, parseCookies, isLoopbackAddress, isIpLiteral, b64url },

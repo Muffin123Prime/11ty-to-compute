@@ -30,7 +30,6 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 
 const { test, drain, tempHome } = require('./harness');
 
@@ -614,114 +613,12 @@ test('Ohne verdrahteten Vergleich antwortet die Route ehrlich mit 503', async ()
 
 /* ------------------------------------------------------------- Anzeige */
 
-/**
- * Die Ansicht im Node-Test.
- *
- * web/** ist Browser-ESM ohne Build-Schritt, dieses Paket ist CommonJS -- Node
- * lädt web/views/chat.js deshalb nicht direkt. Der Test kopiert die Datei und
- * ihre Importe unverändert in ein temporäres Verzeichnis und gibt ihnen nur
- * eine andere Endung; geprüft wird also genau der Quelltext, den der Browser
- * holt, nicht eine Abschrift davon.
- *
- * Zwei reine Funktionen sind dafür exportiert. Beide entscheiden dasselbe:
- * ob die Oberfläche etwas behauptet, das nie gemessen wurde.
+/*
+ * Die Anzeige des Vergleichs (zwei Spalten, Token-Zeile, Modellauswahl) stand
+ * in web/views/chat.js. Der Chat ist neu gebaut: die KI ist Claude, und den
+ * Vergleich zweier Modelle hat der Nutzer gestrichen -- also gibt es dort
+ * weder `tokenSummary` noch `modelChoices`. Was die neue Ansicht an reinen
+ * Funktionen hat, prueft test/chat-ansicht.test.js.
  */
-let viewModule = null;
-async function chatView() {
-  if (viewModule) return viewModule;
-  const web = path.join(__dirname, '..', 'web');
-  const { home, cleanup } = tempHome('nos-cmp-view');
-  const asModule = (src) => src.replace(/(from\s+')([^']+)\.js(')/g, (m, head, spec, tail) => `${head}./${path.basename(spec)}.mjs${tail}`);
-  const copy = (from, to) => fs.writeFileSync(path.join(home, to), asModule(fs.readFileSync(from, 'utf8')));
-  for (const file of fs.readdirSync(path.join(web, 'lib'))) {
-    if (file.endsWith('.js')) copy(path.join(web, 'lib', file), file.replace(/\.js$/, '.mjs'));
-  }
-  copy(path.join(web, 'views', 'chat.js'), 'chat.mjs');
-  try {
-    viewModule = await import(pathToFileURL(path.join(home, 'chat.mjs')).href);
-  } finally {
-    // Ein geladenes Modul lebt im Speicher; die Kopien braucht niemand mehr.
-    cleanup();
-  }
-  return viewModule;
-}
-
-test('Anzeige: ein Backend ohne Tokenzahlen bekommt keine erfundene Null', async () => {
-  const { tokenSummary } = await chatView();
-  // llama.cpp und LM Studio liefern im Strom oft kein `usage`. Genau das hier.
-  const stumm = fakeRegistry([LOCAL], async (target, options) => {
-    options.onDelta('Hallo.');
-    return { content: 'Hallo.', stats: {}, provider: target.providerId, model: target.model };
-  });
-
-  await withCompare('nos-cmp-notok', async ({ compare }) => {
-    const result = await compare.run({ prompt: 'Frage?', a: 'ollama/lokalmodell', b: 'ollama/lokalmodell' });
-    // Über den Draht, wie es der Browser bekommt: JSON kennt kein undefined.
-    const tokens = JSON.parse(JSON.stringify(result)).a.tokens || {};
-    assert.deepEqual(tokens, { prompt: null, completion: null }, 'Voraussetzung: der Server sagt „nicht gemessen“');
-
-    const zeile = tokenSummary(tokens.prompt, tokens.completion);
-    assert.equal(zeile.reported, false);
-    assert.equal(zeile.label, 'Token nicht gemeldet');
-    assert.ok(!/\d/.test(zeile.label), `keine Zahl, wo nichts gemessen wurde: ${zeile.label}`);
-    assert.ok(!/\d/.test(zeile.title), `auch nicht im Titel: ${zeile.title}`);
-  }, { registry: stumm });
-});
-
-test('Anzeige: eine gemessene Null bleibt stehen, eine halbe Meldung wird keine Summe', async () => {
-  const { tokenSummary } = await chatView();
-
-  // Eine wirklich gemeldete 0 ist eine Messung und darf nicht verschwinden.
-  const null_ = tokenSummary(0, 0);
-  assert.equal(null_.reported, true);
-  assert.equal(null_.label, '0 Token');
-
-  // Nur eine Hälfte gemeldet: die Teilsumme darf nicht als Gesamtzahl auftreten.
-  const nurAusgabe = tokenSummary(null, 33);
-  assert.equal(nurAusgabe.label, 'Ausgabe 33 Token');
-  assert.notEqual(nurAusgabe.label, '33 Token', 'eine halbe Summe ist keine Gesamtzahl');
-  assert.match(nurAusgabe.title, /Eingabe: nicht gemeldet/);
-  assert.ok(!/Eingabe: 0/.test(nurAusgabe.title), nurAusgabe.title);
-
-  const nurEingabe = tokenSummary(7, undefined);
-  assert.equal(nurEingabe.label, 'Eingabe 7 Token');
-  assert.match(nurEingabe.title, /Ausgabe: nicht gemeldet/);
-
-  // Beides gemeldet: unverändert eine Summe, mit beiden Hälften im Titel.
-  const beides = tokenSummary(7, 11);
-  assert.equal(beides.label, '18 Token');
-  assert.match(beides.title, /Eingabe: 7 · Ausgabe: 11/);
-});
-
-test('Anzeige: eine ungelesene Modellliste ist keine leere Liste', async () => {
-  const { modelChoices } = await chatView();
-
-  const gelesen = modelChoices({
-    providers: [{ id: 'ollama', kind: 'ollama', available: true, models: [{ id: 'lokalmodell', name: 'lokalmodell' }] }],
-  }, 'ollama/lokalmodell');
-  assert.equal(gelesen.read, true);
-  assert.equal(gelesen.groups.length, 1);
-  assert.equal(gelesen.groups[0].options[0].value, 'ollama/lokalmodell');
-  assert.equal(gelesen.stray, null);
-
-  // Genau das, was loadModels() nach einem fehlgeschlagenen Lesen setzt.
-  const blind = modelChoices({ unavailable: true, error: 'Der lokale Neural-OS-Server ist nicht erreichbar.' }, 'ollama/lokalmodell');
-  assert.equal(blind.read, false, 'nicht nachgesehen ist nicht dasselbe wie nichts gefunden');
-  assert.match(blind.reason, /nicht erreichbar/);
-  assert.deepEqual(blind.groups, []);
-  assert.ok(blind.stray, 'die Auswahl darf das gewählte Modell nicht verschlucken');
-  assert.equal(blind.stray.note, 'Status unbekannt');
-
-  // Noch gar nicht geholt: ebenfalls kein Blick, aber auch kein Grund.
-  const nochNicht = modelChoices(null, '');
-  assert.equal(nochNicht.read, false);
-  assert.equal(nochNicht.reason, null);
-
-  // Gelesen und wirklich leer: das darf die Auswahl sagen.
-  const leer = modelChoices({ providers: [] }, 'ollama/lokalmodell');
-  assert.equal(leer.read, true);
-  assert.deepEqual(leer.groups, []);
-  assert.equal(leer.stray.note, 'zurzeit nicht erreichbar');
-});
 
 module.exports = { name: 'compare', tests: drain() };
