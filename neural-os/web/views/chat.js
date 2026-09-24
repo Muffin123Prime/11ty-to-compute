@@ -501,6 +501,12 @@ function baueAnsicht(container, ctx) {
   let claude = null; // {verbunden, grundCode, grund, …} oder null (unbekannt)
   let claudeGeprueft = false;
   let wartet = null; // Text, der nach dem Verbinden gesendet wird
+  // Die Verbinden-Karte wird neu gebaut, sobald sich der Claude-Zustand
+  // aendert (Netzmodus, Tresor ...). Schluessel und Fehlersatz ueberleben das
+  // hier -- nur im Speicher dieses Tabs, nie im Browser-Speicher.
+  let schluesselEntwurf = '';
+  let verbindenFehler = '';
+  let verbindet = false;
   let folgen = true;
   let anhaenge = [];
   /** Zustand der Oberflaeche je Nachricht: auf-/zugeklappt, Auswahl … */
@@ -685,9 +691,11 @@ function baueAnsicht(container, ctx) {
 
   function zeichneOben(leer) {
     if (ladeFehler) return;
+    // Waehrend "Verbinden" laeuft, bleibt die Karte stehen (Knopf, Spinner).
+    if (verbindet) return;
     const fehlt = !!claude && claude.verbunden === false;
     const art = leer ? (fehlt ? 'verbinden' : (claudeGeprueft ? 'leer' : 'laedt')) : (fehlt ? 'unten' : 'nichts');
-    const key = `${art}|${fehlt ? JSON.stringify([claude.grundCode, claude.grund]) : ''}`;
+    const key = `${art}|${fehlt ? JSON.stringify([claude.grundCode, claude.grund, mussOnline()]) : ''}`;
     if (key === obenKey) return;
     obenKey = key;
     clear(oben);
@@ -718,8 +726,20 @@ function baueAnsicht(container, ctx) {
   }
 
   /**
+   * Offline (ab Werk) oder nur lokales Netz: der Schluessel laesst sich erst
+   * pruefen, wenn Neural OS ins Internet darf (src/models/claude.js,
+   * 409 CLAUDE_OFFLINE). Dieselbe Bedingung wie dort.
+   */
+  function mussOnline() {
+    const n = claude && claude.netz;
+    return !!n && n.erlaubt === false && !!n.modus && n.modus !== 'online';
+  }
+
+  /**
    * Die ruhige Karte, wenn Claude nicht antworten kann. Genau ein Feld, ein
    * Satz, wo es den Schluessel gibt -- und danach geht es sofort weiter.
+   * Ist Neural OS offline, ist das derselbe eine Schritt: der Knopf sagt
+   * "Online gehen und verbinden", und genau das tut der Klick.
    */
   function baueVerbinden(kompakt) {
     const code = claude && claude.grundCode;
@@ -776,6 +796,8 @@ function baueAnsicht(container, ctx) {
     }
 
     // Kein oder ein falscher Schluessel: das eine Feld.
+    const online = mussOnline();
+    const knopfText = online ? 'Online gehen und verbinden' : 'Verbinden';
     const eingabeFeld = h('input.input', {
       type: 'password',
       name: 'claude-schluessel',
@@ -783,8 +805,11 @@ function baueAnsicht(container, ctx) {
       spellcheck: 'false',
       placeholder: 'sk-ant-…',
       'aria-label': 'Claude-Schlüssel',
+      onInput: (e) => { schluesselEntwurf = e.target.value; },
     });
-    const knopf = h('button.btn.btn--primary', { type: 'submit' }, h('span', null, text('Verbinden')));
+    eingabeFeld.value = schluesselEntwurf;
+    if (verbindenFehler) zeigeFehler(verbindenFehler);
+    const knopf = h('button.btn.btn--primary', { type: 'submit' }, h('span', null, text(knopfText)));
     const form = h('form.cv-verbinden__form', {
       onSubmit: async (e) => {
         e.preventDefault();
@@ -793,16 +818,30 @@ function baueAnsicht(container, ctx) {
           eingabeFeld.focus();
           return;
         }
+        schluesselEntwurf = eingabeFeld.value;
+        verbindenFehler = '';
+        verbindet = true;
         knopf.disabled = true;
         eingabeFeld.disabled = true;
         clear(knopf);
-        knopf.append(h('span.spinner.cv-spinner', { 'aria-hidden': 'true' }), h('span', null, text('Prüfe …')));
+        knopf.append(h('span.spinner.cv-spinner', { 'aria-hidden': 'true' }), h('span', null, text(online ? 'Gehe online …' : 'Prüfe …')));
         fehler.hidden = true;
+        // Die Zustimmung ist der Klick auf "Online gehen und verbinden".
+        // Scheitert danach die Pruefung, geht der Netzmodus zurueck -- der
+        // Klick galt beidem zusammen.
+        const vorher = online ? claude.netz.modus : null;
+        let umgeschaltet = false;
         try {
+          if (online) {
+            await api.put('/network', { mode: 'online' });
+            umgeschaltet = true;
+          }
           const z = await api.post('/claude/schluessel', { schluessel: wert }, { timeoutMs: 45000 });
           claude = { ...z };
+          schluesselEntwurf = '';
           eingabeFeld.value = '';
           ctx.toast('Claude ist verbunden.', 'success');
+          verbindet = false;
           obenKey = null;
           plane();
           if (wartet) {
@@ -813,18 +852,31 @@ function baueAnsicht(container, ctx) {
             feld.focus();
           }
         } catch (err) {
-          if (err && err.code === 'CLAUDE_OFFLINE') {
-            claude = { verbunden: false, grundCode: 'offline', grund: err.message };
-            obenKey = null;
-            plane();
-            return;
+          if (umgeschaltet && vorher) {
+            try { await api.put('/network', { mode: vorher }); } catch { /* der Status unten links zeigt, was gilt */ }
           }
-          zeigeFehler((err && err.message) || 'Der Schlüssel ließ sich nicht prüfen.');
+          if (online && !umgeschaltet) {
+            verbindenFehler = err && err.status === 403
+              ? 'Online schalten geht nur am Gerät selbst, auf dem Neural OS läuft.'
+              : `Nicht umgeschaltet: ${(err && err.message) || 'unbekannter Fehler'}`;
+          } else if (!(err && err.code === 'CLAUDE_OFFLINE')) {
+            // CLAUDE_OFFLINE ohne Umschalten: der Zustand war veraltet; die
+            // neu gebaute Karte bietet "Online gehen und verbinden" an.
+            verbindenFehler = (err && err.message) || 'Der Schlüssel ließ sich nicht prüfen.';
+          }
+          verbindet = false;
+          await claudeLaden();
+          if (!lebt) return;
+          obenKey = null;
+          plane();
         } finally {
-          knopf.disabled = false;
-          eingabeFeld.disabled = false;
-          clear(knopf);
-          knopf.appendChild(h('span', null, text('Verbinden')));
+          verbindet = false;
+          if (knopf.isConnected) {
+            knopf.disabled = false;
+            eingabeFeld.disabled = false;
+            clear(knopf);
+            knopf.appendChild(h('span', null, text(knopfText)));
+          }
         }
       },
     }, eingabeFeld, knopf);
@@ -1756,7 +1808,9 @@ function baueAnsicht(container, ctx) {
       }
     }
     claudeGeprueft = true;
-    obenKey = null;
+    // Kein obenKey = null: neu gebaut wird die Karte nur, wenn sich ihr
+    // Zustand aendert (zeichneOben vergleicht). Sonst verloere ein
+    // Schluesselfeld bei jedem Ereignis seinen Inhalt.
     if (lebt) plane();
   }
   const claudeBald = debounce(claudeLaden, 400);

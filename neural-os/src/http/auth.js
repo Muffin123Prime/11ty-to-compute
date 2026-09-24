@@ -239,6 +239,39 @@ function kleineSeite(titel, satz) {
     + `<p style="margin:0;color:#a4a8b0">${esc(satz)}</p></main></body></html>`;
 }
 
+/* ------------------------------------------------------- welche KI? */
+
+/**
+ * Gehört dieser Tab zu dieser KI? (Bauplan 2.6)
+ *
+ * Ein Tab, der noch offen ist, nachdem sein Stick beendet wurde, spricht
+ * weiter mit `127.0.0.1:<port>`. Startet dort inzwischen eine andere KI,
+ * landete alles, was der alte Tab schickt, in ihr: gemessen legte ein
+ * `POST /api/chats` aus dem Tab von A einen Chat in B an (belegt, v5). Die
+ * Oberfläche schickt deshalb die Kennung ihrer KI mit, sobald sie sie aus
+ * `/api/status` kennt, und zwar bei **jeder** Anfrage: auch ein GET oder ein
+ * Ereignisstrom zeigte sonst die Daten von B in einer Seite, die A meint.
+ *
+ * - Kopf fehlt oder ist `1` -> erlaubt: das ist der erste Aufruf eines Tabs,
+ *   ein Werkzeug oder ein Test. Die CSRF-Regel bleibt davon unberührt.
+ * - Kopf ist die Kennung dieser KI -> erlaubt.
+ * - sonst `409 KI_GEWECHSELT`; die Oberfläche lädt dann neu.
+ *
+ * Keine eigene Kennung (ein Server ohne Identität, z. B. in Tests) heißt:
+ * es gibt nichts zu vergleichen.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @param {string} [kiId] die Kennung dieser KI (`dev_…`)
+ * @throws {NeuralError} 409 KI_GEWECHSELT
+ */
+function guardKi(req, kiId) {
+  if (typeof kiId !== 'string' || !kiId) return;
+  const roh = req && req.headers ? req.headers[CSRF_HEADER] : undefined;
+  const kopf = typeof roh === 'string' ? roh.trim() : '';
+  if (!kopf || kopf === '1' || kopf === kiId) return;
+  throw new NeuralError('KI_GEWECHSELT', 'Dieser Tab gehört zu einer anderen KI.', { status: 409 });
+}
+
 /* --------------------------------------------------------------- helpers */
 
 function nullLogger() {
@@ -1066,6 +1099,7 @@ function createAuth({ store, config, logger, audit } = {}) {
     /** Exposed so the server can reuse the same checks on non-API routes. */
     checkHost,
     checkCsrf,
+    guardKi,
     allowedHostNames,
     COOKIE_NAME,
   };
@@ -1073,6 +1107,7 @@ function createAuth({ store, config, logger, audit } = {}) {
 
 module.exports = {
   createAuth,
+  guardKi,
   pinSitzungCookie,
   pinSitzungGueltig,
   sitzungsCookieName,

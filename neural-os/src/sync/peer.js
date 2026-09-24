@@ -142,6 +142,10 @@ function sanitisePeer(record, extra = {}) {
  * @param {object} [deps.auth]  token administration; used to report whether a partner
  *   can reach this device at all. May be attached later via setAuth().
  * @param {object} [deps.paths] used to persist the generated device id
+ * @param {{id:string}} [deps.identitaet] die Identität dieser KI (src/kernel/identitaet.js).
+ *   Die Kennung wird bei jedem Vorgang frisch von dort gelesen: erneuert sich
+ *   die KI (kopierter Datenordner, Zwilling), trägt schon der nächste Abgleich
+ *   die neue. Ohne sie (Tests) legt der Abgleich wie bisher selbst eine an.
  */
 function createSync(deps = {}) {
   const store = deps.store;
@@ -156,7 +160,13 @@ function createSync(deps = {}) {
   let auth = deps.auth || null;
 
   const appVersion = safeAppVersion();
-  const deviceId = ensureDeviceId();
+  const identitaet = deps.identitaet && typeof deps.identitaet === 'object' ? deps.identitaet : null;
+  const eigeneKennung = identitaet ? null : ensureDeviceId();
+
+  /** Die Kennung dieses Geräts, für genau diesen Vorgang. */
+  function deviceIdJetzt() {
+    return identitaet ? identitaet.id : eigeneKennung;
+  }
 
   /** Peers a pull/push is currently running for, so two clicks cannot race. */
   const busy = new Set();
@@ -556,7 +566,7 @@ function createSync(deps = {}) {
     return {
       version: SYNC_PROTOCOL,
       appVersion,
-      deviceId,
+      deviceId: deviceIdJetzt(),
       recordCount: recordCount(),
       now: nowIso(),
       types: [...merge.SYNC_TYPES],
@@ -604,7 +614,7 @@ function createSync(deps = {}) {
       throw new ValidationError(`Es werden höchstens ${MAX_PAGE_SIZE} Datensätze pro Anfrage angenommen (empfangen: ${records.length}).`);
     }
     const senderDeviceId = typeof payload.deviceId === 'string' ? payload.deviceId : null;
-    if (senderDeviceId && senderDeviceId === deviceId) {
+    if (senderDeviceId && senderDeviceId === deviceIdJetzt()) {
       throw new ValidationError(
         'Der Absender meldet dieselbe Geräte-Kennung wie dieses Gerät. Das wäre ein Abgleich mit sich selbst und '
         + 'würde jeden Eintrag verdoppeln.',
@@ -865,7 +875,7 @@ function createSync(deps = {}) {
     const finished = Date.now();
     const remoteNow = Date.parse(remote && remote.now);
     const clockSkewMs = Number.isFinite(remoteNow) ? Math.round(remoteNow - (started + finished) / 2) : null;
-    if (remote && remote.deviceId && remote.deviceId === deviceId) {
+    if (remote && remote.deviceId && remote.deviceId === deviceIdJetzt()) {
       throw new ValidationError(
         `"${peer.data.name}" meldet dieselbe Geräte-Kennung wie dieses Gerät. Ein Gerät kann sich nicht mit sich `
         + 'selbst abgleichen; prüfe die Adresse.',
@@ -1148,7 +1158,7 @@ function createSync(deps = {}) {
         const currentPeer = peerRecord(peerId);
         const bases = basesOf(currentPeer);
         const payload = {
-          deviceId,
+          deviceId: deviceIdJetzt(),
           records: batch.map((e) => e.record),
           bases: Object.fromEntries(batch
             .map((e) => [e.record.id, merge.baseHash(bases[e.record.id])])
@@ -1312,7 +1322,7 @@ function createSync(deps = {}) {
   function summary() {
     const peers = allPeers();
     return {
-      deviceId,
+      deviceId: deviceIdJetzt(),
       protocol: SYNC_PROTOCOL,
       peers: peers.length,
       enabled: peers.filter((p) => p.data.enabled !== false).length,
@@ -1328,7 +1338,7 @@ function createSync(deps = {}) {
   }
 
   return {
-    get deviceId() { return deviceId; },
+    get deviceId() { return deviceIdJetzt(); },
     get protocol() { return SYNC_PROTOCOL; },
     setAuth(next) { auth = next || null; return !!auth; },
     get auth() { return auth; },

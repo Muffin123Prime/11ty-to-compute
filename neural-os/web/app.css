@@ -784,8 +784,9 @@ mark {
 
 .tile__head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 2px 12px;
   min-height: 28px;
   margin-bottom: 14px;
   color: var(--fg);
@@ -1857,10 +1858,26 @@ pre.code {
 /* ------------------------------------------------------------------ */
 
 /* Mittlere Breite (1000-1279, iPad quer): alles wie breit, nur die rechte
-   Spalte ist schmaler und startet zu (web/app.js). */
+   Spalte ist schmaler und startet zu (web/app.js). Damit die Kacheltitel in
+   320 px ganz dastehen ("Agenten aktiv", nicht "Agenten ..."), ruecken die
+   Kacheln enger und die Randnotiz wird kleiner; reicht es trotzdem nicht
+   (andere Schrift auf dem iPad), bricht die Randnotiz in eine eigene Zeile
+   um (.tile__head wrap) -- der Titel wird nie gekuerzt. */
 @media (max-width: 1279px) {
   :root {
     --aside-w: 320px;
+  }
+
+  .tile {
+    padding: 16px 16px 18px;
+  }
+
+  .tile__head {
+    column-gap: 10px;
+  }
+
+  .tile__meta {
+    font-size: 11px;
   }
 }
 

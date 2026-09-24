@@ -14,16 +14,60 @@ const fs = require('node:fs');
  *
  * Resolution order for the home directory:
  *   1. explicit argument (CLI --home)
- *   2. NEURAL_OS_HOME environment variable
- *   3. a portable marker next to the application (USB stick)
+ *   2. a portable marker next to the application (USB stick)
+ *   3. NEURAL_OS_HOME environment variable
  *   4. ~/.neural-os
+ *
+ * Der Stick steht vor NEURAL_OS_HOME (Bauplan 2.6): Ältere Starter setzten die
+ * Variable, und eine, die auf einem fremden Laptop noch in der Umgebung steht,
+ * darf die KI dieses Sticks nicht auf die Platte umleiten. Wer wirklich
+ * woanders hin will, sagt `--home`.
+ *
+ * @param {string} [explicit]
+ * @param {{von?:string, env?:object}} [opts] `von`: wo das Programm liegt
+ *   (Vorgabe: dieser Programmordner); `env`: die Umgebung (Vorgabe: process.env).
+ *   Beides nur, damit Tests einen Temp-Stick einspielen können.
  */
-function resolveHome(explicit) {
-  if (explicit) return path.resolve(explicit);
-  if (process.env.NEURAL_OS_HOME) return path.resolve(process.env.NEURAL_OS_HOME);
-  const portable = detectPortable();
-  if (portable) return portable.dataDir;
-  return path.resolve(path.join(os.homedir(), '.neural-os'));
+function resolveHome(explicit, opts = {}) {
+  return homeHerkunft(explicit, opts).home;
+}
+
+/**
+ * Wie `resolveHome`, sagt aber auch, woher der Ordner kommt, und ob dabei
+ * NEURAL_OS_HOME übergangen wurde; das meldet der Start in einer Zeile.
+ * @returns {{home:string, quelle:'ausdruecklich'|'stick'|'umgebung'|'standard', uebergangen:string|null}}
+ */
+function homeHerkunft(explicit, { von, env = process.env } = {}) {
+  if (explicit) return { home: path.resolve(explicit), quelle: 'ausdruecklich', uebergangen: null };
+  const ausUmgebung = env && env.NEURAL_OS_HOME ? path.resolve(env.NEURAL_OS_HOME) : null;
+  const portable = detectPortable(von);
+  if (portable) {
+    const uebergangen = ausUmgebung && !gleicherPfad(ausUmgebung, portable.dataDir) ? ausUmgebung : null;
+    return { home: portable.dataDir, quelle: 'stick', uebergangen };
+  }
+  if (ausUmgebung) return { home: ausUmgebung, quelle: 'umgebung', uebergangen: null };
+  return { home: path.resolve(path.join(os.homedir(), '.neural-os')), quelle: 'standard', uebergangen: null };
+}
+
+/**
+ * Zeigen zwei Pfade auf denselben Ordner? Über `path.relative`, damit ein
+ * Schrägstrich am Ende oder `a/../b` nichts ausmacht. Windows und macOS
+ * unterscheiden in Dateinamen nicht zwischen Groß und Klein (NTFS, FAT/exFAT
+ * und APFS in der Grundeinstellung): `e:\data` und `E:\data` sind derselbe
+ * Ordner, und ein Stick, der dort nicht erkannt wird, liefe mit Port 7777 und
+ * ohne Kennung im Marker.
+ * @param {{pfad?:object, plattform?:string}} [opts] `pfad`: path-Modul
+ *   (Tests spielen `path.win32` ein); `plattform`: wie `process.platform`.
+ */
+function gleicherPfad(a, b, { pfad = path, plattform } = {}) {
+  const system = plattform || (pfad === path.win32 ? 'win32' : process.platform);
+  let x = pfad.resolve(String(a));
+  let y = pfad.resolve(String(b));
+  if (system === 'win32' || system === 'darwin') {
+    x = x.toLowerCase();
+    y = y.toLowerCase();
+  }
+  return pfad.relative(x, y) === '';
 }
 
 /** Filename of the marker that turns a directory into a portable installation. */
@@ -79,11 +123,16 @@ function detectPortable(from) {
 /**
  * Is the home directory we ended up with the portable one?
  * Used by the startup banner, which must state where the data actually is.
+ *
+ * @param {string} home
+ * @param {{von?:string, gefunden?:object|null, pfad?:object, plattform?:string}} [opts]
+ *   `von` wie bei `detectPortable`; `gefunden` ersetzt die Suche (Tests);
+ *   `pfad`/`plattform` wie bei `gleicherPfad`.
  */
-function portableInfo(home) {
-  const detected = detectPortable();
+function portableInfo(home, { von, gefunden, pfad, plattform } = {}) {
+  const detected = gefunden !== undefined ? gefunden : detectPortable(von);
   if (!detected) return null;
-  if (path.resolve(home) !== detected.dataDir) return null;
+  if (!gleicherPfad(home, detected.dataDir, { pfad, plattform })) return null;
   return detected;
 }
 
@@ -112,14 +161,15 @@ function describePortable(portable) {
 
 /**
  * @param {string} [explicitHome]
+ * @param {{von?:string, env?:object}} [opts] wie bei `resolveHome`
  * @returns {{
  *   home:string, config:string, vault:string, log:string, snapshot:string,
  *   files:string, audit:string, runs:string, exports:string, lock:string,
  *   secrets:string, trash:string
  * }}
  */
-function layout(explicitHome) {
-  const home = resolveHome(explicitHome);
+function layout(explicitHome, opts = {}) {
+  const home = resolveHome(explicitHome, opts);
   const vault = path.join(home, 'vault');
   return {
     home,
@@ -170,6 +220,6 @@ function safeJoin(root, relative) {
 }
 
 module.exports = {
-  resolveHome, layout, ensureLayout, safeJoin,
+  resolveHome, homeHerkunft, gleicherPfad, layout, ensureLayout, safeJoin,
   detectPortable, portableInfo, describePortable, PORTABLE_MARKER,
 };

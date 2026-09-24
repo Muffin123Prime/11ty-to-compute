@@ -4,7 +4,10 @@
  * Wie in der Vorlage: je Zeile ein rundes Symbol der Rolle, der Name
  * ("Recherche-Agent"), darunter, was er gerade tut, rechts ein blauer Punkt
  * "Aktiv" -- oder ein grauer Haken "Fertig". Die Zahl oben zaehlt nur, wer
- * WIRKLICH gerade arbeitet.
+ * WIRKLICH gerade arbeitet. Darunter stehen hoechstens drei Zeilen, die
+ * juengsten: erst, wer gerade laeuft, dann -- hinter einer feinen
+ * Zwischenzeile "Zuletzt" -- was schon fertig ist. Sonst stuende "0" ueber
+ * drei Zeilen "Fertig" und saehe aus wie ein Widerspruch.
  *
  * Woher die Zeilen kommen:
  * - beim Einhaengen die letzten Laeufe (GET /api/runs), damit die Kachel
@@ -31,6 +34,8 @@ const CSS = `
 .kwa__row:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
 @media (hover: hover) { .kwa__row:hover .tile__item-title { text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; } }
 .kwa__row.is-alt { opacity: 0.62; }
+.kwa__zwischen { display: flex; align-items: center; gap: 10px; margin: -4px 0 -6px; font-size: var(--fs-xs); color: var(--fg-subtle); }
+.kwa__zwischen::after { content: ''; flex: 1 1 auto; height: 1px; background: var(--border); }
 .kwa__side { display: inline-flex; align-items: center; gap: 7px; flex: none; font-size: var(--fs-sm); color: var(--fg-muted); }
 .kwa__side svg { width: 15px; height: 15px; color: var(--fg-subtle); }
 .kwa__side.is-laeuft { color: var(--fg); }
@@ -78,7 +83,7 @@ export function mount(el, ctx) {
     const alle = [...laeufe.values()].map((l) => ({ ...l, sicht: zustandVon(l, jetzt) }));
     const aktiv = alle.filter((l) => l.sicht === 'laeuft').sort((a, b) => b.zeit - a.zeit);
     const rest = alle.filter((l) => l.sicht !== 'laeuft').sort((a, b) => b.zeit - a.zeit);
-    const zeigen = [...aktiv, ...rest].slice(0, Math.max(ZEILEN, aktiv.length));
+    const zeigen = [...aktiv, ...rest].slice(0, ZEILEN);
 
     const neuerKopf = tileHead({ icon: icons.agents, title: 'Agenten aktiv', count: aktiv.length, meta: 'Automatisch erkannt', href: '#/agents' });
     if (head) head.replaceWith(neuerKopf);
@@ -95,7 +100,12 @@ export function mount(el, ctx) {
       return;
     }
     const ul = h('ul.kwa__list');
+    let zuletzt = false;
     for (const l of zeigen) {
+      if (l.sicht !== 'laeuft' && !zuletzt) {
+        zuletzt = true;
+        ul.appendChild(h('li.kwa__zwischen', null, text('Zuletzt')));
+      }
       const r = rolle(l.rolle);
       const was = l.sicht === 'laeuft' ? (l.titel || l.schritt || r.kurz) : (l.titel || r.kurz);
       let seite;

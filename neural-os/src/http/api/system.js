@@ -148,7 +148,30 @@ function agentState(ctx) {
   return { active, available: !!runtime, pendingApprovals: pending };
 }
 
+/** `{id, name}` dieser KI, frisch gelesen (nach einer Umbenennung gilt sofort der neue Name). */
+function kiState(ctx) {
+  const ki = ctx.ki;
+  if (!ki || typeof ki.id !== 'string') return null;
+  return { id: ki.id, name: typeof ki.name === 'string' ? ki.name : null };
+}
+
 function register(router) {
+  /**
+   * Einstellungen › "Name dieser KI". Der Name steht auch im Marker, damit
+   * ein anderer Stick ihn ohne PIN zeigen kann ("Anderer Stick: Lena").
+   */
+  router.post('/api/ki/name', async (rc) => {
+    rc.requireOwner('Der Name dieser KI');
+    const body = asObject(await rc.body());
+    const identitaet = need(rc.ctx.identitaet, 'Die Identität dieser KI');
+    const name = identitaet.umbenennen(body.name);
+    if (rc.ctx.audit && typeof rc.ctx.audit.write === 'function') rc.ctx.audit.write('ki.umbenannt', {});
+    if (rc.ctx.bus && typeof rc.ctx.bus.publish === 'function') {
+      rc.ctx.bus.publish('ki.umbenannt', { id: identitaet.id, name });
+    }
+    return { ki: { id: identitaet.id, name } };
+  });
+
   router.get('/api/status', (rc) => {
     rc.requireCapability('read');
     const ctx = rc.ctx;
@@ -163,6 +186,9 @@ function register(router) {
       // DASS er von einem Stick bedient wird, obwohl genau das die Antwort auf
       // "wo liegen meine Daten gerade" ist. null heisst: von der Platte.
       portable: describePortable(ctx.portable),
+      // Welche KI antwortet? Der Tab merkt sich die Kennung und schickt sie
+      // ab dann mit (X-Neural-OS); der Name steht oben in der Oberfläche.
+      ki: kiState(ctx),
       network: networkState(ctx),
       vault: vaultState(ctx),
       models: modelState(ctx),

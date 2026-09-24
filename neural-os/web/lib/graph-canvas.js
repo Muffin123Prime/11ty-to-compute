@@ -76,6 +76,16 @@ const PHYS = {
 };
 PHYS.alphaDecay = 1 - Math.pow(PHYS.alphaMin, 1 / 300);
 
+/**
+ * Uebersicht wie in Obsidian: herausgezoomt tragen nur die groessten
+ * verbundenen Knoten einen Namen (und was man ueberfaehrt oder waehlt):
+ * die drei groessten immer, der vierte und fuenfte nur, wenn sie mindestens
+ * halb so viele Linien haben wie der groesste. Alle anderen blenden erst
+ * beim Hineinzoomen ein.
+ */
+const UEBERSICHT_NAMEN = 5;
+const UEBERSICHT_SICHER = 3;
+
 const MIN_ZOOM = 0.04;
 const MAX_ZOOM = 6;
 const CLICK_SLOP = 5; // so weit darf sich ein Klick bewegen und bleibt ein Klick
@@ -416,6 +426,7 @@ export function createGraphCanvas(canvas, options = {}) {
   let bright = new Uint8Array(0); // 1 = im Licht, 0 = tritt zurueck
   let colorKey = new Int16Array(0); // Themenfarbe je Knoten, -1 = keine
   let labelOrder = new Int32Array(0); // wichtigste zuerst
+  let topSlots = new Set(); // die groessten verbundenen, sichtbaren Knoten (UEBERSICHT_NAMEN)
   let labelWidthCache = [];
   let labelFontCache = 0;
   let edgeStrength = new Float64Array(0);
@@ -548,7 +559,9 @@ export function createGraphCanvas(canvas, options = {}) {
   /* ---------------------------- Daten setzen ----------------------- */
 
   function radiusOf(slot) {
-    const d = degree[slot];
+    // Die sichtbaren Linien: ein Agent, dessen Laeufe ausgeblendet sind,
+    // liegt als Waise im Ring und soll dort kein dicker Punkt sein.
+    const d = visDegree[slot];
     const base = mini ? 2.8 : 2.8;
     return settings.nodeScale * Math.min(base + 1.2 * Math.sqrt(d), mini ? 7 : 15);
   }
@@ -803,8 +816,26 @@ export function createGraphCanvas(canvas, options = {}) {
     // Wer unsichtbar wird, darf nicht gewaehlt bleiben.
     if (selected >= 0 && !visible[selected]) selected = -1;
     if (hovered >= 0 && !visible[hovered]) hovered = -1;
+    computeTop();
     recomputeSizes();
     brightKey = null;
+  }
+
+  /** Die groessten sichtbaren Knoten mit mindestens zwei Linien; Waisen nie. */
+  function computeTop() {
+    const best = [];
+    const before = (p, q) => visDegree[p] > visDegree[q]
+      || (visDegree[p] === visDegree[q] && (degree[p] > degree[q] || (degree[p] === degree[q] && p < q)));
+    for (let i = 0; i < n; i++) {
+      if (!visible[i] || orphan[i] || visDegree[i] < 2) continue;
+      if (best.length === UEBERSICHT_NAMEN && !before(i, best[best.length - 1])) continue;
+      let at = best.length;
+      while (at > 0 && before(i, best[at - 1])) at--;
+      best.splice(at, 0, i);
+      if (best.length > UEBERSICHT_NAMEN) best.pop();
+    }
+    const groesster = best.length ? visDegree[best[0]] : 0;
+    topSlots = new Set(best.filter((i, pos) => pos < UEBERSICHT_SICHER || visDegree[i] * 2 >= groesster));
   }
 
   function recomputeSizes() {
@@ -1443,10 +1474,11 @@ export function createGraphCanvas(canvas, options = {}) {
   }
 
   /**
-   * Beschriftungen. Gewoehnliche erscheinen ab `labelZoom`; grosse Knoten
-   * frueher, weil ihr Name auch aus der Ferne etwas sagt. Im Licht stehen
-   * der Knoten und seine Nachbarn immer da. Was sich ueberlappen wuerde,
-   * faellt weg -- der wichtigere Knoten gewinnt, weil er zuerst kommt.
+   * Beschriftungen. Gewoehnliche erscheinen ab `labelZoom`; darunter (die
+   * Uebersicht) tragen nur die groessten Knoten ihren Namen, wie in
+   * Obsidian -- Waisen im Ring nie. Im Licht stehen der Knoten und seine
+   * Nachbarn immer da. Was sich ueberlappen wuerde, faellt weg -- der
+   * wichtigere Knoten gewinnt, weil er zuerst kommt.
    */
   function drawLabels(k) {
     // Halbe Pixel als Stufen: sonst aendert jeder Zoomschritt die Schrift
@@ -1492,6 +1524,14 @@ export function createGraphCanvas(canvas, options = {}) {
 
     const lit = fade > 0;
     const lz = settings.labelZoom;
+    // Die Uebersicht ist, was "Einpassen" zeigt. Bei einem kleinen Netz
+    // liegt sie schon ueber labelZoom (Einpassen geht bis 1,6) -- gewoehnliche
+    // Namen kommen deshalb erst deutlich hinter dem eingepassten Bild, der
+    // Regler verschiebt das anteilig. 0 in der Uebersicht, 1 ab der
+    // Schwelle; die groessten stehen immer (topSlots).
+    const fit = mini ? null : fitTransform();
+    const schwelle = Math.max(lz, fit ? fit.k * 1.6 * (lz / GRAPH_DEFAULTS.labelZoom) : lz);
+    const gate = clamp((k - 0.8 * schwelle) / (0.2 * schwelle), 0, 1);
     const list = [];
     // Zuerst die, die immer stehen muessen: Fokus und Nachbarn.
     const forced = new Set();
@@ -1515,6 +1555,7 @@ export function createGraphCanvas(canvas, options = {}) {
         if (!visible[i] || forced.has(i)) continue;
         const importance = radius[i] / (2.8 * settings.nodeScale);
         let a = clamp((k * importance - lz) / (0.45 * lz), 0, 1);
+        a = topSlots.has(i) ? 1 : a * gate;
         if (lit && !bright[i]) a *= 1 - fade * 0.85;
         else if (lit && highlightSet && bright[i]) a = Math.max(a, fade * 0.9);
         if (a < 0.04) continue;

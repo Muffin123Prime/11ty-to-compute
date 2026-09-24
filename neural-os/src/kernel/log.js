@@ -23,11 +23,69 @@ function setLevel(name) {
   if (name in LEVELS) currentLevel = LEVELS[name];
 }
 
+/**
+ * Wohin die Diagnose geht. Ohne Senke wie immer nach stderr. Der Dienst
+ * (Stick-Bauplan 2.4) hat kein Fenster und kein stderr; er setzt eine Senke
+ * in eine Datei (`dateiSenke`), damit der Starter im Fehlerfall die letzten
+ * Zeilen zeigen kann.
+ * @type {((zeile:string)=>void)|null}
+ */
+let sink = null;
+
+/** @param {((zeile:string)=>void)|null} fn */
+function setSink(fn) {
+  sink = typeof fn === 'function' ? fn : null;
+}
+
 function emit(level, scope, message, extra) {
   if (LEVELS[level] > currentLevel) return;
   const line = `${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} [${scope}] ${message}`;
   const suffix = extra ? ` ${safeJson(extra)}` : '';
+  if (sink) {
+    try {
+      sink(line + suffix + '\n');
+      return;
+    } catch { /* eine kaputte Senke darf die Meldung nicht verschlucken */ }
+  }
   process.stderr.write(line + suffix + '\n');
+}
+
+/**
+ * Eine Senke, die an `datei` anhängt und ab `maxBytes` nach `<datei>.1`
+ * dreht (ein Vorgänger, nicht mehr: auf einem Stick zählt jedes Megabyte).
+ * Synchron, damit die letzte Zeile vor einem Absturz auch dasteht; die
+ * Diagnose schreibt wenig. Farbcodes werden entfernt: Die Datei liest ein
+ * Mensch im Fehlerfall, nicht ein Terminal.
+ * @param {string} datei
+ * @param {{maxBytes?:number}} [opts]
+ * @returns {((zeile:string)=>void) & {schliessen:()=>void}}
+ */
+function dateiSenke(datei, { maxBytes = 512 * 1024 } = {}) {
+  fs.mkdirSync(path.dirname(datei), { recursive: true, mode: 0o700 });
+  let fd = null;
+  let groesse = 0;
+  const oeffnen = () => {
+    fd = fs.openSync(datei, 'a', 0o600);
+    try { groesse = fs.fstatSync(fd).size; } catch { groesse = 0; }
+  };
+  const senke = (zeile) => {
+    const text = String(zeile).replace(/\u001b\[[0-9;]*[A-Za-z]/g, '');
+    if (fd === null) oeffnen();
+    if (groesse > 0 && groesse + Buffer.byteLength(text) > maxBytes) {
+      try { fs.closeSync(fd); } catch { /* schon zu */ }
+      fd = null;
+      try { fs.renameSync(datei, `${datei}.1`); } catch { /* dann eben weiter anhängen */ }
+      oeffnen();
+    }
+    groesse += fs.writeSync(fd, text);
+  };
+  senke.schliessen = () => {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* schon zu */ }
+      fd = null;
+    }
+  };
+  return senke;
 }
 
 function safeJson(value) {
@@ -140,4 +198,4 @@ class Audit {
   }
 }
 
-module.exports = { logger, setLevel, LEVELS, Audit };
+module.exports = { logger, setLevel, setSink, dateiSenke, LEVELS, Audit };

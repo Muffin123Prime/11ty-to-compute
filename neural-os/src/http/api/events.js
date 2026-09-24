@@ -243,9 +243,12 @@ function eventInput(body) {
  *
  * @param {object} store
  * @param {object} merged   alle Felder, wie sie danach gelten sollen
- * @param {{geerbteChatId?:string|null}} [opts]  ein Vorkommen, das aus seiner
- *   Serie geloest wird, erbt deren Chat -- auch wenn der inzwischen geloescht
- *   ist: die Herkunft bleibt wahr, auch wenn das Gespraech weg ist.
+ * @param {{bestand?:object|null}} [opts]  die Felder, die schon gespeichert
+ *   sind (beim Aendern der Termin selbst, beim Loesen eines Vorkommens die
+ *   Serie). Chat und Projekt, die sich dabei NICHT aendern, werden nicht noch
+ *   einmal gesucht: die Herkunft bleibt wahr, auch wenn das Gespraech oder
+ *   das Projekt inzwischen geloescht ist -- und ein Termin aus einem
+ *   aufgeraeumten Chat muss sich trotzdem verschieben lassen.
  * @returns {object}        die zu speichernden Felder
  */
 function checkEvent(store, merged, opts = {}) {
@@ -300,14 +303,15 @@ function checkEvent(store, merged, opts = {}) {
     out[key] = key === 'location' ? value.trim() : value;
   }
 
-  for (const [key, type, label] of [['projectId', 'project', 'Projekt'], ['chatId', 'chat', 'Chat']]) {
+  const bestand = opts.bestand || {};
+  for (const [key, type, label] of [['projectId', 'project', 'Das Projekt'], ['chatId', 'chat', 'Den Chat']]) {
     const value = merged[key];
     if (value === undefined || value === null || value === '') {
       out[key] = null;
       continue;
     }
-    const geerbt = key === 'chatId' && opts.geerbteChatId && value === opts.geerbteChatId;
-    if (!geerbt && !liveOfType(store, value, type)) throw new ValidationError(`Das ${label} "${String(value)}" gibt es nicht.`);
+    const unveraendert = value === bestand[key];
+    if (!unveraendert && !liveOfType(store, value, type)) throw new ValidationError(`${label} "${String(value)}" gibt es nicht.`);
     out[key] = value;
   }
 
@@ -404,16 +408,19 @@ function updateEvent(store, id, patch, opts = {}) {
   }
   const keys = Object.keys(input).filter((k) => EVENT_FIELDS.includes(k));
   if (!keys.length) throw new ValidationError('Es wurden keine Felder zum Ändern übergeben.');
-  if (opts.nur !== undefined && opts.nur !== null && opts.nur !== '') {
+  // `nur` ist gesetzt, sobald es angegeben wurde -- auch leer. Ein leeres
+  // "nur" still als "die ganze Serie" zu lesen hiesse, aus "nur diesen
+  // Dienstag" eine Aenderung an jedem Dienstag zu machen.
+  if (opts.nur !== undefined && opts.nur !== null) {
     return aendernAm(store, existing, opts.nur, input, opts).record;
   }
-  const merged = { ...existing.data, ...input };
+  const merged = { ...lesbar(existing).data, ...input };
   // Ein Wechsel auf "mit Uhrzeit" ohne neuen Beginn hiesse, den Tag als
   // Zeitpunkt zu nehmen -- das ist keine Uhrzeit, sondern ein Missverstaendnis.
   refuseDayAsTime(input, merged.start);
   // Wird ein Termin ganztaegig, verliert sein altes Ende mit Uhrzeit den Sinn.
   if (input.allDay === true && !Object.prototype.hasOwnProperty.call(input, 'end')) merged.end = null;
-  const data = checkEvent(store, merged);
+  const data = checkEvent(store, merged, { bestand: existing.data });
   const changed = {};
   for (const [key, value] of Object.entries(data)) {
     if (JSON.stringify(existing.data[key]) !== JSON.stringify(value)) changed[key] = value;
@@ -458,7 +465,7 @@ function aendernAm(store, serie, tag, input, opts = {}) {
   const merged = { ...serie.data, start: lage.start, end: lage.end, ...input, recurrence: null, exdates: [] };
   refuseDayAsTime(input, merged.start);
   if (input.allDay === true && !has(input, 'end')) merged.end = null;
-  const data = checkEvent(store, merged, { geerbteChatId: serie.data.chatId || null });
+  const data = checkEvent(store, merged, { bestand: serie.data });
   const exdates = w.ausnahmenPruefen([...(Array.isArray(serie.data.exdates) ? serie.data.exdates : []), tag]);
   return store.transaction(() => gemeinsam(() => {
     const neueSerie = store.update(serie.id, { exdates });
@@ -492,7 +499,7 @@ function aendernAb(store, serie, tag, input, opts = {}) {
   const merged = { ...serie.data, ...teil.neu, ...input };
   refuseDayAsTime(input, merged.start);
   if (input.allDay === true && !has(input, 'end')) merged.end = null;
-  const data = checkEvent(store, merged, { geerbteChatId: serie.data.chatId || null });
+  const data = checkEvent(store, merged, { bestand: serie.data });
   const altRegel = w.regelPruefen(teil.alt.recurrence, s0);
   return store.transaction(() => gemeinsam(() => {
     const alt = store.update(serie.id, { recurrence: altRegel, exdates: teil.alt.exdates });
@@ -516,7 +523,7 @@ function aendernAb(store, serie, tag, input, opts = {}) {
 function deleteEvent(store, id, opts = {}) {
   const existing = liveOfType(store, id, 'event');
   if (!existing) throw notFound('Diesen Termin gibt es nicht (mehr).');
-  if (opts.nur !== undefined && opts.nur !== null && opts.nur !== '') {
+  if (opts.nur !== undefined && opts.nur !== null) {
     vorkommenPruefen(existing, opts.nur);
     const exdates = w.ausnahmenPruefen([...(Array.isArray(existing.data.exdates) ? existing.data.exdates : []), opts.nur]);
     return { record: store.update(existing.id, { exdates }), ausgelassen: opts.nur, mitgeloescht: [] };
@@ -557,11 +564,24 @@ function readRange(query) {
   return { from, to };
 }
 
+/**
+ * Ein Termin, dessen Regel nicht gilt (an checkEvent vorbei geschrieben:
+ * Abgleich, Module, alter Stand), wird als das gezeigt, als das er
+ * behandelt wird: ein Einzeltermin ohne Wiederholung. Sonst stuende im Blatt
+ * "Serie" und die Oberflaeche rechnete mit einer Regel, die es nicht gibt.
+ */
+function lesbar(record) {
+  const d = record && record.data;
+  if (!d || d.recurrence === null || d.recurrence === undefined || w.istSerie(d)) return record;
+  return { ...record, data: { ...d, recurrence: null, exdates: [] } };
+}
+
 /** Ein Einzeltermin, wie der Zeitraum ihn liefert (Vertrag B). */
 function einzelEintrag(record) {
+  const r = lesbar(record);
   return {
-    ...record,
-    data: { ...record.data, occurrence: null, recurring: false },
+    ...r,
+    data: { ...r.data, occurrence: null, recurring: false },
     occurrence: null,
     recurring: false,
   };
@@ -985,6 +1005,19 @@ function kalenderSenden(rc, text, name) {
   return undefined;
 }
 
+/**
+ * `?nur=` lesen: null nur, wenn es GAR NICHT dasteht. Ein leeres oder
+ * falsches "nur" ist ein Fehler (vorkommenPruefen sagt, welcher) -- nie die
+ * ganze Serie. Sonst loeschte `DELETE …?nur=` die ganze Serie, weil eine
+ * Oberflaeche das Vorkommen nicht mitgeschickt hat.
+ */
+function nurParam(query) {
+  if (!query || typeof query.has !== 'function' || !query.has('nur')) return null;
+  const raw = String(query.get('nur') || '').trim();
+  if (raw.length > 20) throw new ValidationError('"nur" ist zu lang (erwartet: JJJJ-MM-TT).');
+  return raw;
+}
+
 /* ------------------------------------------------------------------ */
 /* Routen                                                              */
 /* ------------------------------------------------------------------ */
@@ -1042,7 +1075,7 @@ function register(router) {
   router.get('/api/events/:id', (rc) => {
     rc.requireCapability('read');
     const store = need(rc.ctx.store, 'Der Speicher');
-    const record = liveOfType(store, rc.params.id, 'event');
+    const record = lesbar(liveOfType(store, rc.params.id, 'event'));
     if (!record) throw notFound('Diesen Termin gibt es nicht (mehr).');
     const chats = chatTitles(store, [record.data.chatId]);
     const projekte = projectNames(store, [record.data.projectId]);
@@ -1052,6 +1085,12 @@ function register(router) {
       projekt: projekte[record.data.projectId] || null,
       // In Worten, wie die Serie gespeichert ist ("jeden Dienstag bis 24.12.2026").
       wiederholung: w.istSerie(record.data) ? w.inWorten(record.data.recurrence, record.data.start.slice(0, 10)) : null,
+      // Welches Vorkommen zeigt, wer nur die Serie oeffnet (#/kalender?id=… ohne
+      // &am=): das naechste ab heute, sonst das erste. Ohne diese Angabe stuende
+      // im Blatt der Beginn der Serie, als waere er ein Einzeltermin.
+      naechstes: w.istSerie(record.data)
+        ? (w.naechstesVorkommen(record.data, dayString(new Date())) || w.naechstesVorkommen(record.data, record.data.start.slice(0, 10)))
+        : null,
     };
   });
 
@@ -1066,7 +1105,7 @@ function register(router) {
   router.patch('/api/events/:id', async (rc) => {
     rc.requireCapability('write');
     const store = need(rc.ctx.store, 'Der Speicher');
-    const nur = strParam(rc.query, 'nur', 20) || null;
+    const nur = nurParam(rc.query);
     const input = eventInput(asObject(await rc.body()));
     const stand = verlaufStand(rc);
     const record = updateEvent(store, rc.params.id, input, { nur });
@@ -1083,7 +1122,7 @@ function register(router) {
     // Ohne `nur` weich geloescht: POST /api/records/:id/restore holt ihn zurueck.
     // Mit `nur` bleibt die Serie und laesst nur diesen Tag aus.
     const stand = verlaufStand(rc);
-    const { record, ausgelassen, mitgeloescht } = deleteEvent(store, rc.params.id, { nur: strParam(rc.query, 'nur', 20) || null });
+    const { record, ausgelassen, mitgeloescht } = deleteEvent(store, rc.params.id, { nur: nurParam(rc.query) });
     return {
       record,
       ausgelassen,

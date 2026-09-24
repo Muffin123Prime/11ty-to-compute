@@ -132,6 +132,71 @@ test('layoutDay legt Ueberschneidendes nebeneinander und den Rest in volle Breit
   assert.deepEqual(k.layoutDay([]), []);
 });
 
+test('rasterBloecke: drei halbstuendige Termine hintereinander liegen mit dem Finger nicht uebereinander', async () => {
+  const k = await load('kalender');
+  const folge = [
+    { id: 'dichtung', startMin: 990, endMin: 1020 }, // 16:30-17:00
+    { id: 'bank', startMin: 1020, endMin: 1050 }, // 17:00-17:30
+    { id: 'kaffee', startMin: 1050, endMin: 1080 }, // 17:30-18:00
+  ];
+  for (const [hour, minPx] of [[64, 30], [48, 20]]) {
+    const b = k.rasterBloecke(folge, { hour, minPx });
+    for (const x of b) {
+      for (const y of b) {
+        if (x === y || x.lane !== y.lane) continue;
+        const ueber = Math.min(x.top + x.height, y.top + y.height) - Math.max(x.top, y.top);
+        assert.ok(ueber <= 0, `${x.id}/${y.id} ueberlappen sich um ${ueber} px (Stunde ${hour} px)`);
+      }
+    }
+    assert.ok(b.every((x) => x.height >= minPx), 'jeder Block mindestens so hoch wie ein Tippziel');
+  }
+  // Frueher: Mindesthoehe 44 px bei 56 px je Stunde -- die Folge lag in EINER Spur 16 px uebereinander.
+  const alt = k.rasterBloecke(folge, { hour: 56, minPx: 44 });
+  assert.ok(alt.some((x) => x.lanes > 1), 'mit groesserer Mindesthoehe weichen sie nebeneinander aus, statt sich zu verdecken');
+  // Kurze Termine im Viertelstundentakt am Laptop: nebeneinander, nicht uebereinander.
+  const viertel = k.rasterBloecke([{ id: 'a', startMin: 600, endMin: 615 }, { id: 'b', startMin: 615, endMin: 630 }], { hour: 48, minPx: 20 });
+  assert.notEqual(viertel[0].lane, viertel[1].lane);
+});
+
+test('dauerEnde: der Anfasser folgt der Bewegung -- ein Tipp ohne Bewegung aendert nichts', async () => {
+  const k = await load('kalender');
+  assert.equal(k.dauerEnde(990, 0, 64, 930), 990, 'kein Weg, keine Aenderung (vorher: 15 Minuten kuerzer)');
+  assert.equal(k.dauerEnde(990, 2, 48, 930), 990, '2 px Zittern sind keine Viertelstunde');
+  assert.equal(k.dauerEnde(990, 24, 48, 930), 1020, 'eine halbe Stunde tiefer (24 px bei 48 px je Stunde)');
+  assert.equal(k.dauerEnde(990, -500, 48, 930), 945, 'nie kuerzer als 15 Minuten nach dem Beginn');
+  assert.equal(k.dauerEnde(1410, 200, 48, 1380), 1440, 'nicht ueber Mitternacht hinaus');
+});
+
+test('anlegenSpanne: knapp unter der Stundenlinie losgelassen heisst diese Linie', async () => {
+  const k = await load('kalender');
+  const zwei = 2 / 48 * 60; // 2 px bei 48 px je Stunde
+  assert.deepEqual(k.anlegenSpanne(14 * 60 + 1, 15 * 60 + zwei), { startMin: 840, endMin: 900 }, '14:00-15:00, nicht 15:15');
+  assert.deepEqual(k.anlegenSpanne(14 * 60 + 1, 14 * 60 + 3), { startMin: 840, endMin: 855 }, 'mindestens eine Viertelstunde');
+  assert.deepEqual(k.anlegenSpanne(14 * 60 + 1, 12 * 60 + 58), { startMin: 780, endMin: 855 }, 'nach oben gezogen');
+});
+
+test('scrollAnfang: oben klebt kein halber Termin -- ausser einem, der viel frueher begann', async () => {
+  const k = await load('kalender');
+  const tag = [{ startMin: 540, endMin: 600 }, { startMin: 570, endMin: 615 }];
+  assert.equal(k.scrollAnfang(tag, 590), 540, 'Zahnarzt 9-10 und Telefonat 9:30-10:15: ab 9:00');
+  assert.equal(k.scrollAnfang(tag, 660), 660, 'nichts schneidet 11:00: bleibt');
+  assert.equal(k.scrollAnfang([{ startMin: 480, endMin: 1080 }], 780), 780, 'ein Arbeitstag seit 8 Uhr bleibt angeschnitten, "jetzt" bleibt im Bild');
+});
+
+test('layoutDay nennt die Gruppe: mehr als zwei zugleich wird in engen Spalten zu "+n"', async () => {
+  const k = await load('kalender');
+  const out = k.layoutDay([
+    { id: 'a', startMin: 960, endMin: 1020 },
+    { id: 'b', startMin: 960, endMin: 1020 },
+    { id: 'c', startMin: 960, endMin: 1020 },
+    { id: 'd', startMin: 1200, endMin: 1260 },
+  ]);
+  const by = Object.fromEntries(out.map((x) => [x.id, x]));
+  assert.equal(by.a.gruppe, by.c.gruppe);
+  assert.notEqual(by.a.gruppe, by.d.gruppe);
+  assert.equal(by.c.lanes, 3);
+});
+
 /* ------------------------------------- Kalender: Serien, Ziehen, Balken */
 
 test('eintragAus: Einzeltermin und Vorkommen einer Serie (Vertrag B), am Element oder in data', async () => {

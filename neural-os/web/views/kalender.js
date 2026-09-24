@@ -50,7 +50,9 @@ import {
   plusTage as plusTageW,
   minutenZwischen,
   tageZwischen,
+  tagKurz,
   WT_CODES,
+  MON_SATZ,
 } from '../lib/datum-parser.js';
 import {
   ERINNERUNG_OPTIONEN,
@@ -225,6 +227,7 @@ export function layoutDay(items) {
   const out = [];
   let group = [];
   let groupEnd = -1;
+  let gruppe = 0;
   const flush = () => {
     const laneEnds = [];
     const placed = group.map((item) => {
@@ -237,7 +240,8 @@ export function layoutDay(items) {
       }
       return { ...item, lane };
     });
-    for (const item of placed) out.push({ ...item, lanes: laneEnds.length });
+    for (const item of placed) out.push({ ...item, lanes: laneEnds.length, gruppe });
+    gruppe += 1;
     group = [];
     groupEnd = -1;
   };
@@ -248,6 +252,74 @@ export function layoutDay(items) {
   }
   if (group.length) flush();
   return out;
+}
+
+/**
+ * Wo und wie hoch die Termine eines Tages im Stundenraster stehen.
+ *
+ * Nebeneinander wird nach der GEZEICHNETEN Hoehe entschieden, nicht nur nach
+ * der Uhrzeit: ein Block ist mindestens `minPx` hoch (Maus 20 px, Finger
+ * 44 px -- sonst trifft man ihn nicht). Drei halbstuendige Termine
+ * hintereinander waeren auf dem iPad 44 px hoch bei 28 px Abstand und laegen
+ * zu 16 px uebereinander: Text abgeschnitten, Anfasser verdeckt. Mit der
+ * gezeichneten Hoehe gerechnet stehen sie nebeneinander.
+ *
+ * @param {{id:string, startMin:number, endMin:number}[]} items
+ * @param {{hour?:number, minPx?:number}} [opts]
+ * @returns {{id:string, startMin:number, endMin:number, lane:number, lanes:number, top:number, height:number}[]}
+ */
+export function rasterBloecke(items, { hour = 48, minPx = 20 } = {}) {
+  const minMin = Math.ceil((minPx * 60) / hour);
+  const gelegt = layoutDay(items.map((x) => ({ ...x, bisMin: x.endMin, endMin: Math.max(x.endMin, x.startMin + minMin) })));
+  return gelegt.map(({ bisMin, ...x }) => ({
+    ...x,
+    endMin: bisMin,
+    top: (x.startMin / 60) * hour,
+    height: Math.max(minPx, ((bisMin - x.startMin) / 60) * hour - 2),
+  }));
+}
+
+/**
+ * Das neue Ende beim Ziehen am unteren Rand -- RELATIV zur Bewegung: wer den
+ * Anfasser nicht bewegt, aendert nichts. (Vorher galt die Minute unter dem
+ * Zeiger: ein Tipp in die obere Haelfte des 16-px-Anfassers kuerzte den
+ * Termin um eine Viertelstunde.)
+ */
+export function dauerEnde(altEndeMin, dyPx, hour, startMin = 0) {
+  const neu = altEndeMin + snap((dyPx / hour) * 60);
+  return Math.min(24 * 60, Math.max(startMin + 15, neu));
+}
+
+/**
+ * Anlegen durch Ziehen auf leerer Flaeche: gerundet auf die NAECHSTE
+ * Viertelstunde, wie beim Verschieben -- knapp unter der Linie losgelassen
+ * heisst diese Linie, nicht eine Viertelstunde mehr.
+ */
+export function anlegenSpanne(min0, min) {
+  const a = Math.floor(min0 / 15) * 15;
+  if (min >= min0) return { startMin: a, endMin: Math.max(a + 15, snap(min)) };
+  const c = Math.min(a, snap(min));
+  return { startMin: c, endMin: Math.max(a + 15, c + 15) };
+}
+
+/**
+ * Wohin beim Oeffnen gescrollt wird, damit oben kein halber Termin klebt
+ * ("Ieleton…", ein 8-px-Streifen vom Zahnarzt). Schneidet ein Termin die
+ * Kante und begann er hoechstens `maxZurueck` Minuten davor, beginnt die
+ * Ansicht mit ihm; ein langer, der frueher begann, bleibt geschnitten, damit
+ * "jetzt" im Bild bleibt.
+ *
+ * @param {{startMin:number, endMin:number}[]} bloecke
+ * @param {number} topMin  gewuenschte Oberkante in Minuten
+ */
+export function scrollAnfang(bloecke, topMin, maxZurueck = 120) {
+  let top = topMin;
+  for (let i = 0; i < 24; i++) {
+    const schnitt = bloecke.filter((b) => b.startMin < top && b.endMin > top && topMin - b.startMin <= maxZurueck);
+    if (!schnitt.length) break;
+    top = Math.min(...schnitt.map((b) => b.startMin));
+  }
+  return Math.max(0, top);
 }
 
 /** Eine Zeitangabe als Wandzeit: "YYYY-MM-DD" oder "YYYY-MM-DDTHH:MM" (Zone -> Ortszeit). */
@@ -440,8 +512,19 @@ const CSS = `
   --kal-hour: 48px;
   --kal-label: 56px;
   --kal-bar: 24px;
-  /* 10 px: genau bis vor den Text des unteren Termins (Leiste 3 + Abstand 7). */
-  --kal-einzug: 10px;
+  /* Staffel in engen Spalten: der spaetere Termin liegt um gut ein Drittel
+     eingerueckt ueber dem frueheren. Mit 10 px (nur bis vor dessen Text)
+     verschwand der fruehere ganz, sobald der spaetere wenige Minuten nach
+     ihm begann ("Paket" 16:20, "Dichtung" 16:30) -- so bleibt links sein
+     Titelanfang lesbar. */
+  --kal-einzug: 38%;
+  /* Leise Schrift MIT Inhalt (Ort, Stunden, "+2 weitere") braucht 4,5:1. Das
+     allgemeine --fg-subtle erreicht auf den Flaechen des Kalenders nur 3,4-3,8
+     (gemessen); hier eine Stufe heller bzw. dunkler, gleiche Tonlage. */
+  --fg-subtle: #8a8d93;
+  /* Weisse Ziffer im Heute-Kreis: auf dem dunklen Akzent #2f7cf6 nur 3,9:1,
+     etwas tiefer gesetzt 5,5:1. Im hellen Thema reicht der Akzent selbst. */
+  --kal-heute: color-mix(in srgb, var(--accent) 82%, #000);
   container-type: inline-size;
   position: relative;
   display: flex;
@@ -458,10 +541,17 @@ const CSS = `
    es eng, weicht zuerst der leise Untertitel, dann kuerzt sich der Titel. */
 .kal__period { display: flex; align-items: baseline; gap: 10px; flex: 1 1 auto; min-width: 0; }
 .kal__title { flex: 0 1 auto; min-width: 0; margin: 0; font-size: var(--fs-xl); font-weight: 500; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Zwei Fassungen des Titels; die kurze ("Sept. 2026") nur, wo die lange
+   abgeschnitten wuerde -- der Titel ist das Wichtigste in der Zeile. */
+.kal__title-kurz { display: none; }
 .kal__sub { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-sm); color: var(--fg-subtle); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .kal__nav { display: flex; flex: none; align-items: center; gap: 2px; }
 .kal__row > .segmented { flex: none; }
 .kal__nav[hidden] { display: none; }
+/* In der Liste gibt es kein Vor und Zurueck: weg damit, der Titel braucht den Platz. */
+.kal[data-mode="liste"] .kal__nav { display: none; }
+/* ... und die Zeile bleibt so hoch wie mit ihnen (36 px), damit das Feld darunter nicht springt. */
+.kal__row { min-height: 36px; }
 .kal .segmented__option { min-width: 54px; }
 
 .kal__quick { position: relative; }
@@ -575,11 +665,16 @@ const CSS = `
 .kal__day.is-selected { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--border-strong); }
 .kal__day:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-ring); }
 .kal__day.is-other { color: var(--fg-subtle); }
-.kal__day.is-other .kal__pill { opacity: 0.5; }
+/* Die Tage der Nachbarmonate leiser ueber die Farbe (per Deckkraft fiel
+   ihre Schrift auf 2,2:1). */
+.kal__day.is-other .kal__pill::before { background: var(--border-strong); }
+.kal__day.is-other .kal__pill.is-allday { background: var(--surface-2); }
 .kal__num {
   display: inline-grid;
   place-items: center;
   align-self: flex-start;
+  /* Nie gequetscht: in einer vollen Zelle wurde der Kreis sonst zur Pille. */
+  flex: none;
   min-width: 26px;
   height: 26px;
   padding: 0 6px;
@@ -588,7 +683,7 @@ const CSS = `
   font-variant-numeric: tabular-nums;
   border-radius: var(--r-full);
 }
-.kal__day.is-today .kal__num { color: var(--accent-fg); background: var(--accent); font-weight: 600; }
+.kal__day.is-today .kal__num { color: var(--accent-fg); background: var(--kal-heute); font-weight: 600; }
 .kal__pill {
   display: flex;
   align-items: center;
@@ -605,7 +700,7 @@ const CSS = `
 .kal__pill.is-allday::before { display: none; }
 .kal__pill-time { flex: none; color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
 .kal__pill-title { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--fg); }
-.kal__day.is-other .kal__pill-title { color: var(--fg-muted); }
+.kal__day.is-other .kal__pill-title { color: var(--fg-subtle); }
 .kal__pill:hover .kal__pill-title { text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 2px; }
 .kal__more { padding-left: 6px; font-size: var(--fs-xs); color: var(--fg-subtle); }
 
@@ -650,9 +745,13 @@ const CSS = `
 .kal__entry-title { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--fg); }
 .kal__entry-title > span:first-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .kal__entry-sub { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--fs-sm); color: var(--fg-subtle); }
-.kal__entry.is-past { opacity: 0.55; }
+/* Vergangenes leiser ueber die FARBE, nicht per Deckkraft: durchscheinende
+   Karten liessen Darunterliegendes durchschimmern, und leise Schrift fiel
+   unter 2:1. Titel in --fg-muted, grauer Balken, Karte deckend. */
+.kal__entry.is-past .kal__entry-title { color: var(--fg-muted); }
+.kal__entry.is-past .kal__entry-bar { background: var(--border-strong); }
 .kal__agenda-add { align-self: flex-start; margin-top: var(--sp-2); }
-.kal__liste { display: flex; flex-direction: column; gap: 26px; max-width: 720px; width: 100%; padding-bottom: var(--sp-2); }
+.kal__liste { display: flex; flex-direction: column; gap: 26px; width: 100%; padding-bottom: var(--sp-2); }
 .kal__lgruppe { display: flex; flex-direction: column; }
 .kal__lfuss { display: flex; flex-wrap: wrap; align-items: center; gap: 10px var(--sp-2); padding-top: 4px; }
 .kal__lfuss a { font-size: var(--fs-sm); color: var(--fg-subtle); text-decoration: none; }
@@ -680,7 +779,7 @@ button.kal__rtag { cursor: pointer; }
 button.kal__rtag:hover { background: var(--surface-2); }
 .kal__rtag-num { display: inline-grid; place-items: center; min-width: 30px; height: 30px; padding: 0 6px; font-size: var(--fs-md); color: var(--fg); border-radius: var(--r-full); font-variant-numeric: tabular-nums; }
 .kal__rtag.is-today { color: var(--accent-text); }
-.kal__rtag.is-today .kal__rtag-num { color: var(--accent-fg); background: var(--accent); font-weight: 600; }
+.kal__rtag.is-today .kal__rtag-num { color: var(--accent-fg); background: var(--kal-heute); font-weight: 600; }
 .kal__rganz { border-bottom: 1px solid var(--border); }
 .kal__rganz-label { display: flex; align-items: center; justify-content: flex-end; padding: 0 8px; font-size: var(--fs-xs); color: var(--fg-subtle); }
 .kal__rganz-bars { display: grid; row-gap: 3px; padding: 4px 0; min-height: 30px; }
@@ -712,7 +811,7 @@ button.kal__rtag:hover { background: var(--surface-2); }
 .kal__balken span:first-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .kal__balken:hover { border-color: var(--accent); }
 .kal__balken:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
-.kal__balken.is-past { opacity: 0.6; }
+.kal__balken.is-past { color: var(--fg-muted); background: var(--surface-3); border-color: var(--border); }
 .kal__rscroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; }
 .kal__rstunden { position: relative; -webkit-user-select: none; user-select: none; }
 .kal__rlabels { position: relative; }
@@ -753,28 +852,78 @@ button.kal__rtag:hover { background: var(--surface-2); }
 .kal__block::before { content: ''; flex: none; width: 3px; border-radius: var(--r-full); background: var(--accent); }
 .kal__block:hover, .kal__block.is-open { background: var(--surface-4); border-color: var(--border-strong); }
 .kal__block:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
-.kal__block-text { display: flex; flex-direction: column; min-width: 0; }
-.kal__block-title { display: flex; align-items: center; gap: 5px; min-width: 0; font-weight: 500; }
-.kal__block-title > span:first-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.kal__block-time, .kal__block-ort { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
-.kal__block-ort { color: var(--fg-subtle); }
+/* Jeder Block ist sein eigener Container: wie viel Zeit er zeigt, haengt an
+   SEINER Breite (Spalte geteilt durch Spuren), nicht an der des Fensters. */
+.kal__block { container-type: inline-size; }
+.kal__block-text { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+/* Der Titel darf umbrechen, so viele Zeilen, wie die Hoehe hergibt
+   (--zeilen, im Zeichnen ausgerechnet) -- statt "Woch…" in einem Block, der
+   Platz fuer drei Zeilen hat. */
+.kal__block-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--zeilen, 1);
+  overflow: hidden;
+  min-width: 0;
+  font-weight: 500;
+  overflow-wrap: break-word;
+  hyphens: auto;
+}
+.kal__block-time { display: flex; align-items: center; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.kal__block-time > .kal__wdh, .kal__block-time > .kal__ki { margin-left: 5px; }
+.kal__block-time > span:first-child { flex: none; }
+.kal__block-bis { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: clip; }
+.kal__block-ort { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--fg-subtle); }
+/* Schmal: nur der Beginn ("15:30"); das Ende steht im Blatt und im Tooltip. */
+@container (max-width: 104px) {
+  .kal__block-bis { display: none; }
+}
 .kal__block.is-kurz { padding-top: 1px; padding-bottom: 1px; }
 .kal__block.is-kurz .kal__block-text { flex-direction: row; align-items: center; gap: 6px; }
-.kal__block.is-kurz .kal__block-title { flex: 0 1 auto; }
-.kal__block.is-kurz .kal__block-time { flex: 1 1 0; min-width: 0; }
+.kal__block.is-kurz .kal__block-title { flex: 0 1 auto; -webkit-line-clamp: 1; white-space: nowrap; text-overflow: ellipsis; display: block; }
+.kal__block.is-kurz .kal__block-time { flex: 1 1 0; }
+.kal__block.is-kurz .kal__block-bis { display: none; }
 /* Zu schmal fuer nebeneinander (weniger als ~60 px je Termin): gestaffelt
    wie Karten, der spaetere liegt oben und leicht eingerueckt. So bleibt von
    jedem der Anfang lesbar statt drei Splitter mit je einem Buchstaben. */
-.kal__rcol.is-eng .kal__block {
+.kal__rcol.is-eng .kal__block.is-geteilt {
   left: calc(var(--lane) * var(--kal-einzug) + 3px);
   width: calc(100% - var(--lane) * var(--kal-einzug) - 6px);
   z-index: calc(var(--lane) + 1);
   box-shadow: 0 0 0 1px var(--surface);
 }
-.kal__rcol.is-eng .kal__block:hover { z-index: 8; }
+.kal__rcol.is-eng .kal__block.is-geteilt:hover { z-index: 8; }
+.kal__rcol.is-eng .kal__block.is-dritte { display: none; }
+/* Eng: weniger Rand im Block, jeder Buchstabe zaehlt. */
+.kal__rcol.is-eng .kal__block.is-geteilt { gap: 4px; padding-right: 3px; }
+.kal__mehr {
+  position: absolute;
+  right: 3px;
+  z-index: 7;
+  display: none;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--fg);
+  background: var(--surface-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-full);
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.kal__rcol.is-eng .kal__mehr { display: inline-flex; }
+.kal__mehr:hover { border-color: var(--accent); }
+.kal__mehr:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+/* Der Fokusring muss die Staffel-Kante schlagen (sie ist spezifischer als :focus-visible). */
+.kal__rcol.is-eng .kal__block.is-geteilt:focus-visible { z-index: 8; box-shadow: 0 0 0 3px var(--accent-ring); }
 /* Der Geist beim Ziehen nimmt immer die ganze Spalte -- auch in einer engen. */
 .kal__rcol .kal__block.is-ghost { left: 3px; width: calc(100% - 6px); z-index: 9; }
-.kal__block.is-past { opacity: 0.6; }
+.kal__block.is-past { color: var(--fg-muted); }
+.kal__block.is-past::before { background: var(--border-strong); }
+.kal__block.is-past .kal__block-time { color: var(--fg-subtle); }
 .kal__block.is-dragging { opacity: 0.28; }
 .kal__block.is-ghost {
   z-index: 5;
@@ -787,6 +936,9 @@ button.kal__rtag:hover { background: var(--surface-2); }
   cursor: grabbing;
 }
 .kal__block.is-ghost .kal__block-time { flex: none; color: var(--accent-text); font-weight: 500; }
+/* Kurz: nur der Beginn vor dem Titel ("17:30 Dichtung …") -- sonst fuellt die
+   Spanne "17:30–18:00" den Geist, und man sieht nicht, WAS man zieht. */
+.kal__block.is-ghost.is-kurz .kal__block-bis { display: none; }
 .kal__block.is-ghost.is-kurz .kal__block-title { flex: 1 1 0; }
 .kal__block.is-neu, .kal__balken.is-neu { animation: kal-neu 1.6s var(--ease) 1; }
 @keyframes kal-neu { 0%, 40% { box-shadow: 0 0 0 3px var(--accent-ring); } 100% { box-shadow: 0 0 0 0 transparent; } }
@@ -828,7 +980,7 @@ body.kal-zieht, body.kal-zieht * { cursor: grabbing !important; }
 .kal__mini-tag.is-other { color: var(--fg-subtle); }
 .kal__mini-tag.is-selected { background: var(--surface-4); }
 .kal__mini-tag.is-today { color: var(--accent-text); font-weight: 600; }
-.kal__mini-tag.is-today.is-selected { color: var(--accent-fg); background: var(--accent); }
+.kal__mini-tag.is-today.is-selected { color: var(--accent-fg); background: var(--kal-heute); }
 .kal__mini-tag.has-events::after { content: ''; position: absolute; bottom: 3px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--fg-subtle); }
 .kal__mini-tag.is-today.is-selected::after { background: var(--accent-fg); }
 .kal__mini-tag:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--accent-ring); }
@@ -873,6 +1025,7 @@ body.kal-zieht, body.kal-zieht * { cursor: grabbing !important; }
 .kal__origin-text strong { font-weight: 500; color: var(--fg); }
 .kal__origin .btn { align-self: flex-start; }
 .kal__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.kal__fact-ics { display: inline-flex; align-items: center; gap: 6px; }
 .kal__actions .spacer { flex: 1 1 auto; }
 .kal__danger { color: var(--danger); }
 .kal__wahl { display: flex; flex-direction: column; gap: 8px; width: 100%; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-3); }
@@ -890,6 +1043,9 @@ body.kal-zieht, body.kal-zieht * { cursor: grabbing !important; }
 .kal__form-row { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
 .kal__form-row.is-zwei { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .kal__form .textarea { min-height: 72px; }
+/* Text, Datum, Uhrzeit und Auswahl haben von Haus aus drei Hoehen (38/40/42).
+   In einer Zeile nebeneinander sieht man die versetzten Unterkanten. */
+.kal__form .input, .kal__form .select { height: 40px; box-sizing: border-box; }
 .kal__form-error { margin: 0; padding: 10px 12px; font-size: var(--fs-sm); color: var(--danger); background: var(--danger-soft); border-radius: var(--r-2); }
 
 /* ---- Die Frage bei Serien: "Nur dieser Termin" / "Alle" ---- */
@@ -927,6 +1083,17 @@ body.kal-zieht, body.kal-zieht * { cursor: grabbing !important; }
 @container (max-width: 920px) {
   .kal__pill-time { display: none; }
 }
+@container (max-width: 700px) {
+  .kal__title-lang { display: none; }
+  .kal__title-kurz { display: inline; }
+  /* Der Untertitel (KW, Anzahl) weicht ganz, der Titel eine Stufe kleiner:
+     so passt "Do., 24. Sept." neben Pfeile und Umschalter (iPad quer mit
+     geoeffneter Uebersicht, ~580 px). */
+  .kal__title { font-size: var(--fs-lg); }
+  .kal__sub { display: none; }
+  .kal .segmented__option { min-width: 0; padding-left: 10px; padding-right: 10px; }
+  .kal__nav .btn { padding-left: 8px; padding-right: 8px; }
+}
 @container (max-width: 760px) {
   .kal__body[data-mode="tag"] { grid-template-columns: minmax(0, 1fr); }
   .kal__body[data-mode="tag"] .kal__seite { display: none; }
@@ -947,18 +1114,25 @@ body.kal-zieht, body.kal-zieht * { cursor: grabbing !important; }
 }
 @media (pointer: coarse) {
   .kal { --kal-bar: var(--tap-min); }
-  .kal__block { min-height: var(--tap-min); }
   .kal__rtag { min-height: var(--tap-min); }
+  .kal__mehr { height: 30px; padding: 0 10px; }
   .kal__mini-tag { height: var(--tap-min); }
-  .kal__grip { height: 16px; }
+  .kal__grip { height: 12px; }
   .kal__grip::after { opacity: 1; }
   .kal__switch { min-height: var(--tap-min); }
+  .kal__form .input, .kal__form .select { height: var(--tap-min); }
   .kal__lfuss a { display: inline-flex; align-items: center; min-height: var(--tap-min); }
   .kal__day:active, .kal__entry:active .kal__entry-card, .kal__block:active { background: var(--surface-3); }
 }
 @media (prefers-reduced-motion: reduce) {
   .kal__sheet, .kal__frage { animation: none; }
   .kal__block.is-neu, .kal__balken.is-neu { animation: none; }
+}
+/* Hell: dieselben zwei Tokens, zweimal wie in web/app.css (ausdruecklich
+   gewaehlt und "wie das System"). #62656e auf Weiss: 5,0:1. */
+:root[data-theme="light"] .kal { --fg-subtle: #62656e; --kal-heute: var(--accent); }
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] .kal { --fg-subtle: #62656e; --kal-heute: var(--accent); }
 }
 `;
 
@@ -995,6 +1169,19 @@ function fmt(day, opts) {
 
 function errorText(err) {
   return (err && err.message) || 'Unbekannter Fehler.';
+}
+
+/**
+ * `?nur=` fuer "nur dieses Vorkommen". Fehlt der Tag, wird ABGEBROCHEN statt
+ * ohne `nur` zu senden: api.js laesst leere Werte weg, und ohne `nur` gilt
+ * die Aenderung -- oder das Loeschen -- fuer die ganze Serie.
+ */
+function nurDieses(e) {
+  const tag = e && e.occurrence;
+  if (typeof tag !== 'string' || !DATE_RE.test(tag)) {
+    throw new Error('Welcher Tag der Serie gemeint ist, fehlt – es wurde nichts geändert.');
+  }
+  return { nur: tag };
 }
 
 /** Die naechste volle Stunde, fuer das Formular "Neuer Termin" von heute. */
@@ -1050,14 +1237,27 @@ export default {
     const { h, text, clear, icon, api, icons, bus, toast } = ctx;
     const I = { ...icons, ...GLYPH };
     const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
-    // Mit dem Finger braucht eine halbe Stunde mehr Hoehe, sonst trifft man sie nicht.
-    const HOUR = coarse ? 56 : 48;
+    // Mit dem Finger braucht eine halbe Stunde mehr Hoehe, sonst trifft man sie
+    // nicht: 64 px je Stunde, eine halbe Stunde ist 30 px hoch.
+    const HOUR = coarse ? 64 : 48;
+    // Die kleinste Blockhoehe. Frueher waren es mit dem Finger 44 px (--tap-min)
+    // -- bei 56 px je Stunde lagen drei halbstuendige Termine hintereinander
+    // dann 16 px uebereinander, mit verdecktem Text und Anfasser. Jetzt ist ein
+    // Block so hoch wie seine Dauer (mindestens 30 px = eine halbe Stunde),
+    // und was darunter nicht passt, steht daneben (rasterBloecke).
+    const MIN_BLOCK = coarse ? 30 : 20;
 
     const today = () => toDay(new Date());
+    // Die Adresse darf Ansicht und Tag vorgeben (#/kalender?ansicht=tag&tag=…),
+    // etwa aus der Kachel: "+ 3 weitere heute" soll HEUTE zeigen, nicht das
+    // gemerkte Monatsblatt, in dem die drei unter dem Rand liegen.
+    const routeParams = ctx.route && ctx.route.params ? ctx.route.params : {};
+    const ansichtAusAdresse = MODES.some(([id]) => id === routeParams.ansicht) ? routeParams.ansicht : null;
+    const tagAusAdresse = DATE_RE.test(routeParams.tag || '') && toDay(parseDay(routeParams.tag)) === routeParams.tag ? routeParams.tag : null;
     const st = {
-      mode: readMode(),
-      cursor: today(),
-      selected: today(),
+      mode: ansichtAusAdresse || readMode(),
+      cursor: tagAusAdresse || today(),
+      selected: tagAusAdresse || today(),
       events: [],
       byKey: new Map(),
       chats: {},
@@ -1085,6 +1285,8 @@ export default {
 
     const dom = {
       title: h('h2.kal__title'),
+      titelLang: h('span.kal__title-lang'),
+      titelKurz: h('span.kal__title-kurz'),
       sub: h('span.kal__sub'),
       prev: h('button.icon-button', { type: 'button', onClick: () => move(-1) }, icon(I.prev)),
       next: h('button.icon-button', { type: 'button', onClick: () => move(1) }, icon(I.next)),
@@ -1093,6 +1295,7 @@ export default {
       sheet: null,
       frage: null,
     };
+    dom.title.append(dom.titelLang, dom.titelKurz);
     dom.nav = h('div.kal__nav', null, dom.prev, dom.heute, dom.next);
     const segmented = h('div.segmented', { role: 'group', 'aria-label': 'Ansicht' });
     for (const [mode, label, taste] of MODES) {
@@ -1152,6 +1355,7 @@ export default {
         st.projekte = (res && res.projekte) || {};
         st.range = range;
         st.error = null;
+        st.spaeterGibtEs = undefined; // neu fragen, falls die Liste leer bleibt
       } catch (err) {
         if (!st.alive || token !== st.token) return;
         st.error = errorText(err);
@@ -1267,6 +1471,16 @@ export default {
       return null;
     }
 
+    /** Der Titel in zwei Fassungen; die kurze steht nur im engen Container (CSS). */
+    function setTitel(lang, kurz = lang) {
+      setText(dom.titelLang, lang);
+      setText(dom.titelKurz, kurz);
+      dom.title.setAttribute('aria-label', lang);
+    }
+
+    /** "Sept. 2026" -- dieselbe Kurzform wie ueberall im Kalender (MON_SATZ). */
+    const monatKurz = (day) => `${MON_SATZ[Number(day.slice(5, 7)) - 1]} ${day.slice(0, 4)}`;
+
     function renderBar() {
       const labels = {
         tag: ['Vorheriger Tag', 'Nächster Tag'],
@@ -1275,9 +1489,9 @@ export default {
         liste: ['', ''],
       }[st.mode];
       if (st.mode === 'tag') {
-        // Kurz ("Do, 24. September"): das Raster darunter nennt den Wochentag
+        // Kurz ("Do., 24. September"): das Raster darunter nennt den Wochentag
         // ohnehin gross, und die Kopfzeile bleibt in jeder Ansicht gleich hoch.
-        setText(dom.title, fmt(st.cursor, { weekday: 'short', day: 'numeric', month: 'long' }));
+        setTitel(fmt(st.cursor, { weekday: 'short', day: 'numeric', month: 'long' }), tagKurz(st.cursor, new Date()));
         const rel = relativ(st.cursor);
         const jahr = st.cursor.slice(0, 4) !== today().slice(0, 4) ? ` · ${st.cursor.slice(0, 4)}` : '';
         setText(dom.sub, `${rel ? `${rel} · ` : ''}KW ${isoWeek(st.cursor)}${jahr}`);
@@ -1285,22 +1499,26 @@ export default {
         const from = startOfWeek(st.cursor);
         const to = addDays(from, 6);
         const sameMonth = from.slice(0, 7) === to.slice(0, 7);
-        setText(dom.title, sameMonth
-          ? fmt(from, { month: 'long', year: 'numeric' })
-          : `${fmt(from, { month: 'short' })} – ${fmt(to, { month: 'short', year: 'numeric' })}`);
+        const sameYear = from.slice(0, 4) === to.slice(0, 4);
+        const [m1, m2] = [MON_SATZ[Number(from.slice(5, 7)) - 1], MON_SATZ[Number(to.slice(5, 7)) - 1]];
+        // Immer dieselbe Kurzform ("Sept. – Okt. 2026"): Intl schreibt den
+        // Monat allein "Sep", mit Jahr "Okt." -- nebeneinander sah das falsch aus.
+        if (sameMonth) setTitel(fmt(from, { month: 'long', year: 'numeric' }), monatKurz(from));
+        else if (sameYear) setTitel(`${m1} – ${m2} ${to.slice(0, 4)}`, `${m1} – ${m2}`);
+        else setTitel(`${m1} ${from.slice(0, 4)} – ${m2} ${to.slice(0, 4)}`, `${m1} – ${m2}`);
         setText(dom.sub, `KW ${isoWeek(from)} · ${fmt(from, { day: 'numeric', month: 'numeric' })}–${fmt(to, { day: 'numeric', month: 'numeric' })}`);
       } else if (st.mode === 'monat') {
-        setText(dom.title, fmt(st.cursor, { month: 'long', year: 'numeric' }));
+        setTitel(fmt(st.cursor, { month: 'long', year: 'numeric' }), monatKurz(st.cursor));
         const n = st.loaded && !st.error ? countInMonth() : null;
         setText(dom.sub, n === null ? '' : n === 0 ? 'keine Termine' : n === 1 ? '1 Termin' : `${n} Termine`);
       } else {
-        setText(dom.title, 'Als Nächstes');
+        setTitel('Als Nächstes');
         setText(dom.sub, `ab heute · ${st.listeTage} Tage`);
       }
-      // In der Liste gibt es kein Vor und Zurueck. Unsichtbar statt entfernt:
-      // so bleiben "Heute" und der Umschalter genau an ihrem Platz, und die
-      // Kopfzeile wird nicht um die Hoehe der Pfeile niedriger.
-      for (const b of [dom.prev, dom.next]) b.style.visibility = st.mode === 'liste' ? 'hidden' : '';
+      // In der Liste gibt es kein Vor und Zurueck (und "Heute" ist sie schon):
+      // die Leiste faellt dort weg (CSS ueber data-mode), damit der Titel Platz
+      // hat. Die Hoehe bleibt, der Umschalter ist gleich hoch.
+      root.dataset.mode = st.mode;
       dom.prev.setAttribute('aria-label', labels[0]);
       dom.next.setAttribute('aria-label', labels[1]);
       dom.prev.title = `${labels[0]} (←)`;
@@ -1344,6 +1562,7 @@ export default {
         body.appendChild(renderListe());
       }
       engeSpalten();
+      listeBuendig();
       const next = body.querySelector('.kal__rscroll');
       if (next) {
         if (st.scrollZiel === 'jetzt' || keepScroll === null) scrollZurStunde(next);
@@ -1385,7 +1604,11 @@ export default {
             onClick: (event) => {
               const pill = event.target.closest('[data-key]');
               select(day);
-              if (pill) openDetail(st.byKey.get(pill.dataset.key));
+              // Mit der Maus oeffnet ein Klick auf eine Zeile den Termin. Mit dem
+              // Finger sind die Zeilen 19 px hoch -- ein Tipp traf den Nachbarn.
+              // Dort waehlt der Tipp den Tag; seine Liste hat 52-px-Zeilen.
+              if (pill && !coarse) openDetail(st.byKey.get(pill.dataset.key));
+              else agendaZeigen();
             },
             // Doppelt antippen: dieser Tag im Stundenraster.
             onDblclick: () => {
@@ -1409,6 +1632,25 @@ export default {
       return h('section.kal__month', { 'aria-label': 'Monat' },
         h('div.kal__dow', { 'aria-hidden': 'true' }, ...WEEKDAYS.map((d) => h('span', null, text(d)))),
         grid);
+    }
+
+    /**
+     * Steht die Tagesliste UNTER dem Monat (enger Container), liegt sie nach
+     * einem Klick oft unter dem Rand -- es sah aus, als taete sich nichts.
+     * Dann wird sie ins Bild geholt.
+     */
+    function agendaZeigen() {
+      const agenda = body.querySelector('.kal__agenda');
+      const monat = body.querySelector('.kal__month');
+      if (!agenda || !monat) return;
+      const a = agenda.getBoundingClientRect();
+      const m = monat.getBoundingClientRect();
+      const b = body.getBoundingClientRect();
+      if (a.top < m.bottom - 1) return; // nebeneinander: schon zu sehen
+      if (a.top + 96 <= b.bottom) return; // Kopf und erste Zeile sind im Bild
+      const ziel = body.scrollTop + (a.top - b.top) - 12;
+      const ruhig = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+      body.scrollTo({ top: ziel, behavior: ruhig ? 'auto' : 'smooth' });
     }
 
     function onGridKey(event) {
@@ -1483,7 +1725,16 @@ export default {
       }
       const gruppen = gruppiereNachTag(st.events, from, to);
       if (!gruppen.length) {
-        section.appendChild(h('p.kal__leise', null, text(`Nichts in den nächsten ${st.listeTage} Tagen.`)));
+        // Leer: ein Satz, wie es weitergeht -- kein Export einer leeren Datei
+        // und kein "Mehr zeigen", wenn auch danach nichts kommt.
+        section.appendChild(h('p.kal__leise', null, text(`Nichts in den nächsten ${st.listeTage} Tagen. `
+          + 'Tipp oben zum Beispiel „morgen 15 Uhr Zahnarzt“ – oder sag es im Chat.')));
+        if (st.listeTage < 360 && st.spaeterGibtEs !== false) {
+          if (st.spaeterGibtEs === undefined) spaeterPruefen();
+          else if (st.spaeterGibtEs === true) section.appendChild(h('div.kal__lfuss', null,
+            h('button.btn.btn--small', { type: 'button', onClick: () => { st.listeTage += LISTE_SCHRITT; load(); } }, text('Weiter voraus schauen'))));
+        }
+        return section;
       }
       for (const { day, eintraege } of gruppen) {
         const rel = relativ(day);
@@ -1500,6 +1751,19 @@ export default {
         h('a', { href: `/api/events/export.ics?from=${from}&to=${to}`, title: 'Alle Termine dieses Zeitraums als Kalenderdatei (.ics)' },
           text('Als Kalenderdatei (.ics)'))));
       return section;
+    }
+
+    /** Steht nach der Liste ueberhaupt noch etwas an? (nur im leeren Fall gefragt) */
+    async function spaeterPruefen() {
+      st.spaeterGibtEs = null;
+      try {
+        const from = addDays(today(), st.listeTage);
+        const res = await api.get('/events/zeitraum', { query: { from, to: addDays(from, 360) } });
+        st.spaeterGibtEs = !!(res && Array.isArray(res.items) && res.items.length);
+      } catch {
+        st.spaeterGibtEs = true; // im Zweifel den Knopf anbieten
+      }
+      if (st.alive && st.mode === 'liste') render();
     }
 
     /* ---- Stundenraster: Tag und Woche ---- */
@@ -1589,26 +1853,62 @@ export default {
           timed.push({ id: e.key, startMin, endMin: Math.min(24 * 60, Math.max(endMin, startMin + 15)), e });
         }
         const byId = new Map(timed.map((x) => [x.id, x]));
-        for (const item of layoutDay(timed)) {
+        const bloecke = rasterBloecke(timed, { hour: HOUR, minPx: MIN_BLOCK });
+        // Mehr als zwei Termine gleichzeitig in einer schmalen Spalte: statt
+        // vier blauer Striche und "W…" die ersten zwei gestaffelt und ein
+        // "+n", das den Tag zeigt (nur sichtbar, wenn die Spalte eng ist).
+        const mehrJeGruppe = new Map();
+        for (const item of bloecke) {
+          if (item.lanes <= 2 || item.lane < 2) continue;
+          const g = mehrJeGruppe.get(item.gruppe) || { n: 0, top: Infinity };
+          g.n += 1;
+          g.top = Math.min(g.top, item.top);
+          mehrJeGruppe.set(item.gruppe, g);
+        }
+        for (const g of mehrJeGruppe.values()) {
+          col.appendChild(h('button.kal__mehr', {
+            type: 'button',
+            style: { top: `${g.top}px` },
+            title: `${g.n} ${g.n === 1 ? 'weiterer Termin' : 'weitere Termine'} zur selben Zeit – den Tag zeigen`,
+            'aria-label': `${g.n} weitere zur selben Zeit, ${fmt(day, { weekday: 'long', day: 'numeric', month: 'long' })} als Tag zeigen`,
+            onClick: () => {
+              st.selected = day;
+              st.cursor = day;
+              setMode('tag');
+            },
+          }, text(`+${g.n}`)));
+        }
+        for (const item of bloecke) {
           const { e } = byId.get(item.id);
           spuren = Math.max(spuren, item.lanes);
-          const top = (item.startMin / 60) * HOUR;
-          const height = Math.max(20, ((item.endMin - item.startMin) / 60) * HOUR - 2);
+          const { top, height } = item;
           const kurz = height < 36;
+          // Wie viele Zeilen Titel die Hoehe hergibt: Rand 10 px, Zeitzeile
+          // 16 px, Ort noch eine Zeile, wenn Platz ist.
+          const innen = height - 10;
+          const mitOrt = !kurz && !!e.data.location && innen >= 64;
+          const zeilen = kurz ? 1 : Math.max(1, Math.floor((innen - 16 - (mitOrt ? 16 : 0)) / 16));
+          const label = timeLabel(e.span, day);
+          const [von, bis] = label.includes('–') ? label.split('–') : [label, ''];
           col.appendChild(h('button.kal__block', {
             type: 'button',
             'data-key': e.key,
-            class: { 'is-past': isPast(e.span), 'is-kurz': kurz },
-            style: { top: `${top}px`, height: `${height}px`, '--lane': item.lane, '--lanes': item.lanes },
-            'aria-label': `${timeLabel(e.span, day)}, ${e.data.title}${e.data.location ? `, ${e.data.location}` : ''}${istKi(e) ? ', von der KI' : ''}`,
+            class: { 'is-past': isPast(e.span), 'is-kurz': kurz, 'is-geteilt': item.lanes > 1, 'is-dritte': item.lanes > 2 && item.lane >= 2 },
+            style: { top: `${top}px`, height: `${height}px`, '--lane': item.lane, '--lanes': item.lanes, '--zeilen': zeilen },
+            title: `${label} · ${e.data.title}${e.data.location ? ` · ${e.data.location}` : ''}`,
+            'aria-label': `${label}, ${e.data.title}${e.data.location ? `, ${e.data.location}` : ''}${istKi(e) ? ', von der KI' : ''}`,
             onClick: (ev) => { if (!schlucken(ev)) openDetail(e); },
           },
           h('span.kal__block-text', null,
-            h('span.kal__block-title', null, h('span', null, text(e.data.title)),
+            h('span.kal__block-title', null, text(e.data.title)),
+            // Die leisen Zeichen (Serie, KI) stehen in der Zeitzeile: in der
+            // Titelzeile frassen sie in schmalen Spalten den halben Titel.
+            h('span.kal__block-time', null,
+              h('span', null, text(von)),
+              bis ? h('span.kal__block-bis', null, text(`–${bis}`)) : null,
               e.recurring && !kurz ? h('span.kal__wdh', { title: 'Wiederholt sich' }, icon(I.repeat)) : null,
-              istKi(e) ? h('span.kal__ki', { title: 'Von der KI angelegt' }, icon(I.ki)) : null),
-            h('span.kal__block-time', null, text(timeLabel(e.span, day))),
-            !kurz && height >= 62 && e.data.location ? h('span.kal__block-ort', null, text(e.data.location)) : null),
+              istKi(e) && !kurz ? h('span.kal__ki', { title: 'Von der KI angelegt' }, icon(I.ki)) : null),
+            mitOrt ? h('span.kal__block-ort', null, text(e.data.location)) : null),
           e.span.lastDay === day ? h('span.kal__grip', { 'aria-hidden': 'true', title: 'Ziehen, um die Dauer zu ändern' }) : null));
         }
         // Heute kraeftig; in der Woche an den anderen Tagen ein Hauch derselben
@@ -1628,7 +1928,7 @@ export default {
      * Die volle Stunde direkt neben der blauen Jetzt-Zeit wuerde sie
      * ueberdecken ("09:44" auf "10:00"). Gemessen in Pixeln, nicht in Minuten:
      * eine Beschriftung ist ~15 px hoch, eine Stunde mit Maus 48, mit Finger
-     * 56 px. Die Uhr laeuft weiter -- deshalb auch aus dem Takt aufgerufen.
+     * 64 px. Die Uhr laeuft weiter -- deshalb auch aus dem Takt aufgerufen.
      */
     function stundenFreiraeumen(labels, jetztMin) {
       for (const el of labels.querySelectorAll('.kal__rlabel')) {
@@ -1644,8 +1944,19 @@ export default {
         col.classList.toggle('is-eng', spuren > 1 && col.clientWidth / spuren < 60);
       }
     }
+    /**
+     * Die Liste scrollt im Rumpf; dessen Bildlaufleiste nimmt rechts Platz
+     * weg, und die Karten endeten 8 px vor Feld und Umschalter darueber. Die
+     * Liste reicht deshalb um genau diese Breite in den Rand hinein.
+     */
+    function listeBuendig() {
+      const liste = body.querySelector('.kal__liste');
+      if (!liste) return;
+      const leiste = body.offsetWidth - body.clientWidth;
+      liste.style.marginRight = leiste > 0 ? `-${leiste}px` : '';
+    }
     if (typeof ResizeObserver === 'function') {
-      const ro = new ResizeObserver(() => engeSpalten());
+      const ro = new ResizeObserver(() => { engeSpalten(); listeBuendig(); });
       ro.observe(body);
       cleanups.push(() => ro.disconnect());
     }
@@ -1661,7 +1972,13 @@ export default {
         if (erste.length) stunde = Math.max(0, Math.min(7, Math.min(...erste) / 60 - 0.5));
       }
       // Auf die volle Stunde: sonst stuende oben eine halb abgeschnittene Zeit.
-      scroller.scrollTop = Math.max(0, Math.floor(stunde) * HOUR - 10);
+      // Schneidet dort ein Termin die Kante, beginnt die Ansicht mit ihm.
+      const rand = (10 / HOUR) * 60;
+      const bloecke = st.events
+        .filter((e) => !istBalken(e.span) && days.some((d) => onDay(e.span, d)))
+        .map((e) => ({ startMin: e.span.start.min, endMin: e.span.end && e.span.end.day === e.span.start.day ? e.span.end.min : e.span.start.min + 60 }));
+      const topMin = scrollAnfang(bloecke, Math.floor(stunde) * 60 - rand);
+      scroller.scrollTop = Math.max(0, (topMin / 60) * HOUR - (topMin === Math.floor(stunde) * 60 - rand ? 0 : 10));
     }
 
     /* ---- Tag: der kleine Monat daneben ---- */
@@ -1698,7 +2015,7 @@ export default {
       const heute = eventsOn(st.cursor);
       const summe = !st.loaded ? '' : heute.length === 0
         ? (st.cursor === t ? 'Heute nichts.' : 'Nichts eingetragen.')
-        : heute.length === 1 ? '1 Termin.' : `${heute.length} Termine.`;
+        : heute.length === 1 ? '1 Termin' : `${heute.length} Termine`;
       return h('aside.kal__seite', { 'aria-label': 'Monat' },
         h('section.kal__mini', null,
           h('div.kal__mini-kopf', null,
@@ -1734,8 +2051,10 @@ export default {
      * - Maus: ab 4 px Bewegung wird gezogen, sonst ist es ein Klick.
      * - Finger: erst kurz halten (300 ms), dann ziehen. Wer sofort wischt,
      *   scrollt -- sonst liesse sich ein voller Tag nicht mehr bewegen.
-     * - Der untere Rand eines Termins (.kal__grip) zieht sofort, auch mit dem
-     *   Finger: dort ist ausdruecklich nichts zum Scrollen.
+     * - Der untere Rand eines Termins (.kal__grip) zieht ohne Halten, auch mit
+     *   dem Finger (dort ist ausdruecklich nichts zum Scrollen) -- aber erst ab
+     *   4 px Bewegung, und das neue Ende folgt der BEWEGUNG, nicht der Minute
+     *   unter dem Zeiger. Ein Tipp auf den Rand ist ein Tipp auf den Termin.
      */
     let drag = null;
     let klickSchlucken = false;
@@ -1764,6 +2083,7 @@ export default {
     function onPointerDown(ev, { days, stunden, barsEl }) {
       if (drag || dom.frage) return;
       if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+      if (ev.target.closest('.kal__mehr')) return;
       const grip = ev.target.closest('.kal__grip');
       const block = ev.target.closest('.kal__block');
       const balken = ev.target.closest('.kal__balken');
@@ -1802,8 +2122,8 @@ export default {
         neu: null,
       };
       if (kind === 'dauer') {
+        // Kein Textmarkieren, kein Scrollen -- aktiviert wird erst beim Ziehen.
         ev.preventDefault();
-        aktivieren();
       } else if (drag.touch) {
         drag.timer = setTimeout(() => aktivieren(), kind === 'anlegen' ? 450 : 300);
       }
@@ -1830,6 +2150,10 @@ export default {
       drag.y = ev.clientY;
       if (!drag.active) {
         const weg = Math.hypot(ev.clientX - drag.x0, ev.clientY - drag.y0);
+        if (drag.kind === 'dauer') {
+          if (weg >= 4) aktivieren();
+          return;
+        }
         if (drag.touch) {
           // Der Finger bewegt sich, bevor er "gehalten" hat: scrollen oder wischen.
           if (weg > 8) abbrechen();
@@ -1896,22 +2220,20 @@ export default {
       let endMin;
       let zielTag = day;
       if (d.kind === 'anlegen') {
-        const a = Math.floor(d.min0 / 15) * 15;
-        const b = Math.max(a + 15, Math.ceil(min / 15) * 15);
-        const c = Math.min(a, Math.floor(min / 15) * 15);
-        startMin = min < d.min0 ? c : a;
-        endMin = min < d.min0 ? Math.max(a + 15, c + 15) : b;
+        ({ startMin, endMin } = anlegenSpanne(d.min0, min));
         zielTag = d.days[d.spalte0];
         d.neu = { start: `${zielTag}T${minZuHm(startMin)}`, end: endMin >= 1440 ? `${addDays(zielTag, 1)}T00:00` : `${zielTag}T${minZuHm(endMin)}` };
       } else if (d.kind === 'dauer') {
         const s = alsWand(d.e.data.start);
         const letzter = d.e.span.lastDay;
-        const neuEnde = Math.max(15, snap(min));
+        zielTag = letzter;
+        startMin = d.e.span.firstDay === zielTag ? d.e.span.start.min : 0;
+        const sp = d.e.span;
+        const altEnde = sp.end ? (sp.end.day === letzter ? sp.end.min : 24 * 60) : startMin + 60;
+        const neuEnde = dauerEnde(altEnde, d.y - d.y0, HOUR, startMin);
         let ende = neuEnde >= 1440 ? `${addDays(letzter, 1)}T00:00` : `${letzter}T${minZuHm(neuEnde)}`;
         if (minutenZwischen(s, ende) < 15) ende = plusMinuten(s, 15);
         d.neu = { start: s, end: ende };
-        zielTag = d.e.span.lastDay;
-        startMin = d.e.span.firstDay === zielTag ? d.e.span.start.min : 0;
         endMin = neuEnde;
       } else {
         const delta = snap(min - d.min0) + (spalte - d.spalte0) * 1440;
@@ -1928,7 +2250,7 @@ export default {
         d.ghost = h('div.kal__block.is-ghost', { 'aria-hidden': 'true', style: { '--lane': 0, '--lanes': 1 } },
           h('span.kal__block-text', null,
             h('span.kal__block-time'),
-            h('span.kal__block-title', null, h('span', null, text(d.e ? d.e.data.title : 'Neuer Termin')))));
+            h('span.kal__block-title', null, text(d.e ? d.e.data.title : 'Neuer Termin'))));
       }
       if (colIndex === -1) {
         d.ghost.remove();
@@ -1940,10 +2262,12 @@ export default {
       const height = Math.max(20, ((endMin - startMin) / 60) * HOUR - 2);
       d.ghost.style.top = `${top}px`;
       d.ghost.style.height = `${height}px`;
+      d.ghost.style.setProperty('--zeilen', String(Math.max(1, Math.floor((height - 26) / 16))));
       d.ghost.classList.toggle('is-kurz', height < 36);
       const zeit = d.ghost.querySelector('.kal__block-time');
       clear(zeit);
-      zeit.appendChild(text(`${minZuHm(startMin)}–${endMin >= 1440 ? '24:00' : minZuHm(endMin)}`));
+      zeit.append(h('span', null, text(minZuHm(startMin))),
+        h('span.kal__block-bis', null, text(`–${endMin >= 1440 ? '24:00' : minZuHm(endMin)}`)));
     }
 
     function aufraeumenZiehen() {
@@ -2076,7 +2400,7 @@ export default {
         const pfad = `/events/${encodeURIComponent(e.id)}`;
         if (wahl === 'nur') {
           const serie = (await api.get(pfad)).record;
-          res = await api.patch(pfad, { start: neu.start, end: neu.end }, { query: { nur: e.occurrence } });
+          res = await api.patch(pfad, { start: neu.start, end: neu.end }, { query: nurDieses(e) });
           const neuId = res && res.record && res.record.id;
           const altAus = Array.isArray(serie.data.exdates) ? serie.data.exdates : [];
           zurueck = async () => {
@@ -2277,12 +2601,21 @@ export default {
     /* ---------------- Seitenblatt ---------------- */
 
     function closeSheet({ keepRoute = false } = {}) {
+      const warImBlatt = !!dom.sheet && dom.sheet.contains(document.activeElement);
       if (dom.sheet) dom.sheet.remove();
       dom.sheet = null;
       const hadId = st.sheet && st.sheet.kind !== 'neu';
+      const oeffner = st.sheet ? st.sheet.oeffner || st.sheet.key : null;
       st.sheet = null;
       markOpen();
       if (!keepRoute && hadId && typeof ctx.replaceRoute === 'function') ctx.replaceRoute('#/kalender');
+      // Der Fokus geht dorthin zurueck, woher das Blatt kam -- sonst landet er
+      // auf <body>, und wer mit der Tastatur arbeitet, tabbt wieder von oben.
+      if (warImBlatt && oeffner) {
+        let ziel = body.querySelector(`[data-key="${oeffner}"]`);
+        if (ziel && !ziel.matches('button, a, [tabindex]')) ziel = ziel.closest('button, a, [tabindex]');
+        if (ziel) ziel.focus({ preventScroll: true });
+      }
     }
 
     function showSheet(kicker, ...content) {
@@ -2316,6 +2649,11 @@ export default {
       if (!st.alive) return;
       const record = res.record;
       if (!record.data.recurrence) occ = null;
+      // Eine Serie ohne Tag (#/kalender?id=… aus einer Chat-Karte): ihr
+      // naechstes Vorkommen zeigen, nicht den Beginn der Serie als waere er
+      // ein einzelner Termin -- sonst meldete das Blatt eine Ueberschneidung
+      // mit sich selbst, und "Loeschen" fragte nicht "Nur diesen / Alle".
+      else if (!occ && res.naechstes) occ = res.naechstes;
       let e = st.byKey.get(`${id}@${occ || ''}`);
       if (!e) {
         const lage = occ ? aufTag(record.data, occ) : null;
@@ -2333,7 +2671,8 @@ export default {
         st.selected = e.span.firstDay;
         render();
       }
-      st.sheet = { kind: 'detail', id, occurrence: occ, key: e.key };
+      const vorher = st.sheet;
+      st.sheet = { kind: 'detail', id, occurrence: occ, key: e.key, oeffner: ref.key || (vorher && vorher.oeffner) || e.key };
       renderDetail(res, e);
       if (!fromRoute && typeof ctx.replaceRoute === 'function') ctx.replaceRoute(`#/kalender?id=${id}${occ ? `&am=${occ}` : ''}`);
     }
@@ -2374,6 +2713,13 @@ export default {
             mitteilungMoeglich() ? schalter : null,
             h('span.kal__ehrlich', null, text('Erinnert nur, solange Neural OS offen ist.')))));
       }
+      // Die Kalenderdatei als leise Zeile statt als dritter Knopf: drei Knoepfe
+      // passten nicht in eine Zeile, und "Loeschen" stand allein darunter.
+      facts.appendChild(h('li.kal__fact', null, icon(I.ics),
+        h('a.kal__fact-ics', {
+          href: `/api/events/${encodeURIComponent(record.id)}/ics`,
+          title: 'Als Kalenderdatei – auf dem iPad: „Zum Kalender hinzufügen“',
+        }, text('In Kalender übernehmen (.ics)'))));
       if (res.projekt) {
         facts.appendChild(h('li.kal__fact', null, icon(I.projects),
           h('span', null, text('Projekt '), h('a', { href: `#/projects?id=${encodeURIComponent(res.projekt.id)}` }, text(res.projekt.name)))));
@@ -2381,7 +2727,7 @@ export default {
       // Gleichzeitig: aus dem, was ohnehin geladen ist -- keine eigene Anfrage.
       if (!span.allDay) {
         const ende = span.end ? span.end.ms : span.start.ms + 3600000;
-        const andere = st.events.filter((x) => x.key !== e.key && !x.span.allDay
+        const andere = st.events.filter((x) => x.key !== e.key && x.id !== e.id && !x.span.allDay
           && x.span.start.ms < ende && (x.span.end ? x.span.end.ms : x.span.start.ms + 3600000) > span.start.ms);
         if (andere.length) {
           facts.appendChild(h('li.kal__fact', null, icon(I.clock),
@@ -2412,14 +2758,12 @@ export default {
         clear(aktionen);
         aktionen.append(
           h('button.btn', { type: 'button', onClick: () => openForm(res, {}, e) }, icon(I.pen), text('Bearbeiten')),
-          h('a.btn.btn--ghost', {
-            href: `/api/events/${encodeURIComponent(record.id)}/ics`,
-            title: 'Als Kalenderdatei – auf dem iPad: „Zum Kalender hinzufügen“',
-          }, icon(I.ics), text('In Kalender übernehmen')),
           h('span.spacer'),
           h('button.btn.btn--ghost.kal__danger', {
             type: 'button',
-            onClick: () => (e.recurring ? frageLoeschen() : remove(record, e, 'einzeln')),
+            // Eine Serie fragt IMMER, auch wenn kein Vorkommen gewaehlt ist --
+            // sonst waere mit einem Tipp die ganze Serie weg.
+            onClick: () => (e.recurring || serie.recurrence ? frageLoeschen() : remove(record, e, 'einzeln')),
           }, icon(I.trash), text('Löschen')));
       };
       const frageLoeschen = () => {
@@ -2427,7 +2771,7 @@ export default {
         aktionen.appendChild(h('div.kal__wahl', { role: 'group', 'aria-label': 'Löschen' },
           h('p.kal__wahl-text', null, text(`„${data.title}“ wiederholt sich. Was löschen?`)),
           h('div.kal__wahl-knoepfe', null,
-            h('button.btn.btn--small.kal__danger', { type: 'button', onClick: () => remove(record, e, 'nur') }, text('Nur diesen Termin')),
+            e.occurrence ? h('button.btn.btn--small.kal__danger', { type: 'button', onClick: () => remove(record, e, 'nur') }, text('Nur diesen Termin')) : null,
             h('button.btn.btn--small.kal__danger', { type: 'button', onClick: () => remove(record, e, 'alle') }, text('Alle')),
             h('button.btn.btn--ghost.btn--small', { type: 'button', onClick: zeigeAktionen }, text('Abbrechen')))));
         const erster = aktionen.querySelector('button');
@@ -2466,7 +2810,7 @@ export default {
       try {
         if (art === 'nur') {
           const altAus = Array.isArray(record.data.exdates) ? record.data.exdates : [];
-          res = await api.del(pfad, { query: { nur: e.occurrence } });
+          res = await api.del(pfad, { query: nurDieses(e) });
           zurueck = () => api.patch(pfad, { exdates: altAus });
         } else {
           res = await api.del(pfad);
@@ -2663,7 +3007,7 @@ export default {
           if (serienEdit && wahl === 'nur') {
             const { recurrence, ...ohne } = input;
             const altAus = Array.isArray(serie.exdates) ? serie.exdates : [];
-            res2 = await api.patch(pfad, ohne, { query: { nur: e.occurrence } });
+            res2 = await api.patch(pfad, ohne, { query: nurDieses(e) });
             const neuId = res2.record && res2.record.id;
             zurueck = async () => {
               if (neuId && neuId !== record.id) await api.del(`/events/${encodeURIComponent(neuId)}`);
@@ -2702,7 +3046,8 @@ export default {
         return patch.start && serie.start ? tageZwischen(String(alsWand(serie.start)).slice(0, 10), String(patch.start).slice(0, 10)) : 0;
       }
 
-      st.sheet = { kind: record ? 'bearbeiten' : 'neu', id: record ? record.id : null, key: e ? e.key : null };
+      const oeffner = (st.sheet && st.sheet.oeffner) || (e ? e.key : null);
+      st.sheet = { kind: record ? 'bearbeiten' : 'neu', id: record ? record.id : null, key: e ? e.key : null, oeffner };
       showSheet(record ? 'Termin bearbeiten' : 'Neuer Termin', form);
       if (!coarse) f.title.focus();
       else if (!record) f.title.focus();

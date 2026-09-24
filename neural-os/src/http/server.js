@@ -319,6 +319,26 @@ async function createServer(ctx = {}) {
   let closing = false;
   let closePromise = null;
 
+  // Wer antwortet hier? (Stick-Bauplan 2.4) `/api/health` nennt die Instanz
+  // dieses Servers und den Datenordner; erst beide zusammen beweisen dem
+  // Laufzettel, dass unter dem Port wirklich DIESES Neural OS läuft. Der
+  // Dienst kann seine eigene Instanz vorgeben (ctx.instanz), damit Vorraum,
+  // Laufzettel und Server dieselbe nennen.
+  const laufzettelMod = require('../kernel/laufzettel');
+  const instanz = typeof ctx.instanz === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(ctx.instanz)
+    ? ctx.instanz
+    : laufzettelMod.neueInstanz();
+  let heim = null;
+  const heimJetzt = () => {
+    if (heim === null && ctx.paths && ctx.paths.home) heim = laufzettelMod.heimKennung(ctx.paths.home);
+    return heim;
+  };
+
+  // Aktivität für den Leerlauf-Wächter: laufende Anfragen (ein offener
+  // Ereignisstrom zählt mit, solange er offen ist) und die Zeit der letzten.
+  let inFlight = 0;
+  let letzteAnfrage = Date.now();
+
   const router = createRouter();
   for (const mod of [
     require('./api/system'),
@@ -332,6 +352,7 @@ async function createServer(ctx = {}) {
     require('./api/vault'),
     require('./api/ipad'),
     require('./api/sync'),
+    require('./api/kopplung'),
     require('./api/modules'),
     require('./api/assist'),
     require('./api/automation'),
@@ -342,6 +363,7 @@ async function createServer(ctx = {}) {
     require('./api/secondlook'),
     require('./api/stick'),
     require('./api/events'),
+    require('./api/beenden'),
   ]) {
     mod.register(router);
   }
@@ -946,12 +968,33 @@ async function createServer(ctx = {}) {
         if (!isLoopbackAddress(req.socket && req.socket.remoteAddress)) {
           throw new PermissionError('Die Zustandsabfrage ist nur lokal erreichbar.');
         }
-        sendJson(rc, 200, { ok: true, at: new Date().toISOString() });
+        sendJson(rc, 200, { ok: true, at: new Date().toISOString(), instanz, heim: heimJetzt() });
         return;
       }
 
+      // Ab hier zählt die Anfrage als Aktivität (die Gesundheitsabfrage des
+      // Starters nicht: sie hielte ein vergessenes Neural OS sonst am Leben).
+      inFlight += 1;
+      letzteAnfrage = Date.now();
+      res.once('close', () => {
+        inFlight -= 1;
+        letzteAnfrage = Date.now();
+      });
+
       guardHost(req);
+
+      // Die PIN-Seite des Vorraums (src/kernel/vorraum.js) gibt es nach dem
+      // Entsperren nicht mehr. Ein wiederhergestellter oder neu geladener Tab
+      // von dort geht in die Schale, statt ein JSON-404 zu zeigen.
+      if (target.pathname === '/api/entsperren' && (req.method === 'GET' || req.method === 'HEAD')) {
+        rc.handled = true;
+        res.writeHead(303, { Location: '/', 'Cache-Control': 'no-store', 'Content-Length': 0 });
+        res.end();
+        return;
+      }
+
       guardCsrf(req);
+      require('./auth').guardKi(req, ctx.ki && ctx.ki.id); // ein Tab einer anderen KI (Bauplan 2.6)
       await authenticate(rc);
       if (rc.handled) return;
 
@@ -1038,8 +1081,11 @@ async function createServer(ctx = {}) {
         return await listenOnce({ ...opts, port: candidate });
       } catch (err) {
         lastError = err;
-        if (!err || err.code !== 'PORT_IN_USE' || i === attempts - 1) throw err;
-        log.warn(`Port ${candidate} ist belegt, versuche ${candidate + 1}.`);
+        // Ein gesperrter Port (Windows: von Hyper-V/WSL ausgeschlossen, EACCES)
+        // ist für den, der den Stick hält, dasselbe wie ein belegter.
+        const weiter = err && (err.code === 'PORT_IN_USE' || err.code === 'PORT_FORBIDDEN');
+        if (!weiter || i === attempts - 1) throw err;
+        log.warn(`Port ${candidate} ist ${err.code === 'PORT_FORBIDDEN' ? 'gesperrt' : 'belegt'}, versuche ${candidate + 1}.`);
       }
     }
     throw lastError;
@@ -1162,6 +1208,10 @@ async function createServer(ctx = {}) {
     },
     get closing() { return closing; },
     streamCount: () => streams.size,
+    /** Diese Laufzeit dieses Servers, wie `/api/health` sie nennt. */
+    instanz,
+    /** Für den Leerlauf-Wächter (src/kernel/waechter.js). */
+    aktivitaet: () => ({ streams: streams.size, inFlight, letzteAnfrage }),
     routes: router.list(),
     webRoot,
   };

@@ -276,6 +276,8 @@ function createShell() {
     route: parseRoute(window.location.hash),
     seiten: null,
     ready: false,
+    // {ziel, gesperrt}, solange dieser Browser die KI nicht entsperrt hat (PIN_NOETIG)
+    pin: null,
   });
 
   const busListeners = new Map();
@@ -361,7 +363,7 @@ function createShell() {
     // 404, kennt er die Route nicht -- dann wird bis zum Neuladen nicht
     // wieder gefragt, statt jede Minute denselben Fehler zu erzeugen.
     const mode = status && status.network ? status.network.mode : null;
-    if (mode !== 'online' || claudeRouteFehlt) {
+    if (mode !== 'online' || claudeRouteFehlt || state.get('pin')) {
       state.set('claude', { bekannt: false });
       return;
     }
@@ -451,14 +453,39 @@ function createShell() {
     if (type === 'vault.unlocked') toast('Der Tresor ist entsperrt.', 'success');
   }
 
+  /**
+   * PIN_NOETIG, von irgendeiner /api-Anfrage oder vom Ereignisstrom: der
+   * Server laeuft, nur dieser Browser hat die KI noch nicht entsperrt
+   * (src/http/auth.js). Dann ist nichts "getrennt", und neu verbinden hilft
+   * nicht -- der Strom wird angehalten, und die Schale geht zu details.ziel,
+   * wo die PIN-Eingabe steht.
+   */
+  function pinNoetig(err) {
+    const details = (err && err.details) || {};
+    const ziel = typeof details.ziel === 'string' && details.ziel.startsWith('#/') ? details.ziel : '#/settings';
+    if (!state.get('pin')) state.set('pin', { ziel, gesperrt: details.gesperrt === true });
+    if (eventStream) {
+      const stream = eventStream;
+      eventStream = null;
+      stream.close();
+    }
+    const route = state.get('route');
+    if (!route || route.view !== parseRoute(ziel).view) navigate(ziel);
+  }
+
   function startEventStream() {
     if (eventStream) eventStream.close();
     eventStream = api.events(handleServerEvent, {
       onStatus: (connState, info) => {
+        if (connState === 'error' && info && info.error && info.error.code === 'PIN_NOETIG') {
+          pinNoetig(info.error);
+          return;
+        }
         const connected = connState === 'open';
         state.set('connected', connected);
         state.set('connectionInfo', { state: connState, ...info });
         if (connected) {
+          state.set('pin', null);
           // Nach einer Unterbrechung kann eine Aenderung verpasst sein.
           refreshStatus();
           refreshApprovals();
@@ -706,6 +733,11 @@ function createShell() {
       type: 'button',
       hidden: true,
       onClick: () => {
+        const pin = state.get('pin');
+        if (pin) {
+          navigate(pin.ziel);
+          return;
+        }
         if (eventStream) eventStream.retryNow();
         refreshStatus();
       },
@@ -811,6 +843,7 @@ function createShell() {
       connected: state.get('connected'),
       ready: state.get('ready'),
       claude: state.get('claude'),
+      pin: state.get('pin'),
     });
     clear(dom.statusButton);
     dom.statusButton.dataset.status = info.key;
@@ -824,9 +857,14 @@ function createShell() {
 
     const connected = state.get('connected');
     const connInfo = state.get('connectionInfo') || {};
+    const pin = state.get('pin');
     const showConn = !connected && state.get('ready');
     dom.connChip.hidden = !showConn;
-    if (showConn) {
+    if (showConn && pin) {
+      clear(dom.connChip);
+      dom.connChip.append(icon(ICONS.lock), h('span.chip__label', null, text('PIN nötig')));
+      dom.connChip.title = 'Dieser Browser hat die KI noch nicht entsperrt.';
+    } else if (showConn) {
       clear(dom.connChip);
       const label = connInfo.state === 'reconnecting' && connInfo.delay
         ? `Getrennt – neuer Versuch in ${Math.max(1, Math.round(connInfo.delay / 1000))} s`
@@ -1976,7 +2014,7 @@ function createShell() {
     }
     if (dom.scrim) on(dom.scrim, 'click', () => closeDrawers());
 
-    for (const key of ['status', 'statusStale', 'connected', 'approvals', 'claude']) {
+    for (const key of ['status', 'statusStale', 'connected', 'approvals', 'claude', 'pin']) {
       state.on(key, () => renderChrome());
     }
     state.on('recentChats', () => {
@@ -2005,6 +2043,13 @@ function createShell() {
     }
 
     renderChrome();
+    // Vor dem ersten Aufruf: schon die erste Antwort kann PIN_NOETIG sein.
+    on(window, 'neural-os:pin-noetig', (ev) => pinNoetig(ev.detail));
+    // Wurde die PIN in einem anderen Tab dieses Browsers eingegeben, gilt
+    // die Sitzung auch hier: beim Zurueckkommen einmal nachsehen.
+    on(window, 'focus', () => {
+      if (state.get('pin') && !eventStream) startEventStream();
+    });
     startEventStream();
     refreshRecent();
     await refreshStatus();
@@ -2019,7 +2064,7 @@ function createShell() {
       if (document.visibilityState === 'visible') refreshStatus();
     }, 60000);
 
-    registerServiceWorker(toast);
+    registerServiceWorker();
     import('./lib/erinnerung.js').then((m) => m.starteErinnerungen({ api, bus, navigate })).catch((err) => console.warn('[neural-os] Erinnerungen nicht verfügbar:', err && err.message));
 
     on(window, 'beforeunload', () => {
@@ -2061,7 +2106,19 @@ function createShell() {
  *
  * @returns {{key:string, label:string, hint:string, dot:string|null, offline:boolean, ziel?:string}}
  */
-export function describeStatus({ status, stale, connected, ready, claude }) {
+export function describeStatus({ status, stale, connected, ready, claude, pin }) {
+  // Der Server antwortet, nur dieser Browser darf noch nicht: das ist keine
+  // Trennung, und neu verbinden hilft nicht (PIN_NOETIG, src/http/auth.js).
+  if (pin) {
+    return {
+      key: 'pin',
+      label: 'PIN nötig',
+      hint: 'Dieser Browser hat die KI noch nicht entsperrt.',
+      dot: 'warn',
+      offline: false,
+      ziel: pin.ziel || '#/settings',
+    };
+  }
   if (ready && !connected) {
     return {
       key: 'getrennt',
@@ -2232,15 +2289,23 @@ function readTheme() {
 
 /**
  * Der Service Worker legt nur die Schale in den Zwischenspeicher, damit sie
- * sofort aufgeht. Ein Update wird einer laufenden Sitzung nie aufgezwungen:
- * die neue Fassung wartet, und es gibt einmal das Angebot "Neu laden".
+ * sofort aufgeht. Eine neue Fassung uebernimmt sofort (web/sw.js:
+ * skipWaiting, clients.claim), und diese Seite laedt dann einmal neu -- sonst
+ * liefe hier die alte app.js weiter und holte sich Ansichten aus dem neuen
+ * Stand. Beim allerersten Besuch uebernimmt der Worker nur dieselben Dateien;
+ * das ist kein Grund zum Neuladen.
  */
-function registerServiceWorker(notify) {
+function registerServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
   if (!/^https?:$/.test(window.location.protocol)) return;
 
+  let gesteuert = !!navigator.serviceWorker.controller;
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!gesteuert) {
+      gesteuert = true;
+      return;
+    }
     if (reloading) return;
     reloading = true;
     window.location.reload();
@@ -2248,21 +2313,8 @@ function registerServiceWorker(notify) {
 
   navigator.serviceWorker.register(new URL('./sw.js', import.meta.url), { scope: './' })
     .then((registration) => {
-      const offerUpdate = (worker) => {
-        if (!worker || !navigator.serviceWorker.controller) return;
-        notify('Eine neue Version der Oberfläche ist bereit.', 'info', {
-          timeout: 0,
-          action: { label: 'Neu laden', run: () => worker.postMessage({ type: 'SKIP_WAITING' }) },
-        });
-      };
-      if (registration.waiting) offerUpdate(registration.waiting);
-      registration.addEventListener('updatefound', () => {
-        const worker = registration.installing;
-        if (!worker) return;
-        worker.addEventListener('statechange', () => {
-          if (worker.state === 'installed') offerUpdate(worker);
-        });
-      });
+      // Ein Worker aus einer Fassung, die noch auf Erlaubnis wartete.
+      if (registration.waiting) registration.waiting.postMessage({ type: 'SKIP_WAITING' });
     })
     .catch((err) => console.warn('[neural-os] Service Worker nicht registriert:', err && err.message));
 }

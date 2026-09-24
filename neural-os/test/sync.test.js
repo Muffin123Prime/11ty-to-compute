@@ -19,6 +19,7 @@
  */
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const http = require('node:http');
 
 const { test, drain, tempHome } = require('./harness');
@@ -610,6 +611,38 @@ test('ein Gerät gleicht sich nicht mit sich selbst ab', async () => {
     assert.match(probe.error, /sich selbst/);
   } finally {
     await a.close();
+  }
+});
+
+/**
+ * Paket I (Bauplan 2.6): Die Kennung gehört der Identität, nicht dem Abgleich.
+ * Erneuert sich die KI (kopierter Datenordner, Zwilling), muss der nächste
+ * Vorgang schon die neue Kennung tragen; eine beim Start gemerkte hielte den
+ * Stick für das alte Gerät.
+ */
+test('die eigene Kennung kommt bei jedem Vorgang frisch aus deps.identitaet', async () => {
+  const { home, cleanup } = tempHome('nos-sync-identitaet');
+  const paths = pathsMod.ensureLayout(pathsMod.layout(home));
+  const store = await openStore({ paths, bus: new Bus(), logger: silentLogger, vaultCrypto: null });
+  try {
+    let aktuell = `dev_${'1'.repeat(24)}`;
+    const identitaet = { get id() { return aktuell; } };
+    const config = configMod.defaults();
+    const sync = createSync({ store, config, logger: silentLogger, paths, identitaet });
+    assert.equal(sync.deviceId, aktuell);
+    assert.equal(sync.info().deviceId, aktuell);
+    // Keine zweite, eigene Kennung daneben, und nichts auf die Platte.
+    assert.equal(config.sync, undefined);
+    assert.equal(fs.existsSync(paths.config), false);
+
+    aktuell = `dev_${'2'.repeat(24)}`; // wie nach identitaet.erneuern()
+    assert.equal(sync.deviceId, aktuell);
+    assert.equal(sync.info().deviceId, aktuell);
+    assert.equal(sync.summary().deviceId, aktuell);
+    assert.throws(() => sync.applyIncoming({ deviceId: aktuell, records: [] }), /sich selbst/);
+  } finally {
+    await store.close().catch(() => {});
+    cleanup();
   }
 });
 

@@ -51,6 +51,8 @@ const MAX_ZWEITE = 4;
 const MAX_KNOTEN = 60;
 /** Arten, die nie die Mitte sind: Buchhaltung, kein Thema. */
 const NIE_MITTE = new Set(['run', 'agent']);
+/** Arten, die hier gar nicht erscheinen: Laeufe ("Lauf: ...") sind wie im grossen Gehirn ab Werk aus. */
+const NIE_IM_BILD = new Set(['run']);
 
 export function mount(el, ctx) {
   ensureStyle();
@@ -195,7 +197,8 @@ export function mount(el, ctx) {
     return pos;
   }
 
-  function zeichnen(mitte, alleKnoten, alleKanten) {
+  function zeichnen(mitte, geladen, alleKanten) {
+    const alleKnoten = geladen.filter((node) => !NIE_IM_BILD.has(node.type));
     if (!alleKnoten.some((node) => node.id === mitte)) {
       leer('Noch leer. Was die KI über dich lernt, wächst hier als Netz.');
       return;

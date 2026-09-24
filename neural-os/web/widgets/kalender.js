@@ -25,6 +25,13 @@ const STYLE_ID = 'nos-kachel-kalender';
 const MAX_ROWS = 3;
 
 const CSS = `
+/* Leise Schrift mit Inhalt (Ort, "+ 3 weitere") braucht 4,5:1 -- dieselbe
+   Stufe wie im Kalender (web/views/kalender.js), hell wie dunkel. */
+.kwk__list, .kwk__more, .kwk__next { --fg-subtle: #8a8d93; }
+:root[data-theme="light"] :is(.kwk__list, .kwk__more, .kwk__next) { --fg-subtle: #62656e; }
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] :is(.kwk__list, .kwk__more, .kwk__next) { --fg-subtle: #62656e; }
+}
 .kwk__list { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
 .kwk__row {
   display: grid;
@@ -56,7 +63,10 @@ const CSS = `
 .kwk__ki { display: inline-grid; place-items: center; flex: none; color: var(--fg-subtle); }
 .kwk__ki svg { width: 12px; height: 12px; }
 .kwk__sub { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--fs-sm); color: var(--fg-subtle); }
-.kwk__row.is-past { opacity: 0.5; }
+/* Vergangenes leiser ueber die Farbe, nicht per Deckkraft (Ort fiel sonst
+   unter 2:1): Titel in --fg-muted, grauer Balken. */
+.kwk__row.is-past .kwk__title { color: var(--fg-muted); }
+.kwk__row.is-past .kwk__bar { background: var(--border-strong); }
 .kwk__more { display: inline-block; margin-top: 10px; font-size: var(--fs-sm); color: var(--fg-subtle); text-decoration: none; }
 .kwk__more:hover { color: var(--fg); }
 .kwk__next { display: flex; flex-direction: column; gap: 3px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); color: inherit; text-decoration: none; }
@@ -216,7 +226,9 @@ export function mount(el, ctx) {
       body.appendChild(ul);
       if (heute.length > zeilen.length) {
         const rest = heute.length - zeilen.length;
-        body.appendChild(h('a.kwk__more', { href: '#/kalender' }, text(`+ ${rest} ${rest === 1 ? 'weiterer' : 'weitere'} heute`)));
+        // Zu HEUTE, nicht ins gemerkte Monatsblatt: dort lagen die "weiteren"
+        // unter dem Rand, und es sah aus, als fuehrte der Link ins Leere.
+        body.appendChild(h('a.kwk__more', { href: `#/kalender?ansicht=tag&tag=${day}` }, text(`+ ${rest} ${rest === 1 ? 'weiterer' : 'weitere'} heute`)));
       }
     }
     if (!heute.length && next) {

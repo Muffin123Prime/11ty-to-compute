@@ -25,7 +25,12 @@
  * - **Doppelt anlegen wird verhindert, nicht versteckt.** Derselbe Termin
  *   (Titel + Beginn), dieselbe Erinnerung, dieselbe Aufgabe im selben Projekt
  *   werden nicht ein zweites Mal geschrieben; Claude bekommt gesagt, dass es
- *   sie schon gibt.
+ *   sie schon gibt. Nennt der zweite Aufruf beim Termin etwas Neues
+ *   (Wiederholung, Ende, Ort, Erinnerung), wird das am vorhandenen ergaenzt
+ *   und gesagt -- "ach, das ist jeden Dienstag" darf nicht verschluckt werden.
+ * - **Serien werden nie still verkuerzt.** start/end beziehen sich bei einer
+ *   Serie auf EIN Vorkommen (das Claude aus termine_lesen kennt); die Serie
+ *   verschiebt sich um den Unterschied. "Ab jetzt …" teilt sie mit ab_am.
  */
 
 const { withActor } = require('../kernel/actor');

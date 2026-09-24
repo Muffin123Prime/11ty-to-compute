@@ -23,6 +23,7 @@ const path = require('node:path');
 
 const pathsMod = require('./kernel/paths');
 const configMod = require('./kernel/config');
+const identitaetMod = require('./kernel/identitaet');
 const { Bus } = require('./kernel/bus');
 const { logger, Audit, setLevel } = require('./kernel/log');
 const { StorageError, asNeuralError } = require('./kernel/errors');
@@ -65,12 +66,14 @@ function tryRequire(id) {
  * @param {string} [opts.logLevel]
  * @param {boolean} [opts.harden=true] install process-level network enforcement
  * @param {string} [opts.passphrase]  unlock an encrypted vault at boot
+ * @param {string} [opts.appDir]      nur für Tests: wo das Programm läge; von dort
+ *   sucht `detectPortable` den Marker (Vorgabe: dieser Programmordner)
  */
 async function createApp(opts = {}) {
   if (opts.logLevel) setLevel(opts.logLevel);
 
   const failures = [];
-  const paths = pathsMod.ensureLayout(pathsMod.layout(opts.home));
+  const paths = pathsMod.ensureLayout(pathsMod.layout(opts.home, { von: opts.appDir }));
 
   // --- configuration -------------------------------------------------------
   let config;
@@ -104,6 +107,43 @@ async function createApp(opts = {}) {
   const bus = new Bus();
   const audit = new Audit(paths.audit, { enabled: config.network.audit !== false }).open();
   audit.write('app.start', { version: VERSION, node: process.version, mode: config.network.mode });
+
+  // --- welche KI ist das? (Bauplan 2.6) --------------------------------------
+  //
+  // Vor allem anderen, was die Konfiguration liest: Die Identität kann den
+  // Port ändern (ein Stick zieht von 7777 auf seinen eigenen) und, wenn
+  // `data/` von einem anderen Stick kopiert wurde, die Kennung samt allem,
+  // was die alte KI über Partner wusste. Der Tresor, die Schleuse und der
+  // Abgleich sollen schon die richtige KI sehen.
+  //
+  // Einmal ermittelt und an drei Stellen gebraucht: der Startbanner sagt es,
+  // `doctor()`/`/api/status` müssen es sagen können -- sonst kann der Browser
+  // nicht einmal erfahren, DASS er von einem Stick läuft --, und die
+  // Identität schreibt ihre Kennung in den Marker.
+  const portable = pathsMod.portableInfo(paths.home, { von: opts.appDir });
+  const herkunft = pathsMod.homeHerkunft(opts.home, { von: opts.appDir });
+  const homeHinweis = herkunft.uebergangen && portable
+    ? `NEURAL_OS_HOME zeigt auf ${herkunft.uebergangen}, der Stick gewinnt.`
+    : null;
+  if (homeHinweis) log.warn(homeHinweis);
+  const identitaet = identitaetMod.createIdentitaet({
+    config, paths, portable, bus,
+    speichern: (c) => configMod.save(paths.config, c),
+  });
+  try {
+    identitaet.sicherstellen();
+    const marker = identitaet.pruefeMarker();
+    if (marker.aktion === 'erneuert') {
+      audit.write('ki.erneuert', { grund: 'daten-kopiert' });
+      log.warn('Dieser Datenordner kam von einem anderen Stick und ist jetzt eine eigene KI.');
+    }
+  } catch (err) {
+    // Ein Abbruch mitten im Erneuern holt der nächste Start nach (siehe
+    // identitaet.erneuern); bis dahin läuft die KI, sagt aber, was fehlt.
+    const e = asNeuralError(err);
+    failures.push({ subsystem: 'identitaet', reason: e.message, code: e.code });
+    log.error(`Identität dieser KI unvollständig: ${e.message}`);
+  }
 
   // --- vault encryption ----------------------------------------------------
   const vaultCryptoMod = tryRequire('./store/vaultcrypto');
@@ -370,8 +410,33 @@ async function createApp(opts = {}) {
   // --- device synchronisation -----------------------------------------------
   const syncMod = tryRequire('./sync/peer');
   const sync = syncMod
-    ? optional(failures, 'sync', () => syncMod.createSync({ store, gate, config, bus, logger, auth: null, paths }))
+    ? optional(failures, 'sync', () => syncMod.createSync({ store, gate, config, bus, logger, auth: null, paths, identitaet }))
     : null;
+
+  // Koppeln über die sync/-Ordner der Sticks (Bauplan 2.8). Während Sätze
+  // eines Partners ankommen, ruht die Ableitung der Verknüpfungen: Sie legte
+  // sonst zu jeder Notiz eigene Kanten mit zufälliger ID an, zusätzlich zu
+  // denen im Postfach. Danach wird sie EINMAL nachgeholt (wie bulkWrite).
+  // `opts.kopplung` nur für Tests: Einhängepunkte, Zeitgeber aus.
+  const kopplungMod = tryRequire('./sync/kopplung');
+  const kopplung = kopplungMod
+    ? optional(failures, 'kopplung', () => kopplungMod.createKopplung({
+      store, bus, config, paths, portable, identitaet, vaultCrypto, history, logger, version: VERSION,
+      ableitung: {
+        async aussetzen(fn) {
+          derivationSuspended++;
+          try {
+            return await fn();
+          } finally {
+            derivationSuspended = Math.max(0, derivationSuspended - 1);
+          }
+        },
+        nachholen: () => (graph && typeof graph.scanAll === 'function' && derivationSuspended === 0 ? graph.scanAll(store) : null),
+      },
+      ...(opts.kopplung && typeof opts.kopplung === 'object' ? opts.kopplung : {}),
+    }))
+    : null;
+  if (kopplung && kopplung.automatisch) kopplung.starten();
 
   // --- user-installed extensions -------------------------------------------
   //
@@ -440,15 +505,17 @@ async function createApp(opts = {}) {
     toolbox.attachModules(modules);
   }
 
-  // Einmal ermittelt und an zwei Stellen gebraucht: der Startbanner sagt es,
-  // und `doctor()`/`/api/status` muessen es sagen koennen -- sonst kann der
-  // Browser nicht einmal erfahren, DASS er von einem Stick laeuft.
-  const portable = pathsMod.portableInfo(paths.home);
-
   const app = {
     version: VERSION,
     paths,
     portable,
+    /** Eine Zeile für den Startbanner, wenn NEURAL_OS_HOME übergangen wurde; sonst null. */
+    homeHinweis,
+    identitaet,
+    /** Kennung und Name dieser KI, bei jedem Zugriff frisch (nach Umbenennen oder Erneuern). */
+    get ki() {
+      return { id: identitaet.id, name: identitaet.name };
+    },
     config,
     bus,
     audit,
@@ -479,6 +546,7 @@ async function createApp(opts = {}) {
     embeddings,
     extract,
     sync,
+    kopplung,
     failures,
     server: null,
 
@@ -624,6 +692,7 @@ async function createApp(opts = {}) {
         node: process.version,
         home: paths.home,
         portable: pathsMod.describePortable(portable),
+        ki: app.ki,
         claude: claudeZustand,
         network: { mode: config.network.mode, hardened: !!hardening, strictAllowlist: config.network.strictAllowlist },
         vault: { ...(store.stats ? store.stats() : {}), encryption: vaultCrypto ? vaultCrypto.state : 'unavailable' },
@@ -726,6 +795,7 @@ async function createApp(opts = {}) {
         // Laufende Claude-Antworten abbrechen, bevor der Speicher schließt:
         // der Teiltext wird dann noch als "abgebrochen" gespeichert.
         ['chat', () => chat && chat.abortAll && chat.abortAll()],
+        ['kopplung', () => kopplung && kopplung.beenden()],
         ['store', () => store.close()],
       ]) {
         try {
@@ -770,15 +840,70 @@ function sanitiseConfig(config) {
   return copy;
 }
 
+/**
+ * Feste Kennung eines Startsatzes: `<typ>_start` + Wort, auf 24 Zeichen
+ * aufgefüllt (dasselbe Format wie jede ID, `ID_RE` in schema.js). Kopien aus
+ * Konflikten haben 32 Zeichen (Bauplan 2.8), Startsätze fallen also nie
+ * darunter.
+ */
+function startId(typ, wort) {
+  return `${typ}_start${wort.padStart(19, '0')}`;
+}
+
+/**
+ * Die Startinhalte, auf jedem frischen Stick dieselben: gleiche IDs, gleiche
+ * Texte, gleiche Kanten. Koppelt man zwei frische Sticks, sind die
+ * Einführungen im Abgleich "identisch" statt doppelt vorhanden. Deshalb steht
+ * auch kein Pfad im Text: der wäre auf jedem Stick ein anderer.
+ */
+const START = {
+  willkommen: startId('note', 'willk'),
+  claude: startId('note', 'claud'),
+  projekt: startId('project', 'projekt'),
+  aufgabeClaude: startId('task', 'claude'),
+  aufgabeGehirn: startId('task', 'gehirn'),
+  kanteLink: startId('edge', 'willkclaud'),
+  kanteClaude: startId('edge', 'claudeprojekt'),
+  kanteGehirn: startId('edge', 'gehirnprojekt'),
+};
+
+/**
+ * Wartet auf diesem Stick schon Wissen von einem Partner? Dann kommt die
+ * Einführung beim ersten Abgleich von dort, mit denselben IDs. Eine eigene
+ * wäre bestenfalls überflüssig und, wenn der Partner seine geändert hat,
+ * eine zweite Fassung neben seiner.
+ *  - `<home>/kopplungen.json`: diese KI ist schon gekoppelt (Paket K1).
+ *  - `<Stick>/sync/koppeln/*.angebot`: ein Kopplungsangebot wartet.
+ */
+async function gekoppeltOderAngeboten(app) {
+  try {
+    await fsp.access(path.join(app.paths.home, 'kopplungen.json'));
+    return true;
+  } catch { /* nicht gekoppelt */ }
+  if (!app.portable || !app.portable.root) return false;
+  try {
+    const eintraege = await fsp.readdir(path.join(app.portable.root, 'sync', 'koppeln'));
+    return eintraege.some((name) => name.endsWith('.angebot'));
+  } catch {
+    return false;
+  }
+}
+
 /** Seed a brand-new vault so the first run is not an empty void. */
 async function seedIfEmpty(app) {
   if (app.store.count('note') > 0 || app.store.count('agent') > 0) return false;
+  if (await gekoppeltOderAngeboten(app)) return false;
 
-  const welcome = app.store.create('note', {
+  // Die Reihenfolge ist Absicht. Die Ableitung der Verknüpfungen läuft bei
+  // jedem Anlegen mit und vergäbe ihren Kanten zufällige IDs. Deshalb wird
+  // jeder Satz angelegt, bevor sein Ziel existiert (die Einführung vor der
+  // Notiz, auf die sie verweist; die Aufgaben vor ihrem Projekt), und die
+  // Kanten kommen danach mit festen IDs. Sie sind genau die, die die
+  // Ableitung selbst zöge; ein späteres "neu ableiten" behält sie.
+  app.store.create('note', {
     title: 'Willkommen in Neural OS',
     body: [
-      'Dies ist deine eigene KI. Alles, was du hier schreibst, liegt auf diesem Stick',
-      `unter \`${app.paths.home}\`.`,
+      'Dies ist deine eigene KI. Alles, was du hier schreibst, bleibt auf diesem Stick.',
       '',
       '## Wie es funktioniert',
       '',
@@ -790,9 +915,10 @@ async function seedIfEmpty(app) {
       '',
       '## Erste Schritte',
       '',
-      '1. Claude verbinden: [[Claude verbinden]]',
-      '2. Oben auf „Online“ schalten.',
-      '3. Einfach losschreiben.',
+      '1. Claude verbinden: im Chat oder unter Einstellungen → Claude ([[Claude verbinden]]).',
+      '2. Einfach losschreiben.',
+      '',
+      'Ob Neural OS gerade online ist, steht unten links.',
       '',
       '## Und ohne Internet?',
       '',
@@ -803,16 +929,16 @@ async function seedIfEmpty(app) {
     ].join('\n'),
     tags: ['willkommen', 'anleitung'],
     pinned: true,
-  });
+  }, { id: START.willkommen });
 
-  const setup = app.store.create('note', {
+  app.store.create('note', {
     title: 'Claude verbinden',
     body: [
       'Neural OS benutzt Claude von Anthropic. Dafür braucht es einmal einen Schlüssel.',
       '',
       '1. Auf **console.anthropic.com** anmelden und unter „API Keys“ einen Schlüssel erzeugen.',
-      '2. In Neural OS unter **Einstellungen → Claude** auf „Claude verbinden“ tippen und',
-      '   den Schlüssel einfügen. Er wird sofort mit einer kleinen Anfrage geprüft.',
+      '2. Im Chat oder unter **Einstellungen → Claude** den Schlüssel einfügen.',
+      '   Er wird sofort mit einer kleinen Anfrage geprüft.',
       '3. Der Schlüssel liegt danach im Tresor auf dem Stick, nicht in einer offenen',
       '   Datei. Ist eine PIN eingerichtet, ist er damit geschützt.',
       '',
@@ -822,14 +948,10 @@ async function seedIfEmpty(app) {
       '#anleitung',
     ].join('\n'),
     tags: ['anleitung'],
-  });
+  }, { id: START.claude });
 
-  app.store.edges.add({
-    from: welcome.id, to: setup.id, kind: 'links-to', source: 'derived',
-    reason: 'Wiki-Link in "Willkommen in Neural OS"',
-  });
-
-  // Built-in agent templates, deliberately with restrictive defaults.
+  // Built-in agent templates, deliberately with restrictive defaults. Agenten
+  // reisen beim Koppeln nicht mit, ihre IDs dürfen also je Stick verschieden sein.
   const agentsMod = tryRequire('./agents/permissions');
   const templates = agentsMod && typeof agentsMod.builtinAgents === 'function'
     ? agentsMod.builtinAgents()
@@ -844,48 +966,37 @@ async function seedIfEmpty(app) {
     }
   }
 
-  const project = app.store.create('project', {
+  app.store.create('task', { title: 'Claude verbinden', projectId: START.projekt, priority: 1 }, { id: START.aufgabeClaude });
+  app.store.create('task', { title: 'Gehirn ansehen', projectId: START.projekt }, { id: START.aufgabeGehirn });
+  app.store.create('project', {
     name: 'Mein erstes Projekt',
     description: 'Ein Platz, um Notizen, Aufgaben und Chats zu einem Vorhaben zu bündeln.',
-  });
-  app.store.create('task', { title: 'Claude verbinden', projectId: project.id, priority: 1 });
-  app.store.create('task', { title: 'Graph-Ansicht ausprobieren', projectId: project.id });
+  }, { id: START.projekt });
+
+  // Wortgleich mit src/graph/derive.js (desiredEdges): weicht der Grund ab,
+  // schreibt die nächste Ableitung ihn um, und die Sticks wären verschieden.
+  const kante = (id, from, to, kind, reason) => app.store.create('edge', {
+    from, to, kind, source: 'derived', reason, weight: 1,
+  }, { id });
+  kante(START.kanteLink, START.willkommen, START.claude, 'links-to', 'Wiki-Link [[Claude verbinden]] im Text');
+  kante(START.kanteClaude, START.aufgabeClaude, START.projekt, 'belongs-to', 'Aufgabe gehoert zu diesem Projekt');
+  kante(START.kanteGehirn, START.aufgabeGehirn, START.projekt, 'belongs-to', 'Aufgabe gehoert zu diesem Projekt');
 
   await app.store.flush();
   return true;
 }
 
-/** Write a lock file so two instances cannot share one vault. */
-async function acquireLock(paths) {
-  const payload = JSON.stringify({ pid: process.pid, at: new Date().toISOString() });
-  try {
-    await fsp.writeFile(paths.lock, payload, { flag: 'wx', mode: 0o600 });
-  } catch (err) {
-    if (err.code !== 'EEXIST') throw err;
-    let holder = null;
-    try {
-      holder = JSON.parse(await fsp.readFile(paths.lock, 'utf8'));
-    } catch { /* unreadable lock is treated as stale */ }
-    if (holder && holder.pid && isProcessAlive(holder.pid)) {
-      throw new StorageError(
-        `Another Neural OS instance (PID ${holder.pid}) is already using ${path.dirname(paths.lock)}. ` +
-        'Two instances sharing one vault would corrupt it.',
-      );
-    }
-    await fsp.writeFile(paths.lock, payload, { mode: 0o600 });
-  }
-  return async () => {
-    try { await fsp.unlink(paths.lock); } catch { /* already gone */ }
-  };
-}
-
-function isProcessAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return err.code === 'EPERM'; // exists but owned by someone else
-  }
+/**
+ * Zwei Instanzen dürfen nie denselben Tresor öffnen. Dünner Wrapper um den
+ * Laufzettel (src/kernel/laufzettel.js, Stick-Bauplan 2.4): Eine Sperre von
+ * einem anderen Rechner, einem früheren Start oder einem toten Prozess
+ * blockiert nicht mehr; ein laufendes Neural OS schon, mit einem deutschen
+ * Satz (LAEUFT_SCHON mit `details.url`, STARTET_SCHON, AELTERE_VERSION).
+ * @returns {Promise<() => Promise<void>>} gibt den eigenen Zettel wieder frei
+ */
+async function acquireLock(paths, felder = {}) {
+  const griff = await require('./kernel/laufzettel').anlegen(paths, felder);
+  return async () => { griff.freigeben(); };
 }
 
 module.exports = { createApp, seedIfEmpty, acquireLock, sanitiseConfig, VERSION };

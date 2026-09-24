@@ -105,8 +105,15 @@ export const WT_CODES = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
 export const MONATE = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
 /** Kurz fuer die Vorschau ("24. Sep") -- ohne Punkt, wie auf einem Kalenderblatt. */
 export const MON3 = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
-/** Kurz im Satz ("bis 20. Dez.") -- mit Punkt, wo abgekuerzt wird. */
-const MON_SATZ = ['Jan.', 'Feb.', 'März', 'Apr.', 'Mai', 'Juni', 'Juli', 'Aug.', 'Sept.', 'Okt.', 'Nov.', 'Dez.'];
+/**
+ * Kurz, mit Punkt, wo abgekuerzt wird ("bis 20. Dez.", "Do., 24. Sept.") --
+ * die deutsche Form, dieselbe, die Intl.DateTimeFormat('de-DE') fuer
+ * `month: 'short'` liefert. Der ganze Kalender (Vorschau, Kopfzeile, Kachel,
+ * Serien) benutzt sie, damit nicht "Sep" neben "Sept." steht.
+ */
+export const MON_SATZ = ['Jan.', 'Feb.', 'März', 'Apr.', 'Mai', 'Juni', 'Juli', 'Aug.', 'Sept.', 'Okt.', 'Nov.', 'Dez.'];
+/** Wochentag kurz, mit Punkt ("Do."), wie Intl 'de-DE' `weekday: 'short'`. */
+export const WT_PUNKT = WT_KURZ.map((w) => `${w}.`);
 
 const ZAHLWORT = {
   ein: 1, eins: 1, eine: 1, einer: 1, einem: 1, einen: 1, zwei: 2, drei: 3, vier: 4, 'fünf': 5, fuenf: 5,
@@ -175,7 +182,7 @@ function klein(s) {
 /* ------------------------------------------------------------------ */
 
 /** Worte, die an einer Schnittkante nichts mehr bedeuten ("Zahnarzt um" -> "Zahnarzt"). */
-const RESTWORTE = new Set(['am', 'um', 'ab', 'von', 'vom', 'bis', 'zum', 'den', 'im', 'in', 'für', 'fuer', 'gegen', 'zwischen', 'und', 'ca.', 'ca', 'jeweils']);
+const RESTWORTE = new Set(['am', 'um', 'ab', 'von', 'vom', 'bis', 'zum', 'den', 'dem', 'im', 'in', 'für', 'fuer', 'gegen', 'zwischen', 'und', 'ca.', 'ca', 'jeweils']);
 
 /**
  * @param {string} text  was der Nutzer tippt
@@ -205,8 +212,19 @@ export function parse(text, jetzt = new Date()) {
     rec: null, // {freq, interval, byDay:Set}
     anzahl: null,
     fest: null, // {day, min} aus "in 30 Minuten"
+    relWoche: false, // relTag stammt aus "in N Wochen": ein Wochentag gilt dann in DIESER Woche
+    wtSpanne: null, // {von, bis} aus "Montag bis Freitag" (ohne "jeden")
     kaputt: false,
   };
+
+  /**
+   * Steht ausserhalb von [a, b) noch eine Uhrzeit? Dann ist "6.10" daneben
+   * ein Datum ("Elternabend 6.10 um 19:30") und keine zweite Uhrzeit.
+   */
+  function andereUhrzeit(a, b) {
+    const rest = `${s.slice(0, a)} ${s.slice(b)}`;
+    return /\d{1,2}:\d{2}|\d\s*uhr|\d{1,2}h(?![\p{L}])|(?:^|\s)(?:um|gegen|ab)\s+(?:\d|halb|viertel|dreiviertel|ein|zwei|drei|vier|fünf|fuenf|sechs|sieben|acht|neun|zehn|elf|zwölf|zwoelf)|\d{1,2}\.(?:1[3-9]|[2-5]\d)(?![\d.])/u.test(rest);
+  }
 
   /** Jeden Treffer, der noch frei ist, nehmen und als verbraucht markieren. */
   function nimm(re, fn) {
@@ -234,8 +252,27 @@ export function parse(text, jetzt = new Date()) {
   }
 
   /* ---- 1. Wiederholung ---- */
-  nimm(rx(`${B0}(?:jeden\\s+werktag|werktags|an\\s+werktagen|montags?\\s+bis\\s+freitags?|mo\\s*[-–]\\s*fr)${B1}`),
-    () => { setzeRec('weekly', 1, [0, 1, 2, 3, 4]); });
+  // "Montag bis Freitag" OHNE "jeden" und ohne Plural ist eine Spanne ("Praktikum
+  // Montag bis Freitag" = die eine Woche), keine endlose Werktags-Serie.
+  nimm(rx(`${B0}(?:jede[nrs]?\\s+werktag|werktags|an\\s+werktagen|(jede[nrs]?\\s+)?(montags?)\\s+bis\\s+(freitags?)|mo\\s*[-–]\\s*fr)${B1}`),
+    (m) => {
+      if (m[2] && !m[1] && m[2] === 'montag' && m[3] === 'freitag') return false;
+      setzeRec('weekly', 1, [0, 1, 2, 3, 4]);
+      return undefined;
+    });
+  // "jeden Morgen um 7", "jeden Abend": taeglich zu dieser Tageszeit. Muss vor
+  // Schritt 4 stehen, sonst wird "morgen" zu "morgen" (der Tag) und "jeden" bleibt im Titel.
+  nimm(rx(`${B0}jede[nrs]?\\s+(morgen|früh|frueh|vormittag|mittag|nachmittag|abend|nacht)${B1}`), (m) => {
+    setzeRec('daily');
+    const w = m[1];
+    f.teil = w === 'morgen' || w.startsWith('fr') ? 'morgens'
+      : w === 'vormittag' ? 'vormittags' : w === 'mittag' ? 'mittags'
+        : w === 'nachmittag' ? 'nachmittags' : w === 'abend' ? 'abends' : 'nachts';
+  });
+  // "jeden 2. Donnerstag" wie "jeden zweiten Donnerstag": alle 2 Wochen -- nicht monatlich am 2.
+  nimm(rx(`${B0}jede[nrs]?\\s+([2-4])\\.\\s*(${WT_VOLL})${B1}`), (m) => {
+    setzeRec('weekly', Number(m[1]), [wtIndex(m[2])]);
+  });
   nimm(rx(`${B0}jede[nrs]?\\s+${ORD}\\s+(${WT_VOLL})${B1}`), (m) => {
     setzeRec('weekly', ordnung(m[1]) || 1, [wtIndex(m[2])]);
   });
@@ -265,7 +302,7 @@ export function parse(text, jetzt = new Date()) {
     setzeRec('weekly', 1, tage);
   });
   // "jeden 15." -- monatlich an diesem Tag.
-  nimm(rx(`${B0}jede[nrs]?\\s+(\\d{1,2})\\.(?:\\s+(?:des|im)\\s+monats?)?(?!\\d)`), (m, a) => {
+  nimm(rx(`${B0}jede[nrs]?\\s+(\\d{1,2})\\.(?:\\s+(?:des|im)\\s+monats?)?(?!\\d)(?!\\s*(?:${WT_VOLL}))`), (m, a) => {
     const d = Number(m[1]);
     if (d < 1 || d > 31) return false;
     setzeRec('monthly');
@@ -289,7 +326,7 @@ export function parse(text, jetzt = new Date()) {
   });
 
   /* ---- 3. Daten ---- */
-  const praep = '(?:(am|vom|von|ab|bis(?:\\s+zum|\\s+einschließlich)?|zum|den|bis)\\s+)?';
+  const praep = '(?:(am|vom|von|ab\\s+dem|ab|bis(?:\\s+zum|\\s+einschließlich)?|zum|den|dem|bis)\\s+)?';
   // 3.-5.10. / vom 3. bis 5.10.2026
   nimm(rx(`${B0D}(?:vom\\s+|von\\s+)?(\\d{1,2})\\.\\s*(?:-|–|—|bis)\\s*(\\d{1,2})\\.(\\d{1,2})\\.(\\d{4}|\\d{2})?(?!\\d)`), (m, a) => {
     const mo = Number(m[3]);
@@ -317,11 +354,32 @@ export function parse(text, jetzt = new Date()) {
     f.daten.push({ a, e: b, d: Number(m[2]), m: mo, y: m[4] ? jahr(m[4]) : null, bis: istBis(m[1]) });
     return undefined;
   });
-  // "am 3.10" ohne Schlusspunkt -- nur nach "am"/"vom", sonst ist es eine Uhrzeit.
-  nimm(rx(`${B0}(am|vom)\\s+(\\d{1,2})\\.(\\d{1,2})(?![\\d.:]|\\s*uhr)`), (m, a) => {
+  // "am 3.10" ohne Schlusspunkt -- nach "am"/"vom" immer ein Datum.
+  nimm(rx(`${B0}(am|vom|ab\\s+dem|den)\\s+(\\d{1,2})\\.(\\d{1,2})(?![\\d.:]|\\s*uhr)`), (m, a) => {
     const mo = Number(m[3]);
     if (mo < 1 || mo > 12) return false;
     f.daten.push({ a, d: Number(m[2]), m: mo, y: null, bis: false });
+    return undefined;
+  });
+  // "Elternabend 6.10 um 19:30", "6.10 Elternabend": ohne "am" und ohne
+  // Schlusspunkt ein Datum, wenn daneben schon eine Uhrzeit steht oder es den
+  // Satz anfaengt (oder einem Wochentag folgt) -- sonst koennte "9.10" auch
+  // 9:10 Uhr heissen, und dann lieber nichts raten.
+  nimm(rx(`${B0D}(\\d{1,2})\\.(\\d{1,2})(?![\\d.:]|\\s*(?:uhr|h|std|stunden?|minuten?|min)(?![\\p{L}]))`), (m, a, b) => {
+    const d = Number(m[1]);
+    const mo = Number(m[2]);
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return false;
+    const vorher = s.slice(0, a);
+    // "um 9.10", "von 8.30 bis 9.10": dort ist es eine Uhrzeit.
+    if (/(?:um|gegen|ab|bis|von|zwischen|und)\s*$/u.test(vorher)) return false;
+    // Minuten haben zwei Stellen, Stunden gehen bis 24: "12.3" und "29.10"
+    // koennen keine Uhrzeit sein.
+    const eindeutig = m[2].length === 1 || d > 24;
+    if (!eindeutig && /^\s*(?:-|–|—|bis)\s*\d/u.test(s.slice(b))) return false; // "12.10-13.00": eine Zeitspanne
+    const amAnfang = !vorher.trim();
+    const nachWochentag = new RegExp(`(?:${WT_VOLL}|mo|di|mi|do|fr|sa|so)\\.?,?\\s*$`, 'u').test(vorher);
+    if (!eindeutig && !amAnfang && !nachWochentag && !andereUhrzeit(a, b)) return false;
+    f.daten.push({ a, e: b, d, m: mo, y: null, bis: false });
     return undefined;
   });
   // 3. Oktober / 3 Okt 2027
@@ -335,6 +393,19 @@ export function parse(text, jetzt = new Date()) {
     f.daten.push({ a, d, m: null, y: null, bis: istBis(m[1]), nurTag: true });
     return undefined;
   });
+
+  /* ---- 4a. "naechste Woche Mittwoch", "Mittwoch naechste Woche" ---- */
+  // Der Wochentag in der FOLGENDEN Kalenderwoche (Montag bis Sonntag) -- nicht
+  // der naechste Mittwoch, der am Montag noch in dieser Woche laege.
+  const wocheMod = '(nächste[nr]?|naechste[nr]?|kommende[nr]?|übernächste[nr]?|uebernaechste[nr]?)\\s+woche';
+  const inWoche = (idx, mod) => {
+    if (f.relTag) return false;
+    const wochen = /^(ü|ue)ber/.test(mod) ? 2 : 1;
+    f.relTag = plusTage(heute, 7 * wochen - wochentag(heute) + idx);
+    return undefined;
+  };
+  nimm(rx(`${B0}(?:am\\s+)?(${WT_VOLL})\\s*,?\\s+(?:in\\s+der\\s+)?${wocheMod}${B1}`), (m) => inWoche(wtIndex(m[1]), m[2]));
+  nimm(rx(`${B0}(?:in\\s+der\\s+)?${wocheMod}\\s*,?\\s+(?:am\\s+)?(${WT_VOLL}|mo|di|mi|do|fr|sa|so)\\.?${B1}`), (m) => inWoche(wtIndex(m[2]), m[1]));
 
   /* ---- 4. heute, morgen, uebermorgen, in 3 Tagen ---- */
   nimm(rx(`${B0}heute\\s+(?:morgen|früh|frueh)${B1}`), () => {
@@ -350,12 +421,20 @@ export function parse(text, jetzt = new Date()) {
     const n = zahl(m[1]);
     if (!n || f.relTag) return false;
     if (m[2].startsWith('t')) f.relTag = plusTage(heute, n);
-    else if (m[2].startsWith('w')) f.relTag = plusTage(heute, 7 * n);
-    else f.relTag = plusMonate(heute, n);
+    else if (m[2].startsWith('w')) {
+      f.relTag = plusTage(heute, 7 * n);
+      f.relWoche = true;
+    } else f.relTag = plusMonate(heute, n);
     return undefined;
   });
 
   /* ---- 5. Wochentage ---- */
+  // "Montag bis Freitag" (ohne "jeden", siehe Schritt 1): eine Spanne ganzer Tage.
+  nimm(rx(`${B0}(?:(?:von|vom)\\s+)?(${WT_VOLL})\\s*(?:-|–|bis)\\s*(${WT_VOLL})${B1}`), (m) => {
+    if (f.wt || f.wtSpanne) return false;
+    f.wtSpanne = { von: wtIndex(m[1]), bis: wtIndex(m[2]) };
+    return undefined;
+  });
   const modRe = '(nächste[nrs]?|naechste[nrs]?|kommende[nrs]?|übernächste[nrs]?|uebernaechste[nrs]?|diese[nrs]?)';
   nimm(rx(`${B0}(?:(am|ab)\\s+)?(?:${modRe}\\s+)?(${WT_VOLL}|mo|di|mi|do|fr|sa|so)(\\.)?,?${B1}`), (m, a, b) => {
     if (f.wt) return false;
@@ -401,6 +480,27 @@ export function parse(text, jetzt = new Date()) {
     f.zeiten.push({ a, h: zahl(m[1]), min: 0, literal: false });
   });
   nimm(rx(`${B0}(\\d{1,2}):(\\d{2})${B1}`), (m, a) => zeit(a, m[1], m[2]));
+  // "16h", "16h30", "um 16h": eine Uhrzeit. Als Dauer nur mit "für" ("für 2h",
+  // Schritt 8) oder wenn schon eine andere Uhrzeit dasteht ("10 Uhr 2h").
+  nimm(rx(`(?<![\\p{L}\\d.,]|für\\s|fuer\\s)(?:(um|ab|gegen)\\s+)?(\\d{1,2})h(\\d{2})?${B1}`), (m, a, b) => {
+    if (!m[1] && !m[3] && andereUhrzeit(a, b)) return false;
+    return zeit(a, m[2], m[3]);
+  });
+  // "Heute Abend 7 Kino": eine nackte Zahl direkt nach der Tageszeit ist die Uhrzeit.
+  nimm(rx(`${B0}(früh|frueh|morgens|vormittags?|mittags?|nachmittags?|abends?|nachts?)\\s+(\\d{1,2})(?:[:.](\\d{2}))?(?![\\d.:,]|\\s*(?:h|std|stunden?|minuten?|min|mal|x|tage?n?|wochen?)(?![\\p{L}]))`), (m, a) => {
+    const w = m[1];
+    f.teil = w.startsWith('fr') || w.startsWith('morgen') ? 'morgens'
+      : w.startsWith('vor') ? 'vormittags'
+        : w.startsWith('nach') && w !== 'nacht' && w !== 'nachts' ? 'nachmittags'
+          : w.startsWith('mittag') ? 'mittags'
+            : w.startsWith('abend') ? 'abends' : 'nachts';
+    return zeit(a, m[2], m[3]);
+  });
+  // "Arzt 14.10. 9.30": neben einem Tag ist "9.30" die Uhrzeit.
+  nimm(rx(`${B0D}(\\d{1,2})\\.(\\d{2})(?![\\d.]|\\s*(?:uhr))`), (m, a) => {
+    if (!f.daten.length && !f.relTag && !f.wt) return false;
+    return zeit(a, m[1], m[2]);
+  });
 
   function zeit(a, hs, ms) {
     const h = Number(hs);
@@ -454,7 +554,7 @@ export function parse(text, jetzt = new Date()) {
 
   /* ================= Zusammensetzen ================= */
 
-  const erkannt = f.daten.length || f.relTag || f.wt || f.zeiten.length || f.spanne || f.rec || f.ganztags || f.fest || (f.teil && f.relTag);
+  const erkannt = f.daten.length || f.relTag || f.wt || f.wtSpanne || f.zeiten.length || f.spanne || f.rec || f.ganztags || f.fest || (f.teil && f.relTag);
   if (!erkannt) return null;
 
   // Daten in Textreihenfolge: das erste ist der Beginn, eines nach "bis" oder
@@ -484,9 +584,17 @@ export function parse(text, jetzt = new Date()) {
     if (!bisTag) return null;
   }
   if (!tag && f.relTag) tag = f.relTag;
+  if (f.wtSpanne && !tag) {
+    // "Montag bis Freitag": ab dem naechsten Montag (heute eingeschlossen) bis zum Freitag danach.
+    tag = plusTage(heute, (f.wtSpanne.von - wochentag(heute) + 7) % 7);
+    if (!bisTag) bisTag = plusTage(tag, (f.wtSpanne.bis - f.wtSpanne.von + 7) % 7);
+  }
   if (f.wt) {
     if (tag) {
-      if (startDaten && wochentag(tag) !== f.wt.index) {
+      if (f.relWoche && !startDaten) {
+        // "Freitag in 2 Wochen": der Freitag in der Woche, die in 2 Wochen ist.
+        tag = plusTage(tag, f.wt.index - wochentag(tag));
+      } else if (wochentag(tag) !== f.wt.index) {
         const [, mm, dd] = tag.split('-').map(Number);
         hinweis = `Der ${dd}.${mm}. ist ein ${WOCHENTAGE[wochentag(tag)]}.`;
       }
@@ -692,15 +800,15 @@ function saeubern(teil) {
 /* Beschreiben                                                          */
 /* ------------------------------------------------------------------ */
 
-/** "Do, 24. Sep" -- mit Jahr, wenn es nicht das von `jetzt` ist. */
+/** "Do., 24. Sept." -- mit Jahr, wenn es nicht das von `jetzt` ist. */
 export function tagKurz(day, jetzt = new Date()) {
   const [y, m, d] = day.split('-').map(Number);
   const jahrText = y !== jetzt.getFullYear() ? ` ${y}` : '';
-  return `${WT_KURZ[wochentag(day)]}, ${d}. ${MON3[m - 1]}${jahrText}`;
+  return `${WT_PUNKT[wochentag(day)]}, ${d}. ${MON_SATZ[m - 1]}${jahrText}`;
 }
 
 /**
- * Nur Tag und Uhrzeit: "Do, 24. Sep · 15:00–16:00", "Sa, 3. – Mo, 5. Okt · ganztägig".
+ * Nur Tag und Uhrzeit: "Do., 24. Sept. · 15:00–16:00", "Sa., 3. – Mo., 5. Okt. · ganztägig".
  */
 export function zeitTeil(t, jetzt = new Date()) {
   if (!t || !t.start) return '';
@@ -711,7 +819,7 @@ export function zeitTeil(t, jetzt = new Date()) {
       const [, m1, d1] = tag.split('-').map(Number);
       const [, m2] = t.end.split('-').map(Number);
       teile.push(m1 === m2 && tag.slice(0, 4) === t.end.slice(0, 4)
-        ? `${WT_KURZ[wochentag(tag)]}, ${d1}. – ${tagKurz(t.end, jetzt)}`
+        ? `${WT_PUNKT[wochentag(tag)]}, ${d1}. – ${tagKurz(t.end, jetzt)}`
         : `${tagKurz(tag, jetzt)} – ${tagKurz(t.end, jetzt)}`);
     } else {
       teile.push(tagKurz(tag, jetzt));
@@ -723,14 +831,14 @@ export function zeitTeil(t, jetzt = new Date()) {
     const bis = t.end ? t.end.slice(11, 16) : '';
     if (!t.end) teile.push(von);
     else if (t.end.slice(0, 10) === tag) teile.push(`${von}–${bis}`);
-    else teile.push(`${von} – ${WT_KURZ[wochentag(t.end)]} ${bis}`);
+    else teile.push(`${von} – ${WT_PUNKT[wochentag(t.end)]} ${bis}`);
   }
   return teile.join(' · ');
 }
 
 /**
  * Die Vorschau unter dem Eingabefeld:
- * "Do, 24. Sep · 15:00–16:00 · Zahnarzt".
+ * "Do., 24. Sept. · 15:00–16:00 · Zahnarzt".
  */
 export function beschreibe(t, jetzt = new Date()) {
   if (!t) return '';

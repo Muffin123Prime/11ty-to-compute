@@ -92,6 +92,26 @@ const ICON = {
 const STORE_KEY = 'neural-os:gehirn';
 const LOAD_LIMIT = 2500;
 
+/**
+ * Ab Werk aus: Laeufe ("Lauf: ...") sind die Buchhaltung der Agenten, kein
+ * Wissen -- an vielen Laeufen wurde das Gehirn zu einem Wald aus
+ * "Lauf: ..."-Punkten. Im Filter "Arten" lassen sie sich einschalten.
+ * Wer vor diesem Stand Filter gespeichert hat, hatte sie nie bewusst an;
+ * dort werden sie einmal ausgeschaltet (ARTEN_STAND).
+ */
+const AB_WERK_AUS = ['run'];
+const ARTEN_STAND = 2;
+
+function verborgeneArten(prefs) {
+  const liste = Array.isArray(prefs.hiddenTypes)
+    ? prefs.hiddenTypes.filter((t) => GRAPH_TYPES.includes(t))
+    : [...AB_WERK_AUS];
+  if (prefs.artenStand !== ARTEN_STAND) {
+    for (const t of AB_WERK_AUS) if (!liste.includes(t)) liste.push(t);
+  }
+  return liste;
+}
+
 /* ------------------------------------------------------------------ */
 /* Eigenes CSS (nur Marken aus web/app.css)                            */
 /* ------------------------------------------------------------------ */
@@ -429,7 +449,8 @@ export default {
         panel: typeof prefs.panel === 'boolean' ? prefs.panel : null,
         open: prefs.open && typeof prefs.open === 'object' ? prefs.open : {},
         settings: { ...GRAPH_DEFAULTS, ...(prefs.settings || {}) },
-        hiddenTypes: Array.isArray(prefs.hiddenTypes) ? prefs.hiddenTypes.filter((t) => GRAPH_TYPES.includes(t)) : [],
+        hiddenTypes: verborgeneArten(prefs),
+        artenStand: ARTEN_STAND,
         orphans: prefs.orphans !== false,
         colors: prefs.colors === true,
         groupsOff: Array.isArray(prefs.groupsOff) ? prefs.groupsOff.map(String) : [],
@@ -694,7 +715,14 @@ function runSearch(self, value, { jump = false } = {}) {
 /* ---------------------------- Auswahl ------------------------------- */
 
 function select(self, id, { fromCanvas = false } = {}) {
+  const vorher = self.selectedId ? self.byId.get(self.selectedId) : null;
   self.selectedId = id && self.byId.has(id) ? id : null;
+  // Ein Sprung auf eine ausgeblendete Art (etwa einen Lauf) zeigt genau
+  // diesen einen Eintrag (applyFilter laesst den gewaehlten stehen) -- und
+  // er verschwindet wieder, sobald etwas anderes gewaehlt ist.
+  const gewaehlt = self.selectedId ? self.byId.get(self.selectedId) : null;
+  const verborgen = (node) => !!node && self.prefs.hiddenTypes.includes(node.type);
+  if (verborgen(gewaehlt) || (verborgen(vorher) && vorher !== gewaehlt)) applyFilter(self, { quiet: true });
   if (!fromCanvas) self.graph.setSelection(self.selectedId);
   renderCard(self);
   const node = self.selectedId ? self.byId.get(self.selectedId) : null;
@@ -1002,7 +1030,7 @@ function runSearchHintOnly(self) {
 
 function resetAll(self) {
   self.prefs.settings = { ...GRAPH_DEFAULTS };
-  self.prefs.hiddenTypes = [];
+  self.prefs.hiddenTypes = [...AB_WERK_AUS];
   self.prefs.orphans = true;
   self.prefs.colors = false;
   self.prefs.groupsOff = [];

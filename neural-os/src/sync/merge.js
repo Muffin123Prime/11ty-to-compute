@@ -378,12 +378,104 @@ function plan(localRecords, remoteRecords, state = {}, opts = {}) {
   };
 }
 
+/* ------------------------------------------------------ beide behalten */
+
+/**
+ * Konflikte ohne Rückfrage (Bauplan 2.8): Zwei gekoppelte Sticks müssten eine
+ * Rückfrage beide beantworten, und widersprüchliche Antworten liefen still
+ * auseinander (belegt, v4). Stattdessen entscheidet eine Regel, die auf
+ * beiden Sticks dasselbe ergibt, ohne dass sie sich absprechen:
+ *
+ *  - Sieger ist die Fassung mit dem kleineren Fingerabdruck. Das hängt nur
+ *    vom Inhalt ab, nicht davon, wer rechnet.
+ *  - Die andere Fassung bleibt als neuer Satz erhalten. Ihre ID folgt aus der
+ *    ID des Satzes und dem Fingerabdruck der Verlierer-Fassung, also legen
+ *    beide Sticks DIESELBE Kopie an. Sie hat 32 statt 24 Zeichen; daran ist
+ *    sie erkennbar, und von einer Kopie gibt es nie wieder eine Kopie – sonst
+ *    liefe das nie zusammen.
+ *  - Gelöscht gegen geändert: die lebende Fassung gewinnt, ohne Kopie.
+ *  - Verknüpfungen: nur der Sieger; eine zweite Kante wäre dieselbe Kante.
+ */
+
+/** Länge des Zufallsteils einer Konflikt-Kopie; gewöhnliche IDs haben 24. */
+const KOPIE_LAENGE = 32;
+const KOPIE_RE = new RegExp(`^[a-z]+_[0-9a-z]{${KOPIE_LAENGE}}$`);
+
+/** Wo der Titelzusatz hingehört, und wie lang das Feld sein darf (schema.js). */
+const TITEL_FELD = {
+  note: { feld: 'title', max: 500 },
+  task: { feld: 'title', max: 500 },
+  event: { feld: 'title', max: 500 },
+  chat: { feld: 'title', max: 500 },
+  project: { feld: 'name', max: 500 },
+  entity: { feld: 'name', max: 300 },
+};
+
+/** Ist das die ID einer Konflikt-Kopie? */
+function istKopieId(id) {
+  return typeof id === 'string' && KOPIE_RE.test(id);
+}
+
+/**
+ * Die feste ID der Kopie: `<typ>_` + 32 Zeichen base36 aus
+ * sha256(recordId|fingerprintVerlierer).
+ */
+function kopieId(type, recordId, verliererHash) {
+  const hex = crypto.createHash('sha256').update(`${recordId}|${verliererHash}`).digest('hex');
+  const b36 = BigInt(`0x${hex}`).toString(36).padStart(50, '0');
+  return `${type}_${b36.slice(-KOPIE_LAENGE)}`;
+}
+
+/** Der Zusatz steht immer ganz; gekürzt wird notfalls der Titel davor. */
+function mitZusatz(titel, zusatz, max) {
+  const zeichen = [...String(titel === undefined || titel === null ? '' : titel)];
+  const platz = Math.max(0, max - [...zusatz].length);
+  return `${zeichen.slice(0, platz).join('')}${zusatz}`;
+}
+
+/** Der Titel ohne „ (Fassung von …)“, für die Meldung über zwei Fassungen. */
+function titelOhneZusatz(record) {
+  const art = record && TITEL_FELD[record.type];
+  const wert = art && record.data ? record.data[art.feld] : null;
+  if (typeof wert !== 'string') return '';
+  return wert.replace(/ \(Fassung von [^()]*\)$/, '');
+}
+
+/**
+ * @param {{recordId:string, recordType:string, local:object|null, remote:object}} konflikt
+ * @param {{nameLokal?:string, nameFern?:string}} [namen] Namen der beiden Sticks
+ * @returns {{sieger:'lokal'|'fern', kopie:{id:string,type:string,data:object}|null}}
+ */
+function beideBehalten(konflikt, { nameLokal, nameFern } = {}) {
+  if (!konflikt || !konflikt.remote) throw new ValidationError('beideBehalten() braucht einen Konflikt mit beiden Fassungen.');
+  const local = konflikt.local || null;
+  const remote = konflikt.remote;
+  const lh = fingerprint(local);
+  const rh = fingerprint(remote);
+  if (lh === GONE) return { sieger: 'fern', kopie: null };
+  if (rh === GONE) return { sieger: 'lokal', kopie: null };
+  const sieger = lh <= rh ? 'lokal' : 'fern';
+
+  const type = konflikt.recordType || remote.type;
+  const recordId = konflikt.recordId || remote.id;
+  if (type === 'edge' || istKopieId(recordId)) return { sieger, kopie: null };
+
+  const verlierer = sieger === 'lokal' ? remote : local;
+  const verliererHash = sieger === 'lokal' ? rh : lh;
+  const name = (sieger === 'lokal' ? nameFern : nameLokal) || 'einem anderen Stick';
+  const data = JSON.parse(JSON.stringify(verlierer.data === undefined ? {} : verlierer.data));
+  const art = TITEL_FELD[type];
+  if (art) data[art.feld] = mitZusatz(data[art.feld], ` (Fassung von ${name})`, art.max);
+  return { sieger, kopie: { id: kopieId(type, recordId, verliererHash), type, data } };
+}
+
 module.exports = {
   GONE,
   SYNC_TYPES,
   WITHHELD_DETAIL,
   CLASSIFICATIONS,
   DEFAULT_SKEW_TOLERANCE_MS,
+  KOPIE_LAENGE,
   stableStringify,
   fingerprint,
   isSyncable,
@@ -391,4 +483,8 @@ module.exports = {
   actionFor,
   baseHash,
   plan,
+  beideBehalten,
+  kopieId,
+  istKopieId,
+  titelOhneZusatz,
 };

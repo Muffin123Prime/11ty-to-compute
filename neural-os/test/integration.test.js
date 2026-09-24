@@ -331,7 +331,9 @@ test('two instances cannot open the same vault', async () => {
   let release = null;
   try {
     release = await acquireLock(layout);
-    await assert.rejects(() => acquireLock(layout), /already using|corrupt/i);
+    // Deutsch, ein Satz (Stick-Bauplan 2.4): der zweite Start im selben Prozess
+    // findet einen frischen Laufzettel "startet".
+    await assert.rejects(() => acquireLock(layout), /Neural OS (läuft schon|startet gerade schon)/);
   } finally {
     if (release) await release();
     cleanup();

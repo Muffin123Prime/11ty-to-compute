@@ -16,13 +16,26 @@
  *  - It is opt-in (`--open`), never automatic. A server started on purpose --
  *    as a background service, over ssh -- must not pop a window open.
  *  - A failure is a shrug, not an error. The address is printed anyway.
+ *
+ * Unter Windows läuft der Öffner als `cmd /c start "" <url>`: Ein `&` (oder
+ * `|`, `<`, `>`, `^`, `%`, `"`) in der Adresse wäre für cmd ein zweiter
+ * Befehl. Neural OS baut nie solche Adressen; kommt doch eine, wird sie
+ * abgelehnt statt "repariert". `windowsHide`, damit kein cmd-Fenster
+ * aufblitzt (Stick-Bauplan 0.3).
+ *
+ * NEURAL_OS_OEFFNER (nur für Tests und Werkzeuge): Statt eines Browsers wird
+ * die Adresse als Zeile an diese Datei gehängt.
  */
 
 const { spawn } = require('node:child_process');
 
+/** Zeichen, die cmd.exe in `start "" <url>` als Steuerzeichen läse. */
+const CMD_ZEICHEN = /[&|<>^%"\s]/;
+
 /** Only loopback. Anything else is refused rather than "fixed". */
 function isLocalUrl(value) {
   let url;
+  if (CMD_ZEICHEN.test(String(value))) return false;
   try {
     url = new URL(String(value));
   } catch {
@@ -42,6 +55,17 @@ function openInBrowser(url, opts = {}) {
   return new Promise((resolve) => {
     if (!isLocalUrl(url)) {
       resolve({ opened: false, reason: 'Nur lokale Adressen werden geöffnet.' });
+      return;
+    }
+
+    const umgelenkt = process.env.NEURAL_OS_OEFFNER;
+    if (umgelenkt) {
+      try {
+        require('node:fs').appendFileSync(umgelenkt, `${url}\n`);
+        resolve({ opened: true, umgelenkt: true });
+      } catch (err) {
+        resolve({ opened: false, reason: err && err.message });
+      }
       return;
     }
 
@@ -69,7 +93,7 @@ function openInBrowser(url, opts = {}) {
 
     let child;
     try {
-      child = spawn(command, args, { stdio: 'ignore', detached: true });
+      child = spawn(command, args, { stdio: 'ignore', detached: true, windowsHide: true });
     } catch (err) {
       done({ opened: false, reason: err && err.message });
       return;

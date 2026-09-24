@@ -1286,82 +1286,97 @@ async function checkSync(app) {
     assert(Array.isArray(c.items), 'keine Liste');
     return `${c.items.length} offen`;
   });
-  await check('Ordner-Abgleich führt zwei Geräte zusammen', async () => {
-    if (!app.sync || typeof app.sync.publishToFolder !== 'function') {
-      const folder = require('../src/sync/folder');
-      if (!folder || typeof folder.createFolderSync !== 'function') {
-        return unklar('Ordner-Abgleich nicht über die App erreichbar');
-      }
-    }
+  // Ordner-Abgleich = Koppeln über die sync/-Ordner der Sticks (Bauplan 2.8).
+  // Zwei Temp-Sticks mit echter App; welche Sticks "stecken", sagt eine
+  // eingespielte Liste von Einhängepunkten, Zeitgeber sind aus.
+  async function zweiSticks(fn) {
     const { createApp } = require('../src/app');
-    const { createFolderSync } = require('../src/sync/folder');
-    const merge = require('../src/sync/merge');
-    const stick = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-stick-'));
-    const homeA = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-a-'));
-    const homeB = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-b-'));
-    let A = null; let Bb = null;
+    const pathsMod = require('../src/kernel/paths');
+    const wurzeln = [];
+    const apps = [];
+    const stick = (name) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), `nos-koppeln-${name}-`));
+      fs.mkdirSync(path.join(root, 'data'));
+      fs.mkdirSync(path.join(root, 'app'));
+      fs.writeFileSync(path.join(root, 'app', 'package.json'), JSON.stringify({ version: require('../package.json').version }));
+      fs.writeFileSync(path.join(root, pathsMod.PORTABLE_MARKER), JSON.stringify({ neuralOsPortable: true, dataDir: 'data', appDir: 'app' }));
+      wurzeln.push(root);
+      return root;
+    };
+    const start = async (root, name) => {
+      const a = await createApp({
+        home: path.join(root, 'data'), appDir: path.join(root, 'app'), logLevel: 'error', harden: false,
+        kopplung: { automatisch: false, einhaengepunkte: () => wurzeln },
+      });
+      apps.push(a);
+      a.identitaet.umbenennen(name);
+      return a;
+    };
     try {
-      A = await createApp({ home: homeA, logLevel: 'error', harden: false });
-      Bb = await createApp({ home: homeB, logLevel: 'error', harden: false });
-      const fsA = createFolderSync({ store: A.store, merge, bus: A.bus, logger: A.logger, config: A.config, vaultCrypto: A.vaultCrypto, paths: A.paths });
-      const fsB = createFolderSync({ store: Bb.store, merge, bus: Bb.bus, logger: Bb.logger, config: Bb.config, vaultCrypto: Bb.vaultCrypto, paths: Bb.paths });
-      const note = A.store.create('note', { title: 'Nur auf A', body: 'reist über den Stick' });
-      await A.store.flush();
-      await fsA.publish(stick);
-      const peers = await fsB.peers(stick);
-      const fremd = peers.filter((p) => !p.isSelf);
-      assert(fremd.length === 1, `${fremd.length} fremde Postfächer gefunden`);
-      const res = await fsB.pull(stick, { deviceId: fremd[0].deviceId });
-      assert(Bb.store.get(note.id), 'Notiz kam nicht an');
-      // Was NICHT übertragen werden darf
-      const inbox = path.join(stick, fremd[0].deviceId);
-      const roh = fs.readdirSync(inbox).map((f) => fs.readFileSync(path.join(inbox, f)));
-      const text = Buffer.concat(roh).toString('latin1');
-      assert(!/"type"\s*:\s*"token"/.test(text), 'Zugangstoken im Postfach');
-      assert(!/"type"\s*:\s*"module"/.test(text), 'Modul-Quelltext im Postfach');
-      assert(!/"type"\s*:\s*"agent"/.test(text), 'Agent mit Rechten im Postfach');
-      return `${res.applied} übernommen, keine Rechte übertragen`;
+      return await fn({ stick, start });
     } finally {
-      if (A) await A.close().catch(() => {});
-      if (Bb) await Bb.close().catch(() => {});
-      for (const d of [stick, homeA, homeB]) fs.rmSync(d, { recursive: true, force: true });
+      for (const a of apps) await a.close().catch(() => {});
+      for (const d of wurzeln) fs.rmSync(d, { recursive: true, force: true });
     }
-  });
-  await check('Beidseitige Änderung erzeugt einen Konflikt', async () => {
-    const { createApp } = require('../src/app');
-    const { createFolderSync } = require('../src/sync/folder');
-    const merge = require('../src/sync/merge');
-    const stick = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-stick2-'));
-    const homeA = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-a2-'));
-    const homeB = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-b2-'));
-    let A = null; let Bb = null;
-    try {
-      A = await createApp({ home: homeA, logLevel: 'error', harden: false });
-      Bb = await createApp({ home: homeB, logLevel: 'error', harden: false });
-      const fsA = createFolderSync({ store: A.store, merge, bus: A.bus, logger: A.logger, config: A.config, vaultCrypto: A.vaultCrypto, paths: A.paths });
-      const fsB = createFolderSync({ store: Bb.store, merge, bus: Bb.bus, logger: Bb.logger, config: Bb.config, vaultCrypto: Bb.vaultCrypto, paths: Bb.paths });
-      const note = A.store.create('note', { title: 'Gemeinsam', body: 'Ausgangsfassung' });
-      await A.store.flush();
-      await fsA.publish(stick);
-      const p1 = (await fsB.peers(stick)).filter((p) => !p.isSelf);
-      await fsB.pull(stick, { deviceId: p1[0].deviceId });
-      // Jetzt beide Seiten ändern
-      A.store.update(note.id, { body: 'Fassung von A' });
-      Bb.store.update(note.id, { body: 'Fassung von B' });
-      await A.store.flush(); await Bb.store.flush();
-      await fsA.publish(stick);
-      const res = await fsB.pull(stick, { deviceId: p1[0].deviceId });
-      const konflikte = typeof res.conflicts === 'number' ? res.conflicts : (res.conflicts || []).length;
-      assert(konflikte > 0, 'kein Konflikt erzeugt — eine Seite wurde überschrieben');
-      const lokal = Bb.store.get(note.id);
-      assert(lokal.data.body === 'Fassung von B', `lokale Fassung überschrieben: "${lokal.data.body}"`);
-      return `${konflikte} Konflikt, lokale Fassung unangetastet`;
-    } finally {
-      if (A) await A.close().catch(() => {});
-      if (Bb) await Bb.close().catch(() => {});
-      for (const d of [stick, homeA, homeB]) fs.rmSync(d, { recursive: true, force: true });
+  }
+  function alleDateien(dir) {
+    const out = [];
+    let liste = [];
+    try { liste = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+    for (const e of liste) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) out.push(...alleDateien(p)); else out.push(p);
     }
+    return out;
+  }
+  await check('Koppeln über die Schnittstelle erreichbar', async () => {
+    const k = ok(await api.get('/api/kopplung'), 'kopplung');
+    assert(k.selbst && /^dev_[0-9a-f]{24}$/.test(k.selbst.id), 'keine eigene Kennung');
+    assert(Array.isArray(k.partner) && Array.isArray(k.gefunden), 'keine Listen');
+    assert(!JSON.stringify(k).includes('schluessel'), 'ein Schlüssel geht über HTTP');
+    return `${k.selbst.name} · ${k.partner.length} Partner`;
   });
+  await check('Ordner-Abgleich führt zwei gekoppelte Sticks zusammen, ohne Klartext und ohne Rechte', async () => zweiSticks(async ({ stick, start }) => {
+    const rootA = stick('a');
+    const rootB = stick('b');
+    const A = await start(rootA, 'Max');
+    const Bb = await start(rootB, 'Lena');
+    const note = A.store.create('note', { title: 'NUR-AUF-A-GEHEIM', body: 'reist über den Stick' });
+    A.store.create('token', { label: 'Freigabe', hash: 'h', salt: 's', permissions: { read: true } });
+    await A.kopplung.koppeln({ root: rootB });
+    const angenommen = await Bb.kopplung.annehmen();
+    assert(angenommen.angenommen.length === 1, 'B hat das Angebot nicht angenommen');
+    await Bb.kopplung.abgleichen();
+    assert(Bb.store.get(note.id), 'Notiz kam nicht an');
+    assert(Bb.store.count('token') === 0, 'Zugangstoken übertragen');
+    for (const datei of [...alleDateien(path.join(rootA, 'sync')), ...alleDateien(path.join(rootB, 'sync'))]) {
+      assert(!fs.readFileSync(datei).includes('NUR-AUF-A-GEHEIM'), `Klartext in ${datei}`);
+    }
+    const st = A.kopplung.status();
+    assert(st.partner.length === 1 && st.partner[0].name === 'Lena', 'Partner fehlt bei A');
+    return 'gekoppelt, übernommen, alles verschlüsselt';
+  }));
+  await check('Beidseitige Änderung: beide Fassungen bleiben, ohne Rückfrage, auf beiden Sticks gleich', async () => zweiSticks(async ({ stick, start }) => {
+    const rootA = stick('a2');
+    const rootB = stick('b2');
+    const A = await start(rootA, 'Max');
+    const Bb = await start(rootB, 'Lena');
+    await A.kopplung.koppeln({ root: rootB });
+    await Bb.kopplung.annehmen();
+    const note = A.store.create('note', { title: 'Gemeinsam', body: 'Ausgangsfassung' });
+    for (const x of [A, Bb, A]) await x.kopplung.abgleichen();
+    A.store.update(note.id, { body: 'Fassung von A' });
+    Bb.store.update(note.id, { body: 'Fassung von B' });
+    for (const x of [Bb, A, Bb, A]) await x.kopplung.abgleichen();
+    const stand = (x) => x.store.list('note').items.filter((n) => n.data.title.startsWith('Gemeinsam'))
+      .map((n) => `${n.data.title}=${n.data.body}`).sort();
+    const a = stand(A);
+    assert(a.length === 2, `erwartet zwei Fassungen: ${JSON.stringify(a)}`);
+    assert(JSON.stringify(a) === JSON.stringify(stand(Bb)), 'die Sticks sind verschieden');
+    const offen = A.store.list('conflict', { filter: (r) => r.data.status !== 'resolved' }).total;
+    assert(offen === 0, `${offen} Rückfrage(n)`);
+    return a.join(' · ');
+  }));
 }
 
 async function checkExtraction() {

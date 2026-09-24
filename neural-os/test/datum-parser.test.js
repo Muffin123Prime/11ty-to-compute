@@ -169,18 +169,68 @@ test('parse: ein Datum in der Vergangenheit bekommt einen Hinweis', async () => 
   assert.equal(parse('3.1.2020 Altes', JETZT).hinweis, 'Das liegt in der Vergangenheit.');
 });
 
+/* ------------------------------------------------ Nachbesserung Runde 1: so tippt man wirklich */
+// Die Pruefer haben mit Donnerstag, 24.09.2026, 10:05 gerechnet.
+const DO = new Date(2026, 8, 24, 10, 5);
+const MO = new Date(2026, 8, 28, 10, 5);
+const MI = new Date(2026, 8, 30, 10, 5);
+// Datum ohne Schlusspunkt: mit einer Uhrzeit daneben, am Anfang, nach einem Wochentag -- oder wenn es keine Uhrzeit sein kann.
+fall('Elternabend 6.10 um 19:30', { titel: 'Elternabend', start: '2026-10-06T19:30' }, DO);
+fall('Konzert 2.10 20 uhr', { titel: 'Konzert', start: '2026-10-02T20:00' }, DO);
+fall('Termin 10.10 um 10', { titel: 'Termin', start: '2026-10-10T10:00' }, DO);
+fall('Zahnarzt 06.10 19:30', { titel: 'Zahnarzt', start: '2026-10-06T19:30' }, DO);
+fall('6.10 Elternabend', { titel: 'Elternabend', start: '2026-10-06', allDay: true }, DO);
+fall('Geburtstag Oma 12.3', { titel: 'Geburtstag Oma', start: '2027-03-12' }, DO);
+fall('Friseur Dienstag 29.9 15 Uhr', { titel: 'Friseur', start: '2026-09-29T15:00', hinweis: null }, DO);
+// ... aber eine Uhrzeit bleibt eine Uhrzeit.
+fall('Treffen um 9.10', { titel: 'Treffen', start: '2026-09-25T09:10' }, DO);
+fall('von 8.30 bis 9.10 Sprechstunde', { titel: 'Sprechstunde', start: '2026-09-25T08:30', end: '2026-09-25T09:10' }, DO);
+fall('Pause 12.10-13.00', { titel: 'Pause', start: '2026-09-24T12:10', end: '2026-09-24T13:00' }, DO);
+fall('Kurs 1.5 Stunden morgen 10 Uhr', { titel: 'Kurs', start: '2026-09-25T10:00', end: '2026-09-25T11:30' }, DO);
+// "naechste Woche Mittwoch": der Mittwoch der FOLGENDEN Kalenderwoche.
+fall('nächste Woche Mittwoch Friseur', { titel: 'Friseur', start: '2026-10-07' }, MO);
+fall('Mittwoch nächste Woche 16 Uhr Friseur', { titel: 'Friseur', start: '2026-10-07T16:00' }, MO);
+fall('kommende Woche Freitag Party', { titel: 'Party', start: '2026-10-09' }, MO);
+fall('nächste Woche Mittwoch Friseur', { titel: 'Friseur', start: '2026-10-07' }, MI); // nie heute
+fall('übernächste Woche Montag Zeugnis', { titel: 'Zeugnis', start: '2026-10-12' }, MO);
+// "jeden Morgen": taeglich, nicht "morgen".
+fall('Laufen jeden Morgen um 7', { titel: 'Laufen', start: '2026-09-24T07:00', recurrence: { freq: 'daily', interval: 1, until: null, count: null } }, DO);
+fall('Laufen jeden Abend 20 Uhr', { titel: 'Laufen', start: '2026-09-24T20:00', recurrence: { freq: 'daily', interval: 1, until: null, count: null } }, DO);
+fall('Laufen jeden morgen', { titel: 'Laufen', start: '2026-09-24T08:00', allDay: false }, DO);
+// Wochentag in einer Woche in N Wochen.
+fall('Friseur Mittwoch in einer Woche', { titel: 'Friseur', start: '2026-09-30' }, DO);
+fall('Freitag in 2 Wochen Party', { titel: 'Party', start: '2026-10-09' }, DO);
+fall('Zahnarzt in einer Woche am Dienstag', { titel: 'Zahnarzt', start: '2026-09-29' }, DO);
+fall('morgen Mittwoch Arzt', { start: '2026-09-25', hinweis: 'Der 25.9. ist ein Freitag.' }, DO);
+// "jeden 2. Donnerstag" wie "jeden zweiten Donnerstag".
+fall('Müll jeden 2. Donnerstag', { titel: 'Müll', start: '2026-09-24', recurrence: WOECHENTLICH(['TH'], { interval: 2 }), hinweis: null }, DO);
+fall('Müll jeden 15.', { titel: 'Müll', start: '2026-10-15', recurrence: { freq: 'monthly', interval: 1, until: null, count: null } }, DO);
+// "16h" ist eine Uhrzeit, "für 2h" eine Dauer; "9.30" neben einem Datum die Uhrzeit.
+fall('Fahrstunde morgen 16h', { titel: 'Fahrstunde', start: '2026-09-25T16:00', allDay: false }, DO);
+fall('um 16h Fahrstunde', { titel: 'Fahrstunde', start: '2026-09-24T16:00' }, DO);
+fall('treffen 16h30', { titel: 'Treffen', start: '2026-09-24T16:30' }, DO);
+fall('Meeting für 2h morgen 10 Uhr', { titel: 'Meeting', start: '2026-09-25T10:00', end: '2026-09-25T12:00' }, DO);
+fall('Arzt 14.10. 9.30', { titel: 'Arzt', start: '2026-10-14T09:30' }, DO);
+// Keine Reste im Titel.
+fall('Tanzkurs ab dem 5.10. jeden Montag 19 Uhr', { titel: 'Tanzkurs', start: '2026-10-05T19:00', recurrence: WOECHENTLICH(['MO']) }, DO);
+fall('Heute Abend 7 Kino', { titel: 'Kino', start: '2026-09-24T19:00' }, DO);
+// "Montag bis Freitag" ohne "jeden" ist die eine Woche, keine endlose Serie.
+fall('Praktikum Montag bis Freitag', { titel: 'Praktikum', start: '2026-09-28', end: '2026-10-02', allDay: true, recurrence: null }, DO);
+fall('jeden Montag bis Freitag Frühdienst', { titel: 'Frühdienst', recurrence: WOECHENTLICH(['MO', 'TU', 'WE', 'TH', 'FR']) }, DO);
+fall('montags bis freitags Frühdienst', { recurrence: WOECHENTLICH(['MO', 'TU', 'WE', 'TH', 'FR']) }, DO);
+
 /* ------------------------------------------------ Vorschau und Worte */
 
 test('beschreibe: die Vorschau unter dem Feld', async () => {
   const { parse, beschreibe } = await laden();
-  assert.equal(beschreibe(parse('Morgen 15 Uhr Zahnarzt', JETZT), JETZT), 'Do, 24. Sep · 15:00–16:00 · Zahnarzt');
-  assert.equal(beschreibe(parse('Fr 3.10. ganztägig Ausflug', JETZT), JETZT), 'Sa, 3. Okt · ganztägig · Ausflug');
-  assert.equal(beschreibe(parse('3.-5.10. Ostsee', JETZT), JETZT), 'Sa, 3. – Mo, 5. Okt · ganztägig · Ostsee');
+  assert.equal(beschreibe(parse('Morgen 15 Uhr Zahnarzt', JETZT), JETZT), 'Do., 24. Sept. · 15:00–16:00 · Zahnarzt');
+  assert.equal(beschreibe(parse('Fr 3.10. ganztägig Ausflug', JETZT), JETZT), 'Sa., 3. Okt. · ganztägig · Ausflug');
+  assert.equal(beschreibe(parse('3.-5.10. Ostsee', JETZT), JETZT), 'Sa., 3. – Mo., 5. Okt. · ganztägig · Ostsee');
   assert.equal(beschreibe(parse('jeden Dienstag 18-19:30 Training', JETZT), JETZT),
-    'Di, 29. Sep · 18:00–19:30 · Training · jeden Dienstag');
-  assert.equal(beschreibe(parse('Party Samstag 22-2 Uhr', JETZT), JETZT), 'Sa, 26. Sep · 22:00 – So 02:00 · Party');
-  assert.equal(beschreibe(parse('3.1. Neujahrsempfang', JETZT), JETZT), 'So, 3. Jan 2027 · ganztägig · Neujahrsempfang');
-  assert.equal(beschreibe(parse('morgen 9 Uhr', JETZT), JETZT), 'Do, 24. Sep · 09:00–10:00 · Ohne Titel');
+    'Di., 29. Sept. · 18:00–19:30 · Training · jeden Dienstag');
+  assert.equal(beschreibe(parse('Party Samstag 22-2 Uhr', JETZT), JETZT), 'Sa., 26. Sept. · 22:00 – So. 02:00 · Party');
+  assert.equal(beschreibe(parse('3.1. Neujahrsempfang', JETZT), JETZT), 'So., 3. Jan. 2027 · ganztägig · Neujahrsempfang');
+  assert.equal(beschreibe(parse('morgen 9 Uhr', JETZT), JETZT), 'Do., 24. Sept. · 09:00–10:00 · Ohne Titel');
   assert.equal(beschreibe(null), '');
 });
 
@@ -218,5 +268,5 @@ test('Wandzeit: Tag fuer Tag gerechnet, auch ueber die Zeitumstellung', async ()
   assert.equal(d.wochentag('2026-09-27'), 6, 'Sonntag');
   assert.equal(d.gibtEs(2026, 2, 29), false);
   assert.equal(d.gibtEs(2028, 2, 29), true);
-  assert.equal(d.tagKurz('2026-09-24', JETZT), 'Do, 24. Sep');
+  assert.equal(d.tagKurz('2026-09-24', JETZT), 'Do., 24. Sept.', 'deutsche Kurzform mit Punkt, wie Intl de-DE');
 });

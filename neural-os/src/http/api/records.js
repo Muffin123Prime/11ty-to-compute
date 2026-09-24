@@ -151,6 +151,13 @@ function register(router) {
     }
     const patch = patchFrom(asObject(await rc.body()));
     if (!Object.keys(patch).length) throw new ValidationError('Es wurden keine Felder zum Ändern übergeben.');
+    // Ein Termin wird geprueft wie ueber PATCH /api/events/:id (Wiederholung,
+    // Ende nach Beginn, 31. Februar). Ungeprueft kam hier eine Serie mit
+    // interval -1 durch, und danach hing jede Anfrage an den Kalender.
+    if (existing.type === 'event') {
+      const { updateEvent } = require('./events');
+      return { record: updateEvent(store, existing.id, patch) };
+    }
     if (existing.type === 'edge') {
       const illegal = Object.keys(patch).filter((key) => !EDGE_PATCHABLE.has(key));
       if (illegal.length) {

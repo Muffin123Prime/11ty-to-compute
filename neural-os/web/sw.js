@@ -17,11 +17,17 @@
  *   between "the server said it" and "the UI shows it" is a correctness bug
  *   here, not a performance one.
  *
- * A new version takes over only when the page asks for it (SKIP_WAITING), so
- * an open session is never served half of one build and half of another.
+ * A new version takes over at once: `install` fills the new cache completely,
+ * then `skipWaiting()`; `activate` deletes every older cache and claims the
+ * open pages, and web/app.js reloads a page whose worker changed. A waiting
+ * worker would keep serving the old cache -- and its background refresh mixes
+ * old and new modules (belegt im Browser: app.js neu, views/graph.js alt).
+ *
+ * VERSION goes up with every change under web/. Without the bump the browser
+ * sees no new worker and keeps the old cache.
  */
 
-const VERSION = 'v4';
+const VERSION = 'v5';
 const CACHE_NAME = `neural-os-shell-${VERSION}`;
 
 /**
@@ -54,6 +60,8 @@ self.addEventListener('install', (event) => {
       const response = await fetch(request);
       if (response && response.ok) await cache.put(asset, response.clone());
     }));
+    // Erst mit vollem Cache: sofort uebernehmen statt zu warten.
+    await self.skipWaiting();
   })());
 });
 

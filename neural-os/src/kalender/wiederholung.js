@@ -260,7 +260,13 @@ function erinnerungPruefen(wert) {
  * durch MAX_ANZAHL begrenzt. Der Aufrufer bricht ab, sobald er genug hat;
  * `until` und `count` beenden die Folge von selbst.
  */
-function* erzeugen(startTag, regel, abZahl = -Infinity) {
+function* erzeugen(startTag, rohRegel, abZahl = -Infinity) {
+  // Nur mit einer geprueften Regel rechnen. Ein Satz, der an checkEvent
+  // vorbei geschrieben wurde (Abgleich, Module, ein alter Stand), kann
+  // interval -1 oder byDay 'MO' tragen -- mit -1 fuehrte die Schleife nie
+  // ueber `bis` hinaus und legte den ganzen Server lahm, nicht nur diesen Termin.
+  const regel = regelLesen(rohRegel);
+  if (!regel || !gueltigerTag(startTag)) return;
   const s = tagZahl(startTag);
   const bis = regel.until ? tagZahl(regel.until) : Infinity;
   const grenze = regel.count || Infinity;
@@ -327,10 +333,26 @@ function* erzeugen(startTag, regel, abZahl = -Infinity) {
   }
 }
 
-/** Ist dieser Termin eine Serie (mit lesbarer Regel und Wandzeit)? */
+/**
+ * Eine gespeicherte Regel lesen, ohne zu werfen: die bereinigte Regel, oder
+ * null, wenn sie nicht gilt. Fuer alles, was LIEST (Zeitraum, Kalenderdatei,
+ * Ueberschneidungen) -- dort soll ein kaputter Satz hoechstens selbst als
+ * Einzeltermin erscheinen, statt jede Anfrage mit einem 500 zu beenden.
+ * Das Ende vor dem Beginn wird hier nicht geprueft (der Beginn ist nicht
+ * bekannt); so eine Serie erzeugt schlicht nichts.
+ */
+function regelLesen(regel) {
+  if (regel === null || regel === undefined) return null;
+  try {
+    return regelPruefen(regel, null);
+  } catch {
+    return null;
+  }
+}
+
+/** Ist dieser Termin eine Serie (mit GUELTIGER Regel und Wandzeit)? */
 function istSerie(daten) {
-  return !!(daten && daten.recurrence && typeof daten.recurrence === 'object'
-    && RHYTHMEN.includes(daten.recurrence.freq) && wandzeitLesen(daten.start));
+  return !!(daten && regelLesen(daten.recurrence) && wandzeitLesen(daten.start));
 }
 
 /**
@@ -579,6 +601,7 @@ module.exports = {
   hatZone,
   spanneTage,
   regelPruefen,
+  regelLesen,
   ausnahmenPruefen,
   erinnerungPruefen,
   erzeugen,

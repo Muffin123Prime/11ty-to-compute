@@ -141,11 +141,26 @@ async function errorFromResponse(response) {
     /* body already consumed or connection died mid-read: the status still stands */
   }
   const error = body && typeof body === 'object' ? (body.error || body) : null;
-  return new ApiError(
+  const apiError = new ApiError(
     (error && error.code) || fallbackCode,
     (error && error.message) || fallbackMessage,
     { status: response.status, details: (error && error.details) ?? null },
   );
+  if (apiError.status === 401 && apiError.code === 'PIN_NOETIG') meldePinNoetig(apiError);
+  return apiError;
+}
+
+/**
+ * PIN_NOETIG (src/http/auth.js): dieser Browser hat die KI noch nicht
+ * entsperrt. Gleich welche Anfrage es merkt -- die Schale (web/app.js) hoert
+ * auf dieses Ereignis und zeigt die PIN-Eingabe statt "Server getrennt".
+ */
+function meldePinNoetig(error) {
+  try {
+    window.dispatchEvent(new CustomEvent('neural-os:pin-noetig', { detail: { message: error.message, details: error.details } }));
+  } catch {
+    /* ohne window (Node-Tests) gibt es niemanden zu benachrichtigen */
+  }
 }
 
 /**

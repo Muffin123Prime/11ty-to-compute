@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#090a0a">
+<meta name="referrer" content="no-referrer">
+<title>Neural OS</title>
+<!--
+  Vorraum (Stick-Bauplan 2.5, Paket V): ausgeliefert von src/kernel/vorraum.js,
+  solange der Tresor gesperrt ist. Alles steht in dieser einen Datei; die CSP
+  erlaubt das Skript unten per Hash, nicht per 'unsafe-inline'.
+  Kein Formular-Element und kein Passwortfeld: sonst bietet der Browser an,
+  die PIN zu speichern. Die Punkte macht -webkit-text-security.
+  Route, Feldname und Kopf gehören dem PIN-Ablauf: POST /api/vault/unlock,
+  {passphrase}, X-Neural-OS.
+-->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' rx='5' fill='%23101112'/%3E%3Cg fill='none' stroke='%23eeeef0' stroke-width='1.5' stroke-linecap='round'%3E%3Cpath d='M16.2 7.1A6.8 6.8 0 1 1 12.9 3.8'/%3E%3Cpath d='M11.6 8.4 13.6 6.4'/%3E%3C/g%3E%3Ccircle cx='14.8' cy='5.2' r='1.5' fill='%23eeeef0'/%3E%3Ccircle cx='10' cy='10' r='2.2' fill='%23eeeef0'/%3E%3C/svg%3E">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #090a0a;
+    --surface: #101112;
+    --fg: #eeeef0;
+    --fg-muted: #a4a6ac;
+    --border: rgba(255, 255, 255, 0.14);
+    --accent: #2f7cf6;
+    --accent-ring: rgba(47, 124, 246, 0.45);
+    --accent-glow: rgba(47, 124, 246, 0.16);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.5 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main {
+    width: 100%;
+    max-width: 300px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  main[hidden] { display: none; }
+  .marke {
+    width: 40px;
+    height: 40px;
+    margin: 0 auto 20px;
+    color: var(--fg);
+  }
+  label {
+    text-align: center;
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    color: var(--fg-muted);
+  }
+  input {
+    width: 100%;
+    height: 56px;
+    padding: 0 16px;
+    text-align: center;
+    font: 500 24px/1 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    letter-spacing: 0.45em;
+    text-indent: 0.45em;
+    color: var(--fg);
+    caret-color: var(--accent);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    -webkit-text-security: disc;
+    transition: border-color 0.14s, box-shadow 0.14s;
+  }
+  input.frei { -webkit-text-security: disc; letter-spacing: 0.12em; text-indent: 0.12em; font-size: 18px; }
+  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+  input:disabled { opacity: 0.6; }
+  button {
+    position: relative;
+    height: 48px;
+    padding: 0 16px;
+    font: inherit;
+    font-weight: 500;
+    color: #ffffff;
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 14px;
+    cursor: pointer;
+    transition: filter 0.14s, opacity 0.14s, box-shadow 0.14s;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.1); }
+  button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+  button:disabled { cursor: default; opacity: 0.55; }
+  button[aria-busy="true"] { opacity: 1; animation: puls 1.1s ease-in-out infinite; }
+  #meldung {
+    min-height: 1.5em;
+    margin: 4px 0 0;
+    text-align: center;
+    font-size: 14px;
+    color: var(--fg-muted);
+  }
+  #meldung.laut { color: var(--fg); }
+  .wackeln { animation: wackeln 0.32s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+  .aus { text-align: center; }
+  .aus p { margin: 0; }
+  .aus p + p { margin-top: 6px; color: var(--fg-muted); font-size: 14px; }
+  .aus .marke { color: var(--fg-muted); }
+  @keyframes wackeln {
+    20%, 60% { transform: translateX(-6px); }
+    40%, 80% { transform: translateX(6px); }
+  }
+  @keyframes puls {
+    0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
+    50% { box-shadow: 0 0 0 8px var(--accent-glow); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .wackeln, button[aria-busy="true"] { animation: none; }
+  }
+</style>
+</head>
+<body>
+<main id="vorraum">
+  <svg class="marke" viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+    <path d="M16.2 7.1A6.8 6.8 0 1 1 12.9 3.8"/><path d="M11.6 8.4 13.6 6.4"/>
+    <circle cx="14.8" cy="5.2" r="1.5" fill="currentColor" stroke="none"/><circle cx="10" cy="10" r="2.2" fill="currentColor" stroke="none"/>
+  </svg>
+  <label id="beschriftung" for="pin">PIN</label>
+  <input id="pin" type="text" inputmode="numeric" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" maxlength="6" enterkeyhint="done" data-1p-ignore="true" data-lpignore="true" data-form-type="other" autofocus>
+  <button id="oeffnen" type="button">Öffnen</button>
+  <p id="meldung" role="status" aria-live="polite"></p>
+</main>
+<main id="aus" class="aus" hidden>
+  <svg class="marke" viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+    <path d="M16.2 7.1A6.8 6.8 0 1 1 12.9 3.8"/><path d="M11.6 8.4 13.6 6.4"/>
+    <circle cx="14.8" cy="5.2" r="1.5" fill="currentColor" stroke="none"/><circle cx="10" cy="10" r="2.2" fill="currentColor" stroke="none"/>
+  </svg>
+  <p>Neural OS ist aus.</p>
+  <p>Zum Öffnen den Starter auf dem Stick doppelklicken.</p>
+</main>
+<script>
+(function () {
+  'use strict';
+  var TEXT = {
+    pin: 'PIN',
+    passphrase: 'Passphrase',
+    falschPin: 'Falsche PIN.',
+    falschPassphrase: 'Falsche Passphrase.',
+    zuOft: 'Zu oft falsch. Kurz warten.'
+  };
+  var PIN_RE = /^[0-9]{4,6}$/;
+  var TAKT_MS = 300;
+  var GEDULD_MS = 120000;
+
+  var feld = document.getElementById('pin');
+  var knopf = document.getElementById('oeffnen');
+  var meldung = document.getElementById('meldung');
+  var beschriftung = document.getElementById('beschriftung');
+  var art = 'pin';
+  var laeuft = false;
+  var pauseBis = 0;
+  var pauseUhr = null;
+
+  function zeige(text, laut) {
+    meldung.textContent = text || '';
+    meldung.className = laut ? 'laut' : '';
+  }
+
+  function beschaeftigt(ja) {
+    laeuft = ja;
+    knopf.disabled = ja || Date.now() < pauseBis;
+    if (ja) knopf.setAttribute('aria-busy', 'true');
+    else knopf.removeAttribute('aria-busy');
+    feld.readOnly = ja;
+  }
+
+  function wackeln() {
+    feld.classList.remove('wackeln');
+    void feld.offsetWidth;
+    feld.classList.add('wackeln');
+  }
+
+  function falsch() {
+    zeige(art === 'passphrase' ? TEXT.falschPassphrase : TEXT.falschPin, true);
+    feld.value = '';
+    wackeln();
+    feld.focus();
+  }
+
+  function pause(sekunden) {
+    var ms = Math.max(1, Number(sekunden) || 30) * 1000;
+    pauseBis = Date.now() + ms;
+    zeige(TEXT.zuOft, true);
+    knopf.disabled = true;
+    feld.value = '';
+    if (pauseUhr) clearTimeout(pauseUhr);
+    pauseUhr = setTimeout(function () {
+      pauseUhr = null;
+      pauseBis = 0;
+      if (!laeuft) knopf.disabled = false;
+      zeige('');
+      feld.focus();
+    }, ms);
+  }
+
+  function aus() {
+    document.getElementById('vorraum').hidden = true;
+    document.getElementById('aus').hidden = false;
+  }
+
+  /** Weiter in die Schale; sie wohnt unter "/" (unter /api/entsperren gibt es danach nichts). */
+  function weiter() {
+    if (location.pathname === '/') location.reload();
+    else location.replace('/' + location.hash);
+  }
+
+  /** Nach 200: bis /api/status ohne "gesperrt" antwortet, dann neu laden. */
+  function warteAufSchale() {
+    var zuletzt = Date.now();
+    function runde() {
+      fetch('/api/status', { cache: 'no-store', credentials: 'same-origin' })
+        .then(function (r) {
+          if (!r.ok) return null;
+          zuletzt = Date.now();
+          return r.json();
+        })
+        .then(function (s) {
+          if (s && typeof s === 'object' && !s.gesperrt && !s.error) { weiter(); return; }
+          naechste();
+        }, naechste);
+    }
+    function naechste() {
+      if (Date.now() - zuletzt > GEDULD_MS) { aus(); return; }
+      setTimeout(runde, TAKT_MS);
+    }
+    runde();
+  }
+
+  function oeffnen() {
+    if (laeuft) return;
+    if (Date.now() < pauseBis) { zeige(TEXT.zuOft, true); return; }
+    var wert = feld.value;
+    if (!wert) { feld.focus(); return; }
+    if (art === 'pin' && !PIN_RE.test(wert)) { falsch(); return; }
+    beschaeftigt(true);
+    zeige('');
+    fetch('/api/vault/unlock', {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Neural-OS': '1' },
+      body: JSON.stringify({ passphrase: wert })
+    }).then(function (r) {
+      if (r.ok) {
+        feld.value = '';
+        warteAufSchale();
+        return;
+      }
+      return r.json().catch(function () { return null; }).then(function (daten) {
+        var fehler = daten && daten.error;
+        beschaeftigt(false);
+        if (r.status === 429) pause(fehler && fehler.details && fehler.details.wartenS);
+        else if (r.status === 401 || r.status === 400) falsch();
+        else zeige((fehler && fehler.message) || '', true);
+      });
+    }, function () {
+      aus();
+    });
+  }
+
+  feld.addEventListener('input', function () {
+    if (art !== 'pin') return;
+    var sauber = feld.value.replace(/[^0-9]/g, '').slice(0, 6);
+    if (sauber !== feld.value) feld.value = sauber;
+  });
+  feld.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') { ev.preventDefault(); oeffnen(); }
+  });
+  knopf.addEventListener('click', oeffnen);
+
+  fetch('/api/status', { cache: 'no-store', credentials: 'same-origin' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (s) {
+      if (!s || typeof s !== 'object') return;
+      if (!s.gesperrt) { weiter(); return; }
+      if (s.art === 'passphrase') {
+        art = 'passphrase';
+        beschriftung.textContent = TEXT.passphrase;
+        feld.inputMode = 'text';
+        feld.removeAttribute('maxlength');
+        feld.className = 'frei';
+      }
+      if (s.ki && typeof s.ki.name === 'string' && s.ki.name) document.title = s.ki.name;
+      if (s.pauseS > 0) pause(s.pauseS);
+    })
+    .catch(function () { /* bleibt bei PIN */ });
+  feld.focus();
+})();
+</script>
+</body>
+</html>

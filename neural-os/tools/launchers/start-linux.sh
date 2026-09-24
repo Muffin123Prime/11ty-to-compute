@@ -1,30 +1,43 @@
 #!/bin/sh
 # ---------------------------------------------------------------------------
-#  Neural OS - Starter für Linux
+#  Neural OS - Starter für Linux (auf dem Stick)
 #
-#  Wird beim Vorbereiten des Sticks als "Neural OS starten.sh" in den
-#  Stick-Ordner gelegt.
+#  Doppelklick (oder ./"Neural OS starten.sh"): Neural OS startet im
+#  Hintergrund, der Browser geht auf, das Fenster darf zu. Nur wenn etwas
+#  nicht geht, steht hier der Grund in einem Satz, und das Fenster wartet
+#  auf die Eingabetaste (docs/STICK-BAUPLAN.md, 2.4).
 #
-#  Das Ausführbar-Bit ist auf einem Stick der Normalfall-Stolperstein: FAT und
-#  exFAT speichern es gar nicht, und viele Systeme hängen Wechselmedien mit
-#  "noexec" ein. Deshalb prüft dieser Starter beides - erst das Bit (und setzt
-#  es notfalls selbst), dann ob sich das Programm wirklich ausführen lässt -
-#  und erklärt den Unterschied, statt einen rohen "Permission denied"
-#  durchzureichen.
+#  Zwei Aufbauten des Sticks, der neue zuerst: Inhalt/app, Inhalt/runtime
+#  oder app, runtime direkt auf dem Stick. Welcher Datenordner gilt,
+#  entscheidet die Markierung neural-os.portable, nicht dieser Starter;
+#  er gibt keinen Datenordner vor.
 #
 #  POSIX sh, kein bash: der fremde Rechner hat vielleicht nur dash.
 # ---------------------------------------------------------------------------
 set -u
 
-DIR=$(cd -- "$(dirname -- "$0")" && pwd)
-cd "$DIR" || exit 1
+DIR=$(cd -- "$(dirname -- "$0")" && pwd) || exit 1
 
 halt() {
   echo ""
-  printf "Zum Schliessen dieses Fensters die Eingabetaste drücken ... "
+  printf "Zum Schließen die Eingabetaste drücken … "
   read -r _dummy 2>/dev/null || true
-  exit "${1:-1}"
+  exit 1
 }
+
+sage() {
+  echo ""
+  echo "  $1"
+  halt
+}
+
+if [ -f "$DIR/Inhalt/app/bin/neural-os.js" ]; then
+  INHALT="$DIR/Inhalt"
+elif [ -f "$DIR/app/bin/neural-os.js" ]; then
+  INHALT="$DIR"
+else
+  sage "Auf diesem Stick fehlt das Programm für Linux."
+fi
 
 case "$(uname -m)" in
   x86_64|amd64)  PLAT="linux-x64" ;;
@@ -32,121 +45,35 @@ case "$(uname -m)" in
   armv7l|armv7)  PLAT="linux-armv7l" ;;
   *)             PLAT="linux-$(uname -m)" ;;
 esac
+NODE="$INHALT/runtime/$PLAT/node"
 
-NODE="$DIR/runtime/$PLAT/node"
-USED="$PLAT"
-
-if [ ! -f "$NODE" ]; then
-  # Letzter Ausweg: ein installiertes Node auf diesem Rechner.
-  SYSTEM_NODE=$(command -v node 2>/dev/null || true)
-  SYSTEM_MAJOR=0
-  if [ -n "$SYSTEM_NODE" ]; then
-    SYSTEM_MAJOR=$("$SYSTEM_NODE" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
+if [ -f "$NODE" ]; then
+  # FAT und exFAT speichern das Ausführbar-Bit nicht; setzen, wo es geht.
+  [ -x "$NODE" ] || chmod +x "$NODE" 2>/dev/null || true
+else
+  # Letzter Ausweg: ein installiertes Node.js ab Version 20.
+  NODE=$(command -v node 2>/dev/null || true)
+  HAUPT_NODE=0
+  if [ -n "$NODE" ]; then
+    HAUPT_NODE=$("$NODE" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
   fi
-  if [ -n "$SYSTEM_NODE" ] && [ "$SYSTEM_MAJOR" -ge 20 ] 2>/dev/null; then
-    NODE="$SYSTEM_NODE"
-    USED="installiertes Node.js ($SYSTEM_MAJOR)"
-    echo "Hinweis: Auf dem Stick liegt keine Laufzeit für $PLAT."
-    echo "         Es wird das auf diesem Rechner installierte Node.js benutzt."
-    echo ""
-  else
-    echo ""
-    echo "  Neural OS kann auf diesem Rechner nicht starten."
-    echo ""
-    echo "  Es fehlt die Laufzeitumgebung für:  $PLAT"
-    echo "  Gesucht wurde hier:                 $DIR/runtime/$PLAT/node"
-    echo ""
-    echo "  Der Stick wurde also auf einem Rechner mit einem anderen"
-    echo "  Betriebssystem oder einer anderen Prozessorarchitektur vorbereitet."
-    echo ""
-    echo "  So legst du die fehlende Laufzeit nach:"
-    echo "    1. Stick an einem Rechner mit Neural OS und Internet einstecken."
-    echo "       Dort unter Einstellungen -> Stick noch einmal auf"
-    echo "       \"Stick vorbereiten\" tippen und \"Erlauben\" wählen. Dein Wissen"
-    echo "       auf dem Stick bleibt dabei, wie es ist."
-    echo "    2. Oder: Node.js ab Version 20 installieren (nodejs.org) und in"
-    echo "       diesem Ordner ausführen:"
-    echo "           node app/bin/neural-os.js start --open"
-    echo ""
-    halt 1
+  case "$HAUPT_NODE" in ''|*[!0-9]*) HAUPT_NODE=0 ;; esac
+  if [ -z "$NODE" ] || [ "$HAUPT_NODE" -lt 20 ]; then
+    sage "Auf diesem Stick fehlt das Programm für Linux."
   fi
 fi
 
-if [ ! -f "$DIR/app/bin/neural-os.js" ]; then
-  echo ""
-  echo "  Der Programmordner \"app\" fehlt auf dem Stick oder ist unvollständig."
-  echo "  Gesucht wurde:  $DIR/app/bin/neural-os.js"
-  echo ""
-  echo "  Das passiert, wenn der Stick während des Kopierens abgezogen wurde."
-  echo "  Stecke ihn an einem Rechner mit Neural OS ein und tippe dort unter"
-  echo "  Einstellungen -> Stick auf \"Stick vorbereiten\". Deine Daten in"
-  echo "  \"data\" sind davon nicht betroffen - die werden dabei nie angefasst."
-  echo ""
-  halt 1
-fi
-
-# Fehlt das Ausführbar-Bit, selbst setzen. Auf FAT/exFAT schlägt das fehl oder
-# bleibt wirkungslos - das ist kein Grund abzubrechen, sondern wird durch den
-# Probelauf unten abgefangen.
-if [ ! -x "$NODE" ]; then
-  echo "Das Ausführbar-Bit fehlt; es wird gesetzt ..."
-  chmod +x "$NODE" 2>/dev/null || true
-fi
-
+# Nicht annehmen, dass es geht - ausprobieren. Ein Stick, der mit "noexec"
+# eingehängt ist, lässt kein Programm starten, egal welche Rechte es hat.
 if ! "$NODE" -e '' >/dev/null 2>&1; then
-  echo ""
-  echo "  Die Laufzeit auf dem Stick liess sich nicht starten."
-  echo "  ($NODE)"
-  echo ""
-  echo "  Der häufigste Grund: der Stick ist mit der Option \"noexec\""
-  echo "  eingehängt. Dann darf von ihm grundsätzlich kein Programm starten,"
-  echo "  egal welche Rechte die Datei hat."
-  echo ""
-  echo "  Was hilft:"
-  echo "    - Den ganzen Ordner auf die Festplatte kopieren und von dort"
-  echo "      starten. Deine Daten in \"data\" kommen dabei mit."
-  echo "    - Oder den Stick neu einhängen:"
-  echo "          sudo mount -o remount,exec \"$DIR\""
-  echo "    - Oder Node.js ab Version 20 installieren und hier ausführen:"
-  echo "          node app/bin/neural-os.js start --open"
-  echo ""
-  halt 1
+  sage "Dieser Rechner lässt keine Programme vom Stick starten."
 fi
 
-echo ""
-echo "  Neural OS wird gestartet ..."
-echo ""
-echo "  Laufzeit:  $USED"
-echo "  Daten:     $DIR/data"
-echo ""
-echo "  Gleich öffnet sich dein Browser. Dieses Fenster bitte offen lassen -"
-echo "  solange es offen ist, läuft Neural OS. Zum Aufhören in Neural OS"
-echo "  unter Einstellungen -> Stick auf \"Beenden & abziehen\" tippen."
-echo ""
-
-NEURAL_OS_HOME="$DIR/data"
-export NEURAL_OS_HOME
-
-"$NODE" "$DIR/app/bin/neural-os.js" start --open
-CODE=$?
-
-if [ "$CODE" -ne 0 ]; then
-  echo ""
-  echo "  Neural OS wurde mit Fehler $CODE beendet."
-  echo ""
-  echo "  Versuche es im abgesicherten Modus (ohne eigene Erweiterungen):"
-  echo "      \"$NODE\" \"$DIR/app/bin/neural-os.js\" start --safe"
-  echo ""
-  echo "  Hilft das nicht, steht in LIESMICH.txt, was du sonst tun kannst."
-  halt "$CODE"
-fi
-
-# Sauber beendet: nicht mehr auf die Eingabetaste warten. Solange dieses
-# Skript lebt, liegt sein Arbeitsverzeichnis auf dem Stick, und das System
-# meldet ihn beim Auswerfen als "in Verwendung". Also weg vom Stick und Ende.
+# Weg vom Stick: Ein Arbeitsverzeichnis darauf hielte ihn beim Aushängen fest.
 cd / 2>/dev/null || true
-echo ""
-echo "  Neural OS wurde beendet. Alles ist gespeichert."
-echo "  Jetzt kannst du den Stick abziehen."
-echo ""
+
+# Der Starter schreibt „Neural OS startet …“, startet den Dienst ohne
+# Fenster, öffnet den Browser und endet. Läuft Neural OS schon, öffnet er nur
+# den Browser. Scheitert etwas, steht der Grund schon da.
+"$NODE" "$INHALT/app/bin/neural-os.js" start --hintergrund --open || halt
 exit 0

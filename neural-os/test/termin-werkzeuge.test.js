@@ -265,3 +265,45 @@ test('Die Werkzeugbeschreibung sagt, dass ein ganztaegiges Ende der letzte Tag E
   assert.match(anlegen, /5\. bis 9\.10\.“ = ende 9\.10\./);
   assert.match(aendern, /einschließlich/);
 });
+
+/* ------------------------------------------------ Rueckgaengig im Chat, rueckwaerts */
+
+test('Zwei Karten im Chat: erst „Verschieben“ zurueck, dann „Anlegen“ zurueck -- beides klappt, der Termin ist weg', async () => {
+  const http = require('node:http');
+  const anfrage = (base, method, pfad, body) => new Promise((resolve, reject) => {
+    const url = new URL(pfad, base);
+    const daten = body === undefined ? null : Buffer.from(JSON.stringify(body));
+    const req = http.request({
+      method, hostname: url.hostname, port: url.port, path: url.pathname,
+      headers: { 'x-neural-os': '1', ...(daten ? { 'content-type': 'application/json', 'content-length': daten.length } : {}) },
+    }, (res) => {
+      const teile = [];
+      res.on('data', (c) => teile.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, text: Buffer.concat(teile).toString('utf8') }));
+    });
+    req.on('error', reject);
+    if (daten) req.write(daten);
+    req.end();
+  });
+  const { home, cleanup } = tempHome('nos-termin-zurueck');
+  const app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false });
+  try {
+    const server = await app.listen();
+    const base = `http://127.0.0.1:${server.server.address().port}`;
+    const chat = app.store.create('chat', { title: 'Termine' });
+    const werkzeuge = createWerkzeuge({ store: app.store, bus: app.bus });
+    const lauf1 = werkzeuge.ausfuehren({ id: 'a', name: 'termin_anlegen', input: { titel: 'Zahnarzt', start: '2026-10-01T15:00', ganztaegig: false } }, undefined, { chatId: chat.id });
+    const id = JSON.parse(lauf1.toolResult.content).id;
+    const lauf2 = werkzeuge.ausfuehren({ id: 'b', name: 'termin_aendern', input: { id, start: '2026-10-02T09:00' } }, undefined, { chatId: chat.id });
+    const zwei = await anfrage(base, 'POST', `/api/chats/${chat.id}/rueckgaengig`, { runId: lauf2.ereignisse[0].runId });
+    assert.equal(zwei.status, 200, zwei.text);
+    assert.equal(app.store.get(id).data.start, '2026-10-01T15:00');
+    // Vorher: 409 "Der Eintrag wurde seitdem erneut geändert (Fassung 1 → 3)."
+    const eins = await anfrage(base, 'POST', `/api/chats/${chat.id}/rueckgaengig`, { runId: lauf1.ereignisse[0].runId });
+    assert.equal(eins.status, 200, eins.text);
+    assert.equal(app.store.get(id), null, 'der Zahnarzt ist weg');
+  } finally {
+    await app.close().catch(() => {});
+    cleanup();
+  }
+});

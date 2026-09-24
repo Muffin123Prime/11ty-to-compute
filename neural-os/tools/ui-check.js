@@ -1004,6 +1004,21 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
     }
   }
 
+  /* --- ein Klick auf den unteren Rand ohne Ziehen aendert nichts --- */
+  if (probe) {
+    const block = page.locator('.kal__block', { hasText: 'Probe beim Zahnarzt' }).first();
+    await block.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+    const box = await block.boundingBox();
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height - 3);
+    await warte(900);
+    const blattTitel = (await page.locator('.kal__sheet h2').innerText().catch(() => '')).trim();
+    check(store.get(probe.id).data.end === `${heute}T10:30` && blattTitel === 'Probe beim Zahnarzt',
+      'Ein Klick auf den unteren Rand (ohne Ziehen) ändert die Dauer nicht, sondern öffnet den Termin',
+      `Ende ${store.get(probe.id).data.end}, Blatt „${blattTitel}“`);
+    await page.keyboard.press('Escape');
+    await warte(300);
+  }
+
   /* --- am unteren Rand ziehen verlaengert --- */
   if (probe) {
     const block = page.locator('.kal__block', { hasText: 'Probe beim Zahnarzt' }).first();
@@ -1090,6 +1105,10 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
     && (heuteZahl <= 3 ? weitere === '' : weitere.includes(String(heuteZahl - 3))),
   'Die Kachel „Kalender“ zeigt die heutigen Termine – höchstens drei, der Rest als Zahl',
   `${zeilen} Zeilen von ${heuteZahl}${weitere ? `, „${weitere}“` : ''}`);
+  if (weitere) {
+    const ziel = await kachel.locator('.kwk__more').getAttribute('href');
+    check(ziel === `#/kalender?ansicht=tag&tag=${heute}`, '„+ n weitere heute“ führt zu heute als Tag, nicht ins gemerkte Monatsblatt', ziel);
+  }
   // In fuenf Minuten (vor Mitternacht: 23:59) -- noch nicht vorbei, also sichtbar.
   const gleich = new Date(Date.now() + 5 * 60000);
   const paketBeginn = gleich.getDate() === d.getDate() ? `${heute}T${pad(gleich.getHours())}:${pad(gleich.getMinutes())}` : `${heute}T23:59`;
