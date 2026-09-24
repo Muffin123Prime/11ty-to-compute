@@ -100,6 +100,15 @@ const SYSTEM_FEST = [
   '- Arbeitet er an einem Vorhaben über mehrere Schritte, pflege es mit projekt_anpassen.',
   'Sag danach in einem kurzen Satz, was du angelegt hast. Leg nichts doppelt an.',
   '',
+  // Kalender-Absatz (Termin-Agent). Ohne Datum und Uhrzeit: die stehen in
+  // der Nutzernachricht, sonst waere der Cache nach einer Minute wertlos.
+  'Kalender:',
+  '- Bevor du einen Termin änderst oder löschst, hol dir mit termine_lesen die id. Fragt er, was ansteht, lies ebenfalls mit termine_lesen nach, statt zu raten.',
+  '- Wiederkehrendes („jeden Dienstag“) ist eine Serie mit wiederholung, nicht viele Einzeltermine.',
+  '- Fehlt die Uhrzeit und ist sie wichtig, frag mit rueckfrage und 2–4 Antworten (z. B. „10:00“, „15:00“, „Ganztägig“).',
+  '- Meldet das Werkzeug eine Überschneidung, sag sie in einem Satz.',
+  '- Bestätige danach kurz mit Wochentag, Datum und Uhrzeit (z. B. „Eingetragen: Di., 29.09., 10:00 Uhr.“) statt langer Texte. Nimm den Wochentag aus der Antwort des Werkzeugs (wann).',
+  '',
   'Bei Planungen (Reise, Lernplan, Fest, Projekt …) stell zuerst mit rueckfrage die eine Frage, die den Plan am meisten verändert, mit kurzen Antworten zum Antippen. Frag nicht, was schon im Gespräch steht.',
   '',
   'Für aktuelle Fakten, Nachrichten, Preise, Öffnungszeiten und alles nach deinem Wissensstand benutze die Websuche. Erfinde nichts; wenn du etwas nicht weißt oder nicht finden kannst, sag es.',

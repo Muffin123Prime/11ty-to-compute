@@ -1,95 +1,102 @@
 /**
- * views/stick.js -- „Stick": das Hauptversprechen dieses Projekts, sichtbar.
+ * views/stick.js -- „Stick": die KI zum Mitnehmen, per Knopfdruck.
  *
- * Worum es geht
- * -------------
- * Die KI mit allem Wissen auf einem Stick mitnehmen und an jedem Rechner
- * weiterarbeiten. Das konnte `src/portable/stick.js` seit langem -- aber nur
- * über die Kommandozeile. Diese Ansicht ist der Ort, an dem es stattfindet.
+ * Was der Nutzer will
+ * -------------------
+ * „Stick rein, starten antippen, läuft – mit allem, was sie über mich weiß."
+ * Nichts einrichten, nichts erklären, kein Schnickschnack. Diese Ansicht hat
+ * deshalb genau vier Handgriffe, und jeder ist EIN Knopf:
+ *
+ *   1. Stick vorbereiten   – Programm, Laufzeiten, Wissen; was der Stick braucht
+ *   2. Jetzt sichern       – auf den Stick, sonst in den Sicherungsordner
+ *   3. Wiederherstellen    – klein darunter, weil man es selten braucht
+ *   4. Beenden & abziehen  – speichern, auswerfen wo es geht, schließen
+ *
+ * Die frühere Ansicht „Sicherung" (views/backup.js) ist hier aufgegangen.
  *
  * Entscheidungen, die man beim Lesen sonst für Zufall hielte
  * ----------------------------------------------------------
- * 1. **Die Wahrheit über die laufende Instanz steht ganz oben, vor allem
- *    anderen.** „Du läufst gerade VOM STICK" ist eine andere Situation als
- *    „du läufst von der Platte", und wer das verwechselt, kopiert seinen
- *    Datenbestand im Kreis. Deshalb ist es keine Fußnote, sondern die erste
- *    Zeile.
- * 2. **Erst ansehen, dann schreiben.** Der Browser kennt keine Dateipfade; es
- *    gibt keinen Ordnerwähler, der einen absoluten Pfad liefert, also wird der
- *    Pfad getippt. Ein getippter Pfad neben einem Knopf, der sofort Gigabyte
- *    kopiert, ist eine Falle -- ein Tippfehler legt dann ein `app/` irgendwo
- *    auf der Platte an. „Erst ansehen" beantwortet vorher, was passieren
- *    WÜRDE, mit denselben Zahlen, die der Vorgang danach benutzt. Dasselbe tun
- *    die beobachteten Ordner in den Einstellungen, aus demselben Grund.
- * 3. **Der Fortschritt ist gemessen, nicht geschätzt.** Jede Zahl im Balken
- *    kommt aus einem echten Ereignis des Servers (`percent` aus kopierten
- *    Bytes). Eine erfundene Animation, die bei 90 % stehenbleibt, wäre hier
- *    besonders schädlich: die natürliche Reaktion auf „hängt" ist, den Stick
- *    abzuziehen.
- * 4. **Die unbequemen Wahrheiten stehen da, wo entschieden wird, nicht im
- *    Kleingedruckten.** Dass auf FAT32 keine Datei über 4 GB passt, dass es
- *    auf den meisten Sticks keine Zugriffsrechte gibt (und deshalb nur die
- *    Verschlüsselung schützt) und dass das SPRACHMODELL NICHT mitreist -- das
- *    sind die drei Sätze, wegen derer jemand hinterher enttäuscht wäre.
- * 5. **Die Laufzeiten sagen ehrlich, welcher Rechner geht und welcher nicht.**
- *    Mitkopiert wird immer nur die Laufzeit DIESES Rechners; sie braucht kein
- *    Netz. Jede weitere ist ein einmaliger Download durch die Netzschleuse,
- *    und wenn die Schleuse zu ist, ist das kein Fehler des Sticks.
- * 6. **Das Modell reist nur mit, wenn man es dazulegt -- und der Abschnitt
- *    dazu sagt die Wahrheit, BEVOR jemand klickt.** Was auf diesem Rechner
- *    gefunden wurde (mit Grösse), was auf dem Stick liegt und für welches
- *    Betriebssystem, ob das Dateisystem eine 4-GB-Datei überhaupt aufnimmt,
- *    ob der Platz reicht: alles kommt aus `GET /api/stick/models`, das nichts
- *    schreibt. Nichts gefunden? Dann steht da, was zu tun wäre, und kein
- *    leerer Kasten. Ein Laufzeitkern für ein anderes Betriebssystem lässt
- *    sich -- anders als die Node-Laufzeit -- NICHT herunterladen; dafür
- *    braucht es einen Rechner mit diesem System, und das steht genau dort,
- *    wo es auffällt.
+ * - **Der Ort des Sticks ist EIN Feld**, vorbelegt mit dem Stick, den der
+ *   Server an diesem Rechner gefunden hat; weitere stehen als antippbare
+ *   Knöpfe darunter. Der Server sucht, nicht der Browser: der kennt keine
+ *   Dateipfade, und auf dem iPad, das nur der Bildschirm ist, steckt gar
+ *   kein Stick. Findet er keinen, steht genau das da.
+ * - **Die Frage nach dem Internet kommt als zwei Knöpfe**, nicht als Dialog
+ *   mit „Abbrechen": „Erlauben" oder „Nur <dieses System>". Ein Dialog kann
+ *   Escape und Nein nicht unterscheiden -- dann hätte ein Wegklicken still
+ *   einen halben Stick bestellt.
+ * - **Der Balken ist gemessen.** Jede Bewegung kommt aus einem Ereignis des
+ *   Servers. Eine Animation, die bei 90 % stehenbleibt, wäre hier besonders
+ *   schädlich: die natürliche Reaktion auf „hängt" ist, den Stick abzuziehen.
+ * - **„Jetzt kannst du den Stick abziehen" steht erst da, wenn der Server
+ *   wirklich weg ist** -- die Ansicht fragt so lange nach, bis keiner mehr
+ *   antwortet. Vorher heißt es „Wird beendet …".
+ * - **Beim Tippen wird nichts neu gebaut außer dem, was vom Feld abhängt.**
+ *   Ein voller Neuaufbau würde das Feld unter den Fingern austauschen.
  */
 
 import {
-  h, text, clear, icon, formatBytes, formatNumber, formatDateTime,
+  h, text, clear, icon, formatBytes, formatNumber, formatDateTime, timeAgo,
 } from '../lib/dom.js';
 
 /* ------------------------------------------------------------------ */
 /* Wortschatz                                                          */
 /* ------------------------------------------------------------------ */
 
-/** Ein USB-Stick: Gehäuse mit Kontaktstück. */
-const VIEW_ICON = '<rect x="6.6" y="6.2" width="6.8" height="11.2" rx="1.6"/>'
-  + '<path d="M8.4 6.2V3.4a1.6 1.6 0 0 1 1.6-1.6h0a1.6 1.6 0 0 1 1.6 1.6v2.8"/>'
-  + '<path d="M8.8 10.2h2.4M8.8 12.8h2.4"/>';
-
-const ICONS = {
-  eye: '<path d="M1.8 10S4.8 4.6 10 4.6 18.2 10 18.2 10 15.2 15.4 10 15.4 1.8 10 1.8 10Z"/><circle cx="10" cy="10" r="2.4"/>',
-  check: '<path d="m4.2 10.6 3.9 3.9 7.7-8.9"/>',
-  alert: '<path d="M10 3.2 17.5 16.4h-15z"/><path d="M10 8.2v3.5M10 13.9h.01"/>',
-  refresh: '<path d="M16.6 10a6.6 6.6 0 1 1-2.1-4.8"/><path d="M16.9 3v3.7h-3.7"/>',
-  download: '<path d="M10 3.4v9M6.2 9l3.8 3.8L13.8 9"/><path d="M3.6 15.8h12.8"/>',
+const EIGENE_ICONS = {
+  /** Auswerfen: Dreieck über einem Strich. */
+  eject: '<path d="M10 4.2 15.4 11H4.6z"/><path d="M4.6 14.8h10.8"/>',
+  download: '<path d="M10 3.4v9.2M6.2 9l3.8 3.8L13.8 9M4 16.2h12"/>',
+  upload: '<path d="M10 16.4V7.2M6.2 11 10 7.2 13.8 11M4 3.8h12"/>',
   stop: '<rect x="5.4" y="5.4" width="9.2" height="9.2" rx="1.6"/>',
 };
 
-/** Menschliche Namen für die Node-Plattformkennungen. */
-const PLATTFORM_NAMEN = {
-  'win-x64': 'Windows (Intel/AMD, 64 Bit)',
-  'win-arm64': 'Windows (ARM)',
-  'darwin-x64': 'macOS (Intel)',
-  'darwin-arm64': 'macOS (Apple Silicon)',
-  'linux-x64': 'Linux (Intel/AMD, 64 Bit)',
-  'linux-arm64': 'Linux (ARM, 64 Bit)',
-  'linux-armv7l': 'Linux (ARM, 32 Bit – z. B. Raspberry Pi)',
-};
+/**
+ * Wiederherstellen: die Modi aus `POST /api/backup/import`, von „nimmt nichts
+ * weg" nach „nimmt alles weg". Voreingestellt ist der ungefährliche.
+ */
+const MODI = [
+  { value: 'merge', label: 'Ergänzen', gefahr: false },
+  { value: 'replace', label: 'Gleiche ersetzen', gefahr: true },
+  { value: 'fresh', label: 'Nur in leeren Tresor', gefahr: false },
+  { value: 'restore', label: 'Alles ersetzen', gefahr: true },
+];
 
 const STYLE_ID = 'neural-os-stickv-style';
 
-function plattformName(id) {
-  return PLATTFORM_NAMEN[id] || id || 'unbekanntes System';
-}
+/** Wie lange nach „Beenden" nachgefragt wird, ob der Server noch antwortet. */
+const WARTEN_MS = 20000;
 
 function fehlerText(err) {
   if (!err) return 'Unbekannter Fehler.';
-  if (err.message) return err.message;
-  return String(err);
+  return err.message ? String(err.message) : String(err);
+}
+
+/** Der erste Satz eines langen Grundes -- der Rest steht im Protokoll. */
+function ersterSatz(satz) {
+  const s = String(satz || '').trim();
+  const m = /^(.{12,220}?[.!?])(\s|$)/.exec(s);
+  return m ? m[1] : s.slice(0, 220);
+}
+
+/**
+ * Die Rechnerfamilie zu einer Plattform. Für die Frage „Darf es?" zählt, ob
+ * der Stick an Windows und am Mac startet -- ob Intel oder Apple-Chip, weiß
+ * der Nutzer oft nicht und muss es hier auch nicht wissen.
+ */
+function familien(ids) {
+  const namen = [];
+  for (const id of ids || []) {
+    const n = String(id).startsWith('win') ? 'Windows' : String(id).startsWith('darwin') ? 'Mac' : String(id).startsWith('linux') ? 'Linux' : id;
+    if (!namen.includes(n)) namen.push(n);
+  }
+  return namen;
+}
+
+function aufzaehlen(namen) {
+  const n = (namen || []).filter(Boolean);
+  if (n.length <= 1) return n.join('');
+  return `${n.slice(0, -1).join(', ')} und ${n[n.length - 1]}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -101,7 +108,6 @@ let view = null;
 export default {
   id: 'stick',
   title: 'Stick',
-  icon: VIEW_ICON,
 
   async mount(container, ctx) {
     ensureStyle();
@@ -111,56 +117,63 @@ export default {
       alive: true,
       ctx,
       api: ctx.api,
+      icons: ctx.icons || {},
       container,
       requests: new Set(),
+      timers: new Set(),
 
       selbst: null,
       selbstFehler: null,
-      laedt: true,
+
+      laufwerke: null,
+      laufwerkeFehler: null,
+      sucht: false,
 
       pfad: '',
-      mitDaten: false,
+      pfadVonHand: false,
 
-      vorschau: null,
-      vorschauFehler: null,
-      vorschauLaeuft: false,
-
-      pruefung: null,
-      pruefungFehler: null,
-      pruefungLaeuft: false,
-
-      /** Der laufende oder zuletzt gelaufene Vorgang. */
+      /* Stick vorbereiten */
+      frage: null, // { plan } solange um Erlaubnis gefragt wird
       lauf: null,
       abbruch: null,
-      /** Nur dieser Teilbaum wird beim Fortschritt neu gebaut, siehe renderLauf(). */
       laufSlot: null,
 
-      /** Antwort von GET /stick/models: rechner, stick, vorschau. */
-      modelle: null,
-      modelleFehler: null,
-      modelleLaedt: false,
-      /** Der Pfad, für den `modelle.stick` und `modelle.vorschau` gelten. */
-      modellePfad: '',
-      /** Für welches Gerät gefragt wird ('' = dieser Rechner, sonst Plattform oder 'ipados'). */
-      fuer: '',
-      /** Die gewählten Kennungen; null heisst: alles, was gefunden wurde. */
-      auswahl: null,
-      /** Erst wenn jemand ein Kästchen berührt hat, überlebt die Auswahl ein „Neu nachsehen". */
-      auswahlVonHand: false,
-      modellPlan: null,
-      modellPlanFehler: null,
-      modellPlanLaeuft: false,
+      /* Sichern */
+      sicherung: null,
+      sichernLaeuft: false,
+      sichernFehler: null,
+      gesichert: null,
+      sichernSlot: null,
+
+      /* Wiederherstellen */
+      offen: false,
+      liste: null,
+      quelle: '',
+      modus: 'merge',
+      pass: '',
+      vorschau: null,
+      vorschauQuelle: null,
+      vorschauFehler: null,
+      vorschauLaeuft: false,
+      ergebnis: null,
+      ergebnisFehler: null,
+      importLaeuft: false,
+
+      /* Beenden */
+      ende: null, // null | 'speichert' | 'wartet' | 'fertig' | 'haengt' | 'fehler'
+      endeAntwort: null,
+      endeFehler: null,
     };
     view = self;
 
-    await ladeSelbst(self);
-    if (!self.alive) return;
+    self.sucht = true;
     render(self);
-    // Der Befund über diesen Rechner soll dastehen, ohne dass jemand klickt --
-    // nach der Selbstauskunft, weil der Pfad des eigenen Sticks daraus kommt.
-    await ladeModelle(self);
+    await Promise.all([ladeSelbst(self), ladeLaufwerke(self)]);
     if (!self.alive) return;
+    if (!self.pfad) self.pfad = vorschlag(self);
     render(self);
+    await ladeSicherung(self);
+    if (self.alive) renderSichern(self);
   },
 
   async unmount() {
@@ -173,16 +186,16 @@ function teardown() {
   view = null;
   if (!self) return;
   self.alive = false;
-  // Ein Wechsel des Bereichs beendet einen laufenden Kopiervorgang NICHT
-  // stillschweigend -- aber der Strom wird abgebaut, und der Server bricht
-  // daraufhin ab (stream.onClose -> AbortController). Das ist die ehrliche
-  // Variante: ein Tab, den niemand mehr ansieht, darf keine 8 GB zu Ende
-  // kopieren, und der Stick bleibt durch die zweistufige Umbenennung auf dem
-  // Stand von vorher.
+  // Ein Wechsel des Bereichs baut den Strom ab, und der Server bricht dann ab
+  // (stream.onClose). Ein Tab, den niemand mehr ansieht, darf keinen Stick zu
+  // Ende beschreiben, von dem keiner weiß, dass er beschrieben wird.
   for (const controller of self.requests) {
     try { controller.abort(); } catch { /* schon vorbei */ }
   }
   self.requests.clear();
+  for (const t of self.timers) clearTimeout(t);
+  self.timers.clear();
+  if (self.tippTimer) clearTimeout(self.tippTimer);
 }
 
 function request(self, run) {
@@ -196,328 +209,323 @@ function request(self, run) {
 /* ------------------------------------------------------------------ */
 
 async function ladeSelbst(self) {
-  self.laedt = true;
   try {
-    const r = await request(self, (signal) => self.api.get('/stick', { signal }));
-    if (!self.alive) return;
-    self.selbst = r;
+    self.selbst = await request(self, (signal) => self.api.get('/stick', { signal }));
     self.selbstFehler = null;
-    // Läuft die Instanz schon vom Stick, ist der Pfad bekannt und muss nicht
-    // getippt werden. Vorbereiten und Erneuern gehen auf diesem Pfad zwar
-    // nicht (siehe istEigenerStick), aber Prüfen und Laufzeiten-Holen schon --
-    // und beides ist genau das, was man auf einem fremden Rechner will.
-    if (!self.pfad && r && r.von && r.von.root) self.pfad = r.von.root;
   } catch (err) {
     if (!self.alive || (err && err.isAborted)) return;
-    self.selbst = null;
     self.selbstFehler = err;
-  } finally {
-    self.laedt = false;
   }
 }
 
-async function ansehen(self) {
-  const pfad = self.pfad.trim();
-  if (!pfad) return;
-  self.vorschauLaeuft = true;
-  self.vorschauFehler = null;
-  render(self);
+async function ladeLaufwerke(self) {
+  self.sucht = true;
   try {
-    const r = await request(self, (signal) => self.api.get('/stick/preview', {
-      signal,
-      query: { path: pfad, action: 'prepare', vault: self.mitDaten ? '1' : '0' },
-      // Den Quelltext und einen ganzen Datenbestand zu vermessen dauert auf
-      // einem grossen Heimatordner länger als die üblichen 30 Sekunden.
-      timeoutMs: 120000,
+    self.laufwerke = await request(self, (signal) => self.api.get('/stick/laufwerke', { signal, timeoutMs: 20000 }));
+    self.laufwerkeFehler = null;
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.laufwerke = null;
+    self.laufwerkeFehler = err;
+  } finally {
+    self.sucht = false;
+  }
+}
+
+/** Der beste Vorschlag für das Feld: ein fremder Stick vor dem eigenen. */
+function vorschlag(self) {
+  const liste = (self.laufwerke && self.laufwerke.laufwerke) || [];
+  const fremd = liste.find((l) => !l.eigener);
+  if (fremd) return fremd.pfad;
+  const eigen = self.selbst && self.selbst.von && self.selbst.von.root;
+  return eigen || '';
+}
+
+async function ladeSicherung(self) {
+  const pfad = self.pfad.trim();
+  try {
+    self.sicherung = await request(self, (signal) => self.api.get('/stick/sicherung', {
+      signal, query: pfad ? { path: pfad } : undefined,
     }));
-    if (!self.alive) return;
-    self.vorschau = r;
   } catch (err) {
     if (!self.alive || (err && err.isAborted)) return;
-    self.vorschau = null;
-    self.vorschauFehler = err;
-  } finally {
-    self.vorschauLaeuft = false;
-    render(self);
+    self.sicherung = { fehler: fehlerText(err) };
   }
 }
 
-async function pruefen(self) {
-  const pfad = self.pfad.trim();
-  if (!pfad) return;
-  self.pruefungLaeuft = true;
-  self.pruefungFehler = null;
-  render(self);
+async function ladeListe(self) {
+  const ziel = self.sicherung && self.sicherung.ziel;
   try {
-    const r = await request(self, (signal) => self.api.get('/stick/verify', {
-      signal, query: { path: pfad }, timeoutMs: 60000,
+    self.liste = await request(self, (signal) => self.api.get('/backup/list', {
+      signal, query: ziel && ziel.pfad ? { dir: ziel.pfad } : undefined,
     }));
-    if (!self.alive) return;
-    self.pruefung = r;
   } catch (err) {
     if (!self.alive || (err && err.isAborted)) return;
-    self.pruefung = null;
-    self.pruefungFehler = err;
-  } finally {
-    self.pruefungLaeuft = false;
-    render(self);
+    self.liste = { items: [], fehler: fehlerText(err) };
   }
-  // Wer den Stick prüft, will auch wissen, was an Modellen darauf liegt --
-  // derselbe Pfad, keine zweite Eingabe.
-  if (self.alive && self.modellePfad !== pfad) {
-    await ladeModelle(self);
-    render(self);
-  }
-}
-
-/**
- * Was liegt an Modellen hier und auf dem Stick -- ohne zu schreiben.
- *
- * Läuft beim Öffnen der Ansicht (dann ohne Pfad, oder mit dem des eigenen
- * Sticks) und noch einmal, sobald ein Pfad geprüft wird. Der Server sucht
- * dabei in Ollamas Speicher und im PATH; das dauert auf einem grossen
- * Modellordner länger als die üblichen 30 Sekunden.
- */
-async function ladeModelle(self) {
-  const pfad = self.pfad.trim();
-  self.modelleLaedt = true;
-  self.modelleFehler = null;
-  try {
-    const query = {};
-    if (pfad) query.path = pfad;
-    if (self.fuer) query.fuer = self.fuer;
-    const r = await request(self, (signal) => self.api.get('/stick/models', { signal, query, timeoutMs: 90000 }));
-    if (!self.alive) return;
-    self.modelle = r;
-    self.modellePfad = pfad;
-    // Vorgabe: alles, was gefunden wurde -- Modell UND Kern. Eine von Hand
-    // getroffene Auswahl bleibt, solange ihre Kennungen noch existieren; was
-    // nie jemand angefasst hat, folgt dem neuen Befund.
-    const ids = alleKennungen(r);
-    self.auswahl = self.auswahlVonHand && self.auswahl
-      ? new Set([...self.auswahl].filter((id) => ids.includes(id)))
-      : new Set(ids);
-  } catch (err) {
-    if (!self.alive || (err && err.isAborted)) return;
-    self.modelle = null;
-    self.modellePfad = '';
-    self.modelleFehler = err;
-  } finally {
-    self.modelleLaedt = false;
-  }
-}
-
-function alleKennungen(antwort) {
-  const r = antwort && antwort.rechner;
-  if (!r) return [];
-  return [...(r.kerne || []), ...(r.modelle || [])].map((f) => f.id);
-}
-
-function gewaehlteKennungen(self) {
-  return self.auswahl ? [...self.auswahl] : alleKennungen(self.modelle);
-}
-
-async function modellAnsehen(self) {
-  const pfad = self.pfad.trim();
-  if (!pfad) return;
-  self.modellPlanLaeuft = true;
-  self.modellPlanFehler = null;
-  render(self);
-  try {
-    const r = await request(self, (signal) => self.api.post('/stick/models/preview', {
-      path: pfad, auswahl: gewaehlteKennungen(self), fuer: self.fuer || undefined,
-    }, { signal, timeoutMs: 90000 }));
-    if (!self.alive) return;
-    self.modellPlan = r;
-  } catch (err) {
-    if (!self.alive || (err && err.isAborted)) return;
-    self.modellPlan = null;
-    self.modellPlanFehler = err;
-  } finally {
-    self.modellPlanLaeuft = false;
-    render(self);
-  }
-}
-
-async function modellKopieren(self) {
-  const pfad = self.pfad.trim();
-  if (!pfad) return;
-  const auswahl = gewaehlteKennungen(self);
-  if (!auswahl.length) return;
-  const plan = self.modellPlan;
-  const groesse = plan && Number.isFinite(plan.bytesMitKopfraum) ? ` (${formatBytes(plan.bytesMitKopfraum)})` : '';
-  const ok = await self.ctx.confirm({
-    title: 'Modell auf den Stick kopieren?',
-    message: `${auswahl.length} Eintrag/Einträge werden nach ${pfad}/models kopiert${groesse}. Was dort schon liegt, `
-      + 'bleibt unverändert; bricht der Vorgang ab, wird das halb Kopierte entfernt. Ein Laufzeitkern gilt nur für '
-      + 'das Betriebssystem, für das er gebaut ist.',
-    confirmLabel: 'Kopieren',
-  });
-  if (!ok || !self.alive) return;
-  await starteVorgang(self, {
-    was: 'Modell auf den Stick kopieren',
-    pfad,
-    route: '/stick/models/copy',
-    koerper: { path: pfad, auswahl, fuer: self.fuer || undefined },
-  });
 }
 
 /* ------------------------------------------------------------------ */
-/* Die langen Vorgänge                                                 */
+/* 1. Stick vorbereiten                                                */
 /* ------------------------------------------------------------------ */
 
-/**
- * Einen langen Vorgang als Ereignisstrom fahren.
- *
- * Warum nicht `api.post`: `web/lib/api.js` bricht eine gewöhnliche Anfrage
- * nach 30 Sekunden ab (DEFAULT_TIMEOUT_MS), während der Server weiterkopiert.
- * Der Tab sähe einen Fehler, der Stick würde trotzdem fertig -- die
- * unangenehmste Art von Unwahrheit. Der Strom läuft, solange der Vorgang
- * läuft, und trägt den gemessenen Fortschritt.
- */
-async function starteVorgang(self, { was, pfad, koerper, route }) {
-  if (self.lauf && self.lauf.laeuft) return;
+async function vorbereitenGeklickt(self) {
+  const pfad = self.pfad.trim();
+  if (!pfad || laeuft(self)) return;
+  self.frage = null;
+  let plan;
+  try {
+    plan = await request(self, (signal) => self.api.get('/stick/plan', { signal, query: { path: pfad } }));
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.lauf = { laeuft: false, fehler: fehlerText(err), percent: null, message: '' };
+    renderLauf(self);
+    return;
+  }
+  if (!self.alive) return;
+  // Muss für die anderen Betriebssysteme einmal ins Internet, und erlaubt
+  // die Schleuse das nicht schon von sich aus: fragen. Sonst sofort los.
+  if (plan.download && plan.download.noetig && !plan.download.erlaubt) {
+    self.frage = { plan };
+    self.lauf = null;
+    renderLauf(self);
+    return;
+  }
+  await einrichten(self, { andereSysteme: true, erlaubnis: false });
+}
+
+async function einrichten(self, { andereSysteme, erlaubnis }) {
+  const pfad = self.pfad.trim();
+  if (!pfad || laeuft(self)) return;
+  self.frage = null;
   const controller = new AbortController();
   self.abbruch = controller;
-  self.lauf = {
-    was,
-    pfad,
-    laeuft: true,
-    percent: null,
-    message: 'Wird vorbereitet …',
-    zeilen: [],
-    warnungen: [],
-    fehler: null,
-    ergebnis: null,
-  };
-  render(self);
-
-  const notiere = (zeile) => {
-    const lauf = self.lauf;
-    if (!lauf) return;
-    lauf.zeilen.push(zeile);
-    if (lauf.zeilen.length > 40) lauf.zeilen.splice(0, lauf.zeilen.length - 40);
-  };
+  self.requests.add(controller);
+  self.lauf = { laeuft: true, percent: 0, message: 'Wird vorbereitet …', fehler: null, ergebnis: null, pfad };
+  renderLauf(self);
 
   try {
-    await self.api.stream(route, {
-      body: koerper,
+    await self.api.stream('/stick/einrichten', {
+      body: { path: pfad, andereSysteme, erlaubnis },
       signal: controller.signal,
       onEvent: (event) => {
         const lauf = self.lauf;
         if (!lauf || !self.alive) return;
         const nutz = event.payload || {};
         if (event.type === 'fortschritt') {
-          if (Number.isFinite(nutz.percent)) lauf.percent = nutz.percent;
-          if (nutz.message) {
-            lauf.message = String(nutz.message);
-            notiere(String(nutz.message));
-          }
+          if (Number.isFinite(nutz.percent)) lauf.percent = Math.max(lauf.percent || 0, nutz.percent);
+          if (nutz.message) lauf.message = String(nutz.message);
         } else if (event.type === 'fertig') {
           lauf.ergebnis = nutz;
-          lauf.warnungen = Array.isArray(nutz.warnings) ? nutz.warnings : [];
           lauf.percent = 100;
-          lauf.message = 'Fertig.';
         } else if (event.type === 'fehler') {
-          lauf.fehler = fehlerSatz(nutz.error);
+          lauf.fehler = fehlerText(nutz.error);
         }
-        // Absichtlich NUR der Fortschrittsblock: ein vollständiger Neuaufbau
-        // mehrmals pro Sekunde würde das Pfadfeld unter den Fingern
-        // auswechseln und den Cursor verlieren.
+        // Nur der Fortschrittsblock: ein voller Neuaufbau mehrmals pro
+        // Sekunde würde das Feld unter den Fingern austauschen.
         renderLauf(self);
       },
     });
   } catch (err) {
     if (self.lauf) {
-      self.lauf.fehler = (err && err.isAborted)
-        ? 'Abgebrochen. Auf dem Stick steht der Stand von vorher; halb Kopiertes wurde entfernt.'
-        : fehlerSatz(err);
+      self.lauf.fehler = err && err.isAborted
+        ? 'Abgebrochen. Auf dem Stick steht der Stand von vorher.'
+        : fehlerText(err);
     }
   } finally {
-    if (self.lauf) self.lauf.laeuft = false;
+    self.requests.delete(controller);
     self.abbruch = null;
+    if (self.lauf) self.lauf.laeuft = false;
     if (self.alive) {
-      // Nach jedem Vorgang stimmt die Selbstauskunft nicht mehr (neue
-      // Laufzeiten, neuer Zeitstempel), und die alte Vorschau schon gar nicht.
-      // Der Modellplan ebenso: was eben kopiert wurde, liegt jetzt dort.
-      self.vorschau = null;
-      self.modellPlan = null;
-      self.modellePfad = '';
-      await ladeSelbst(self);
-      if (self.pfad.trim()) await pruefen(self);
-      else render(self);
+      // Danach gibt es auf dem Stick etwas Neues (Marke, Laufzeiten).
+      await ladeLaufwerke(self);
+      await ladeSicherung(self);
+      if (self.alive) render(self);
     }
   }
+}
+
+function laeuft(self) {
+  return !!(self.lauf && self.lauf.laeuft);
+}
+
+/* ------------------------------------------------------------------ */
+/* 2. Sichern                                                          */
+/* ------------------------------------------------------------------ */
+
+async function sichern(self) {
+  if (self.sichernLaeuft) return;
+  self.sichernLaeuft = true;
+  self.sichernFehler = null;
+  self.gesichert = null;
+  renderSichern(self);
+  try {
+    const pfad = self.pfad.trim();
+    self.gesichert = await request(self, (signal) => self.api.post('/stick/sichern',
+      pfad ? { path: pfad } : {}, { signal, timeoutMs: 600000 }));
+    self.ctx.toast('Gesichert.', 'success');
+    await ladeSicherung(self);
+    if (self.offen) await ladeListe(self);
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.sichernFehler = err;
+  } finally {
+    self.sichernLaeuft = false;
+    if (self.alive) {
+      renderSichern(self);
+      if (self.offen) renderWieder(self);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 3. Wiederherstellen (die Funktion der früheren „Sicherung")         */
+/* ------------------------------------------------------------------ */
+
+function quelleKoerper(self) {
+  const quelle = String(self.quelle || '').trim();
+  const klein = quelle.toLowerCase();
+  const body = klein.endsWith('.json') || klein.endsWith('.enc') ? { file: quelle } : { dir: quelle };
+  if (self.pass) body.passphrase = self.pass;
+  return body;
 }
 
 /**
- * Der Satz zu einem gescheiterten Vorgang.
- *
- * Eine verweigerte Netzschleuse ist kein Fehler des Sticks, sondern die
- * eigene Einstellung -- und genau so muss es dastehen, sonst sucht jemand den
- * Defekt am falschen Ort. Der Server nennt den Code, die Ansicht den Ort.
+ * Gilt die Vorschau noch für das, was eingestellt ist? Eine Vorschau ist eine
+ * Aussage über GENAU EINE Sicherung in GENAU EINEM Modus; daneben ein anderer
+ * Pfad oder Modus, und sie beschreibt etwas, das so nicht passieren würde.
  */
-function fehlerSatz(fehler) {
-  const code = fehler && fehler.code;
-  const satz = (fehler && fehler.message) || 'Der Vorgang ist gescheitert.';
-  if (code === 'NETWORK_BLOCKED') {
-    return `${satz} Das ist kein Fehler des Sticks: die Netzschleuse hat den Zugriff verweigert, weil du es so `
-      + 'eingestellt hast. Freigeben lässt er sich im Bereich „Netz" – oder du lässt es, dann läuft der Stick '
-      + 'weiterhin auf deinem eigenen Betriebssystem.';
-  }
-  return satz;
+function vorschauGilt(self) {
+  const v = self.vorschau;
+  if (!v || v.mode !== self.modus) return false;
+  return String(self.quelle || '').trim() === self.vorschauQuelle;
 }
 
-async function vorbereiten(self) {
-  const pfad = self.pfad.trim();
-  if (!pfad) return;
+async function ansehen(self) {
+  const quelle = String(self.quelle || '').trim();
+  if (!quelle) return;
+  self.vorschauLaeuft = true;
+  self.vorschauFehler = null;
+  self.ergebnis = null;
+  self.ergebnisFehler = null;
+  renderWieder(self);
+  try {
+    const r = await request(self, (signal) => self.api.post('/backup/preview',
+      { ...quelleKoerper(self), mode: self.modus }, { signal, timeoutMs: 120000 }));
+    if (!self.alive) return;
+    self.vorschau = r;
+    self.vorschauQuelle = quelle;
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.vorschau = null;
+    self.vorschauFehler = err;
+  } finally {
+    self.vorschauLaeuft = false;
+    if (self.alive) renderWieder(self);
+  }
+}
+
+async function wiederherstellen(self) {
+  const quelle = String(self.quelle || '').trim();
+  if (!quelle || !vorschauGilt(self)) return;
+  const modus = MODI.find((m) => m.value === self.modus) || MODI[0];
+  const v = self.vorschau;
+  const zeilen = [];
+  if (v && v.sicherung) zeilen.push(`${formatNumber(v.sicherung.records || 0)} Einträge kommen aus der Sicherung.`);
+  if (v && Array.isArray(v.verschwindet) && v.verschwindet.length) zeilen.push(`Es verschwindet: ${v.verschwindet.join('; ')}.`);
   const ok = await self.ctx.confirm({
-    title: 'Stick vorbereiten?',
-    message: `In ${pfad} werden das Programm, die Laufzeit dieses Rechners und die Starter angelegt`
-      + (self.mitDaten ? ' und dein Datenbestand hineinkopiert' : '')
-      + '. Ein vorhandener Datenbestand auf dem Stick wird dabei NIE überschrieben.',
-    confirmLabel: 'Vorbereiten',
+    title: modus.value === 'restore' ? 'Alles durch die Sicherung ersetzen?' : 'Wiederherstellen?',
+    message: zeilen.join(' ') || quelle,
+    confirmLabel: modus.value === 'restore' ? 'Ja, alles ersetzen' : 'Wiederherstellen',
+    danger: modus.gefahr,
   });
   if (!ok || !self.alive) return;
-  await starteVorgang(self, {
-    was: 'Stick vorbereiten',
-    pfad,
-    route: '/stick/prepare',
-    koerper: { path: pfad, includeVault: self.mitDaten },
-  });
-}
 
-async function aktualisieren(self) {
-  const pfad = self.pfad.trim();
-  if (!pfad) return;
-  await starteVorgang(self, {
-    was: 'Stick aktualisieren',
-    pfad,
-    route: '/stick/update',
-    koerper: { path: pfad },
-  });
-}
-
-async function laufzeitHolen(self, plattform) {
-  const pfad = self.pfad.trim();
-  if (!pfad) return;
-  const lokal = self.selbst && self.selbst.dieserRechner === plattform;
-  if (!lokal) {
-    const ok = await self.ctx.confirm({
-      title: `Laufzeit für ${plattformName(plattform)} holen?`,
-      message: 'Dafür wird einmalig das offizielle Node-Paket von nodejs.org geladen – durch die '
-        + 'Netzschleuse, die das erlauben muss. Die Prüfsummen werden verglichen, und es wird nur die '
-        + 'Programmdatei entpackt. Ohne Freigabe passiert nichts; der Stick läuft trotzdem auf diesem Rechner.',
-      confirmLabel: 'Holen',
-    });
-    if (!ok || !self.alive) return;
+  self.importLaeuft = true;
+  self.ergebnis = null;
+  self.ergebnisFehler = null;
+  renderWieder(self);
+  try {
+    const r = await request(self, (signal) => self.api.post('/backup/import',
+      { ...quelleKoerper(self), mode: self.modus }, { signal, timeoutMs: 600000 }));
+    if (!self.alive) return;
+    self.ergebnis = r;
+    self.ctx.toast(`Wiederhergestellt: ${formatNumber((r && r.imported) || 0)} Einträge.`, 'success');
+  } catch (err) {
+    if (!self.alive || (err && err.isAborted)) return;
+    self.ergebnisFehler = err;
+  } finally {
+    self.importLaeuft = false;
+    if (self.alive) renderWieder(self);
   }
-  await starteVorgang(self, {
-    was: `Laufzeit ${plattform} holen`,
-    pfad,
-    route: '/stick/runtime',
-    koerper: { path: pfad, platform: plattform },
+}
+
+/* ------------------------------------------------------------------ */
+/* 4. Beenden & abziehen                                               */
+/* ------------------------------------------------------------------ */
+
+async function beenden(self) {
+  if (laeuft(self) || self.sichernLaeuft || self.importLaeuft) {
+    self.ctx.toast('Erst fertig werden lassen – sonst ist der Stick nur halb beschrieben.', 'info');
+    return;
+  }
+  const ok = await self.ctx.confirm({
+    title: 'Neural OS beenden?',
+    message: 'Alles wird gespeichert, danach schließt Neural OS.',
+    confirmLabel: 'Beenden',
   });
+  if (!ok || !self.alive) return;
+
+  self.ende = 'speichert';
+  self.endeFehler = null;
+  render(self);
+  try {
+    const pfad = self.pfad.trim();
+    self.endeAntwort = await self.api.post('/stick/beenden', pfad ? { path: pfad } : {}, { timeoutMs: 30000 });
+  } catch (err) {
+    if (!self.alive) return;
+    self.ende = 'fehler';
+    self.endeFehler = err;
+    render(self);
+    return;
+  }
+  self.ende = 'wartet';
+  render(self);
+  const weg = await wartenBisWeg();
+  if (!self.alive) return;
+  self.ende = weg ? 'fertig' : 'haengt';
+  render(self);
+}
+
+/**
+ * Antwortet der Server noch? Erst wenn nicht, ist „abziehen" wahr.
+ *
+ * Absichtlich `fetch` und nicht `api.get`: gefragt wird nach dem Ausbleiben
+ * einer Antwort, und das ist für die Hülle um `fetch` ein Fehlerfall, den sie
+ * weitermelden würde. „Keine Antwort" hat zwei Gestalten: die Verbindung wird
+ * abgelehnt, oder der Service Worker (web/sw.js) springt ein und meldet selbst
+ * SERVER_UNREACHABLE -- gemessen: ohne diese zweite Lesart hielt die Ansicht
+ * einen längst beendeten Server 20 Sekunden lang für lebendig.
+ */
+async function wartenBisWeg() {
+  const bis = Date.now() + WARTEN_MS;
+  while (Date.now() < bis) {
+    await new Promise((r) => { setTimeout(r, 500); });
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 1500);
+    try {
+      const res = await fetch('/api/status', { cache: 'no-store', signal: c.signal, credentials: 'same-origin' });
+      if (res.status === 503) {
+        const body = await res.json().catch(() => null);
+        if (body && body.error && body.error.code === 'SERVER_UNREACHABLE') return true;
+      }
+    } catch {
+      return true;
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  return false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -526,815 +534,465 @@ async function laufzeitHolen(self, plattform) {
 
 function render(self) {
   if (!self.alive || !self.container) return;
-  const laufSlot = h('div.stickv__laufslot');
-  self.laufSlot = laufSlot;
-  const block = laufBlock(self);
-  if (block) laufSlot.appendChild(block);
+  clear(self.container);
+  if (self.ende) {
+    self.container.appendChild(endeBlock(self));
+    return;
+  }
+  self.laufSlot = h('div.stickv__slot', { 'aria-live': 'polite' });
+  self.sichernSlot = h('div.stickv__sichern');
+  self.wiederSlot = h('div.stickv__wieder-inhalt');
 
   const page = h('div.page.stickv', null,
-    h('header.page__head', null,
-      h('div', null,
-        h('h1.page__title', null, text('Stick')),
-        h('p.page__subtitle', null, text(
-          'Dein Wissen auf einem USB-Stick – auf jedem Rechner, ohne Installation.'))),
-      h('div.page__actions', null,
-        h('button.btn.btn--small', {
-          type: 'button',
-          disabled: self.laedt,
-          onClick: async () => { await ladeSelbst(self); render(self); },
-        }, icon(ICONS.refresh), text('Neu laden')))),
-    h('div.stack', null,
-      selbstBlock(self),
-      pruefBlock(self),
-      laufSlot,
-      vorbereitenBlock(self),
-      laufzeitenBlock(self),
-      modellBlock(self),
-      wahrheitenBlock(self)));
-
-  clear(self.container);
+    vorbereitenKarte(self),
+    sichernKarte(self),
+    beendenKarte(self));
   self.container.appendChild(page);
+  renderLauf(self);
+  renderSichern(self);
+  renderWieder(self);
 }
 
-/** Nur den Fortschrittsblock erneuern. Siehe den Kommentar an seiner Aufrufstelle. */
+/* ---------------------------------------------- 1. Stick vorbereiten */
+
+function vorbereitenKarte(self) {
+  const feld = h('input.input.stickv__feld', {
+    type: 'text',
+    value: self.pfad,
+    placeholder: 'z. B. E:\\  oder  /Volumes/STICK',
+    spellcheck: 'false',
+    autocapitalize: 'off',
+    autocomplete: 'off',
+    'aria-label': 'Ort des Sticks',
+    onInput: (e) => {
+      self.pfad = e.target.value;
+      self.pfadVonHand = true;
+      pfadGeaendert(self);
+    },
+    onKeyDown: (e) => { if (e.key === 'Enter') vorbereitenGeklickt(self); },
+  });
+  self.feld = feld;
+
+  const suchen = h('button.btn.btn--ghost.stickv__suchen', {
+    type: 'button',
+    disabled: self.sucht,
+    onClick: async () => {
+      await ladeLaufwerke(self);
+      if (!self.alive) return;
+      if (!self.pfadVonHand || !self.pfad.trim()) self.pfad = vorschlag(self);
+      await ladeSicherung(self);
+      render(self);
+    },
+  }, icon(self.icons.refresh || ''), text('Neu suchen'));
+
+  const knopf = h('button.btn.btn--primary.stickv__los', {
+    type: 'button',
+    disabled: !self.pfad.trim() || laeuft(self),
+    onClick: () => vorbereitenGeklickt(self),
+  }, icon(self.icons.stick || ''), text('Stick vorbereiten'));
+  self.losKnopf = knopf;
+
+  return h('section.card.stickv__karte', { 'aria-label': 'Stick vorbereiten' },
+    h('label.stickv__label', null, text('Wo steckt der Stick?')),
+    h('div.stickv__feldzeile', null, feld, suchen),
+    laufwerkeZeile(self),
+    knopf,
+    self.laufSlot);
+}
+
+function laufwerkeZeile(self) {
+  if (self.sucht && !self.laufwerke) return h('p.stickv__still', null, text('Suche Sticks …'));
+  if (self.laufwerkeFehler) {
+    return h('p.stickv__still', null, text(`Die Suche ging nicht: ${fehlerText(self.laufwerkeFehler)}`));
+  }
+  const liste = (self.laufwerke && self.laufwerke.laufwerke) || [];
+  if (!liste.length) {
+    return h('p.stickv__still', { dataset: { leer: '1' } },
+      text('Kein Stick gefunden. Steck ihn ein und tippe auf „Neu suchen“ – oder trag den Ort oben ein.'));
+  }
+  const gewaehlt = self.pfad.trim();
+  return h('div.stickv__laufwerke', { role: 'list', 'aria-label': 'Gefundene Sticks' },
+    liste.map((l) => {
+      const aktiv = gleich(gewaehlt, l.pfad);
+      const teile = [];
+      if (l.name) teile.push(l.name);
+      if (Number.isFinite(l.frei)) teile.push(`${formatBytes(l.frei)} frei`);
+      if (l.eigener) teile.push('läuft von hier');
+      else if (l.istStick) teile.push('Neural OS drauf');
+      return h('button.stickv__laufwerk', {
+        type: 'button',
+        role: 'listitem',
+        class: aktiv ? 'is-active' : '',
+        'aria-pressed': aktiv ? 'true' : 'false',
+        onClick: async () => {
+          self.pfad = l.pfad;
+          self.pfadVonHand = false;
+          if (self.feld) self.feld.value = l.pfad;
+          markiereLaufwerke(self);
+          if (!laeuft(self)) self.lauf = null;
+          self.frage = null;
+          renderLauf(self);
+          await ladeSicherung(self);
+          renderSichern(self);
+        },
+      },
+      h('span.stickv__laufwerk-pfad', null, text(l.pfad)),
+      teile.length ? h('span.stickv__laufwerk-info', null, text(teile.join(' · '))) : null);
+    }));
+}
+
+function gleich(a, b) {
+  const n = (p) => String(p || '').trim().replace(/[\\/]+$/, '').toLowerCase();
+  return n(a) !== '' && n(a) === n(b);
+}
+
+function markiereLaufwerke(self) {
+  if (!self.container) return;
+  const gewaehlt = self.pfad.trim();
+  for (const b of self.container.querySelectorAll('.stickv__laufwerk')) {
+    const pfad = b.querySelector('.stickv__laufwerk-pfad');
+    const aktiv = !!pfad && gleich(gewaehlt, pfad.textContent);
+    b.classList.toggle('is-active', aktiv);
+    b.setAttribute('aria-pressed', aktiv ? 'true' : 'false');
+  }
+}
+
+/** Beim Tippen: nur was vom Feld abhängt -- Knopf, Markierung, Sicherungsziel. */
+function pfadGeaendert(self) {
+  if (self.losKnopf) self.losKnopf.disabled = !self.pfad.trim() || laeuft(self);
+  markiereLaufwerke(self);
+  if (self.frage) { self.frage = null; renderLauf(self); }
+  if (self.tippTimer) clearTimeout(self.tippTimer);
+  self.tippTimer = setTimeout(async () => {
+    self.tippTimer = null;
+    if (!self.alive) return;
+    await ladeSicherung(self);
+    renderSichern(self);
+  }, 450);
+}
+
 function renderLauf(self) {
   if (!self.alive || !self.laufSlot) return;
   clear(self.laufSlot);
-  const block = laufBlock(self);
-  if (block) self.laufSlot.appendChild(block);
-}
-
-/* ---------------------------------------------------- 1. diese Instanz */
-
-function selbstBlock(self) {
-  if (self.laedt && !self.selbst) {
-    return karte('Wo läuft dieses Neural OS gerade?', h('p.meta', null, text('Wird ermittelt …')));
+  if (self.losKnopf) self.losKnopf.disabled = !self.pfad.trim() || laeuft(self);
+  if (self.frage) {
+    self.laufSlot.appendChild(frageBlock(self));
+    return;
   }
-  if (self.selbstFehler) {
-    return karte('Wo läuft dieses Neural OS gerade?',
-      h('p.stickv__bad', null, text(`Nicht zu beantworten: ${fehlerText(self.selbstFehler)}`)));
-  }
-  const s = self.selbst || {};
-  const von = s.von;
-
-  if (!von) {
-    return h('section.card.stickv__self', { dataset: { portabel: '0' } },
-      h('div.card__body.stack', null,
-        h('div.row', null,
-          h('span.stickv__dot', { 'aria-hidden': 'true' }),
-          h('strong', null, text('Diese Instanz läuft von der Festplatte, nicht von einem Stick.'))),
-        h('p.meta', null, text(
-          `Dein Datenbestand liegt in ${s.datenOrdner || 'deinem Heimatordner'}. `
-          + 'Beim Vorbereiten wird er nur dann mitkopiert, wenn du es unten ausdrücklich ankreuzt – '
-          + 'das Original bleibt in jedem Fall unverändert.'))));
-  }
-
-  return h('section.card.stickv__self', { dataset: { portabel: '1' } },
-    h('div.card__body.stack', null,
-      h('div.row', null,
-        h('span.stickv__dot', { 'aria-hidden': 'true' }),
-        h('strong', null, text('Dieses Neural OS läuft gerade VOM STICK.'))),
-      h('p.meta', null, text(`Stick: ${von.root}`)),
-      h('p.meta', null, text(`Deine Daten liegen in ${von.dataDir} – und nur dort.`)),
-      h('p.meta', null, text(
-        (von.createdAt ? `Stick angelegt ${formatDateTime(von.createdAt)}` : 'Anlegedatum unbekannt')
-        + (von.updatedAt ? ` · zuletzt aktualisiert ${formatDateTime(von.updatedAt)}` : '')
-        + (von.preparedBy ? ` · vorbereitet auf ${plattformName(von.preparedBy)}` : ''))),
-      Number.isFinite(s.freieBytes)
-        ? h('p.meta', null, text(`Noch frei auf dem Stick: ${formatBytes(s.freieBytes)}`))
-        : null,
-      s.pruefung && Array.isArray(s.pruefung.problems) && s.pruefung.problems.length
-        ? problemListe(s.pruefung.problems)
-        : h('p.meta', null, text('Die Prüfung dieses Sticks findet nichts zu beanstanden.'))));
-}
-
-/* --------------------------------------------------- 2. prüfen/ansehen */
-
-function pruefBlock(self) {
-  const eingabe = h('input.input', {
-    type: 'text',
-    value: self.pfad,
-    placeholder: '/media/usb   oder   E:\\',
-    spellcheck: 'false',
-    autocapitalize: 'off',
-    'aria-label': 'Pfad zum Stick',
-    // Kein vollstaendiger Neuaufbau beim Tippen -- der wuerde das Feld unter
-    // den Fingern austauschen und den Cursor verlieren. Nur die Knoepfe, die
-    // ohne Pfad nichts tun koennen, werden freigegeben oder gesperrt.
-    onInput: (e) => { self.pfad = e.target.value; pfadKnoepfe(self); },
-    onKeyDown: (e) => { if (e.key === 'Enter') pruefen(self); },
-  });
-
-  const leer = !self.pfad.trim();
-  const eigener = istEigenerStick(self);
-
-  return karte('Stick prüfen und ansehen',
-    h('div.stack', null,
-      h('div.field', null,
-        h('label.label', null, text('Pfad zum Stick')),
-        eingabe,
-        h('p.hint', null, text(
-          'Der Browser kennt keine Dateipfade – es gibt keinen Ordnerwähler, der einen absoluten Pfad '
-          + 'liefern darf. Der Pfad muss also getippt werden. Unter Linux meist /media/… oder /run/media/…, '
-          + 'unter macOS /Volumes/…, unter Windows z. B. E:\\'))),
-      h('div.row.stickv__buttons', null,
-        h('button.btn', {
-          type: 'button',
-          dataset: { brauchtFremdenPfad: '1' },
-          disabled: leer || eigener || self.vorschauLaeuft,
-          title: eigener ? 'Für den Stick, von dem diese Instanz läuft, gibt es nichts vorzubereiten.' : '',
-          onClick: () => ansehen(self),
-        }, icon(ICONS.eye), text(self.vorschauLaeuft ? 'Wird angesehen …' : 'Erst ansehen')),
-        h('button.btn', {
-          type: 'button',
-          dataset: { brauchtPfad: '1' },
-          disabled: leer || self.pruefungLaeuft,
-          onClick: () => pruefen(self),
-        }, icon(ICONS.check), text(self.pruefungLaeuft ? 'Wird geprüft …' : 'Stick prüfen'))),
-      eigener
-        ? h('p.hint', null, text(
-          'Das ist der Stick, von dem diese Instanz gerade läuft. „Stick prüfen" sagt hier, wie es um ihn '
-          + 'steht; „Erst ansehen" beantwortet dagegen die Frage „was würde ein Vorbereiten tun" – und die '
-          + 'stellt sich für den eigenen Stick nicht.'))
-        : null,
-      self.vorschauFehler
-        ? h('div.stickv__box', { dataset: { level: 'fail' } }, text(fehlerText(self.vorschauFehler)))
-        : null,
-      vorschauBox(self),
-      self.pruefungFehler
-        ? h('div.stickv__box', { dataset: { level: 'fail' } }, text(fehlerText(self.pruefungFehler)))
-        : null,
-      pruefungBox(self)));
-}
-
-function vorschauBox(self) {
-  const v = self.vorschau;
-  if (!v) return null;
-  const zeilen = [];
-
-  zeilen.push(h('p', null, h('strong', null, text('Das würde passieren – geschrieben ist noch nichts.'))));
-  zeilen.push(h('p.meta', null, text(
-    v.exists
-      ? (v.isStick ? `${v.root} ist bereits ein Neural-OS-Stick.` : `${v.root} gibt es, ein Neural-OS-Stick ist es noch nicht.`)
-      : `${v.root} gibt es noch nicht – der Ordner würde angelegt.`)));
-
-  if (v.source) {
-    zeilen.push(h('p', null, text(
-      `Programm: ${formatNumber(v.source.files)} Dateien (${formatBytes(v.source.bytes)}), Fassung ${v.source.version}.`)));
-  }
-  if (v.home) {
-    zeilen.push(h('p', null, text(
-      `Datenbestand: ${formatNumber(v.home.files)} Dateien (${formatBytes(v.home.bytes)}) aus ${v.home.root}. `
-      + 'Das Original bleibt unverändert.')));
-  } else if (v.action === 'prepare') {
-    zeilen.push(h('p', null, text('Datenbestand: wird NICHT mitkopiert. Der Stick startet mit einem leeren Tresor.')));
-  }
-  if (v.runtimes) {
-    const teile = [];
-    if (v.runtimes.copyLocal && v.runtimes.local) teile.push(`${plattformName(v.runtimes.local)} (von diesem Rechner, ohne Netz)`);
-    for (const p of v.runtimes.download || []) teile.push(`${plattformName(p)} (Download durch die Netzschleuse)`);
-    zeilen.push(h('p', null, text(teile.length
-      ? `Laufzeiten, die dazukämen: ${teile.join(', ')}.`
-      : 'Laufzeiten: keine neue – die vorhandenen bleiben, wie sie sind.')));
-  }
-  if (v.space) {
-    zeilen.push(h('p', null, text(
-      `Platz: gebraucht ${formatBytes(v.space.withHeadroom)}, frei `
-      + (Number.isFinite(v.space.free) ? formatBytes(v.space.free) : 'unbekannt')
-      + (v.space.fits === true ? ' – das passt.' : v.space.fits === false ? ' – das passt NICHT.' : ' – nicht feststellbar.'))));
-  }
-  if (v.data && v.data.entries > 0) {
-    zeilen.push(h('p', null, text(
-      `Auf dem Stick liegen bereits ${formatNumber(v.data.entries)} Einträge in ${v.data.path}. `
-      + 'Sie werden von keinem Vorgang angefasst.')));
-  }
-
-  for (const b of v.blockers || []) {
-    zeilen.push(h('p.stickv__bad', null, icon(ICONS.alert), text(` ${b.message}`)));
-  }
-  for (const w of (v.warnings || []).slice(0, 8)) {
-    zeilen.push(h('p.stickv__warn', null, text(w)));
-  }
-  if (!v.blockers.length) {
-    zeilen.push(h('p.meta', null, text('Nichts spricht dagegen. Erst ein Klick unten schreibt etwas.')));
-  }
-
-  return h('div.stickv__box', { dataset: { level: v.blockers.length ? 'blocked' : 'ok' } }, zeilen);
-}
-
-function pruefungBox(self) {
-  const p = self.pruefung;
-  if (!p) return null;
-  const zeilen = [
-    h('p', null, h('strong', null, text(p.ok
-      ? 'Der Stick ist startklar.'
-      : 'So startet der Stick nicht.'))),
-  ];
-  if (Number.isFinite(p.freeBytes)) {
-    zeilen.push(h('p.meta', null, text(`Frei: ${formatBytes(p.freeBytes)}`)));
-  }
-  const laufzeiten = (p.layout && p.layout.runtimes) || [];
-  zeilen.push(h('p.meta', null, text(laufzeiten.length
-    ? `Laufzeiten auf dem Stick: ${laufzeiten.map((r) => plattformName(r.platform)).join(', ')}`
-    : 'Auf dem Stick liegt keine Laufzeit.')));
-  if (p.problems && p.problems.length) zeilen.push(problemListe(p.problems));
-  zeilen.push(h('p.hint', null, text(
-    'Diese Prüfung schreibt nichts auf den Stick – auch keine Testdatei.')));
-  return h('div.stickv__box', { dataset: { level: p.ok ? 'ok' : 'fail' } }, zeilen);
-}
-
-/**
- * Zeigt der getippte Pfad auf genau den Stick, von dem diese Instanz laeuft?
- *
- * Das ist keine Feinheit, sondern eine harte Grenze: der Quelltext, aus dem
- * kopiert wuerde, liegt dann IN dem Ordner, in den kopiert werden soll
- * (`<stick>/app` in `<stick>`). stick.js lehnt das zu Recht ab -- eine Kopie
- * eines Baums in sich selbst waechst endlos. Also sagt die Ansicht es vorher,
- * statt den Benutzer in eine Fehlermeldung laufen zu lassen.
- */
-function istEigenerStick(self) {
-  const von = self.selbst && self.selbst.von;
-  if (!von || !von.root) return false;
-  const pfad = self.pfad.trim().replace(/[\\/]+$/, '');
-  return pfad !== '' && pfad === String(von.root).replace(/[\\/]+$/, '');
-}
-
-/**
- * Die Knoepfe, die einen Pfad brauchen, an den aktuellen Stand anpassen.
- *
- * Sie tragen `data-braucht-pfad` bzw. `data-braucht-fremden-pfad`, damit diese
- * Funktion sie findet, ohne dass jede Stelle eine Referenz durchreichen muss
- * -- und damit kein Knopf vergessen wird, der spaeter dazukommt.
- */
-function pfadKnoepfe(self) {
-  if (!self.container) return;
-  const leer = !self.pfad.trim();
-  const laeuft = !!(self.lauf && self.lauf.laeuft);
-  const eigener = istEigenerStick(self);
-  for (const knopf of self.container.querySelectorAll('[data-braucht-pfad]')) {
-    knopf.disabled = leer || laeuft;
-  }
-  for (const knopf of self.container.querySelectorAll('[data-braucht-fremden-pfad]')) {
-    knopf.disabled = leer || laeuft || eigener;
-  }
-}
-
-function problemListe(problems) {
-  return h('ul.stickv__probleme', { role: 'list' },
-    problems.map((p) => h('li', { dataset: { level: p.level || 'info' } },
-      h('span', null, text(p.message || '')),
-      p.fix ? h('span.meta', null, text(` ${p.fix}`)) : null)));
-}
-
-/* ------------------------------------------------------- 3. Fortschritt */
-
-function laufBlock(self) {
   const lauf = self.lauf;
-  if (!lauf) return null;
-
-  const percent = Number.isFinite(lauf.percent) ? Math.max(0, Math.min(100, lauf.percent)) : null;
-
-  return h('section.card.stickv__lauf', { dataset: { laeuft: lauf.laeuft ? '1' : '0' } },
-    h('div.card__head', null,
-      h('strong', null, text(lauf.was)),
-      h('span.spacer'),
-      lauf.laeuft
-        ? h('button.btn.btn--small.btn--danger', {
+  if (!lauf) return;
+  if (lauf.laeuft) {
+    const p = Number.isFinite(lauf.percent) ? Math.max(0, Math.min(100, lauf.percent)) : 0;
+    self.laufSlot.appendChild(h('div.stickv__lauf', null,
+      h('div.stickv__bar', {
+        role: 'progressbar',
+        'aria-valuemin': '0',
+        'aria-valuemax': '100',
+        'aria-valuenow': String(p),
+        'aria-label': 'Fortschritt',
+      }, h('div.stickv__bar-fill', { style: `width:${p}%` })),
+      h('div.stickv__lauf-zeile', null,
+        h('span.stickv__lauf-text', null, text(`${p} % · ${lauf.message || ''}`)),
+        h('button.btn.btn--ghost.btn--small', {
           type: 'button',
           onClick: () => { if (self.abbruch) self.abbruch.abort(); },
-        }, icon(ICONS.stop), text('Abbrechen'))
-        : null),
-    h('div.card__body.stack', null,
-      h('p.meta', null, text(`${lauf.pfad}`)),
-      h('div.stickv__bar', { role: 'progressbar', 'aria-valuenow': percent === null ? undefined : String(percent) },
-        h('div.stickv__bar-fill', {
-          dataset: { unbekannt: percent === null ? '1' : '0' },
-          style: percent === null ? '' : `width:${percent}%`,
-        })),
-      h('p', null, text(percent === null ? lauf.message : `${percent} % · ${lauf.message}`)),
-      lauf.fehler ? h('p.stickv__bad', null, text(lauf.fehler)) : null,
-      ...(lauf.warnungen || []).map((w) => h('p.stickv__warn', null, text(w))),
-      lauf.ergebnis && !lauf.fehler
-        ? h('p', null, text(
-          `${formatNumber(lauf.ergebnis.files || 0)} Dateien · ${formatBytes(lauf.ergebnis.bytes || 0)} geschrieben.`))
-        : null,
-      lauf.zeilen.length
-        ? h('details.stickv__log', null,
-          h('summary', null, text('Was gemeldet wurde')),
-          h('ul.stickv__logliste', { role: 'list' },
-            lauf.zeilen.slice(-20).map((z) => h('li', null, text(z)))))
-        : null));
+        }, icon(EIGENE_ICONS.stop), text('Abbrechen')))));
+    return;
+  }
+  if (lauf.fehler) {
+    self.laufSlot.appendChild(h('div.stickv__meldung', { role: 'alert' },
+      icon(self.icons.alert || ''), h('span', null, text(lauf.fehler))));
+    return;
+  }
+  if (lauf.ergebnis) self.laufSlot.appendChild(fertigBlock(self, lauf.ergebnis));
 }
 
-/* ------------------------------------------------------ 4. vorbereiten */
-
-function vorbereitenBlock(self) {
-  const leer = !self.pfad.trim();
-  const laeuft = !!(self.lauf && self.lauf.laeuft);
-  const eigenerStick = istEigenerStick(self);
-
-  return karte('Stick vorbereiten oder erneuern',
-    h('div.stack', null,
-      h('label.stickv__check', null,
-        h('input', {
-          type: 'checkbox',
-          checked: self.mitDaten,
-          disabled: laeuft,
-          onChange: (e) => { self.mitDaten = e.target.checked; self.vorschau = null; render(self); },
-        }),
-        text('Meinen Datenbestand mitnehmen')),
-      h('p.hint', null, text(
-        'Kopiert Notizen, Chats, Projekte und Dateien auf den Stick. Das Original auf diesem Rechner '
-        + 'bleibt unverändert. Liegt auf dem Stick schon ein Datenbestand, wird er NICHT überschrieben – '
-        + 'der Vorgang lehnt dann ab.')),
-      eigenerStick
-        ? h('p.stickv__warn', null, text(
-          'Dieser Stick kann sich nicht selbst erneuern. Der Quelltext, aus dem kopiert würde, liegt auf '
-          + 'ihm selbst (in app/) – eine Kopie eines Ordners in sich hinein würde endlos wachsen, und das '
-          + 'wird abgelehnt. Zum Erneuern steck den Stick in einen Rechner, auf dem Neural OS von der '
-          + 'Festplatte läuft. Laufzeiten für weitere Betriebssysteme lassen sich hier trotzdem holen.'))
-        : null,
-      h('div.row.stickv__buttons', null,
-        h('button.btn.btn--primary', {
-          type: 'button',
-          dataset: { brauchtFremdenPfad: '1' },
-          disabled: leer || laeuft || eigenerStick,
-          title: eigenerStick ? 'Nicht auf dem Stick, von dem diese Instanz gerade läuft.' : '',
-          onClick: () => vorbereiten(self),
-        }, icon(ICONS.download), text('Stick vorbereiten')),
-        h('button.btn', {
-          type: 'button',
-          dataset: { brauchtFremdenPfad: '1' },
-          disabled: leer || laeuft || eigenerStick,
-          title: eigenerStick ? 'Nicht auf dem Stick, von dem diese Instanz gerade läuft.' : '',
-          onClick: () => aktualisieren(self),
-        }, icon(ICONS.refresh), text('Nur Programm erneuern'))),
-      h('p.hint', null, text(
-        '„Nur Programm erneuern" fasst den Ordner data/ nicht an – das ist die wichtigste Zusage dieses '
-        + 'Vorgangs und durch einen Test abgesichert. Beide Vorgänge laufen so lange, wie sie brauchen; '
-        + 'der Balken oben ist gemessen, nicht geschätzt.'))));
-}
-
-/* -------------------------------------------------------- 5. Laufzeiten */
-
-function laufzeitenBlock(self) {
-  const s = self.selbst || {};
-  const bekannt = Array.isArray(s.bekanntePlattformen) ? s.bekanntePlattformen : [];
-  const lokal = s.dieserRechner || null;
-  const leer = !self.pfad.trim();
-  const laeuft = !!(self.lauf && self.lauf.laeuft);
-
-  // Was wirklich auf dem angesehenen Stick liegt -- aus der Prüfung oder der
-  // Vorschau, nie geraten. Ohne eine der beiden steht hier ehrlich nichts.
-  const aufStick = new Map();
-  const ausPruefung = self.pruefung && self.pruefung.layout && self.pruefung.layout.runtimes;
-  const ausVorschau = self.vorschau && self.vorschau.runtimes && self.vorschau.runtimes.onStick;
-  for (const r of ausPruefung || ausVorschau || []) aufStick.set(r.platform, r);
-  const gesehen = !!(ausPruefung || ausVorschau);
-
-  const zeilen = bekannt.map((p) => {
-    const da = aufStick.get(p);
-    const istLokal = p === lokal;
-    let zustand;
-    let ton;
-    if (da) {
-      zustand = `liegt auf dem Stick${da.version ? ` (Node ${da.version})` : ''}`;
-      ton = 'ok';
-    } else if (!gesehen) {
-      zustand = 'unbekannt – erst „Stick prüfen" sagt, was wirklich darauf liegt';
-      ton = 'unklar';
-    } else if (istLokal) {
-      zustand = 'fehlt – kommt beim Vorbereiten dieses Rechners automatisch mit, ohne Netz';
-      ton = 'unklar';
-    } else {
-      zustand = 'fehlt – dieser Rechnertyp startet den Stick nur, wenn Node.js dort installiert ist';
-      ton = 'fehlt';
-    }
-    return h('li.stickv__rt', { dataset: { ton } },
-      h('div', null,
-        h('strong', null, text(plattformName(p))),
-        istLokal ? h('span.badge', null, text('dieser Rechner')) : null,
-        h('p.meta', null, text(zustand))),
-      h('span.spacer'),
-      da ? null : h('button.btn.btn--small', {
+/** Die eine Rückfrage: zwei Knöpfe, keine Erklärung. */
+function frageBlock(self) {
+  const plan = self.frage.plan;
+  const hier = familien([plan.dieserRechner])[0] || plan.dieserRechnerName || 'dieses System';
+  return h('div.stickv__frage', { role: 'group', 'aria-label': 'Einmal ins Internet?' },
+    h('p.stickv__frage-text', null, text(
+      `Damit der Stick auch an ${aufzaehlen(familien(plan.andere).filter((f) => f !== hier))} startet, lädt Neural OS einmal die Laufzeit `
+      + 'dafür von nodejs.org. Darf es?')),
+    h('div.stickv__antworten', null,
+      h('button.btn.btn--accent', {
         type: 'button',
-        dataset: { brauchtPfad: '1' },
-        disabled: leer || laeuft,
-        title: istLokal
-          ? 'Kopiert die Node-Laufzeit dieses Rechners auf den Stick – ohne Netz.'
-          : 'Lädt einmalig das offizielle Node-Paket von nodejs.org – Netzzugriff durch die Netzschleuse.',
-        onClick: () => laufzeitHolen(self, p),
-      }, icon(ICONS.download), text(istLokal ? 'Jetzt kopieren' : 'Holen')));
+        onClick: () => einrichten(self, { andereSysteme: true, erlaubnis: true }),
+      }, icon(self.icons.globe || ''), text('Erlauben')),
+      h('button.btn.btn--accent', {
+        type: 'button',
+        onClick: () => einrichten(self, { andereSysteme: false, erlaubnis: false }),
+      }, text(`Nur ${hier}`))));
+}
+
+function fertigBlock(self, r) {
+  const namen = familien(Array.isArray(r.laufzeiten) ? r.laufzeiten : []);
+  const fehlend = Array.isArray(r.fehlend) ? r.fehlend : [];
+  return h('div.stickv__fertig', { role: 'status' },
+    h('p.stickv__fertig-titel', null,
+      h('span.stickv__haken', null, icon(self.icons.checkCircle || self.icons.check || '')),
+      text('Der Stick ist fertig.')),
+    h('p.stickv__still', null, text(namen.length
+      ? `Startet an: ${aufzaehlen(namen)}.${r.wissen === 'blieb' ? ' Dein Wissen darauf blieb, wie es war.' : ''}`
+      : 'Auf dem Stick liegt noch keine Laufzeit.')),
+    ...fehlend.map((f) => h('p.stickv__hinweis', null,
+      text(`${f.name || f.platform} fehlt: ${ersterSatz(f.grund)}`))),
+    h('ol.stickv__schritte', null,
+      h('li', null, text('Steck den Stick in den anderen Rechner und öffne ihn im Explorer oder Finder.')),
+      h('li', null, text('Doppelklick auf „Neural OS starten“ – am Mac beim ersten Mal Rechtsklick und „Öffnen“.')),
+      h('li', null, text('Zum Schluss hier „Beenden & abziehen“ tippen.'))));
+}
+
+/* ------------------------------------------------------- 2. Sichern */
+
+function sichernKarte(self) {
+  const details = h('details.stickv__wieder', {
+    onToggle: async (e) => {
+      self.offen = e.target.open;
+      if (self.offen && !self.liste) {
+        renderWieder(self);
+        await ladeListe(self);
+      }
+      renderWieder(self);
+    },
+  },
+  h('summary.stickv__wieder-titel', null, text('Von einer Sicherung wiederherstellen')),
+  self.wiederSlot);
+  if (self.offen) details.open = true;
+
+  return h('section.card.stickv__karte', { 'aria-label': 'Sicherung' },
+    self.sichernSlot,
+    details);
+}
+
+function renderSichern(self) {
+  if (!self.alive || !self.sichernSlot) return;
+  clear(self.sichernSlot);
+  const s = self.sicherung;
+  let still = '';
+  if (s && s.fehler) still = s.fehler;
+  else if (s && s.letzte && s.letzte.at) {
+    still = `Zuletzt gesichert ${timeAgo(s.letzte.at)} · ${s.letzte.art === 'stick' ? 'auf dem Stick' : 'im Sicherungsordner'}`;
+  } else if (s) still = 'Noch keine Sicherung.';
+
+  self.sichernSlot.appendChild(h('div.stickv__zeile', null,
+    h('button.btn.btn--accent.stickv__sichern-knopf', {
+      type: 'button',
+      disabled: self.sichernLaeuft,
+      onClick: () => sichern(self),
+    }, self.sichernLaeuft ? h('span.spinner', { 'aria-hidden': 'true' }) : icon(EIGENE_ICONS.download),
+    text(self.sichernLaeuft ? 'Wird gesichert …' : 'Jetzt sichern')),
+    h('span.stickv__still', { title: s && s.letzte ? `${formatDateTime(s.letzte.at)} · ${s.letzte.dir}` : '' }, text(still))));
+
+  if (self.sichernFehler) {
+    self.sichernSlot.appendChild(h('div.stickv__meldung', { role: 'alert' },
+      icon(self.icons.alert || ''), h('span', null, text(fehlerText(self.sichernFehler)))));
+  } else if (self.gesichert) {
+    const g = self.gesichert;
+    self.sichernSlot.appendChild(h('p.stickv__still.stickv__pfad', { role: 'status' },
+      text(`${formatNumber(g.records || 0)} Einträge · ${formatBytes(g.bytes || 0)} · ${g.dir}`)));
+  }
+}
+
+function renderWieder(self) {
+  if (!self.alive || !self.wiederSlot) return;
+  clear(self.wiederSlot);
+  if (!self.offen) return;
+
+  const items = (self.liste && self.liste.items) || [];
+  const quelleFeld = h('input.input', {
+    type: 'text',
+    value: self.quelle,
+    spellcheck: 'false',
+    placeholder: 'Ordner der Sicherung',
+    'aria-label': 'Ordner oder Datei der Sicherung',
+    onInput: (e) => {
+      self.quelle = e.target.value;
+      knoepfeNachziehen(self);
+    },
   });
 
-  const daListe = [...aufStick.keys()];
-  const fehltListe = bekannt.filter((p) => !aufStick.has(p));
+  const modusFeld = h('select.select', {
+    'aria-label': 'Wie wiederherstellen',
+    onChange: (e) => {
+      self.modus = e.target.value;
+      self.vorschau = null;
+      self.ergebnis = null;
+      renderWieder(self);
+    },
+  }, MODI.map((m) => h('option', { value: m.value }, text(m.label))));
+  modusFeld.value = self.modus;
 
-  return karte('Welche Rechner der Stick starten kann',
-    h('div.stack', null,
-      h('p', null, text(
-        'Mitkopiert wird immer nur die Laufzeit DIESES Rechners'
-        + (lokal ? ` (${plattformName(lokal)})` : '')
-        + '. Das geht ohne Internet und macht den Stick auf jedem gleichartigen Rechner startfähig. '
-        + 'Jede weitere Laufzeit ist ein einmaliger Download des offiziellen Node-Pakets (rund 30 MB) von '
-        + 'nodejs.org durch die Netzschleuse – mit Prüfsummenvergleich, und nur die Programmdatei wird '
-        + 'entpackt. Verweigert die Schleuse ihn, ist das kein Fehler des Sticks, sondern deine eigene '
-        + 'Einstellung: er läuft weiterhin auf deinem Betriebssystem.')),
-      gesehen
-        ? h('p.meta', null, text(
-          (daListe.length
-            ? `Auf dem Stick liegen Laufzeiten für: ${daListe.map(plattformName).join(', ')}. `
-            : 'Auf dem Stick liegt noch keine Laufzeit. ')
-          + (fehltListe.length
-            ? `Es fehlen: ${fehltListe.map(plattformName).join(', ')}.`
-            : 'Damit startet der Stick auf jedem bekannten Rechnertyp.')))
-        : null,
-      h('ul.stickv__rts', { role: 'list' }, zeilen),
-      h('p.hint', null, text(
-        'Für den Laufzeitkern des Sprachmodells (Ollama, llama.cpp) gilt das NICHT: den kann Neural OS nicht '
-        + 'herunterladen. Ein Kern für ein anderes Betriebssystem kommt nur von einem Rechner mit genau diesem '
-        + 'System, auf dem unter „Modell mitnehmen" derselbe Schritt einmal ausgeführt wird.'))));
-}
+  const passFeld = h('input.input', {
+    type: 'password',
+    value: self.pass,
+    autocomplete: 'off',
+    placeholder: 'Passphrase, falls verschlüsselt',
+    'aria-label': 'Passphrase der Sicherung',
+    onInput: (e) => { self.pass = e.target.value; },
+  });
 
-/* ------------------------------------------------- 5b. Modell mitnehmen */
+  self.ansehenKnopf = h('button.btn', {
+    type: 'button',
+    disabled: self.vorschauLaeuft || !String(self.quelle || '').trim(),
+    onClick: () => ansehen(self),
+  }, text(self.vorschauLaeuft ? 'Wird gelesen …' : 'Erst ansehen'));
 
-/** Menschliche Namen für die Arten aus src/portable/model.js. */
-const ART_NAMEN = {
-  ollama: 'Ollama',
-  'llama.cpp': 'llama.cpp',
-  gguf: 'GGUF-Datei (llama.cpp, LM Studio)',
-};
+  self.zurueckKnopf = h('button.btn.btn--primary', {
+    type: 'button',
+    // Ohne gesehene Vorschau gibt es den Knopf nicht: nichts wird
+    // geschrieben, bevor dasteht, was geschrieben wird.
+    disabled: !vorschauGilt(self) || self.importLaeuft,
+    onClick: () => wiederherstellen(self),
+  }, icon(EIGENE_ICONS.upload), text(self.importLaeuft ? 'Läuft …' : 'Wiederherstellen'));
 
-/** Die Geräte, für die man fragen kann -- Plattformen plus das, was gar kein Programm startet. */
-const GERAETE_OHNE_PROGRAMM = [['ipados', 'iPad (iPadOS)'], ['android', 'Android-Gerät']];
-
-function artName(art) {
-  return ART_NAMEN[art] || art || 'unbekannt';
-}
-
-function fundZeile(self, fund, laeuft) {
-  const gewaehlt = !self.auswahl || self.auswahl.has(fund.id);
-  const istKern = fund.rolle === 'kern';
-  const beschreibung = istKern
-    ? `Laufzeitkern (${artName(fund.art)}) für ${plattformName(fund.plattform)} · ${formatBytes(fund.bytes)}`
-    : `Modell (${artName(fund.art)}) · ${formatBytes(fund.bytes)} · ${fund.dateien ? fund.dateien.length : 1} Datei(en)`;
-  return h('li.stickv__fund', { dataset: { rolle: fund.rolle, gewaehlt: gewaehlt ? '1' : '0' } },
-    h('label.stickv__check', null,
-      h('input', {
-        type: 'checkbox',
-        checked: gewaehlt,
-        disabled: laeuft,
-        onChange: (e) => {
-          if (!self.auswahl) self.auswahl = new Set(alleKennungen(self.modelle));
-          self.auswahlVonHand = true;
-          if (e.target.checked) self.auswahl.add(fund.id); else self.auswahl.delete(fund.id);
-          // Der alte Plan galt für die alte Auswahl.
-          self.modellPlan = null;
-          render(self);
+  self.wiederSlot.append(
+    items.length
+      ? h('div.stickv__liste', { role: 'list' }, items.slice(0, 6).map((item) => h('button.stickv__eintrag', {
+        type: 'button',
+        role: 'listitem',
+        class: String(self.quelle || '').trim() === item.dir ? 'is-active' : '',
+        onClick: () => {
+          self.quelle = item.dir;
+          self.vorschau = null;
+          self.vorschauFehler = null;
+          self.ergebnis = null;
+          renderWieder(self);
+          ansehen(self);
         },
-      }),
-      h('span', null,
-        h('strong', null, text(fund.name)),
-        h('span.meta', null, text(` ${beschreibung}`)))),
-    istKern && fund.ausfuehrbar === false
-      ? h('p.stickv__warn', null, text('Trägt kein Ausführbar-Bit – auf dem Zielrechner muss es von Hand gesetzt werden (chmod +x).'))
+      },
+      h('span', null, text(item.at ? formatDateTime(item.at) : item.name)),
+      h('span.stickv__still', null, text([
+        item.records === null || item.records === undefined ? null : `${formatNumber(item.records)} Einträge`,
+        ortName(self, item),
+        item.sealed ? 'verschlüsselt' : null,
+      ].filter(Boolean).join(' · '))))))
+      : h('p.stickv__still', null, text(self.liste ? 'Hier liegt keine Sicherung.' : 'Suche Sicherungen …')),
+    h('div.stickv__formular', null, quelleFeld, modusFeld, passFeld),
+    h('div.stickv__zeile', null, self.ansehenKnopf, self.zurueckKnopf),
+    vorschauBlock(self) || '',
+    ergebnisBlock(self) || '');
+}
+
+/** Wo eine Sicherung liegt, in den Worten dieser Ansicht statt in denen der Liste. */
+function ortName(self, item) {
+  const ziel = self.sicherung && self.sicherung.ziel;
+  if (item.ort === 'Auf dem Stick') return 'auf dem Stick';
+  if (item.ort === 'Gewähltes Ziel') return ziel && ziel.art === 'stick' ? 'auf dem Stick' : 'im Sicherungsordner';
+  if (item.ort === 'Im Programmverzeichnis') return 'im Sicherungsordner';
+  return item.ort || null;
+}
+
+/**
+ * Beim Tippen NUR die Knöpfe nachziehen, kein volles Neuzeichnen: das würde
+ * das Feld bei jedem Zeichen austauschen und den Cursor verlieren.
+ */
+function knoepfeNachziehen(self) {
+  if (self.ansehenKnopf) self.ansehenKnopf.disabled = self.vorschauLaeuft || !String(self.quelle || '').trim();
+  if (self.zurueckKnopf) self.zurueckKnopf.disabled = !vorschauGilt(self) || self.importLaeuft;
+  const slot = self.wiederSlot && self.wiederSlot.querySelector('.stickv__vorschau');
+  if (slot) slot.hidden = !vorschauGilt(self);
+}
+
+function vorschauBlock(self) {
+  if (self.vorschauFehler) {
+    return h('div.stickv__meldung', { role: 'alert' },
+      icon(self.icons.alert || ''), h('span', null, text(fehlerText(self.vorschauFehler))));
+  }
+  if (!vorschauGilt(self)) return null;
+  const v = self.vorschau;
+  const verschwindet = Array.isArray(v.verschwindet) ? v.verschwindet : [];
+  return h('div.stickv__vorschau', { role: 'status' },
+    h('p', null, h('strong', null, text('Das würde passieren – geschrieben ist noch nichts.'))),
+    h('p', null, text(`${formatNumber(v.sicherung.records)} Einträge kommen`
+      + (v.at ? ` (Stand ${formatDateTime(v.at)})` : '')
+      + `, hier liegen jetzt ${formatNumber(v.hier.records)}.`)),
+    verschwindet.length
+      ? h('p.stickv__hinweis', null, text(`Es verschwindet: ${verschwindet.join('; ')}.`))
       : null,
-    fund.vollstaendig === false && fund.hinweis
-      ? h('p.stickv__warn', null, text(fund.hinweis))
+    h('p.stickv__still', null, text('Zugangstoken und Netzmodus kommen nicht mit.')));
+}
+
+function ergebnisBlock(self) {
+  if (self.ergebnisFehler) {
+    return h('div.stickv__meldung', { role: 'alert' },
+      icon(self.icons.alert || ''), h('span', null, text(`Nicht wiederhergestellt: ${fehlerText(self.ergebnisFehler)}`)));
+  }
+  const r = self.ergebnis;
+  if (!r) return null;
+  const warnungen = Array.isArray(r.warnings) ? r.warnings : [];
+  return h('div.stickv__fertig', { role: 'status' },
+    h('p.stickv__fertig-titel', null,
+      h('span.stickv__haken', null, icon(self.icons.checkCircle || self.icons.check || '')),
+      text(`${formatNumber(r.imported || 0)} Einträge wiederhergestellt.`)),
+    ...warnungen.slice(0, 3).map((w) => h('p.stickv__hinweis', null, text(w))));
+}
+
+/* ------------------------------------------------- 4. Beenden & abziehen */
+
+function beendenKarte(self) {
+  const s = self.selbst;
+  let wo = '';
+  if (s && s.portabel && s.von) wo = `Läuft vom Stick ${s.von.root}`;
+  else if (s) wo = 'Läuft von diesem Rechner';
+  return h('section.card.stickv__karte', { 'aria-label': 'Beenden' },
+    h('div.stickv__zeile', null,
+      h('button.btn.stickv__ende-knopf', {
+        type: 'button',
+        onClick: () => beenden(self),
+      }, icon(EIGENE_ICONS.eject), text('Beenden & abziehen')),
+      wo ? h('span.stickv__still', null, text(wo)) : null));
+}
+
+function endeBlock(self) {
+  const a = self.endeAntwort || {};
+  const auswurf = a.auswurf || null;
+  let titel;
+  let zeile = null;
+  let ton = 'ruhig';
+  if (self.ende === 'speichert') {
+    titel = 'Wird gespeichert …';
+  } else if (self.ende === 'wartet') {
+    titel = 'Wird beendet …';
+    zeile = 'Alles ist gespeichert.';
+  } else if (self.ende === 'fertig') {
+    titel = 'Jetzt kannst du den Stick abziehen.';
+    ton = 'gut';
+    if (auswurf && auswurf.ausgeworfen === true) {
+      zeile = 'Alles ist gespeichert, der Stick ist ausgeworfen.';
+    } else if (auswurf && auswurf.ausgeworfen === false && auswurf.wie === 'diskutil') {
+      zeile = 'Alles ist gespeichert. Der Mac hat den Stick nicht ausgeworfen – wirf ihn im Finder aus.';
+    } else if (auswurf && auswurf.ausgeworfen === false) {
+      zeile = `Alles ist gespeichert. Ausgeworfen hat ihn Windows nicht${auswurf.grund ? ` (${auswurf.grund})` : ''} – abziehen geht trotzdem.`;
+    } else {
+      zeile = 'Alles ist gespeichert.';
+    }
+  } else if (self.ende === 'haengt') {
+    titel = 'Neural OS antwortet noch.';
+    ton = 'warn';
+    zeile = 'Alles ist gespeichert. Schließ das schwarze Fenster von Neural OS, dann kannst du den Stick abziehen.';
+  } else {
+    titel = 'Beenden ging nicht.';
+    ton = 'warn';
+    zeile = fehlerText(self.endeFehler);
+  }
+  let zeichen;
+  if (ton === 'gut') zeichen = icon(self.icons.checkCircle || self.icons.check || '');
+  else if (ton === 'warn') zeichen = icon(self.icons.alert || '');
+  else zeichen = h('span.spinner', { 'aria-hidden': 'true' });
+  return h('div.stickv__ende', { role: 'status', 'aria-live': 'polite', dataset: { ton, zustand: self.ende } },
+    h('div.stickv__ende-zeichen', null, zeichen),
+    h('h2.stickv__ende-titel', null, text(titel)),
+    zeile ? h('p.stickv__ende-zeile', null, text(zeile)) : null,
+    self.ende === 'fehler'
+      ? h('button.btn', { type: 'button', onClick: () => { self.ende = null; render(self); } }, text('Zurück'))
       : null);
 }
 
-/** Was auf DIESEM Rechner gefunden wurde -- oder was zu tun wäre. */
-function rechnerTeil(self, laeuft) {
-  const m = self.modelle;
-  if (self.modelleLaedt && !m) {
-    return h('p.meta', null, text('Auf diesem Rechner wird nach Modellen und Laufzeitkernen gesucht …'));
-  }
-  if (self.modelleFehler) {
-    return h('p.stickv__bad', null, text(`Nicht zu beantworten: ${fehlerText(self.modelleFehler)}`));
-  }
-  if (!m || !m.rechner) return h('p.meta', null, text('Noch nicht nachgesehen.'));
-  const r = m.rechner;
-
-  if (!r.gefunden) {
-    return h('div.stickv__box', { dataset: { level: 'blocked' } },
-      h('p', null, h('strong', null, text(
-        `Auf diesem Rechner (${plattformName(r.rechner && r.rechner.plattform)}) ist kein lokales Modell und kein Laufzeitkern zu finden.`))),
-      h('p', null, text('Zum Mitnehmen braucht es beides. So kommt es auf diesen Rechner:')),
-      h('ol.stickv__anleitung', null,
-        h('li', null, text('Ollama von ollama.com installieren (einmalig, mit Internet).')),
-        h('li', null, text('Im Terminal ein Modell holen: '), h('code', null, text('ollama pull llama3.2')),
-          text(' – rund 2 GB, läuft auf fast jeder Hardware.')),
-        h('li', null, text('Hier „Neu nachsehen" drücken. Dann stehen Modell und Kern in dieser Liste.'))),
-      // Der Satz "kein lokales Modell" steht oben schon; alles andere (ein
-      // Kern ohne Bit, ein unvollständiges Modell) ist neu und bleibt.
-      ...(r.hinweise || []).filter((s) => !/kein lokales Modell/.test(s)).slice(0, 4).map((s) => h('p.meta', null, text(s))));
-  }
-
-  const funde = [...(r.kerne || []), ...(r.modelle || [])];
-  const gewaehlt = funde.filter((f) => !self.auswahl || self.auswahl.has(f.id));
-  const bytes = gewaehlt.reduce((s, f) => s + (f.bytes || 0), 0);
-  const kernDa = gewaehlt.some((f) => f.rolle === 'kern');
-  const modellDa = gewaehlt.some((f) => f.rolle === 'modell');
-
-  return h('div.stack', null,
-    h('ul.stickv__funde', { role: 'list' }, funde.map((f) => fundZeile(self, f, laeuft))),
-    h('p.meta', null, text(
-      `${gewaehlt.length} von ${funde.length} ausgewählt · ${formatBytes(bytes)}`
-      + (!kernDa && modellDa ? ' · ohne Laufzeitkern öffnet die Dateien auf einem fremden Rechner nur, wer dort selbst Ollama oder llama.cpp hat' : '')
-      + (kernDa && !modellDa ? ' · ein Kern ohne Modell beantwortet keine Frage' : ''))),
-    ...(r.hinweise || []).filter((s) => !/kein lokales Modell/.test(s)).slice(0, 4)
-      .map((s) => h('p.stickv__warn', null, text(s))));
-}
-
-/** Was auf dem Stick liegt, für welches Betriebssystem, und der eine Satz dazu. */
-function stickTeil(self, laeuft) {
-  const pfad = self.pfad.trim();
-  const m = self.modelle;
-  const zeilen = [];
-
-  const geraete = [['', `dieser Rechner (${plattformName(self.selbst && self.selbst.dieserRechner)})`]];
-  for (const p of (self.selbst && self.selbst.bekanntePlattformen) || []) geraete.push([p, plattformName(p)]);
-  geraete.push(...GERAETE_OHNE_PROGRAMM);
-  zeilen.push(h('div.field', null,
-    h('label.label', null, text('Für welchen Rechner soll das gelten?')),
-    h('select.select', {
-      'aria-label': 'Für welchen Rechner',
-      disabled: laeuft || self.modelleLaedt,
-      onChange: async (e) => {
-        self.fuer = e.target.value;
-        self.modellPlan = null;
-        await ladeModelle(self);
-        render(self);
-      },
-    }, geraete.map(([wert, name]) => h('option', { value: wert, selected: self.fuer === wert }, text(name)))),
-    h('p.hint', null, text(
-      'Ein Laufzeitkern startet nur auf dem Betriebssystem, für das er gebaut ist. Die Modelldateien selbst passen '
-      + 'auf jeden Rechner. Ein iPad startet gar kein Programm von einem Stick – dort gibt es Antworten nur über '
-      + 'einen Rechner im selben Netz.'))));
-
-  if (!pfad) {
-    zeilen.push(h('p.meta', null, text('Trag oben den Pfad zum Stick ein – dann steht hier, was darauf liegt.')));
-    return h('div.stack', null, zeilen);
-  }
-  if (self.modelleLaedt) {
-    zeilen.push(h('p.meta', null, text(`Auf ${pfad} wird nachgesehen …`)));
-    return h('div.stack', null, zeilen);
-  }
-  const stand = m && self.modellePfad === pfad ? m.stick : null;
-  if (!stand) {
-    zeilen.push(h('p.meta', null, text(`Für ${pfad} wurde noch nicht nachgesehen.`)),
-      h('div.row.stickv__buttons', null,
-        h('button.btn.btn--small', {
-          type: 'button',
-          dataset: { brauchtPfad: '1' },
-          disabled: laeuft,
-          onClick: async () => { await ladeModelle(self); render(self); },
-        }, icon(ICONS.eye), text('Auf dem Stick nachsehen'))));
-    return h('div.stack', null, zeilen);
-  }
-
-  zeilen.push(h('p', { dataset: { passt: stand.passt ? '1' : '0' } }, h('strong', null, text(stand.satz))));
-  if (stand.vorhanden) {
-    zeilen.push(h('p.meta', null, text(`Belegt: ${formatBytes(stand.bytes)} in ${stand.ordner}`)));
-    for (const k of stand.kerne || []) {
-      const passt = stand.fuer && stand.fuer.kannProgrammeStarten && k.plattform === stand.fuer.plattform;
-      zeilen.push(h('p.stickv__aufstick', { dataset: { ton: passt ? 'ok' : 'fehlt' } }, text(
-        `Laufzeitkern ${k.name} (${artName(k.art)}) für ${plattformName(k.plattform)} · ${formatBytes(k.bytes)}`
-        + (passt ? ' – passt zum gewählten Rechner' : ' – startet auf dem gewählten Rechner nicht'))));
-    }
-    for (const mo of stand.modelle || []) {
-      zeilen.push(h('p.stickv__aufstick', { dataset: { ton: 'ok' } }, text(
-        `Modell ${mo.name} (${artName(mo.art)}) · ${formatBytes(mo.bytes)} · ${mo.dateien} Datei(en)`)));
-    }
-  }
-  const fehlendeKerne = ((self.selbst && self.selbst.bekanntePlattformen) || [])
-    .filter((p) => !(stand.plattformen || []).includes(p));
-  if (stand.vorhanden && fehlendeKerne.length) {
-    zeilen.push(h('p.hint', null, text(
-      `Kein Laufzeitkern für: ${fehlendeKerne.map(plattformName).join(', ')}. Neural OS kann ihn nicht herunterladen. `
-      + 'Steck den Stick in einen Rechner mit diesem System, auf dem Ollama oder llama.cpp installiert ist, und führe '
-      + 'dort „Auf den Stick kopieren" einmal aus – die Modelldateien liegen dann schon da und werden nicht noch einmal kopiert.')));
-  }
-  for (const w of stand.warnungen || []) zeilen.push(h('p.stickv__warn', null, text(w)));
-  for (const s of stand.hinweise || []) zeilen.push(h('p.meta', null, text(s)));
-  return h('div.stack', null, zeilen);
-}
-
-/** Dateisystem und Platz -- aus dem Plan für alles Gefundene, bevor irgendetwas beginnt. */
-function platzTeil(self) {
-  const pfad = self.pfad.trim();
-  const m = self.modelle;
-  const v = m && self.modellePfad === pfad ? m.vorschau : null;
-  const zeilen = [];
-  if (!pfad || !v) {
-    zeilen.push(wahrheit('Dateisystem und Platz auf dem Stick',
-      pfad ? 'Noch nicht nachgesehen.' : 'Ohne Pfad lässt sich das nicht beantworten.', 'unklar'));
-    return h('div.stack', null, zeilen);
-  }
-  const fsInfo = v.dateisystem;
-  const zuGross = (v.hindernisse || []).find((x) => x.code === 'DATEI_ZU_GROSS' || x.code === 'DATEI_ZU_GROSS_VIELLEICHT');
-  if (!fsInfo) {
-    zeilen.push(wahrheit('Dateisystem: unbekannt', 'Der Ordner liess sich nicht untersuchen – gibt es ihn?', 'unklar'));
-  } else if (zuGross) {
-    zeilen.push(wahrheit(`Dateisystem: ${fsInfo.typeName || 'unbekannt'} – hier passt das Modell NICHT`, zuGross.satz, 'fehlt'));
-  } else {
-    const grenze = Number.isFinite(fsInfo.maxFileBytes) ? fsInfo.maxFileBytes : null;
-    zeilen.push(wahrheit(`Dateisystem: ${fsInfo.typeName || 'unbekannt'}`,
-      grenze
-        ? `Einzelne Dateien bis ${formatBytes(grenze)}. Die grösste ausgewählte Datei ist `
-          + `${v.groessteDatei ? formatBytes(v.groessteDatei.bytes) : 'unbekannt'} – das passt.`
-        : (fsInfo.typeName
-          ? 'Keine Grenze für einzelne Dateien bekannt. (Auf FAT32 wäre bei 4 GB Schluss; ein Modell ist meist grösser.)'
-          : 'Der Typ liess sich nicht bestimmen. Ist es FAT32, passt keine Datei über 4 GB – ein Modell ist meist grösser; '
-            + 'exFAT und NTFS haben diese Grenze nicht. Neuformatieren löscht ALLE Daten auf dem Stick.'),
-      grenze || fsInfo.typeName ? 'ok' : 'unklar'));
-  }
-  const frei = Number.isFinite(v.frei) ? v.frei : null;
-  zeilen.push(wahrheit('Platz',
-    `Gebraucht: ${formatBytes(v.bytesMitKopfraum || 0)} für ${v.anzahl || 0} Datei(en)`
-    + (v.bytesUebersprungen ? ` (${formatBytes(v.bytesUebersprungen)} liegen schon dort)` : '')
-    + ` · frei: ${frei === null ? 'unbekannt' : formatBytes(frei)}`
-    + (v.passt === true ? ' – das passt.' : v.passt === false ? ' – das passt NICHT.' : ' – nicht feststellbar.'),
-    v.passt === true ? 'ok' : v.passt === false ? 'fehlt' : 'unklar'));
-  return h('div.stack', null, zeilen);
-}
-
-function planBox(self) {
-  const p = self.modellPlan;
-  if (!p) return null;
-  const zeilen = [
-    h('p', null, h('strong', null, text('Das würde passieren – geschrieben ist noch nichts.'))),
-    h('p', null, text(p.zusammenfassung || '')),
-  ];
-  if (p.stickVorbereitet === false) {
-    zeilen.push(h('p.stickv__warn', null, text(
-      'In diesem Ordner liegt noch kein vorbereiteter Stick. Das Modell landet trotzdem dort – aber ohne „Stick vorbereiten" startet dort kein Programm, das es benutzt.')));
-  }
-  for (const x of p.hindernisse || []) {
-    zeilen.push(h('p', { className: x.schwere === 'stopp' ? 'stickv__bad' : 'stickv__warn' },
-      x.schwere === 'stopp' ? icon(ICONS.alert) : null, text(` ${x.satz}`)));
-  }
-  for (const s of (p.hinweise || []).slice(0, 8)) zeilen.push(h('p.meta', null, text(s)));
-  if (p.kannLosgehen) zeilen.push(h('p.meta', null, text('Nichts spricht dagegen. Erst „Auf den Stick kopieren" schreibt etwas.')));
-  return h('div.stickv__box', { dataset: { level: p.kannLosgehen ? 'ok' : 'blocked' } }, zeilen);
-}
-
-function modellBlock(self) {
-  const leer = !self.pfad.trim();
-  const laeuft = !!(self.lauf && self.lauf.laeuft);
-  const gefunden = !!(self.modelle && self.modelle.rechner && self.modelle.rechner.gefunden);
-  const nichtsGewaehlt = !gewaehlteKennungen(self).length;
-  const planSagtNein = !!(self.modellPlan && self.modellPlan.kannLosgehen === false);
-  const vorschauSagtNein = !!(self.modelle && self.modellePfad === self.pfad.trim() && self.modelle.vorschau
-    && self.modelle.vorschau.hindernisse.some((x) => x.schwere === 'stopp' && x.code !== 'NICHTS_AUSGEWAEHLT'));
-
-  return h('section.card.stickv__modell', null,
-    h('div.card__head', null,
-      h('strong', null, text('Modell mitnehmen')),
-      h('span.spacer'),
-      h('button.btn.btn--small', {
-        type: 'button',
-        disabled: self.modelleLaedt || laeuft,
-        onClick: async () => { self.modellPlan = null; await ladeModelle(self); render(self); },
-      }, icon(ICONS.refresh), text(self.modelleLaedt ? 'Wird nachgesehen …' : 'Neu nachsehen'))),
-    h('div.card__body.stack', null,
-      h('p', null, text(
-        'Das Wissen reist immer mit; das Sprachmodell nur, wenn du es hier dazulegst. Dafür braucht es zwei '
-        + 'Dinge: die Modelldateien (mehrere Gigabyte, passen auf jeden Rechner) und den Laufzeitkern, der sie '
-        + 'öffnet (ein Programm, gebunden an ein Betriebssystem). Kopiert wird, was auf DIESEM Rechner schon '
-        + 'liegt – Neural OS lädt kein Modell herunter.')),
-      h('h3.stickv__h3', null, text('Auf diesem Rechner')),
-      rechnerTeil(self, laeuft),
-      h('h3.stickv__h3', null, text('Auf dem Stick')),
-      stickTeil(self, laeuft),
-      h('h3.stickv__h3', null, text('Dateisystem und Platz')),
-      platzTeil(self),
-      self.modellPlanFehler
-        ? h('div.stickv__box', { dataset: { level: 'fail' } }, text(fehlerText(self.modellPlanFehler)))
-        : null,
-      planBox(self),
-      h('div.row.stickv__buttons', null,
-        h('button.btn', {
-          type: 'button',
-          dataset: { brauchtPfad: '1' },
-          disabled: leer || laeuft || !gefunden || nichtsGewaehlt || self.modellPlanLaeuft,
-          onClick: () => modellAnsehen(self),
-        }, icon(ICONS.eye), text(self.modellPlanLaeuft ? 'Wird angesehen …' : 'Erst ansehen')),
-        h('button.btn.btn--primary', {
-          type: 'button',
-          dataset: { brauchtPfad: '1' },
-          disabled: leer || laeuft || !gefunden || nichtsGewaehlt || planSagtNein || vorschauSagtNein,
-          title: !gefunden ? 'Auf diesem Rechner gibt es nichts zu kopieren.'
-            : planSagtNein || vorschauSagtNein ? 'Ein Hindernis steht oben – so kann es nicht losgehen.' : '',
-          onClick: () => modellKopieren(self),
-        }, icon(ICONS.download), text('Auf den Stick kopieren'))),
-      h('p.hint', null, text(
-        'Was schon auf dem Stick liegt, bleibt unverändert; ein zweites Modell kommt daneben, und geteilte Schichten '
-        + 'werden nur einmal kopiert. Bricht der Vorgang ab, wird das halb Kopierte entfernt. Über die Kommandozeile: '
-        + 'neural-os stick model copy <pfad>.'))));
-}
-
-/* --------------------------------------------------- 6. was man wissen muss */
-
-function wahrheitenBlock(self) {
-  const fsInfo = (self.vorschau && self.vorschau.filesystem)
-    || (self.pruefung && self.pruefung.filesystem)
-    || (self.selbst && self.selbst.dateisystem)
-    || null;
-  const modell = (self.selbst && self.selbst.modell) || null;
-
-  const zeilen = [];
-
-  /* --- Dateisystem ------------------------------------------------- */
-  if (!fsInfo) {
-    zeilen.push(wahrheit('Was das Dateisystem des Sticks kann',
-      'Noch nicht nachgesehen. „Erst ansehen" oder „Stick prüfen" beantwortet es – ohne etwas zu schreiben.',
-      'unklar'));
-  } else {
-    const grenze = Number.isFinite(fsInfo.maxFileBytes) && fsInfo.maxFileBytes < 4 * 1024 * 1024 * 1024;
-    zeilen.push(wahrheit(`Dateisystem: ${fsInfo.typeName || 'unbekannt'}`,
-      grenze
-        ? 'Hier passt keine einzelne Datei über 4 GB. Ein KI-Modell ist meist grösser – dafür müsste der '
-          + 'Stick als exFAT formatiert werden (dabei gehen alle Daten auf ihm verloren).'
-        : 'Keine 4-GB-Grenze für einzelne Dateien erkennbar.',
-      grenze ? 'fehlt' : 'ok'));
-
-    if (fsInfo.enforcesModes === false) {
-      zeilen.push(wahrheit('Dieses Dateisystem kennt keine Zugriffsrechte',
-        'Typisch für exFAT und FAT32. Die Dateirechte 0600/0700 laufen dort ins Leere – wer den Stick '
-        + 'findet, liest alles. Auf einem Stick schützt dann NUR die Tresorverschlüsselung. '
-        + 'Sie steht in den Einstellungen unter „Verschlüsselung".',
-        'fehlt'));
-    } else if (fsInfo.enforcesModes === true) {
-      zeilen.push(wahrheit('Zugriffsrechte werden durchgesetzt',
-        'Das Dateisystem behält die gesetzten Rechte. Ein verlorener Stick ist trotzdem ein verlorener '
-        + 'Datenbestand – an einem fremden Rechner hilft gegen physischen Zugriff nur Verschlüsselung.',
-        'ok'));
-    } else {
-      zeilen.push(wahrheit('Ob Zugriffsrechte durchgesetzt werden, ist offen',
-        'Diese Frage lässt sich nicht beantworten, ohne eine Datei zu schreiben – und Prüfen und Ansehen '
-        + 'schreiben nichts. Beim Vorbereiten wird sie beantwortet und gemeldet. Bis dahin gilt: auf einem '
-        + 'Stick schützt nur die Verschlüsselung.',
-        'unklar'));
-    }
-  }
-
-  /* --- das Modell -------------------------------------------------- */
-  const aufStick = (self.modelle && self.modellePfad === self.pfad.trim() && self.modelle.stick)
-    || (modell && modell.aufDemStick && !modell.aufDemStick.fehler ? modell.aufDemStick : null);
-  if (aufStick && aufStick.vorhanden) {
-    zeilen.push(wahrheit('Auf diesem Stick liegt ein Modell – aber nur für sein Betriebssystem',
-      aufStick.satz, aufStick.passt ? 'ok' : 'fehlt'));
-  } else {
-    zeilen.push(wahrheit('Das Sprachmodell kommt nicht von selbst mit auf den Stick',
-      (modell && modell.grund)
-        || 'Ein Sprachmodell gehört einem Anbieter auf diesem Rechner, nicht Neural OS. Dazulegen lässt es sich unter „Modell mitnehmen".',
-      'fehlt'));
-  }
-  zeilen.push(h('p.meta.stickv__folge', null, text(
-    'Konkret: auf einem fremden Rechner ohne eigenes Modell und ohne Modell auf dem Stick hast du alle Notizen, '
-    + 'Chats, Projekte und Verknüpfungen – aber keine neuen Antworten. Das Wissen reist immer mit, das Denken nur, '
-    + 'wenn Modell und passender Laufzeitkern auf dem Stick liegen. '
-    + (modell && modell.geprueft
-      ? (modell.hierErreichbar
-        ? 'Auf diesem Rechner ist zurzeit ein Modell erreichbar.'
-        : 'Auf diesem Rechner ist zurzeit kein Modell erreichbar.')
-      : 'Ob auf diesem Rechner ein Modell erreichbar ist, wurde noch nicht geprüft.'))));
-  if (modell && modell.laufzeitkern) {
-    const lk = modell.laufzeitkern;
-    const satz = lk.zustand === 'laeuft' ? `Der Laufzeitkern vom Stick läuft (${lk.name || lk.art || 'Kern'}${lk.modellName ? `, ${lk.modellName}` : ''}).`
-      : lk.zustand === 'startet' ? 'Der Laufzeitkern vom Stick startet noch – beim ersten Mal dauert das, bis das Modell im Arbeitsspeicher ist.'
-        : lk.zustand === 'gescheitert' ? `Der Laufzeitkern vom Stick ist gescheitert: ${lk.grund || 'ohne Angabe eines Grundes'}`
-          : 'Auf diesem Stick liegt kein startbarer Laufzeitkern.';
-    zeilen.push(wahrheit('Das Modell vom Stick, gerade jetzt', satz,
-      lk.zustand === 'laeuft' ? 'ok' : lk.zustand === 'gescheitert' ? 'fehlt' : 'unklar'));
-  }
-
-  /* --- der verlorene Stick ---------------------------------------- */
-  zeilen.push(wahrheit('Ein verlorener Stick ist ein verlorener Datenbestand',
-    'Deshalb: Verschlüsselung einschalten, und eine Sicherung woanders aufbewahren. Ein Stick geht '
-    + 'verloren, geht kaputt, wird vergessen.',
-    'fehlt'));
-
-  return karte('Was du vorher wissen solltest', h('div.stack', null, zeilen));
-}
-
-function wahrheit(titel, satz, ton) {
-  return h('div.stickv__wahrheit', { dataset: { ton } },
-    h('strong', null, text(titel)),
-    h('p.meta', null, text(satz)));
-}
-
 /* ------------------------------------------------------------------ */
-/* Bausteine                                                           */
+/* Gestalt                                                             */
 /* ------------------------------------------------------------------ */
-
-function karte(titel, inhalt) {
-  return h('section.card', null,
-    h('div.card__head', null, h('strong', null, text(titel))),
-    h('div.card__body', null, inhalt));
-}
 
 function ensureStyle() {
   if (typeof document === 'undefined' || document.getElementById(STYLE_ID)) return;
@@ -1345,99 +1003,253 @@ function ensureStyle() {
 }
 
 const CSS = `
-.stickv { max-width: 1000px; }
+.stickv {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
 .stickv p { margin: 0; }
 
-.stickv__self { border-left: 4px solid var(--fg-subtle); }
-.stickv__self[data-portabel="1"] { border-left-color: var(--ok); }
-.stickv__dot { width: 10px; height: 10px; flex: none; border-radius: var(--r-full); background: var(--fg-subtle); }
-.stickv__self[data-portabel="1"] .stickv__dot { background: var(--ok); }
+.stickv__karte {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-radius: var(--r-4);
+  box-shadow: none;
+}
 
-.stickv__buttons { flex-wrap: wrap; }
+.stickv__label {
+  font-size: var(--fs-md);
+  color: var(--fg);
+}
 
-.stickv__box {
-  padding: var(--sp-2);
+.stickv__feldzeile {
+  display: flex;
+  gap: var(--sp-1);
+  align-items: stretch;
+}
+.stickv__feld {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--tap-min);
+  font-size: var(--fs-md);
+  font-family: var(--font-mono);
+  border-radius: var(--r-3);
+}
+.stickv__suchen { min-height: var(--tap-min); }
+
+.stickv__laufwerke {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+.stickv__laufwerk {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  min-height: var(--tap-min);
+  padding: var(--sp-1) 14px;
+  background: var(--surface-3);
+  color: var(--fg);
   border: 1px solid var(--border);
-  border-left: 4px solid var(--border-strong);
-  border-radius: var(--r-2);
-  background: var(--surface-2);
+  border-radius: var(--r-3);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+.stickv__laufwerk:hover { border-color: var(--border-strong); }
+.stickv__laufwerk.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.stickv__laufwerk-pfad { font-family: var(--font-mono); font-size: var(--fs-base); }
+.stickv__laufwerk-info { font-size: var(--fs-xs); color: var(--fg-muted); }
+
+.stickv__los {
+  min-height: 52px;
+  font-size: var(--fs-md);
+  border-radius: var(--r-3);
+}
+.stickv__los svg { width: 20px; height: 20px; }
+
+.stickv__still {
+  color: var(--fg-muted);
   font-size: var(--fs-sm);
-  display: flex; flex-direction: column; gap: var(--sp-05);
+  line-height: var(--lh);
+}
+.stickv__hinweis {
+  color: var(--warn);
+  font-size: var(--fs-sm);
+  line-height: var(--lh);
+}
+
+.stickv__slot:empty { display: none; }
+
+.stickv__lauf { display: flex; flex-direction: column; gap: var(--sp-1); }
+.stickv__bar {
+  height: 8px;
+  background: var(--surface-3);
+  border-radius: var(--r-full);
+  overflow: hidden;
+}
+.stickv__bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--r-full);
+  transition: width var(--dur-3) var(--ease);
+}
+.stickv__lauf-zeile { display: flex; align-items: center; gap: var(--sp-1); }
+.stickv__lauf-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stickv__frage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  background: var(--surface-3);
+  border-radius: var(--r-3);
+}
+.stickv__frage-text { line-height: var(--lh); }
+.stickv__antworten { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.stickv__antworten .btn { min-height: var(--tap-min); }
+
+.stickv__fertig { display: flex; flex-direction: column; gap: var(--sp-1); }
+.stickv__fertig-titel {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+.stickv__haken { display: inline-flex; color: var(--accent-text); }
+.stickv__schritte {
+  margin: var(--sp-1) 0 0;
+  padding-left: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-05);
+  line-height: var(--lh);
+}
+.stickv__schritte li::marker { color: var(--accent-text); }
+
+.stickv__meldung {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-1);
+  padding: 12px var(--sp-2);
+  border-radius: var(--r-3);
+  background: var(--danger-soft);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  line-height: var(--lh);
   word-break: break-word;
 }
-.stickv__box[data-level="ok"] { border-left-color: var(--ok); }
-.stickv__box[data-level="blocked"] { border-left-color: var(--warn); }
-.stickv__box[data-level="fail"] { border-left-color: var(--danger); }
+.stickv__meldung svg { flex: none; color: var(--danger); margin-top: 1px; }
 
-.stickv__bad { color: var(--danger); }
-.stickv__warn { color: var(--warn); }
+.stickv__zeile {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-2);
+}
+.stickv__sichern { display: flex; flex-direction: column; gap: var(--sp-1); }
+.stickv__sichern-knopf, .stickv__ende-knopf { min-height: var(--tap-min); }
+.stickv__pfad { word-break: break-all; }
 
-.stickv__probleme { margin: var(--sp-05) 0 0; padding-left: var(--sp-3); display: flex; flex-direction: column; gap: 3px; }
-.stickv__probleme li { border-left: 3px solid var(--border-strong); padding-left: var(--sp-1); list-style: none; }
-.stickv__probleme li[data-level="error"] { border-left-color: var(--danger); }
-.stickv__probleme li[data-level="warn"] { border-left-color: var(--warn); }
-.stickv__probleme li[data-level="info"] { border-left-color: var(--accent); }
-
-.stickv__lauf[data-laeuft="1"] { border-color: var(--accent); }
-.stickv__bar { position: relative; height: 6px; overflow: hidden; background: var(--surface-3); border-radius: var(--r-full); }
-.stickv__bar-fill { height: 100%; width: 0; background: var(--accent); border-radius: var(--r-full); transition: width var(--dur-2) var(--ease); }
-.stickv__bar-fill[data-unbekannt="1"] { width: 34%; animation: stickv-slide 1.1s var(--ease) infinite; position: absolute; top: 0; bottom: 0; }
-@keyframes stickv-slide { from { left: -34%; } to { left: 100%; } }
-
-.stickv__log > summary { cursor: pointer; font-size: var(--fs-sm); color: var(--fg-muted); }
-.stickv__logliste { margin: var(--sp-05) 0 0; padding-left: var(--sp-3); font-size: var(--fs-xs); color: var(--fg-muted); list-style: none; }
-
-.stickv__check { display: flex; align-items: center; gap: var(--sp-1); font-weight: 500; }
-
-.stickv__rts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--sp-1); }
-.stickv__rt {
-  display: flex; align-items: center; gap: var(--sp-1);
-  padding: var(--sp-1) var(--sp-2);
+.stickv__wieder { border-top: 1px solid var(--border); padding-top: var(--sp-2); }
+.stickv__wieder-titel {
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+}
+.stickv__wieder-titel:hover { color: var(--fg); }
+.stickv__wieder-inhalt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+}
+.stickv__wieder-inhalt:empty { display: none; }
+.stickv__liste { display: flex; flex-direction: column; gap: var(--sp-05); }
+.stickv__eintrag {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  min-height: 40px;
+  padding: var(--sp-1) 12px;
+  background: none;
+  color: var(--fg);
+  font: inherit;
   border: 1px solid var(--border);
-  border-left: 4px solid var(--fg-subtle);
   border-radius: var(--r-2);
+  cursor: pointer;
+  text-align: left;
 }
-.stickv__rt[data-ton="ok"] { border-left-color: var(--ok); }
-.stickv__rt[data-ton="fehlt"] { border-left-color: var(--warn); }
-.stickv__rt[data-ton="unklar"] { border-left-color: var(--border-strong); }
-.stickv__rt p { margin: 2px 0 0; }
-.stickv__rt .badge { margin-left: var(--sp-1); }
-
-.stickv__wahrheit {
-  padding: var(--sp-1) var(--sp-2);
-  border-left: 4px solid var(--border-strong);
-  border-radius: 0 var(--r-2) var(--r-2) 0;
-  background: var(--surface-2);
+.stickv__eintrag:hover { background: var(--surface-3); }
+.stickv__eintrag.is-active { border-color: var(--accent); }
+.stickv__formular {
+  display: grid;
+  grid-template-columns: 2fr 1.4fr 1.2fr;
+  gap: var(--sp-1);
 }
-.stickv__wahrheit[data-ton="ok"] { border-left-color: var(--ok); }
-.stickv__wahrheit[data-ton="fehlt"] { border-left-color: var(--warn); }
-.stickv__wahrheit[data-ton="unklar"] { border-left-color: var(--border-strong); }
-.stickv__wahrheit p { margin: 2px 0 0; }
-.stickv__folge { max-width: 78ch; }
-
-.stickv__h3 { margin: var(--sp-1) 0 0; font-size: var(--fs-sm); font-weight: 600; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
-
-.stickv__funde { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--sp-1); }
-.stickv__fund {
-  padding: var(--sp-1) var(--sp-2);
-  border: 1px solid var(--border);
-  border-left: 4px solid var(--border-strong);
-  border-radius: var(--r-2);
+.stickv__vorschau {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-05);
+  padding: 12px var(--sp-2);
+  background: var(--surface-3);
+  border-radius: var(--r-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh);
 }
-.stickv__fund[data-gewaehlt="1"] { border-left-color: var(--accent); }
-.stickv__fund[data-rolle="kern"][data-gewaehlt="1"] { border-left-color: var(--ok); }
-.stickv__fund .stickv__check { align-items: flex-start; }
-.stickv__fund .stickv__check input { margin-top: 3px; }
-.stickv__fund p { margin: var(--sp-05) 0 0; }
 
-.stickv__anleitung { margin: 0; padding-left: var(--sp-3); display: flex; flex-direction: column; gap: 3px; }
-.stickv__anleitung code { font-family: var(--font-mono); font-size: var(--fs-sm); background: var(--surface-3); padding: 0 4px; border-radius: var(--r-1); }
+.stickv__ende {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
+}
+.stickv__ende-zeichen { color: var(--fg-muted); }
+.stickv__ende-zeichen svg { width: 44px; height: 44px; }
+.stickv__ende[data-ton="gut"] .stickv__ende-zeichen { color: var(--accent-text); }
+.stickv__ende[data-ton="warn"] .stickv__ende-zeichen { color: var(--warn); }
+.stickv__ende-titel {
+  margin: 0;
+  font-size: var(--fs-display);
+  font-weight: 500;
+  line-height: var(--lh-tight);
+  max-width: 22ch;
+}
+.stickv__ende-zeile { color: var(--fg-muted); max-width: 52ch; line-height: var(--lh); }
 
-.stickv__aufstick { padding-left: var(--sp-2); border-left: 3px solid var(--border-strong); font-size: var(--fs-sm); }
-.stickv__aufstick[data-ton="ok"] { border-left-color: var(--ok); }
-.stickv__aufstick[data-ton="fehlt"] { border-left-color: var(--warn); }
+/* Mit dem Finger (iPad) ist auch die kleine Zeile ein ganzes Tippziel. */
+@media (pointer: coarse) {
+  .stickv__wieder-titel { min-height: var(--tap-min); }
+}
 
-@media (max-width: 680px) {
-  .stickv__rt { flex-wrap: wrap; }
+@media (max-width: 720px) {
+  .stickv__formular { grid-template-columns: 1fr; }
+  .stickv__karte { padding: var(--sp-2); }
 }
 `;

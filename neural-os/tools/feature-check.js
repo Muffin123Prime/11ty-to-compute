@@ -441,6 +441,111 @@ async function checkKalender() {
   });
 }
 
+/*
+ * Termin-Agent: Serien, einzelne Vorkommen, Ueberschneidungen, Kalenderdatei
+ * -- und Claude, das Termine SELBST liest und verschiebt (ueber den Statisten,
+ * denn einen echten Schluessel gibt es hier nicht; das steht im Ergebnis).
+ */
+async function checkTerminAgent(app) {
+  area('2c · Termin-Agent');
+  let serieId = null;
+
+  await check('Serie „jeden Dienstag 18 Uhr bis Weihnachten“: jeder Dienstag, auch nach der Zeitumstellung 18:00', async () => {
+    const r = ok(await api.post('/api/events', {
+      title: 'Prüftraining', start: '2026-09-29T18:00', end: '2026-09-29T19:30', recurrence: { freq: 'weekly', until: '2026-12-24' },
+    }), 'serie');
+    serieId = r.record.id;
+    const z = ok(await api.get('/api/events/zeitraum?from=2026-10-01&to=2026-12-31'), 'zeitraum');
+    const tage = z.items.filter((x) => x.id === serieId).map((x) => x.occurrence);
+    assert(tage.length === 12 && tage[0] === '2026-10-06' && tage[11] === '2026-12-22', `Vorkommen: ${tage.join(', ')}`);
+    const okt27 = z.items.find((x) => x.id === serieId && x.occurrence === '2026-10-27');
+    assert(okt27 && okt27.data.start === '2026-10-27T18:00' && okt27.recurring === true, `27.10.: ${okt27 && okt27.data.start}`);
+    return `${tage.length} Dienstage, 27.10. um 18:00`;
+  });
+
+  await check('Nur ein Vorkommen verschieben (?nur) – und ein Rückgängig nimmt beide Hälften zurück', async () => {
+    assert(serieId, 'keine Serie aus dem Schritt davor');
+    const r = ok(await api.patch(`/api/events/${serieId}?nur=2026-10-13`, { start: '2026-10-14T18:00', end: '2026-10-14T19:30' }), 'patch nur');
+    assert(r.record.id !== serieId && r.serie.data.exdates.includes('2026-10-13'), 'kein Einzeltermin oder keine Ausnahme');
+    assert(r.rueckgaengig && r.rueckgaengig.pfad, 'keine Rückgängig-Nummer in der Antwort');
+    const u = ok(await api.post(r.rueckgaengig.pfad, {}), 'undo');
+    assert(u.mitgenommen && u.mitgenommen.length === 1, 'nur eine Hälfte zurückgenommen');
+    assert((await api.get(`/api/events/${r.record.id}`)).status === 404, 'der Einzeltermin blieb');
+    const s = ok(await api.get(`/api/events/${serieId}`), 'serie');
+    assert(s.record.data.exdates.length === 0, `Ausnahmen: ${s.record.data.exdates}`);
+    return `verschoben und zurück: ${s.wiederholung}`;
+  });
+
+  await check('Überschneidungen (GET /api/events/ueberschneidungen) – ganztägig stört nichts mit Uhrzeit', async () => {
+    ok(await api.post('/api/events', { title: 'Prüf-Ferien', start: '2026-10-19', end: '2026-10-23' }), 'ferien');
+    const u = ok(await api.get('/api/events/ueberschneidungen?start=2026-10-20T19:00&end=2026-10-20T20:00'), 'ueber');
+    const titel = u.items.map((x) => x.data.title);
+    assert(titel.includes('Prüftraining') && !titel.includes('Prüf-Ferien'), `gefunden: ${titel.join(', ')}`);
+    return titel.join(', ');
+  });
+
+  await check('Kalenderdatei fürs iPad (text/calendar, CRLF, RRULE)', async () => {
+    const r = await api.get(`/api/events/${serieId}/ics`);
+    assert(r.status === 200, `HTTP ${r.status}`);
+    assert(r.headers['content-type'] === 'text/calendar; charset=utf-8', r.headers['content-type']);
+    assert(/^attachment; filename="prueftraining\.ics"$/.test(r.headers['content-disposition']), r.headers['content-disposition']);
+    assert(r.text.startsWith('BEGIN:VCALENDAR\r\n') && r.text.endsWith('END:VCALENDAR\r\n'), 'keine CRLF-Hülle');
+    assert(/\r\nRRULE:FREQ=WEEKLY;UNTIL=20261224T235959\r\n/.test(r.text), 'RRULE fehlt');
+    assert(r.text.split('\r\n').every((z) => Buffer.byteLength(z, 'utf8') <= 75), 'eine Zeile ist länger als 75 Oktette');
+    return r.headers['content-disposition'];
+  });
+
+  await check('Termine sind rückgängig machbar (Verlauf kennt „Termin“)', async () => {
+    const t = ok(await api.post('/api/events', { title: 'Prüf-Rückgängig', start: '2026-11-11T11:11' }), 'create');
+    assert(t.rueckgaengig, 'keine Rückgängig-Nummer');
+    ok(await api.post(t.rueckgaengig.pfad, {}), 'undo');
+    assert((await api.get(`/api/events/${t.record.id}`)).status === 404, 'der Termin ist noch da');
+    return 'angelegt und zurückgenommen';
+  });
+
+  await check('Claude (Statist) liest und verschiebt selbst: termine_lesen → termin_aendern, als Agent, rückgängig machbar', async () => {
+    const { starten, B, antwort } = require('../test/claude-statist');
+    const { createApp, seedIfEmpty } = require('../src/app');
+    const statist = await starten();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-check-termin-agent-'));
+    let zweite = null;
+    try {
+      zweite = await createApp({ home: tmp, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false, claudeBasis: statist.url });
+      await seedIfEmpty(zweite);
+      const port = (await zweite.listen()).server.address().port;
+      const an = (m, p, b) => request(m, p, b, {}, port);
+      assert((await an('POST', '/api/claude/schluessel', { schluessel: statist.schluessel })).status === 200, 'Schlüssel');
+      const chat = (await an('POST', '/api/chats', {})).json.record.id;
+      const zahnarzt = (await an('POST', '/api/events', { title: 'Zahnarzt', start: '2026-09-29T10:00', end: '2026-09-29T10:45' })).json.record;
+      const namen = [];
+      statist.weiter(
+        antwort(B.start(), B.werkzeug(0, 'toolu_l', 'termine_lesen', { von: '2026-09-23', bis: '2026-10-31', suche: 'Zahnarzt' }), B.ende('tool_use')),
+        antwort(B.start(), B.werkzeug(0, 'toolu_a', 'termin_aendern', { id: zahnarzt.id, start: '2026-10-02T10:00' }), B.ende('tool_use')),
+        antwort(B.start(), B.text(0, 'Verschoben auf Fr., 02.10., 10:00 Uhr.'), B.ende('end_turn')),
+      );
+      const r = await an('POST', `/api/chats/${chat}/messages`, { inhalt: 'verschieb den Zahnarzt auf Freitag' });
+      assert(/"stopReason":"end_turn"/.test(r.text), 'der Zug lief nicht zu Ende');
+      namen.push(...statist.stromAnfragen()[0].body.tools.map((t) => t.name));
+      const soll = 'rueckfrage,termin_anlegen,termine_lesen,termin_aendern,termin_loeschen,notiz_anlegen,merken,projekt_anpassen,web_search,web_fetch';
+      assert(namen.join(',') === soll, `Werkzeuge: ${namen.join(',')}`);
+      const gelesen = JSON.parse(statist.stromAnfragen()[1].body.messages.slice(-1)[0].content[0].content);
+      assert(gelesen.termine.length === 1 && gelesen.termine[0].id === zahnarzt.id, 'termine_lesen fand den Zahnarzt nicht');
+      const jetzt = zweite.store.get(zahnarzt.id).data;
+      assert(jetzt.start === '2026-10-02T10:00' && jetzt.end === '2026-10-02T10:45', `${jetzt.start}–${jetzt.end}`);
+      const eintrag = zweite.history.list({ type: 'event' }).items.find((e) => e.id === zahnarzt.id && e.op === 'update');
+      assert(eintrag && eintrag.actor.kind === 'agent', `Urheber: ${eintrag && eintrag.actor.kind}`);
+      await zweite.history.undo(eintrag.seq);
+      assert(zweite.store.get(zahnarzt.id).data.start === '2026-09-29T10:00', 'nicht zurückgenommen');
+      return 'verschoben (Dauer blieb), Urheber Agent, zurückgenommen — Claude selbst ist hier der Statist, kein echtes Modell';
+    } finally {
+      if (zweite) await zweite.close().catch(() => {});
+      await statist.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+  void app;
+}
+
 async function checkSearch() {
   area('3 · Suche');
   await check('Volltextsuche findet den Titel', async () => {
@@ -1297,6 +1402,7 @@ async function checkStick() {
   // einander nicht in die Quere kommen, sonst erklaert ein Fehlschlag nichts.
   const httpZiel = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-usb-http-'));
   const httpDaten = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-usb-daten-'));
+  const httpNeu = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-usb-neu-'));
   let app = null;
   try {
     const { createApp } = require('../src/app');
@@ -1357,9 +1463,11 @@ async function checkStick() {
       assert(typeof r.portabel === 'boolean', 'keine Aussage, ob diese Instanz portabel laeuft');
       assert(r.portabel === false ? r.von === null : !!r.von, 'portabel und Herkunft widersprechen sich');
       assert(Array.isArray(r.bekanntePlattformen) && r.bekanntePlattformen.length, 'keine Plattformliste');
-      assert(r.modell && r.modell.reistMit === false && r.modell.grund,
-        'die Ansicht koennte nicht sagen, dass das Modell NICHT mitreist');
-      return `portabel=${r.portabel}, dieser Rechner=${r.dieserRechner}`;
+      // Die KI ist Claude; ein Modell auf dem Stick gibt es nicht mehr.
+      assert(!('modell' in r), 'die Selbstauskunft spricht noch von einem Modell auf dem Stick');
+      assert(r.andereSysteme && typeof r.andereSysteme.erlaubt === 'boolean',
+        'die Ansicht koennte nicht wissen, ob sie fuer Windows/Mac um Erlaubnis fragen muss');
+      return `portabel=${r.portabel}, dieser Rechner=${r.dieserRechner}, nodejs.org ${r.andereSysteme.erlaubt ? 'erlaubt' : 'nur mit Rueckfrage'}`;
     });
 
     await check('/api/status sagt, ob von einem Stick gestartet wurde', async () => {
@@ -1448,119 +1556,57 @@ async function checkStick() {
       return `409 ohne Strom, "${satz.slice(0, 55)}…"`;
     });
 
-    /* ---- das Modell: dieselbe Lehre, ein zweites Mal beherzigt ---- */
+    /* ---- die vier Handgriffe der Ansicht, durch dieselbe Tuer ---- */
     //
-    // src/portable/model.js konnte finden, planen und kopieren, bevor es eine
-    // Route dafuer gab. Deshalb hier ausschliesslich die HTTP-Tuer -- und
-    // zuerst so, wie dieser Rechner wirklich ist: ohne Ollama. Der Kasten
-    // darf dann nicht leer sein, sondern muss sagen, was zu tun waere.
+    // web/views/stick.js hat genau vier Knoepfe. Drei davon werden hier ueber
+    // ihre echte Route gefahren; "Beenden & abziehen" wuerde den Server
+    // beenden, an dem diese Pruefung haengt -- das pruefen test/stick.test.js
+    // (mit einem eingeschleusten Ende) und der Beweis-Kreis.
 
-    await check('GET /api/stick/models sagt ohne Klick, was auf diesem Rechner liegt – oder was zu tun waere', async () => {
-      const r = ok(await api.get('/api/stick/models'), 'GET /api/stick/models');
-      assert(r.rechner && typeof r.rechner.gefunden === 'boolean', 'kein Befund ueber diesen Rechner');
-      assert(Array.isArray(r.rechner.kerne) && Array.isArray(r.rechner.modelle), 'keine Listen');
-      assert(r.dieserRechner === LOCAL_PLATFORM, `Plattform ${r.dieserRechner} statt ${LOCAL_PLATFORM}`);
-      if (!r.rechner.gefunden) {
-        assert(r.rechner.hinweise.some((s) => /ollama pull/.test(s)), 'nichts gefunden, aber kein Satz, was zu tun waere');
-        return 'kein Modell auf diesem Rechner – und der Satz dazu nennt "ollama pull"';
-      }
-      return `${r.rechner.modelle.length} Modell(e), ${r.rechner.kerne.length} Kern(e) gefunden`;
+    await check('Die Laufwerkssuche antwortet und sagt, wo sie gesucht hat', async () => {
+      const r = ok(await api.get('/api/stick/laufwerke'), 'GET /api/stick/laufwerke');
+      assert(Array.isArray(r.laufwerke), 'keine Liste');
+      assert(Array.isArray(r.gesucht) && r.gesucht.length, 'nicht gesagt, wo gesucht wurde');
+      return `${r.laufwerke.length} gefunden, gesucht in ${r.gesucht.join(', ')}`;
     });
 
-    await check('Mit Pfad: was auf dem Stick liegt, das Dateisystem und der Platz – ohne ein Byte zu schreiben', async () => {
-      const vorher = fs.readdirSync(httpZiel).sort().join(',');
-      const r = ok(await api.get(`/api/stick/models?path=${encodeURIComponent(httpZiel)}`), 'GET mit Pfad');
-      assert(r.stick && typeof r.stick.satz === 'string' && r.stick.satz.length > 20, 'kein Satz ueber den Stick');
-      assert(r.stick.vorhanden === false && /kein Modell/.test(r.stick.satz), `frischer Stick meldet: ${r.stick.satz}`);
-      assert(r.vorschau && r.vorschau.dateisystem, 'die Vorschau nennt das Dateisystem nicht');
-      assert(Number.isFinite(r.vorschau.frei), 'die Vorschau nennt den freien Platz nicht');
-      assert(Array.isArray(r.vorschau.hindernisse) && r.vorschau.hindernisse.every((h) => h.code && h.schwere && h.satz),
-        'Hindernis ohne Code, Schwere oder Satz');
-      assert(fs.readdirSync(httpZiel).sort().join(',') === vorher, 'GET hat auf den Stick geschrieben');
-      // models/ legt schon prepare() an (leer); hineingeschrieben hat GET nichts.
-      assert(fs.readdirSync(path.join(httpZiel, 'models')).length === 0, 'GET hat in models/ geschrieben');
-      return `${r.vorschau.dateisystem.typeName || 'Typ unbekannt'}, ${Math.round(r.vorschau.frei / 1048576)} MB frei, ${r.vorschau.hindernisse.length} Hindernis(se)`;
+    await check('Der Plan sagt vor dem Klick, ob es fuer Windows/Mac ins Internet muesste', async () => {
+      const r = ok(await api.get(`/api/stick/plan?path=${encodeURIComponent(httpNeu)}`), 'GET /api/stick/plan');
+      assert(r.fall === 'neu', `Fall ${r.fall} statt neu`);
+      assert(r.download && r.download.noetig === true, 'es fehlen Laufzeiten, und der Plan verschweigt es');
+      assert(fs.readdirSync(httpNeu).length === 0, 'der Plan hat etwas geschrieben');
+      return `neu, ${r.andere.join(', ')} bräuchten nodejs.org (${r.download.erlaubt ? 'erlaubt' : 'Rückfrage'})`;
     });
 
-    await check('Fuer ein iPad steht der unbequeme Satz da, kein gruener Haken', async () => {
-      const r = ok(await api.get(`/api/stick/models?path=${encodeURIComponent(httpZiel)}&fuer=ipados`), 'GET fuer=ipados');
-      assert(r.stick && r.stick.fuer && r.stick.fuer.kannProgrammeStarten === false, 'ein iPad gilt als Rechner, der Programme startet');
-      assert(r.stick.passt === false, 'fuer ein iPad wird "passt" behauptet');
-      return r.stick.fuer.name;
+    await check('Ein Klick "Stick vorbereiten": Programm, Laufzeit, Wissen – ein Balken bis 100', async () => {
+      const r = await sse('/api/stick/einrichten', { path: httpNeu, andereSysteme: false });
+      assert(r.status === 200, `HTTP ${r.status}: ${String(r.text).slice(0, 200)}`);
+      const fertig = r.events.find((e) => e.event === 'fertig');
+      assert(fertig, `kein Abschluss: ${r.events.map((e) => e.event).join(',')}`);
+      assert(fertig.data.fall === 'neu' && fertig.data.wissen === 'kopiert', JSON.stringify(fertig.data).slice(0, 200));
+      assert(fertig.data.laufzeiten.includes(LOCAL_PLATFORM), 'die Laufzeit dieses Rechners fehlt');
+      const p = r.events.filter((e) => e.event === 'fortschritt').map((e) => e.data.percent);
+      assert(p.length >= 3 && p[p.length - 1] === 100, `Balken: ${p.join(',')}`);
+      assert(p.every((v, i) => i === 0 || v >= p[i - 1]), `der Balken lief rueckwaerts: ${p.join(',')}`);
+      assert(fs.readdirSync(path.join(httpNeu, 'data')).length > 0, 'das Wissen kam nicht mit');
+      return `${p.length} Schritte, startet an ${fertig.data.laufzeiten.join(', ')}`;
     });
 
-    await check('Kopieren ohne Auswahl wird VOR dem ersten Byte abgelehnt – als Statuscode, nicht als Strom', async () => {
-      const r = await api.post('/api/stick/models/copy', { path: httpZiel, auswahl: [] });
-      assert(r.status === 400, `HTTP ${r.status} statt 400: ${String(r.text).slice(0, 160)}`);
-      assert(!/^event:/m.test(String(r.text)), 'es wurde doch ein Ereignisstrom geoeffnet');
-      const satz = (r.json && r.json.error && r.json.error.message) || '';
-      assert(/ausgewaehlt/.test(satz), `kein brauchbarer Satz: ${satz.slice(0, 120)}`);
-      assert(fs.readdirSync(path.join(httpZiel, 'models')).length === 0, 'ein abgelehnter Vorgang hat in models/ geschrieben');
-      return `HTTP 400, "${satz.slice(0, 60)}…"`;
+    await check('"Jetzt sichern" legt eine vollstaendige Sicherung auf den Stick', async () => {
+      const r = ok(await api.post('/api/stick/sichern', { path: httpNeu }), 'POST /api/stick/sichern');
+      assert(r.ziel && r.ziel.art === 'stick', `Ziel ${JSON.stringify(r.ziel)}`);
+      assert(r.dir.startsWith(path.join(httpNeu, 'Sicherungen')), `falscher Ort: ${r.dir}`);
+      const pruefung = ok(await api.get(`/api/backup/verify?dir=${encodeURIComponent(r.dir)}`), 'verify');
+      assert(pruefung.ok === true, JSON.stringify(pruefung.problems).slice(0, 200));
+      const stand = ok(await api.get(`/api/stick/sicherung?path=${encodeURIComponent(httpNeu)}`), 'sicherung');
+      assert(stand.letzte && stand.letzte.dir === r.dir, '"zuletzt gesichert" nennt eine andere Sicherung');
+      return `${r.records} Sätze, geprüft, "zuletzt gesichert" stimmt`;
     });
 
-    await check('Ein Modell laesst sich ueber HTTP wirklich auf den Stick legen (Statist statt Ollama)', async () => {
-      // Kein Ollama auf diesem Rechner -- also ein Statist an seiner Stelle:
-      // ein Skript im PATH und ein inhaltsadressierter Speicher unter
-      // OLLAMA_MODELS. Die Route baut das Werkzeug mit process.env, genau wie
-      // im Betrieb; deshalb wird die Umgebung DIESES Prozesses umgebogen und
-      // hinterher zurueckgestellt. Der Statist erfindet nichts.
-      const heim = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-usb-modell-'));
-      const vorherEnv = { OLLAMA_MODELS: process.env.OLLAMA_MODELS, PATH: process.env.PATH };
-      try {
-        const bin = path.join(heim, 'bin');
-        fs.mkdirSync(bin, { recursive: true });
-        const kern = path.join(bin, process.platform === 'win32' ? 'ollama.exe' : 'ollama');
-        fs.writeFileSync(kern, '#!/usr/bin/env node\n/* STATIST aus tools/feature-check.js */\nprocess.stdout.write("statist");\n');
-        fs.chmodSync(kern, 0o755);
-        const speicher = path.join(heim, 'speicher');
-        const blobs = path.join(speicher, 'blobs');
-        const manifest = path.join(speicher, 'manifests', 'registry.ollama.ai', 'library', 'mini');
-        fs.mkdirSync(blobs, { recursive: true });
-        fs.mkdirSync(manifest, { recursive: true });
-        const inhalt = Buffer.from('GEWICHTE'.padEnd(4096, 'x'));
-        const hex = require('node:crypto').createHash('sha256').update(inhalt).digest('hex');
-        fs.writeFileSync(path.join(blobs, `sha256-${hex}`), inhalt);
-        fs.writeFileSync(path.join(manifest, '8b'), JSON.stringify({
-          schemaVersion: 2,
-          layers: [{ mediaType: 'application/vnd.ollama.image.model', digest: `sha256:${hex}`, size: inhalt.length }],
-        }));
-        process.env.OLLAMA_MODELS = speicher;
-        process.env.PATH = `${bin}${path.delimiter}${vorherEnv.PATH || ''}`;
-
-        const befund = ok(await api.get('/api/stick/models'), 'finden');
-        assert(befund.rechner.gefunden === true, 'der Statist wurde nicht gefunden');
-        assert(befund.rechner.modelle.some((m) => m.name === 'mini:8b'), 'das Modell aus dem Manifest fehlt');
-
-        const plan = ok(await api.post('/api/stick/models/preview', { path: httpZiel }), 'preview');
-        assert(plan.kannLosgehen === true, `Hindernis: ${JSON.stringify(plan.hindernisse)}`);
-        assert(fs.readdirSync(path.join(httpZiel, 'models')).length === 0, 'die Vorschau hat in models/ geschrieben');
-
-        const lauf = await sse('/api/stick/models/copy', { path: httpZiel });
-        assert(lauf.status === 200, `HTTP ${lauf.status}: ${String(lauf.text).slice(0, 200)}`);
-        const arten = lauf.events.map((e) => e.event);
-        assert(arten.includes('fertig'), `kein Abschluss gemeldet: ${arten.join(',')}`);
-        assert(!arten.includes('fehler'), `Fehler im Strom: ${JSON.stringify(lauf.events.find((e) => e.event === 'fehler'))}`);
-        const prozente = lauf.events.filter((e) => e.event === 'fortschritt').map((e) => e.data && e.data.percent).filter(Number.isFinite);
-        assert(prozente.length && prozente[prozente.length - 1] === 100, `der Balken endet nicht bei 100: ${prozente.join(',')}`);
-        assert(fs.existsSync(path.join(httpZiel, 'models', 'ollama', 'blobs', `sha256-${hex}`)), 'der Blob liegt nicht auf dem Stick');
-        assert(fs.existsSync(path.join(httpZiel, 'models', 'kern', LOCAL_PLATFORM, path.basename(kern))), 'der Kern liegt nicht auf dem Stick');
-        assert(fs.existsSync(path.join(httpZiel, 'models', 'modelle.json')), 'keine Beschreibung');
-
-        const danach = ok(await api.get(`/api/stick/models?path=${encodeURIComponent(httpZiel)}`), 'danach');
-        assert(danach.stick.vorhanden === true && danach.stick.passt === true, danach.stick.satz);
-        assert(danach.stick.plattformen.includes(LOCAL_PLATFORM), 'die Plattform des Kerns steht nicht da');
-        // Nach dem Kopieren gilt "Nur Programm erneuern" weiter: models/ bleibt.
-        const vorherBlob = fs.statSync(path.join(httpZiel, 'models', 'ollama', 'blobs', `sha256-${hex}`)).mtimeMs;
-        const erneuern = await sse('/api/stick/update', { path: httpZiel });
-        assert(erneuern.status === 200, `update: HTTP ${erneuern.status}`);
-        assert(fs.statSync(path.join(httpZiel, 'models', 'ollama', 'blobs', `sha256-${hex}`)).mtimeMs === vorherBlob, 'update hat models/ angefasst');
-        return `mini:8b und Kern fuer ${LOCAL_PLATFORM} auf dem Stick, "${danach.stick.satz.slice(0, 50)}…"`;
-      } finally {
-        if (vorherEnv.OLLAMA_MODELS === undefined) delete process.env.OLLAMA_MODELS; else process.env.OLLAMA_MODELS = vorherEnv.OLLAMA_MODELS;
-        process.env.PATH = vorherEnv.PATH;
-        fs.rmSync(heim, { recursive: true, force: true });
-      }
+    await check('Die Routen fuer ein Modell auf dem Stick gibt es nicht mehr', async () => {
+      const r = await api.get('/api/stick/models');
+      assert(r.status === 404, `HTTP ${r.status}`);
+      return 'HTTP 404';
     });
   } finally {
     if (app) await app.close().catch(() => {});
@@ -1568,6 +1614,7 @@ async function checkStick() {
     fs.rmSync(src, { recursive: true, force: true });
     fs.rmSync(httpZiel, { recursive: true, force: true });
     fs.rmSync(httpDaten, { recursive: true, force: true });
+    fs.rmSync(httpNeu, { recursive: true, force: true });
   }
 }
 
@@ -2110,6 +2157,7 @@ const AREAS = {
   status: checkStatus,
   notizen: checkRecords,
   kalender: checkKalender,
+  terminagent: checkTerminAgent,
   suche: checkSearch,
   graph: checkGraph,
   chat: checkChat,

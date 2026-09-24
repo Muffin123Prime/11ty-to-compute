@@ -156,6 +156,46 @@ async function befuellen(app) {
     ];
     for (const t of termine) s.create('event', { source: 'user', ...t });
 
+    // --- Kalender: Serien, Erinnerungen, Ueberschneidung, mehrtaegig -----
+    //
+    // Damit jede Ansicht zeigt, was sie kann: eine Serie von Hand und eine von
+    // der KI, ein Termin, der sich mit dem Zahnarzt ueberschneidet (Woche:
+    // nebeneinander), ganztaegig ueber mehrere Tage (Balken), Erinnerungen --
+    // aber keine, die waehrend der Bildschirmfotos faellig wird: sonst stuende
+    // der Hinweis oben rechts auf jedem Bild jedes Bereichs. Das Foto des
+    // Hinweises legt sich seinen Termin selbst an (tools/screenshots.js).
+    // Angelegt ueber createEvent, also mit den
+    // Pruefungen der Termin-Route: eine falsch geformte Regel faellt hier auf
+    // und nicht erst als leerer Kalender.
+    {
+      let anlegen = (daten) => s.create('event', daten);
+      try {
+        const { createEvent } = require('../src/http/api/events');
+        if (typeof createEvent === 'function') anlegen = (daten) => createEvent(s, daten);
+      } catch { /* aeltere Fassung ohne Export: dann direkt */ }
+      // Der erste Dienstag (2) bzw. Freitag (5) ab vor zwei Wochen -- die Serie hat schon Geschichte.
+      const ab = (wochentag) => tag(-14 + ((wochentag - new Date().getDay() + 7) % 7));
+      const p2 = (x) => String(x).padStart(2, '0');
+      const wand = (d) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}`;
+      // In drei Stunden, auf fuenf gerundet: heute noch, mit Erinnerung, aber nicht gleich faellig.
+      const gleich = new Date(Date.now() + 180 * 60000);
+      gleich.setMinutes(Math.ceil(gleich.getMinutes() / 5) * 5, 0, 0);
+      const paketBeginn = wand(gleich);
+      const plusStunde = () => wand(new Date(gleich.getTime() + 60 * 60000));
+      const serien = [
+        { title: 'Training', start: um(ab(2), '18:00'), end: um(ab(2), '19:30'), location: 'Turnhalle Nord', reminder: 30,
+          recurrence: { freq: 'weekly', interval: 1, byDay: ['TU'], until: tag(70), count: null } },
+        { title: 'Wochenrückblick', start: um(ab(5), '16:00'), end: um(ab(5), '16:30'), reminder: 15, source: 'auto', chatId: woche.id,
+          recurrence: { freq: 'weekly', interval: 1, byDay: ['FR'], until: null, count: null } },
+        { title: 'Miete überweisen', start: tag(1 - new Date().getDate()), allDay: true, reminder: 60,
+          recurrence: { freq: 'monthly', interval: 1, until: null, count: null } },
+        { title: 'Telefonat mit Jonas', start: um(tag(0), '09:30'), end: um(tag(0), '10:15'), location: 'Handy' },
+        { title: 'Messe in Köln', start: tag(3), end: tag(4), allDay: true, location: 'Koelnmesse', projectId: kueche.id },
+        { title: 'Paket bei der Post abholen', start: paketBeginn, end: plusStunde(), location: 'Postfiliale Lindenstraße', reminder: 30 },
+      ];
+      for (const t of serien) anlegen({ source: 'user', ...t });
+    }
+
     const auto = [
       ['Zahnarzt: Fragen für heute', 'Nach der Füllung oben links fragen, die seit dem Winter empfindlich ist.\n\n- Lohnt sich eine professionelle Zahnreinigung zweimal im Jahr?\n- Welche Zahnbürste bei empfindlichem Zahnfleisch?', woche.id, null],
       ['Beete: nächste Schritte', 'Tomaten in die Südwand, Salat in den Halbschatten. Vor der Tauschbörse die Liste der fehlenden Sorten machen: Ochsenherz, Schnittlauch, Kapuzinerkresse.', beetChat ? beetChat.id : null, garten.id],

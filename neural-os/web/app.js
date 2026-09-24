@@ -2020,6 +2020,7 @@ function createShell() {
     }, 60000);
 
     registerServiceWorker(toast);
+    import('./lib/erinnerung.js').then((m) => m.starteErinnerungen({ api, bus, navigate })).catch((err) => console.warn('[neural-os] Erinnerungen nicht verfügbar:', err && err.message));
 
     on(window, 'beforeunload', () => {
       if (eventStream) eventStream.close();

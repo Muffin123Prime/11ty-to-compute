@@ -151,9 +151,11 @@ const CSS = `
 .gh__hint { margin: 0; color: var(--fg-subtle); font-size: var(--fs-sm); line-height: 1.45; }
 .gh__label { margin: 0; color: var(--fg-muted); font-size: var(--fs-sm); }
 .gh__chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.gh__chips .chip { min-height: 28px; padding: 0 10px; }
+/* Arten-Schalter: an = hell auf Flaeche, aus = leise. Kein Blau: sieben
+   blaue Chips waeren sieben Akzente, und der eine gehoert dem gewaehlten Knoten. */
+.gh__chips .chip { min-height: 28px; padding: 0 10px; color: var(--fg-subtle); }
+.gh__chips .chip.is-active { color: var(--fg); background: var(--surface-3); border-color: var(--border-strong); }
 .gh__chip-n { color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
-.chip.is-active .gh__chip-n { color: inherit; opacity: 0.75; }
 
 .gh__toggle {
   display: flex; align-items: center; gap: var(--sp-1); width: 100%;
@@ -432,6 +434,8 @@ export default {
         colors: prefs.colors === true,
         groupsOff: Array.isArray(prefs.groupsOff) ? prefs.groupsOff.map(String) : [],
       },
+      groupHover: false,
+      pendingFocus: null,
     };
     view = self;
     build(self);
@@ -464,7 +468,7 @@ function build(self) {
     'aria-label': 'Filter und Anzeige öffnen',
     onClick: () => setPanel(self, true),
   }, icon(ICON.sliders));
-  dom.root = h('div.gh', null, dom.canvas, dom.state, dom.panel, dom.opener, dom.card, dom.live);
+  dom.root = h('div.gh', { dataset: { ruhe: 'nein' } }, dom.canvas, dom.state, dom.panel, dom.opener, dom.card, dom.live);
   container.appendChild(dom.root);
 
   dom.count = h('span.gh__count');
@@ -474,9 +478,21 @@ function build(self) {
     onSelect: (node) => select(self, node ? node.id : null, { fromCanvas: true }),
     onOpen: (node) => openNode(self, node),
     onHover: (node) => announce(self, node ? `${TYPE_LABELS[node.type] || 'Eintrag'}: ${node.label}` : ''),
-    // Fuer Pruefwerkzeuge und Bildschirmfotos: die Wolke ruht.
-    onSettle: () => { if (self.alive) dom.root.dataset.ruhe = 'ja'; },
-    onUserMove: () => {},
+    // Fuer Pruefwerkzeuge und Bildschirmfotos: ruht die Wolke gerade?
+    onSettle: () => {
+      if (!self.alive) return;
+      dom.root.dataset.ruhe = 'ja';
+      // Ein Sprung auf einen Eintrag: waehrend die Wolke einschwingt, wandert
+      // er ein Stueck. Ist sie zur Ruhe gekommen, wird er nachgefuehrt --
+      // ausser der Mensch hat die Kamera inzwischen selbst bewegt.
+      if (self.pendingFocus) {
+        const id = self.pendingFocus;
+        self.pendingFocus = null;
+        self.graph.focus(id, { zoom: self.graph.transform.k });
+      }
+    },
+    onWake: () => { if (self.alive) dom.root.dataset.ruhe = 'nein'; },
+    onUserMove: () => { self.pendingFocus = null; },
   });
   self.graph.setSettings(self.prefs.settings);
 
@@ -512,7 +528,7 @@ function build(self) {
     if (!self.alive || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
     const t = event.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-    if (event.key === 'f') {
+    if (event.key === 'f' || event.key === '0') {
       event.preventDefault();
       self.graph.fitToView();
     } else if (event.key === 'Escape' && self.selectedId) {
@@ -589,16 +605,27 @@ async function load(self, { first }) {
   if (first) {
     // Die ersten, wildesten Schritte rechnet der Zeichner vorab; danach
     // folgt die Kamera der Wolke weich, bis sie ruht oder jemand eingreift.
-    graph.prewarm(self.nodes.length > 1200 ? 90 : 140, 260);
+    // Wer weniger Bewegung eingestellt hat, bekommt die fertige Wolke:
+    // alles wird vorab gerechnet, nichts schwingt sichtbar ein.
+    let still = false;
+    try {
+      still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    } catch { /* dann eben mit Bewegung */ }
+    if (still) graph.prewarm(400, 900);
+    else graph.prewarm(self.nodes.length > 1200 ? 90 : 140, 260);
     if (self.focusId && self.byId.has(self.focusId)) {
       select(self, self.focusId);
       graph.focus(self.focusId, { animate: false, zoom: 1.5 });
+      self.pendingFocus = self.focusId;
     } else {
       graph.fitToView({ animate: false, follow: true });
     }
   }
   renderState(self);
-  renderPanel(self);
+  // Wer gerade im Panel tippt oder schiebt, dem wird es nicht unter den
+  // Fingern neu gebaut; die Zahlen folgen beim naechsten Nachladen.
+  if (first || !self.dom.panel.contains(document.activeElement)) renderPanel(self);
+  else renderCount(self);
   describe(self);
 }
 
@@ -607,7 +634,7 @@ async function load(self, { first }) {
 function applyFilter(self, { quiet = false } = {}) {
   const hidden = new Set(self.prefs.hiddenTypes);
   const keep = self.selectedId;
-  self.graph.setFilter((node) => !hidden.has(node.type) || node.id === keep, { orphans: self.prefs.orphans });
+  self.graph.setFilter((node) => !hidden.has(node.type) || node.id === keep);
   self.graph.setOrphans(self.prefs.orphans);
   if (!quiet) {
     if (self.query) runSearch(self, self.query, { jump: false });
@@ -658,7 +685,7 @@ function runSearch(self, value, { jump = false } = {}) {
     self.dom.searchHint.hidden = !q;
     if (q) {
       self.dom.searchHint.appendChild(text(self.matches.length
-        ? `${formatNumber(self.matches.length)} ${self.matches.length === 1 ? 'Treffer' : 'Treffer'} · Eingabetaste springt hin`
+        ? `${formatNumber(self.matches.length)} Treffer · Eingabetaste springt hin`
         : 'Nichts gefunden.'));
     }
   }
@@ -690,7 +717,8 @@ function renderCard(self) {
   const links = self.graph.neighbours(node.id).length;
   const kind = `${TYPE_LABELS[node.type] || 'Eintrag'} · ${links === 1 ? '1 Verbindung' : `${formatNumber(links)} Verbindungen`}`;
   const route = OPEN_ROUTES[node.type];
-  dom.card.append(
+  // Element.append() macht aus null den Text "null" -- deshalb gefiltert.
+  const teile = [
     h('div.gh__card-head', null,
       h('span.gh__card-kind', null, text(kind)),
       h('button.icon-button', {
@@ -706,7 +734,8 @@ function renderCard(self) {
         type: 'button',
         onClick: () => self.graph.focus(node.id, { zoom: Math.max(1.8, self.graph.transform.k) }),
       }, text('Hinzoomen'))),
-  );
+  ];
+  dom.card.append(...teile.filter(Boolean));
 }
 
 /* ---------------------------- Panel --------------------------------- */
@@ -727,8 +756,10 @@ function panelOpen(self) {
   if (typeof self.prefs.panel === 'boolean') return self.prefs.panel;
   // Ohne gemerkte Wahl: auf breiter Flaeche offen (wie die Vorlage), auf
   // schmaler zu -- dort braucht das Netz jeden Zentimeter.
+  // Die Karte ist bei 1440 px mit beiden Seiten offen nur ~780 px breit;
+  // das Panel (292 px) passt dort wie in der Vorlage. Darunter ist es zu.
   const w = self.dom.root ? self.dom.root.clientWidth : 0;
-  return w >= 760;
+  return w >= 700;
 }
 
 function section(self, key, title, body, extra) {
@@ -760,7 +791,10 @@ function toggle(label, checked, onChange) {
 }
 
 function slider(self, key, label, min, max, step) {
-  const valueText = () => `${Math.round(self.prefs.settings[key] * 100)} %`;
+  // Die Schwelle ist ein Zoomfaktor, alles andere ein Anteil der Vorgabe.
+  const valueText = () => (key === 'labelZoom'
+    ? `${self.prefs.settings[key].toFixed(1).replace('.', ',')}×`
+    : `${Math.round(self.prefs.settings[key] * 100)} %`);
   const out = h('span.gh__range-val', null, text(valueText()));
   const input = h('input', {
     type: 'range', min: String(min), max: String(max), step: String(step),
@@ -779,8 +813,17 @@ function slider(self, key, label, min, max, step) {
   return h('label.gh__range', null, h('span.gh__range-head', null, h('span', null, text(label)), out), input);
 }
 
+/** Das Licht der Suche wiederherstellen (oder aus), nach einem Gruppen-Ueberfahren. */
+function restoreHighlight(self) {
+  self.groupHover = false;
+  self.graph.setHighlight(self.query ? self.matches.map((node) => node.id) : null);
+}
+
 function renderPanel(self) {
   const { dom, prefs } = self;
+  // Eine Zeile, die gerade ueberfahren wird, verschwindet beim Neuaufbau
+  // ohne pointerleave -- ihr Licht darf nicht haengen bleiben.
+  if (self.groupHover) restoreHighlight(self);
   const open = panelOpen(self);
   dom.panel.hidden = !open;
   dom.opener.hidden = open;
@@ -892,10 +935,12 @@ function renderPanel(self) {
     h('span.gh__group-n', null, text(formatNumber(topic.ids.length))));
     // Ueberfahren zeigt, wo die Gruppe liegt -- ohne sie einzufaerben.
     row.addEventListener('pointerenter', (event) => {
-      if (event.pointerType === 'mouse') self.graph.setHighlight(topic.ids);
+      if (event.pointerType !== 'mouse') return;
+      self.groupHover = true;
+      self.graph.setHighlight(topic.ids);
     });
     row.addEventListener('pointerleave', (event) => {
-      if (event.pointerType === 'mouse') self.graph.setHighlight(self.query ? self.matches.map((node) => node.id) : null);
+      if (event.pointerType === 'mouse') restoreHighlight(self);
     });
     return h('li', null, row);
   });

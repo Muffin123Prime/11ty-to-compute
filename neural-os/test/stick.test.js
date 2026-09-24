@@ -1585,9 +1585,17 @@ test('der Stick ist ueber HTTP erreichbar, und die Selbstauskunft sagt die Wahrh
     assert.equal(selbst.json.portabel, false, 'ein Server aus einem Tresorordner laeuft nicht portabel');
     assert.equal(selbst.json.von, null);
     assert.equal(selbst.json.datenOrdner, appPaths.home);
-    assert.equal(selbst.json.modell.reistMit, false);
-    assert.match(selbst.json.modell.grund, /Modell/);
+    // Ein Sprachmodell reist nicht mehr mit -- die KI ist Claude. Die
+    // Selbstauskunft spricht deshalb auch nicht mehr davon.
+    assert.equal('modell' in selbst.json, false);
     assert.ok(selbst.json.bekanntePlattformen.includes('win-x64'));
+    // Ohne Netzschleuse darf "Stick vorbereiten" nicht behaupten, es komme
+    // an nodejs.org heran.
+    assert.equal(selbst.json.andereSysteme.erlaubt, false);
+    assert.ok(selbst.json.andereSysteme.plattformen.every((p) => p !== LOCAL_PLATFORM));
+
+    const modelle = await req('GET', '/api/stick/models');
+    assert.equal(modelle.status, 404, 'die Modell-Routen gibt es nicht mehr');
 
     const status = await req('GET', '/api/status');
     assert.equal(status.status, 200, status.text);
@@ -1598,7 +1606,7 @@ test('der Stick ist ueber HTTP erreichbar, und die Selbstauskunft sagt die Wahrh
     // Ohne Pfad: ein ganzer Satz, kein "path required".
     const ohne = await req('GET', '/api/stick/preview');
     assert.equal(ohne.status, 400, ohne.text);
-    assert.match(ohne.json.error.message, /Pfad zum Stick/);
+    assert.match(ohne.json.error.message, /Ort des Sticks/);
     assert.match(ohne.json.error.message, /getippt/);
 
     const vorschau = await req('GET', `/api/stick/preview?path=${encodeURIComponent(ziel)}`);
@@ -1694,6 +1702,401 @@ test('ohne Stick-Werkzeug sagt die Route das, statt so zu tun als ob', async () 
     await store.close().catch(() => {});
     vault.cleanup();
   }
+});
+
+/* ------------------------------------------------ ein Klick: einrichten */
+
+/** Laufzeit-Archive fuer die Plattformen, die ein fremder Rechner braucht. */
+function laufzeitArchive(plattformen) {
+  const version = process.version;
+  const base = `https://nodejs.org/dist/${version}`;
+  const routes = {};
+  const sums = [];
+  const binaries = {};
+  for (const platform of plattformen) {
+    const zip = platform.startsWith('win');
+    const filename = `node-${version}-${platform}.${zip ? 'zip' : 'tar.gz'}`;
+    const binary = Buffer.from(`#!/fake/node ${platform}\n`.padEnd(4000, 'x'), 'utf8');
+    const archive = zip
+      ? makeZip([{ name: `node-${version}-${platform}/node.exe`, data: binary }])
+      : makeTarGz([{ name: `node-${version}-${platform}/bin/node`, data: binary }]);
+    routes[`${base}/${filename}`] = archive;
+    sums.push(`${crypto.createHash('sha256').update(archive).digest('hex')}  ${filename}`);
+    binaries[platform] = binary;
+  }
+  routes[`${base}/SHASUMS256.txt`] = `${sums.join('\n')}\n`;
+  return { routes, binaries };
+}
+
+test('einrichten: ein leerer Stick bekommt Programm, Laufzeiten und das Wissen', async () => {
+  const stick = tempHome('stick-ein1');
+  const src = tempHome('stick-ein1-src');
+  const home = tempHome('stick-ein1-home');
+  try {
+    makeSource(src.home);
+    fs.writeFileSync(path.join(home.home, 'notiz.txt'), 'mein Wissen');
+    const andere = ['win-x64', 'darwin-arm64'].filter((p) => p !== LOCAL_PLATFORM);
+    const { routes, binaries } = laufzeitArchive(andere);
+    const gate = fakeGate(routes);
+    const tool = createStick({ gate });
+
+    const plan = tool.einrichtenPlan(stick.home, { plattformen: andere });
+    assert.equal(plan.fall, 'neu');
+    assert.deepEqual(plan.andere, andere);
+    assert.deepEqual(fs.readdirSync(stick.home), [], 'der Plan hat etwas geschrieben');
+
+    const prozente = [];
+    const saetze = [];
+    const r = await tool.einrichten(stick.home, {
+      sourceRoot: src.home, sourceHome: home.home, plattformen: andere,
+      onProgress: (e) => { prozente.push(e.percent); saetze.push(e.message); },
+    });
+    assert.equal(r.fall, 'neu');
+    assert.equal(r.wissen, 'kopiert');
+    assert.deepEqual(r.fehlend, []);
+    assert.equal(fs.readFileSync(path.join(stick.home, 'data', 'notiz.txt'), 'utf8'), 'mein Wissen');
+    for (const p of andere) {
+      const spec = require('../src/portable/stick').PLATFORMS[p];
+      assert.ok(fs.readFileSync(path.join(stick.home, 'runtime', p, spec.file)).equals(binaries[p]), `${p} fehlt`);
+      assert.ok(r.laufzeiten.includes(p));
+    }
+    assert.ok(r.laufzeiten.includes(LOCAL_PLATFORM), 'die Laufzeit dieses Rechners fehlt');
+
+    // Ein Balken: nie rueckwaerts, endet bei 100, und kein Satz traegt eine
+    // zweite Prozentzahl neben der des Balkens.
+    for (let i = 1; i < prozente.length; i++) assert.ok(prozente[i] >= prozente[i - 1], `rueckwaerts: ${prozente.join(',')}`);
+    assert.equal(prozente[prozente.length - 1], 100);
+    assert.ok(prozente.filter((p) => p > 0 && p < 100).length >= 3, `zu wenige Zwischenstaende: ${prozente.join(',')}`);
+    assert.ok(saetze.every((m) => !/\d+ %/.test(String(m))), `Prozent im Satz: ${saetze.find((m) => /\d+ %/.test(String(m)))}`);
+
+    // Die LIESMICH redet nicht mehr von einem Modell, sondern von Claude.
+    const liesmich = fs.readFileSync(path.join(stick.home, 'LIESMICH.txt'), 'utf8');
+    assert.ok(!/Sprachmodell|Ollama|models/i.test(liesmich), 'die LIESMICH spricht noch vom Modell');
+    assert.match(liesmich, /Claude verbinden/);
+    assert.match(liesmich, /Beenden & abziehen/);
+    assert.equal(fs.existsSync(path.join(stick.home, 'models')), false, 'ein models/-Ordner wird nicht mehr angelegt');
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+    home.cleanup();
+  }
+});
+
+test('einrichten: liegt schon Wissen auf dem Stick, bleibt es unberuehrt', async () => {
+  const stick = tempHome('stick-ein2');
+  const src = tempHome('stick-ein2-src');
+  const home = tempHome('stick-ein2-home');
+  try {
+    makeSource(src.home);
+    fs.writeFileSync(path.join(home.home, 'notiz.txt'), 'vom Laptop');
+    const tool = createStick({});
+    await tool.einrichten(stick.home, { sourceRoot: src.home, sourceHome: home.home, andereSysteme: false });
+    // Auf einem anderen Rechner weitergeschrieben:
+    fs.writeFileSync(path.join(stick.home, 'data', 'notiz.txt'), 'auf dem fremden Rechner geaendert');
+    const vorher = snapshotDir(path.join(stick.home, 'data'));
+    fs.writeFileSync(path.join(src.home, 'src', 'neu.js'), '// neu\n');
+
+    assert.equal(tool.einrichtenPlan(stick.home, {}).fall, 'erneuern');
+    const r = await tool.einrichten(stick.home, { sourceRoot: src.home, sourceHome: home.home, andereSysteme: false });
+    assert.equal(r.fall, 'erneuern');
+    assert.equal(r.wissen, 'blieb');
+    assert.deepEqual(snapshotDir(path.join(stick.home, 'data')), vorher, 'das Wissen auf dem Stick wurde angefasst');
+    assert.ok(fs.existsSync(path.join(stick.home, 'app', 'src', 'neu.js')), 'das Programm wurde nicht erneuert');
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+    home.cleanup();
+  }
+});
+
+test('einrichten: ohne Netz ist der Stick trotzdem fertig und sagt, was fehlt', async () => {
+  const stick = tempHome('stick-ein3');
+  const src = tempHome('stick-ein3-src');
+  try {
+    makeSource(src.home);
+    const tool = createStick({}); // keine Schleuse
+    const r = await tool.einrichten(stick.home, { sourceRoot: src.home, mitWissen: false, plattformen: ['win-x64', 'darwin-x64'] });
+    const erwartet = ['win-x64', 'darwin-x64'].filter((p) => p !== LOCAL_PLATFORM);
+    assert.deepEqual(r.fehlend.map((f) => f.platform), erwartet);
+    assert.ok(r.fehlend.every((f) => f.grund && f.grund.length > 20), 'ein fehlender Grund ist keine Auskunft');
+    const pruefung = await tool.verify(stick.home);
+    assert.equal(pruefung.ok, true, JSON.stringify(pruefung.problems));
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('einrichten: der eigene Stick bekommt nur fehlende Laufzeiten, das Programm bleibt', async () => {
+  const stick = tempHome('stick-ein4');
+  const src = tempHome('stick-ein4-src');
+  try {
+    makeSource(src.home);
+    const tool = createStick({});
+    await tool.einrichten(stick.home, { sourceRoot: src.home, mitWissen: false, andereSysteme: false });
+    const app = snapshotDir(path.join(stick.home, 'app'));
+    const andere = ['darwin-arm64'].filter((p) => p !== LOCAL_PLATFORM);
+    const { routes } = laufzeitArchive(andere);
+    const mitSchleuse = createStick({ gate: fakeGate(routes) });
+    const r = await mitSchleuse.einrichten(stick.home, { eigenerStick: stick.home, plattformen: andere });
+    assert.equal(r.fall, 'eigener');
+    assert.deepEqual(snapshotDir(path.join(stick.home, 'app')), app, 'das laufende Programm wurde ueberschrieben');
+    for (const p of andere) assert.ok(r.laufzeiten.includes(p));
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+/* ------------------------------------------ Laufwerke finden, auswerfen */
+
+test('findeLaufwerke findet eingehaengte Sticks und sagt ehrlich, wenn keiner da ist', async () => {
+  const stickMod = require('../src/portable/stick');
+  const medien = tempHome('medien');
+  try {
+    const leer = await stickMod.findeLaufwerke({ platform: 'linux', wurzeln: [medien.home], einhaengepunkt: () => true });
+    assert.deepEqual(leer.laufwerke, []);
+    assert.deepEqual(leer.gesucht, [medien.home]);
+
+    // /media/<benutzer>/<stick>: der Benutzerordner ist kein Einhaengepunkt.
+    const benutzer = path.join(medien.home, 'anna');
+    const a = path.join(benutzer, 'USB-STICK');
+    const b = path.join(benutzer, 'NEURAL');
+    fs.mkdirSync(a, { recursive: true });
+    fs.mkdirSync(b, { recursive: true });
+    fs.writeFileSync(path.join(b, 'neural-os.portable'), JSON.stringify({ neuralOsPortable: true, dataDir: 'data' }));
+    const punkte = new Set([a, b]);
+    const r = await stickMod.findeLaufwerke({
+      platform: 'linux', wurzeln: [medien.home], einhaengepunkt: (d) => punkte.has(d), eigenerStick: null,
+    });
+    assert.deepEqual(r.laufwerke.map((l) => l.pfad), [b, a], 'ein Neural-OS-Stick gehoert nach vorn');
+    assert.equal(r.laufwerke[0].istStick, true);
+    assert.equal(r.laufwerke[1].istStick, false);
+    assert.ok(Number.isFinite(r.laufwerke[0].frei));
+
+    // Der Stick, von dem diese Instanz laeuft, rutscht ans Ende.
+    const eigen = await stickMod.findeLaufwerke({
+      platform: 'linux', wurzeln: [medien.home], einhaengepunkt: (d) => punkte.has(d), eigenerStick: b,
+    });
+    assert.equal(eigen.laufwerke[eigen.laufwerke.length - 1].pfad, b);
+    assert.equal(eigen.laufwerke[eigen.laufwerke.length - 1].eigener, true);
+
+    // Windows: ein Netz- oder CD-Laufwerk wird nicht einmal befragt.
+    const win = await stickMod.findeLaufwerke({
+      platform: 'win32',
+      buchstaben: ['D', 'E', 'Z'],
+      klassifiziere: async () => new Map([['D:', { art: 'cd', name: '' }], ['Z:', { art: 'netz', name: 'Schule' }]]),
+    });
+    assert.deepEqual(win.laufwerke, []);
+    assert.deepEqual(win.gesucht, ['D: bis Z:']);
+  } finally {
+    medien.cleanup();
+  }
+});
+
+test('auswerfen: Windows ueber die Shell, nie das Systemlaufwerk, sonst ehrlich', async () => {
+  const stickMod = require('../src/portable/stick');
+  const aufrufe = [];
+  const ps = async (skript) => { aufrufe.push(skript); return { code: 0, stdout: '', stderr: '', error: null }; };
+  const ok = await stickMod.auswerfen('E:\\', { platform: 'win32', ps });
+  assert.equal(ok.ausgeworfen, true);
+  assert.match(aufrufe[0], /Shell\.Application/);
+  assert.match(aufrufe[0], /Namespace\(17\)\.ParseName\(\$ziel\)/);
+  assert.match(aufrufe[0], /\$ziel = 'E:'/);
+  assert.match(aufrufe[0], /Test-Path/, 'ob es geklappt hat, sagt erst der verschwundene Buchstabe');
+
+  const belegt = await stickMod.auswerfen('F:\\', { platform: 'win32', ps: async () => ({ code: 2, stdout: '', stderr: '', error: null }) });
+  assert.equal(belegt.ausgeworfen, false);
+  assert.match(belegt.grund, /nicht freigegeben/);
+
+  const ohne = await stickMod.auswerfen('F:\\', { platform: 'win32', ps: async () => ({ code: null, stdout: '', stderr: '', error: 'ENOENT' }) });
+  assert.equal(ohne.ausgeworfen, false);
+  assert.match(ohne.grund, /PowerShell/);
+
+  const vorher = process.env.SystemDrive;
+  process.env.SystemDrive = 'C:';
+  try {
+    let gerufen = false;
+    const system = await stickMod.auswerfen('C:\\Users\\anna', { platform: 'win32', ps: async () => { gerufen = true; return { code: 0 }; } });
+    assert.equal(system.ausgeworfen, false);
+    assert.equal(gerufen, false, 'das Systemlaufwerk wurde auszuwerfen versucht');
+  } finally {
+    if (vorher === undefined) delete process.env.SystemDrive; else process.env.SystemDrive = vorher;
+  }
+
+  const mac = [];
+  const r = await stickMod.auswerfen('/Volumes/STICK', { platform: 'darwin', run: async (cmd, args) => { mac.push([cmd, ...args]); return { code: 0 }; } });
+  assert.equal(r.ausgeworfen, true);
+  assert.deepEqual(mac[0], ['diskutil', 'eject', '/Volumes/STICK']);
+
+  const lin = [];
+  const l = await stickMod.auswerfen('/media/anna/STICK', { platform: 'linux', run: async (cmd) => { lin.push(cmd); return { code: 0 }; } });
+  assert.equal(l.ausgeworfen, null, 'unter Linux wird nichts ausgeworfen -- und das wird nicht behauptet');
+  assert.deepEqual(lin, ['sync']);
+});
+
+/* ------------------------------------------------- die neuen HTTP-Tueren */
+
+/**
+ * Eine ganze Anwendung (createApp), weil "Jetzt sichern" die Sicherung und
+ * "Beenden" den ganzen Abbau braucht -- nicht nur den Server.
+ */
+async function withApp(fn) {
+  const { createApp, seedIfEmpty } = require('../src/app');
+  const home = tempHome('stick-app');
+  const app = await createApp({ home: home.home, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false });
+  await seedIfEmpty(app);
+  const server = await app.listen();
+  const base = `http://127.0.0.1:${server.server.address().port}`;
+  const req = (method, urlPath, body) => httpRequest(base, method, urlPath, body);
+  try {
+    await fn({ app, req, home: home.home });
+  } finally {
+    await app.close().catch(() => {});
+    home.cleanup();
+  }
+}
+
+test('HTTP: Laufwerke, Plan und ein Klick "Stick vorbereiten" mit einmaliger Erlaubnis', async () => {
+  await withApp(async ({ app, req }) => {
+    const medien = tempHome('stick-http-medien');
+    const ziel = path.join(medien.home, 'USB-STICK');
+    fs.mkdirSync(ziel);
+    const stickMod = require('../src/portable/stick');
+    app.findeLaufwerke = (opts) => stickMod.findeLaufwerke({ ...opts, platform: 'linux', wurzeln: [medien.home], einhaengepunkt: () => true });
+    // Kein Test geht ins Netz: das Stick-Werkzeug holt seine Laufzeiten aus
+    // einer Tabelle. Die Freigabe dagegen legt die ECHTE Schleuse an.
+    const andere = stickMod.ZIEL_PLATTFORMEN.filter((p) => p !== LOCAL_PLATFORM);
+    const { routes } = laufzeitArchive(andere);
+    app.stick = createStick({ gate: fakeGate(routes), paths: app.paths, config: app.config });
+    try {
+      const lw = await req('GET', '/api/stick/laufwerke');
+      assert.equal(lw.status, 200, lw.text);
+      assert.deepEqual(lw.json.laufwerke.map((l) => l.pfad), [ziel]);
+
+      const plan = await req('GET', `/api/stick/plan?path=${encodeURIComponent(ziel)}`);
+      assert.equal(plan.status, 200, plan.text);
+      assert.equal(plan.json.fall, 'neu');
+      assert.equal(plan.json.download.noetig, true);
+      assert.equal(plan.json.download.erlaubt, false, 'der Netzmodus ab Werk erlaubt nodejs.org nicht');
+      assert.deepEqual(fs.readdirSync(ziel), [], 'der Plan hat etwas geschrieben');
+
+      // "Erlauben": die Schleuse bekommt genau eine, enge Freigabe -- und
+      // nach dem Vorgang ist sie zurueckgezogen.
+      const lauf = await req('POST', '/api/stick/einrichten', { path: ziel, erlaubnis: true });
+      assert.equal(lauf.status, 200, lauf.text);
+      const arten = lauf.events.map((e) => e.event);
+      assert.ok(arten.includes('fertig'), `kein Abschluss: ${arten.join(',')} ${lauf.text.slice(0, 300)}`);
+      const fertig = lauf.events.find((e) => e.event === 'fertig').data;
+      assert.equal(fertig.fall, 'neu');
+      assert.equal(fertig.wissen, 'kopiert');
+      assert.ok(fertig.laufzeiten.includes(LOCAL_PLATFORM));
+      for (const p of andere) assert.ok(fertig.laufzeiten.includes(p), `${p} fehlt: ${JSON.stringify(fertig.fehlend)}`);
+      assert.deepEqual(fertig.fehlend, []);
+      const prozente = lauf.events.filter((e) => e.event === 'fortschritt').map((e) => e.data.percent);
+      assert.equal(prozente[prozente.length - 1], 100);
+      for (let i = 1; i < prozente.length; i++) assert.ok(prozente[i] >= prozente[i - 1]);
+      assert.ok(fs.readdirSync(path.join(ziel, 'data')).length > 0, 'das Wissen kam nicht mit');
+
+      const freigaben = app.store.all ? app.store.all('grant') : app.store.list('grant').items;
+      const unsere = freigaben.filter((g) => g.data.scope === stickMod.RUNTIME_SCOPE);
+      assert.equal(unsere.length, 1, 'es wurde nicht genau eine Freigabe angelegt');
+      assert.deepEqual(unsere[0].data.hosts, ['nodejs.org']);
+      assert.equal(unsere[0].data.revoked, true, 'die Freigabe blieb nach dem Vorgang stehen');
+      assert.ok(Date.parse(unsere[0].data.expiresAt) - Date.now() <= 31 * 60 * 1000, 'die Freigabe gilt zu lange');
+
+      // Ohne "Erlauben" wird keine Freigabe angelegt.
+      const nochmal = await req('POST', '/api/stick/einrichten', { path: ziel, andereSysteme: false });
+      assert.equal(nochmal.status, 200, nochmal.text);
+      const danach = (app.store.all ? app.store.all('grant') : app.store.list('grant').items)
+        .filter((g) => g.data.scope === stickMod.RUNTIME_SCOPE);
+      assert.equal(danach.length, 1);
+      assert.equal(nochmal.events.find((e) => e.event === 'fertig').data.fall, 'erneuern');
+    } finally {
+      medien.cleanup();
+    }
+  });
+});
+
+test('HTTP: "Jetzt sichern" schreibt auf den Stick, sonst in den Sicherungsordner', async () => {
+  await withApp(async ({ app, req }) => {
+    const stick = tempHome('stick-sichern');
+    try {
+      const vorher = await req('GET', `/api/stick/sicherung?path=${encodeURIComponent(stick.home)}`);
+      assert.equal(vorher.status, 200, vorher.text);
+      assert.equal(vorher.json.ziel.art, 'stick');
+      assert.equal(vorher.json.letzte, null);
+
+      const r = await req('POST', '/api/stick/sichern', { path: stick.home });
+      assert.equal(r.status, 200, r.text);
+      assert.ok(r.json.dir.startsWith(path.join(stick.home, 'Sicherungen')), r.json.dir);
+      assert.ok(fs.existsSync(path.join(r.json.dir, 'manifest.json')), 'keine echte Sicherung auf dem Stick');
+      const pruefung = await app.backup.verify(r.json.dir);
+      assert.equal(pruefung.ok, true, JSON.stringify(pruefung.problems));
+
+      const danach = await req('GET', `/api/stick/sicherung?path=${encodeURIComponent(stick.home)}`);
+      assert.equal(danach.json.letzte.dir, r.json.dir);
+      assert.equal(danach.json.letzte.art, 'stick');
+
+      // Ohne Stick: der Sicherungsordner dieser Installation.
+      const ohne = await req('POST', '/api/stick/sichern', {});
+      assert.equal(ohne.status, 200, ohne.text);
+      assert.equal(ohne.json.ziel.art, 'ordner');
+      assert.ok(ohne.json.dir.startsWith(app.paths.exports));
+
+      // Ein Stick, der nicht (mehr) steckt, wird nicht still durch einen
+      // anderen Ort ersetzt.
+      const weg = await req('POST', '/api/stick/sichern', { path: path.join(stick.home, 'gibt-es-nicht') });
+      assert.equal(weg.status, 404, weg.text);
+      assert.match(weg.json.error.message, /finde ich nicht/);
+      assert.ok(!/not found/.test(weg.json.error.message));
+    } finally {
+      stick.cleanup();
+    }
+  });
+});
+
+test('HTTP: "Beenden & abziehen" speichert, antwortet, und schliesst erst danach', async () => {
+  await withApp(async ({ app, req }) => {
+    const stickMod = require('../src/portable/stick');
+    const stick = tempHome('stick-beenden');
+    let beendet = 0;
+    const ausgeworfen = [];
+    app.beenden = () => { beendet++; };
+    app.auswerfen = async (root) => { ausgeworfen.push(root); return { ausgeworfen: true, wie: 'test', grund: null }; };
+    try {
+      // Laeuft gerade ein Vorgang auf irgendeinem Stick: nichts passiert.
+      const frei = stickMod.lockRoot(path.join(stick.home, 'anderer'), 'Stick vorbereiten');
+      const belegt = await req('POST', '/api/stick/beenden', { path: stick.home });
+      frei();
+      assert.equal(belegt.status, 409, belegt.text);
+      assert.match(belegt.json.error.message, /Warte/);
+      await new Promise((r) => { setTimeout(r, 300); });
+      assert.equal(beendet, 0, 'trotz laufendem Vorgang beendet');
+
+      const note = app.store.create('note', { title: 'Kurz vor dem Abziehen', body: 'muss auf die Platte' });
+      const r = await req('POST', '/api/stick/beenden', { path: stick.home });
+      assert.equal(r.status, 200, r.text);
+      assert.equal(r.json.gespeichert, true);
+      assert.equal(r.json.vomStick, false);
+      assert.equal(r.json.auswurf.ausgeworfen, true);
+      assert.deepEqual(ausgeworfen, [path.resolve(stick.home)]);
+      await new Promise((res) => { setTimeout(res, 400); });
+      assert.equal(beendet, 1, 'nach der Antwort wurde nicht beendet');
+      const log = fs.readdirSync(path.join(app.paths.home, 'vault', 'log'))
+        .map((f) => fs.readFileSync(path.join(app.paths.home, 'vault', 'log', f), 'utf8')).join('');
+      assert.ok(log.includes(note.id), 'die letzte Notiz steht nicht im Protokoll auf der Platte');
+
+      // Das Laufwerk, auf dem das Programm liegt, wird nie ausgeworfen.
+      ausgeworfen.length = 0;
+      const programm = await req('POST', '/api/stick/beenden', { path: path.parse(__dirname).root });
+      assert.equal(programm.status, 200, programm.text);
+      assert.equal(programm.json.auswurf, null);
+      assert.deepEqual(ausgeworfen, []);
+    } finally {
+      stick.cleanup();
+    }
+  });
 });
 
 module.exports = { name: 'stick', tests: drain() };

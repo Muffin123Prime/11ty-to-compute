@@ -66,15 +66,11 @@ if [ ! -f "$NODE" ]; then
     echo "  Betriebssystem oder einer anderen Prozessorarchitektur vorbereitet."
     echo ""
     echo "  So legst du die fehlende Laufzeit nach:"
-    echo "    1. Stick in einen Mac stecken, auf dem Neural OS schon läuft."
-    echo "       Dort in der Seitenleiste den Bereich \"Stick\" öffnen (oder"
-    echo "       g dann t), den Pfad des Sticks eintragen und unter \"Welche"
-    echo "       Rechner der Stick starten kann\" bei diesem System auf"
-    echo "       \"Jetzt kopieren\" klicken. Das braucht kein Internet."
-    echo "    2. Oder: auf einem Rechner MIT Internet denselben Bereich öffnen"
-    echo "       und dort die Laufzeit \"$PLAT\" holen; sie wird dann als"
-    echo "       offizielles Node-Paket geladen und geprüft."
-    echo "    3. Oder: Node.js ab Version 20 installieren (nodejs.org) und in"
+    echo "    1. Stick an einem Rechner mit Neural OS und Internet einstecken."
+    echo "       Dort unter Einstellungen -> Stick noch einmal auf"
+    echo "       \"Stick vorbereiten\" tippen und \"Erlauben\" wählen. Dein Wissen"
+    echo "       auf dem Stick bleibt dabei, wie es ist."
+    echo "    2. Oder: Node.js ab Version 20 installieren (nodejs.org) und in"
     echo "       diesem Ordner ausführen:"
     echo "           node app/bin/neural-os.js start --open"
     echo ""
@@ -88,10 +84,9 @@ if [ ! -f "$DIR/app/bin/neural-os.js" ]; then
   echo "  Gesucht wurde:  $DIR/app/bin/neural-os.js"
   echo ""
   echo "  Das passiert, wenn der Stick während des Kopierens abgezogen wurde."
-  echo "  Stecke ihn in den Rechner, auf dem du ihn vorbereitet hast, und rufe"
-  echo "  dort im Bereich \"Stick\" erst \"Stick prüfen\" und dann"
-  echo "  \"Nur Programm erneuern\" auf. Deine Daten in \"data\" sind davon"
-  echo "  nicht betroffen - die werden beim Erneuern nie angefasst."
+  echo "  Stecke ihn an einem Rechner mit Neural OS ein und tippe dort unter"
+  echo "  Einstellungen -> Stick auf \"Stick vorbereiten\". Deine Daten in"
+  echo "  \"data\" sind davon nicht betroffen - die werden dabei nie angefasst."
   echo ""
   halt 1
 fi
@@ -128,7 +123,8 @@ echo "  Laufzeit:  $USED"
 echo "  Daten:     $DIR/data"
 echo ""
 echo "  Gleich öffnet sich dein Browser. Dieses Fenster bitte offen lassen -"
-echo "  solange es offen ist, läuft Neural OS. Beenden mit Strg+C."
+echo "  solange es offen ist, läuft Neural OS. Zum Aufhören in Neural OS"
+echo "  unter Einstellungen -> Stick auf \"Beenden & abziehen\" tippen."
 echo ""
 
 NEURAL_OS_HOME="$DIR/data"
@@ -148,6 +144,12 @@ if [ "$CODE" -ne 0 ]; then
   halt "$CODE"
 fi
 
+# Sauber beendet: nicht mehr auf die Eingabetaste warten. Solange dieses
+# Skript lebt, liegt sein Arbeitsverzeichnis auf dem Stick, und das System
+# meldet ihn beim Auswerfen als "in Verwendung". Also weg vom Stick und Ende.
+cd / 2>/dev/null || true
 echo ""
-echo "  Neural OS wurde beendet."
-halt 0
+echo "  Neural OS wurde beendet. Alles ist gespeichert."
+echo "  Jetzt kannst du den Stick abziehen."
+echo ""
+exit 0

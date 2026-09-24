@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { layout } = require('../kernel/paths');
+const schema = require('./schema');
 const {
   NeuralError,
   ValidationError,
@@ -93,7 +94,7 @@ const TITLE_MAX = 60;
  * costume of a convenience.
  */
 const UNDOABLE_TYPES = new Set([
-  'note', 'chat', 'project', 'task', 'agent', 'file', 'entity', 'memory', 'schedule', 'trigger',
+  'note', 'chat', 'project', 'task', 'event', 'agent', 'file', 'entity', 'memory', 'schedule', 'trigger',
 ]);
 
 /** German names for the types above, for the label the user reads. */
@@ -102,6 +103,10 @@ const TYPE_LABELS = {
   chat: 'Chat',
   project: 'Projekt',
   task: 'Aufgabe',
+  // Termine legt die KI von selbst an ("Dienstag um 10 Zahnarzt"). Was sie
+  // von selbst tut, muss man zuruecknehmen koennen -- sonst traut sich
+  // niemand, sie machen zu lassen.
+  event: 'Termin',
   agent: 'Agent',
   file: 'Datei',
   entity: 'Begriff',
@@ -116,6 +121,7 @@ const TITLE_FIELDS = {
   chat: 'title',
   project: 'name',
   task: 'title',
+  event: 'title',
   agent: 'name',
   file: 'name',
   entity: 'name',
@@ -130,6 +136,44 @@ const REASON_UNDONE = 'Diese Änderung wurde bereits rückgängig gemacht.';
 const REASON_GONE = 'Der Eintrag existiert nicht mehr.';
 
 const NOOP_LOGGER = { error() {}, warn() {}, info() {}, debug() {} };
+
+/* ---------------------------------------------------------------- groups */
+
+/**
+ * Mehrere Schreibvorgaenge, die EINE Entscheidung des Nutzers sind.
+ *
+ * "Nur diesen Dienstag verschieben" schreibt zweimal: die Serie bekommt den
+ * Tag als Ausnahme, und ein neuer Einzeltermin entsteht. Wuerde "rueckgaengig"
+ * nur eine Haelfte zuruecknehmen, stuende danach entweder das Training
+ * doppelt da oder gar nicht mehr -- beides ist schlimmer als kein Knopf.
+ * Deshalb tragen alle Eintraege, die waehrend `gemeinsam(fn)` entstehen,
+ * dieselbe Gruppe, und `undo()` nimmt die Gruppe als Ganzes zurueck.
+ *
+ * Warum eine Variable auf Modulebene und kein Parameter: der Bus ist
+ * synchron, jeder Eintrag entsteht also INNERHALB des Speicheraufrufs, der
+ * ihn ausloest, und damit innerhalb von `fn`. Der Aufrufer (die Termin-Route,
+ * das Werkzeug der KI) braucht dafuer keinen Zugriff auf den Verlauf selbst.
+ * Nur synchron: ein `await` in `fn` liesse fremde Schreibvorgaenge in die
+ * Gruppe rutschen, darum wird ein zurueckgegebenes Versprechen abgelehnt.
+ */
+let offeneGruppe = null;
+let gruppenZaehler = 0;
+
+function gemeinsam(fn) {
+  if (typeof fn !== 'function') throw new ValidationError('gemeinsam() braucht eine Funktion.');
+  if (offeneGruppe) return fn(); // verschachtelt: gehoert zur aeusseren Gruppe
+  gruppenZaehler += 1;
+  offeneGruppe = `g${Date.now().toString(36)}${gruppenZaehler.toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  try {
+    const result = fn();
+    if (result && typeof result.then === 'function') {
+      throw new ValidationError('gemeinsam() nimmt nur synchrone Funktionen.');
+    }
+    return result;
+  } finally {
+    offeneGruppe = null;
+  }
+}
 
 /* ----------------------------------------------------------------- utils */
 
@@ -375,6 +419,7 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
       actor: isPlainObject(raw.actor) ? raw.actor : { kind: 'user' },
       undone: raw.undone === true,
       undoneAt: typeof raw.undoneAt === 'string' ? raw.undoneAt : null,
+      gruppe: typeof raw.gruppe === 'string' ? raw.gruppe : null,
     };
   }
 
@@ -443,6 +488,7 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
     if (entry.rev !== null) line.rev = entry.rev;
     if (entry.fromRev !== null) line.fromRev = entry.fromRev;
     if (entry.undoneAt) line.undoneAt = entry.undoneAt;
+    if (entry.gruppe) line.gruppe = entry.gruppe;
     return line;
   }
 
@@ -536,6 +582,7 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
       actor: actorOf(data, patch, eventActor),
       undone: false,
       undoneAt: null,
+      gruppe: offeneGruppe,
     };
 
     appendLine(toLine(entry));
@@ -610,6 +657,19 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
     const before = {};
     for (const [key, value] of Object.entries(payload.before)) {
       if (value !== undefined) before[key] = clone(value);
+    }
+    // Ein Termin von gestern kennt die Felder `recurrence`, `exdates` und
+    // `reminder` noch nicht. Bekommt er heute eine Wiederholung, war das
+    // Feld vorher nicht "leer", sondern "keine Wiederholung" -- genau das,
+    // was die Vorgabe im Schema sagt. Ohne diesen Ersatz liesse sich die
+    // Serie nicht zuruecknehmen (der Speicher kann ein Feld nur setzen, nicht
+    // entfernen), und aus einem einmaligen Termin bliebe fuer immer eine Serie.
+    if (payload.record.type === 'event') {
+      const felder = schema.FIELDS.event || {};
+      for (const key of Object.keys(payload.before)) {
+        if (payload.before[key] !== undefined || !felder[key] || felder[key].default === undefined) continue;
+        before[key] = clone(felder[key].default);
+      }
     }
     record('update', {
       id: payload.record.id,
@@ -803,20 +863,20 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
     }
   }
 
-  async function undo(entryId, opts = {}) {
-    const entry = findEntry(entryId);
-    const force = isPlainObject(opts) && opts.force === true;
-    const state = undoability(entry);
+  /**
+   * Die Eintraege, die mit `entry` zusammen zurueckgenommen werden: die ganze
+   * Gruppe (siehe `gemeinsam()`), juengster zuerst -- die Umkehrung laeuft
+   * rueckwaerts, wie beim Abbau eines Geruests.
+   */
+  function gliederVon(entry) {
+    if (!entry.gruppe) return [entry];
+    return entries
+      .filter((e) => e.gruppe === entry.gruppe && (e === entry || !e.undone))
+      .sort((a, b) => b.seq - a.seq);
+  }
 
-    if (!state.canUndo) {
-      // `force` answers exactly one question -- "ja, ich weiß, dass seitdem
-      // etwas anderes passiert ist" -- and nothing else. An entry that is
-      // already undone, or whose record is gone, has no inverse left to force.
-      const forceable = state.current !== null && !entry.undone && UNDOABLE_TYPES.has(entry.type);
-      if (!force || !forceable) throw refuse(state.reason, { seq: entry.seq, id: entry.id, force: forceable });
-      log.warn(`Verlaufseintrag ${entry.seq} wird trotz neuerer Aenderung zurueckgenommen (force).`);
-    }
-
+  /** Die echte Umkehrung eines Eintrags, am Journal vorbei. */
+  function umkehren(entry) {
     let applied;
     switch (entry.op) {
       case 'create': {
@@ -879,9 +939,43 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
     }
 
     markUndone(entry);
+    return applied;
+  }
+
+  async function undo(entryId, opts = {}) {
+    const entry = findEntry(entryId);
+    const force = isPlainObject(opts) && opts.force === true;
+    const glieder = gliederVon(entry);
+
+    // Erst ALLE pruefen, dann schreiben: eine halb zurueckgenommene Gruppe
+    // ist genau der Zustand, den die Gruppe verhindern soll.
+    for (const glied of glieder) {
+      const state = undoability(glied);
+      if (state.canUndo) continue;
+      // `force` answers exactly one question -- "ja, ich weiß, dass seitdem
+      // etwas anderes passiert ist" -- and nothing else. An entry that is
+      // already undone, or whose record is gone, has no inverse left to force.
+      const forceable = state.current !== null && !glied.undone && UNDOABLE_TYPES.has(glied.type);
+      if (!force || !forceable) {
+        const reason = glieder.length > 1 && glied !== entry
+          ? `${state.reason} (Diese Änderung bestand aus ${glieder.length} Schritten und wird nur als Ganzes zurückgenommen.)`
+          : state.reason;
+        throw refuse(reason, { seq: glied.seq, id: glied.id, force: forceable });
+      }
+      log.warn(`Verlaufseintrag ${glied.seq} wird trotz neuerer Aenderung zurueckgenommen (force).`);
+    }
+
+    let applied = null;
+    const mitgenommen = [];
+    for (const glied of glieder) {
+      const ergebnis = umkehren(glied);
+      if (glied === entry) applied = ergebnis;
+      else mitgenommen.push({ entry: clone(toLine(glied)), applied: ergebnis });
+    }
     const result = { entry: clone(toLine(entry)), applied };
+    if (mitgenommen.length) result.mitgenommen = mitgenommen;
     publish('history.undone', result);
-    log.info(`Rueckgaengig: ${entry.label} (Eintrag ${entry.seq}).`);
+    log.info(`Rueckgaengig: ${entry.label} (Eintrag ${entry.seq}${mitgenommen.length ? ` und ${mitgenommen.length} weitere` : ''}).`);
     return result;
   }
 
@@ -947,6 +1041,7 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
 
 module.exports = {
   createHistory,
+  gemeinsam,
   UNDOABLE_TYPES,
   DEFAULT_MAX_ENTRIES,
   DEFAULT_MAX_DAYS,

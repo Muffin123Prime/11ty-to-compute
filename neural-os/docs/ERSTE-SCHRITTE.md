@@ -6,16 +6,19 @@ Abweichende jeweils darunter.
 
 Was am Ende dasteht:
 
-* Neural OS läuft auf deinem Windows-Rechner.
-* Ein USB-Stick, den du in jeden anderen Windows-Rechner stecken kannst —
-  doppelklicken, und dein System ist da, mit allen Notizen, ohne Installation.
+* Neural OS läuft auf deinem Windows-Rechner, und Claude antwortet im Chat.
+* Ein USB-Stick, den du in jeden anderen Windows-Rechner (und in einen Mac)
+  stecken kannst — doppelklicken, und dein System ist da, mit allem, was es
+  über dich weiß, ohne Installation.
 * Dein iPad zeigt dieselbe Oberfläche über dein WLAN.
 * Eine Sicherung, mit der du auf einem neuen Rechner wieder da anfängst, wo du
   aufgehört hast.
 
-**Kosten: keine.** Keine Domain, kein Server, kein Abo. Alles läuft auf deinen
-eigenen Geräten unter `127.0.0.1`, und das iPad erreicht den Rechner über dein
-WLAN, nicht über das Internet.
+**Kosten:** Neural OS selbst kostet nichts — keine Domain, kein Server, kein
+Abo. Es läuft auf deinen eigenen Geräten unter `127.0.0.1`, und das iPad
+erreicht den Rechner über dein WLAN. Die KI ist Claude von Anthropic; sie
+braucht Internet und einen eigenen Schlüssel, und was Claude kostet, rechnet
+Anthropic nach Verbrauch mit dir ab.
 
 ---
 
@@ -85,32 +88,24 @@ das Programm; deine Daten bleiben natürlich da.
 > **Mac:** Finder → Ordner → Rechtsklick → „Neues Terminal beim Ordner", dann
 > `npm start`. **Linux:** Terminal im Ordner öffnen, `npm start`.
 
-### 1.4 Ein Modell installieren (damit der Chat antwortet)
+### 1.4 Claude verbinden (damit der Chat antwortet)
 
-Neural OS erfindet keine Antworten. Ohne ein Sprachmodell auf dem Rechner sagt
-der Chat genau das — Notizen, Graph, Suche, Aufgaben und alles andere
-funktionieren trotzdem vollständig.
+Neural OS erfindet keine Antworten. Ohne Claude sagt der Chat genau das —
+Notizen, Kalender, Projekte und das Gehirn funktionieren trotzdem vollständig.
 
 Für Antworten:
 
-1. <https://ollama.com/download> → Windows. Darfst du nichts installieren,
-   nimm statt des Installers die ZIP-Fassung (auf derselben Seite bzw. unter
-   „Releases" die Datei `ollama-windows-amd64.zip`), entpacke sie irgendwohin
-   und starte darin `ollama app.exe` — auch das braucht keinen Administrator.
-2. Eingabeaufforderung öffnen (Explorer → in den Ollama-Ordner → oben in die
-   Adressleiste `cmd` tippen) und eintippen:
+1. Auf <https://console.anthropic.com> ein Konto anlegen und unter
+   **API Keys** einen Schlüssel erzeugen. Er beginnt mit `sk-ant-`.
+2. In Neural OS auf **Einstellungen → Claude verbinden**, den Schlüssel
+   einfügen, bestätigen. Neural OS probiert ihn einmal kurz aus und sagt,
+   ob er geht.
+3. Unten links steht danach **Online verbunden**.
 
-   ```
-   ollama pull llama3.2
-   ```
-
-   Das lädt rund 2 GB. Läuft auf fast jedem Rechner.
-   Mehr Leistung, ab 16 GB Arbeitsspeicher: `ollama pull qwen2.5:7b` (~4,7 GB).
-3. Neural OS findet Ollama von allein auf `127.0.0.1:11434`. Oben rechts wird
-   aus „Kein Modell" der Modellname.
-
-Das ist **kein** Internetzugriff im Sinne der Netzschleuse: das Modell läuft auf
-deinem Rechner. Du kannst danach das Netzwerkkabel ziehen und weiterarbeiten.
+Der Schlüssel liegt in deinem Tresor — also auch auf dem Stick, wenn du ihn
+vorbereitest. Er reist mit, du musst ihn an keinem anderen Rechner noch
+einmal eintippen. Claude braucht Internet; ohne Netz siehst du alles, was du
+hast, bekommst aber keine neuen Antworten.
 
 ---
 
@@ -118,34 +113,38 @@ deinem Rechner. Du kannst danach das Netzwerkkabel ziehen und weiterarbeiten.
 
 Voraussetzung: Neural OS läuft nach Teil 1.
 
-**Der Stick muss exFAT oder NTFS sein, nicht FAT32.** Auf FAT32 passt keine
-Datei über 4 GB — und ein Sprachmodell ist meistens eine. Ohne Modell reicht
-FAT32; mit Modell nicht. Wie der Stick formatiert ist, sagt dir Neural OS im
-Bereich **Stick**, nachdem du den Pfad eingetippt hast.
+1. Stick einstecken.
+2. In Neural OS auf **Einstellungen → Stick**. Oben steht schon, welcher
+   Stick gefunden wurde (unter Windows `E:\` oder ein anderer Buchstabe).
+   Steht dort „Kein Stick gefunden", auf **Neu suchen** tippen oder den Ort
+   von Hand eintragen.
+3. **Stick vorbereiten** tippen.
+4. Einmal kommt die Frage, ob Neural OS für Windows und Mac die Laufzeit von
+   nodejs.org holen darf. **Erlauben** — dann startet der Stick an beiden.
+   **Nur Windows** geht ohne Internet; dann startet er nur an Windows-Rechnern.
+5. Der Balken läuft durch. Danach steht da: „Der Stick ist fertig."
 
-1. Stick einstecken. Im Explorer nachsehen, welchen Buchstaben er bekommen hat,
-   zum Beispiel `E:`.
-2. In Neural OS links auf **Stick**.
-3. Bei „Pfad zum Stick" eintippen: `E:\`
-4. **Erst ansehen** drücken. Jetzt wird nichts geschrieben — es steht nur da,
-   wie viele Dateien kämen, wie viel Platz sie brauchen, wie viel frei ist, und
-   was dagegen spricht.
-5. Häkchen bei **Meinen Datenbestand mitnehmen** setzen, wenn deine Notizen mit
-   auf den Stick sollen. Das Original auf dem Rechner bleibt unverändert.
-6. **Stick vorbereiten** drücken.
+Auf den Stick kommen das Programm, die Laufzeit (deshalb muss auf dem fremden
+Rechner nichts installiert sein) und dein Wissen — Notizen, Chats, Termine,
+Projekte und dein Claude-Schlüssel. Das Original auf dem Rechner bleibt, wie
+es ist.
+
+Liegt auf dem Stick schon Wissen (du hast ihn woanders weiterbenutzt), wird es
+**nicht** überschrieben: „Stick vorbereiten" erneuert dann nur das Programm und
+legt fehlende Laufzeiten dazu.
 
 Danach liegt auf dem Stick:
 
 ```
 E:\
   Neural OS starten.bat        ← Windows: doppelklicken
-  Neural OS starten.command    ← macOS: doppelklicken
+  Neural OS starten.command    ← Mac: beim ersten Mal Rechtsklick → Öffnen
   Neural OS starten.sh         ← Linux
   LIESMICH.txt
-  app\        das Programm
-  runtime\    Node — deshalb braucht der fremde PC nichts
-  data\       DEINE DATEN
-  models\     das Sprachmodell, falls du es mitnimmst
+  app\          das Programm
+  runtime\      die Laufzeit — deshalb braucht der fremde PC nichts
+  data\         DEIN WISSEN
+  Sicherungen\  was „Jetzt sichern" hier ablegt
 ```
 
 ### Den Stick benutzen
@@ -155,18 +154,14 @@ doppelklicken. Es öffnet sich ein Fenster und danach der Browser mit deinem
 System. Fenster offen lassen, solange du arbeitest.
 
 Alles, was du auf diesem fremden Rechner schreibst, landet auf dem Stick — nicht
-auf dem fremden Rechner. Stick abziehen, in einen anderen stecken, weiterarbeiten.
+auf dem fremden Rechner.
 
-### Auch für den Mac
+### Aufhören
 
-Mitkopiert wird immer nur die Node-Laufzeit **des Rechners, an dem du den Stick
-vorbereitest**. Soll derselbe Stick auch an einem Mac starten, brauchst du
-einmalig Internet: im Bereich **Stick** die fehlende Plattform hinzufügen. Der
-Download geht durch die Netzschleuse, du musst ihn also ausdrücklich erlauben.
-
-Für das **Sprachmodell** gilt das nicht — das kann Neural OS nicht
-herunterladen. Dafür brauchst du einmal einen Mac, an dem du denselben Schritt
-„Modell mitnehmen" ausführst.
+**Einstellungen → Stick → Beenden & abziehen.** Neural OS speichert alles,
+schließt sich und sagt dann: **„Jetzt kannst du den Stick abziehen."** Läuft
+Neural OS nicht vom Stick, sondern vom Laptop, wirft es den Stick unter Windows
+dabei auch gleich aus.
 
 ---
 
@@ -236,36 +231,28 @@ bis das fertig ist, sind einige Knöpfe kleiner, als sie sein sollten.
 
 ## Teil 4 · Sicherung
 
-Der Fall, um den es geht: der Rechner ist weg, und du willst auf einem neuen
-genau da weitermachen, wo du aufgehört hast.
+Der Fall, um den es geht: der Rechner oder der Stick ist weg, und du willst
+auf einem neuen genau da weitermachen, wo du aufgehört hast.
 
-**Sichern:** links auf **Sicherung** → Ziel wählen → **Jetzt sichern**.
-Als Ziel den Stick nehmen oder eine zweite Festplatte — nicht den Ordner auf
-demselben Rechner, denn der ist im Schadensfall mit weg. Danach steht dort, wie
-viele Sätze gesichert wurden und wo sie liegen.
+**Sichern:** **Einstellungen → Stick → Jetzt sichern.** Steckt ein Stick, landet
+die Sicherung auf dem Stick (Ordner `Sicherungen`), sonst im Sicherungsordner
+von Neural OS. Daneben steht, wann zuletzt gesichert wurde. Jede Sicherung ist
+ein eigener Ordner mit Datum; eine ältere wird nie überschrieben.
 
-**Prüfen:** in der Liste bei der Sicherung auf **Prüfen**. Das liest jede Datei
-und vergleicht ihre Prüfsumme — erst danach weißt du, dass die Sicherung
-vollständig ist.
+Am besten liegt eine Sicherung nicht nur da, wo auch das Original liegt: sichere
+vom Laptop auf den Stick — und ab und zu vom Stick auf den Laptop.
 
-**Wiederherstellen auf einem neuen Rechner:** Teil 1 durchführen, dann
-**Sicherung** → Pfad der Sicherung eintragen → **Vorschau**. Dort steht, was
-kommt und was verschwindet, bevor irgendetwas geschrieben wird. Für einen
-wirklich frischen Rechner ist **„Alles ersetzen"** richtig: die
-Erstausstattung fliegt raus und dein Stand kommt an ihre Stelle.
+**Wiederherstellen:** darunter, klein, **Von einer Sicherung wiederherstellen**.
+Sicherung antippen — Neural OS zeigt erst, was passieren würde („geschrieben
+ist noch nichts"), dann **Wiederherstellen**. Für einen frischen Rechner ist
+**Alles ersetzen** richtig.
 
-Zwei Dinge reisen bewusst **nicht** mit:
+Zwei Dinge reisen bewusst **nicht** mit: Zugangstoken fürs lokale Netz (am
+neuen Gerät neu erzeugen) und der Netzmodus.
 
-* **Zugangstoken.** Das sind Zugangsdaten eines bestimmten Geräts, kein Wissen.
-  Am neuen Gerät erzeugst du neue.
-* **Der Netzmodus.** Er wird angezeigt, aber nicht gesetzt — eine Sicherung von
-  einem Online-Gerät soll ein bewusst offline gehaltenes nicht stillschweigend
-  öffnen.
-
-Und: eine Sicherung liegt standardmäßig **im Klartext**, auch wenn dein Tresor
-verschlüsselt ist. Der Bereich sagt das an Ort und Stelle. Wenn du sie irgendwo
-hinlegst, wo andere hinkommen, setz eine eigene Passphrase — aber merk sie dir,
-denn ohne sie ist die Sicherung dann wertlos.
+Eine Sicherung liegt **im Klartext**. Wer den Stick findet, kann sie lesen —
+genau wie den Ordner `data`. Schalte deshalb in den Einstellungen die
+Verschlüsselung ein.
 
 ---
 
@@ -293,7 +280,8 @@ moderne CSS-Einheiten). Die Seite bliebe dort schlicht leer.
 **Warum es nicht „rein im Browser" geht:** Neural OS läuft absichtlich nicht
 bei einem Anbieter im Internet, sondern nur bei dir. Ein reines Browser-Angebot
 wäre entweder ein fremder Server (dann lägen deine Daten dort) oder ein
-Programm ohne Speicher und ohne Modell. Das Programm muss also auf einem Gerät
+Programm ohne Speicher. Claude beantwortet zwar online deine Fragen, aber was
+Neural OS über dich weiß, liegt bei dir. Das Programm muss also auf einem Gerät
 laufen, das dir gehört — aber es muss dort nicht *installiert* werden. Genau
 dafür ist Teil 1 so gebaut.
 
@@ -310,14 +298,12 @@ Terminal im Ordner `neural-os`:
 
 Ehrlichkeitshalber, damit du nicht danach suchst:
 
-* **Das Modell auf dem Stick** ist im Bau. Bis es fertig ist, reist dein Wissen
-  mit, aber die Antworten nicht: auf einem fremden Rechner ohne Ollama siehst du
-  alles, bekommst aber keine Chat-Antwort.
-* **Das Design** ist noch nicht überarbeitet.
-* Der Doppelklick-Starter für Windows ist neu und konnte hier nur gelesen, nicht
-  auf einem echten Windows ausgeführt werden. Wenn er bei dir etwas anderes
-  sagt als oben beschrieben: Screenshot schicken.
-* **Die Fingerbedienung auf dem iPad** ist noch nicht fertig — rund die Hälfte
-  der Knöpfe ist kleiner als das, was Apple für einen Finger empfiehlt.
+* Die Starter für Windows und Mac konnten hier nur gelesen, nicht auf einem
+  echten Windows oder Mac ausgeführt werden — ebenso das Auswerfen des Sticks.
+  Wenn dort etwas anderes steht als oben beschrieben: Screenshot schicken.
+* Laufzeiten für Windows und Mac holt „Stick vorbereiten" von nodejs.org. Ohne
+  Internet startet der Stick nur an Rechnern mit demselben Betriebssystem wie
+  der, an dem er vorbereitet wurde. Ein zweiter Klick mit Internet holt den
+  Rest nach — dein Wissen darauf bleibt dabei, wie es ist.
 * Neural OS **auf** dem iPad ausführen geht nicht und wird nicht gehen. Es gibt
   auch nichts im App Store; siehe Teil 3.

@@ -122,15 +122,17 @@ test('Die Anfrage hat genau die Form der Vorlage (Modell, Ersatzmodell, Denken, 
     assert.equal(b.temperature, undefined, 'keine Sampling-Parameter');
     // Werkzeuge: erst die eigenen, streng und eager, dann Suche und Abruf.
     const namen = b.tools.map((t) => t.name);
-    assert.deepEqual(namen, ['rueckfrage', 'termin_anlegen', 'notiz_anlegen', 'merken', 'projekt_anpassen', 'web_search', 'web_fetch']);
-    for (const t of b.tools.slice(0, 5)) {
+    // Reihenfolge fest vereinbart (Vertrag F, Termin-Agent), siehe auch test/termin-agent.test.js.
+    assert.deepEqual(namen, ['rueckfrage', 'termin_anlegen', 'termine_lesen', 'termin_aendern', 'termin_loeschen',
+      'notiz_anlegen', 'merken', 'projekt_anpassen', 'web_search', 'web_fetch']);
+    for (const t of b.tools.slice(0, 8)) {
       assert.equal(t.strict, true, `${t.name}: strict`);
       assert.equal(t.eager_input_streaming, true, `${t.name}: eager_input_streaming`);
       assert.equal(t.input_schema.additionalProperties, false);
       assert.ok(Array.isArray(t.input_schema.required));
     }
-    assert.equal(b.tools[5].type, 'web_search_20260209');
-    assert.equal(b.tools[6].type, 'web_fetch_20260209');
+    assert.equal(b.tools[8].type, 'web_search_20260209');
+    assert.equal(b.tools[9].type, 'web_fetch_20260209');
     assert.ok(!b.tools.some((t) => /code_execution/.test(t.type || '')), 'kein code_execution daneben');
     // System: fester Teil ohne Datum, dann Gedächtnis mit cache_control.
     assert.equal(b.system.length, 2);

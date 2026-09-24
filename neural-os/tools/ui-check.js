@@ -45,8 +45,11 @@ const D = '\u001b[2m'; const B = '\u001b[1m'; const X = '\u001b[0m';
  */
 const ALL_VIEWS = [
   'chat', 'kalender', 'notes', 'projects', 'agents', 'graph', 'workshop', 'settings',
-  'network', 'stick', 'backup',
+  'network', 'stick',
 ];
+// „backup" steht noch in VIEWS, ist aber nur noch eine Weiterleitung in den
+// Bereich Stick (web/views/backup.js). Dass sie dorthin fuehrt, prueft
+// Abschnitt 9 -- als eigene Ansicht gezaehlt wuerde sie den Stick zweimal pruefen.
 
 /** Die Eintraege der Leiste, in der Reihenfolge der Vorlage (docs/vorlage/app.png). */
 const LEISTE = ['Neuer Chat', 'Kalender', 'Notizen', 'Projekte', 'Agenten', 'Gehirn', 'Werkstatt', 'Einstellungen'];
@@ -217,6 +220,10 @@ async function main() {
     });
     await pruefeSchale(page, base, store, app);
 
+    /* ------------------------------------------- 4b. Das Gehirn */
+    console.log(`\n${B}4b · Das Gehirn: ein Netz, das zur Ruhe kommt, und ein Antippen, das wirkt${X}`);
+    await pruefeGehirn(page, base, store);
+
     /* ------------------------ 5. Schnellerfassung von ueberall aus */
     console.log(`\n${B}5 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
     // Absichtlich aus dem Gehirn heraus: der ganze Sinn ist, dass man nicht
@@ -328,91 +335,122 @@ async function main() {
     console.log(`\n${B}8 · Kalender, Notizen, Projekte: ein Klick wirkt im Tresor${X}`);
     await pruefeKalenderNotizenProjekte(page, base, store);
 
-    /* ----------------- 9. Sichern: der Knopf muss einen Ordner hinterlassen */
-    console.log(`\n${B}9 · „Jetzt sichern" legt wirklich einen Ordner an${X}`);
-    // Der Punkt dieser Pruefung: eine gruene Meldung beweist gar nichts. Eine
-    // Sicherung ist erst dann eine, wenn danach Dateien auf der Platte liegen,
-    // die man wieder einlesen kann. Deshalb wird hier nach dem Klick im
-    // Dateisystem nachgesehen und die Sicherung anschliessend geprueft.
-    const sicherungsZiel = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-ui-sicher-'));
+    /* ------------- 9. Stick: vorbereiten, sichern, wiederherstellen */
+    console.log(`\n${B}9 · Stick: ein Klick bereitet vor, „Jetzt sichern" legt wirklich etwas ab${X}`);
+    // Der Punkt dieser Pruefung: eine gruene Meldung beweist gar nichts. Ein
+    // Stick ist erst dann vorbereitet und eine Sicherung erst dann eine, wenn
+    // danach Dateien auf der Platte liegen. Deshalb wird nach jedem Klick im
+    // Dateisystem nachgesehen. Hier steckt kein echter Stick; ein leerer
+    // Ordner steht an seiner Stelle und wird von Hand eingetragen -- genau
+    // der Weg, den die Ansicht anbietet, wenn die Suche nichts findet.
+    const stickOrt = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-ui-stick-'));
     /** Der Ordner, den der Klick wirklich angelegt hat -- nicht der getippte. */
     let geschrieben = null;
     try {
       await page.goto(`${base}/#/backup`, { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(1200);
-      const bkpText = await page.locator('main').innerText();
-      check(/Zuletzt gesichert|noch keine Sicherung/i.test(bkpText),
-        'Der Bereich sagt zuerst, wann zuletzt gesichert wurde');
-      check(/Klartext|verschlüsselt/i.test(bkpText),
-        'und ob die Sicherung im Klartext liegt — nicht kleingedruckt');
+      await page.waitForTimeout(1500);
+      check(/#\/stick$/.test(page.url()), 'Die alte Adresse #/backup führt in den Bereich „Stick“', page.url());
 
-      const zielFeld = page.getByLabel('Zielordner der Sicherung');
-      check(await zielFeld.count() > 0, 'Das Ziel lässt sich auswählen');
-      if (await zielFeld.count()) {
-        await zielFeld.fill(sicherungsZiel);
+      const ortFeld = page.getByLabel('Ort des Sticks');
+      check(await ortFeld.count() === 1, 'Es gibt genau ein Feld für den Ort des Sticks');
+      const stickText = await page.locator('main').innerText();
+      check(/Kein Stick gefunden|frei/.test(stickText),
+        'Die Suche sagt, was sie gefunden hat – oder ehrlich, dass sie nichts fand');
+      check(!/Modell|Ollama|llama/i.test(stickText), 'Vom Sprachmodell auf dem Stick ist nicht mehr die Rede');
+      check(/Zuletzt gesichert|Noch keine Sicherung/.test(stickText),
+        'Neben „Jetzt sichern" steht still, wann zuletzt gesichert wurde');
+
+      if (await ortFeld.count()) {
+        await ortFeld.fill(stickOrt);
+        await page.waitForTimeout(900);
+
+        // --- Stick vorbereiten: ab Werk ist das Netz zu, also kommt die
+        // eine Rueckfrage -- mit zwei Knoepfen, nicht mit einem Dialog.
+        await page.getByRole('button', { name: /^Stick vorbereiten$/ }).click();
+        const nurHier = page.getByRole('button', { name: /^Nur / });
+        await nurHier.first().waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+        check(await page.getByRole('button', { name: /^Erlauben$/ }).count() === 1 && await nurHier.count() === 1,
+          'Für Windows/Mac fragt der Knopf einmal – „Erlauben" oder „Nur dieses System"');
+        if (await nurHier.count()) {
+          await nurHier.first().click();
+          await page.locator('.stickv__fertig, .stickv__meldung').first().waitFor({ timeout: 120000 }).catch(() => {});
+          const fertigText = await page.locator('main').innerText();
+          check(/Der Stick ist fertig/.test(fertigText), 'Nach dem Klick meldet die Ansicht „Der Stick ist fertig"',
+            fertigText.split('\n').find((z) => /fertig|Fehler|nicht/i.test(z)) || '');
+          check(fs.existsSync(path.join(stickOrt, 'neural-os.portable'))
+            && fs.existsSync(path.join(stickOrt, 'app', 'bin', 'neural-os.js'))
+            && fs.readdirSync(path.join(stickOrt, 'data')).length > 0,
+          'und auf dem Stick liegen wirklich Programm, Laufzeit und Wissen',
+          fs.readdirSync(stickOrt).join(', '));
+          check(await page.locator('.stickv__schritte li').count() === 3,
+            'Danach steht eine Anleitung in drei Sätzen da');
+        }
+
+        // --- Jetzt sichern: Ziel ist der Stick im Feld.
         const sichernKnopf = page.getByRole('button', { name: /^Jetzt sichern/ });
-        check(await sichernKnopf.count() > 0, 'Der Knopf „Jetzt sichern" ist da');
+        check(await sichernKnopf.count() === 1, 'Der Knopf „Jetzt sichern" ist da');
         if (await sichernKnopf.count()) {
           await sichernKnopf.first().click();
-          // Der Export laeuft serverseitig; gewartet wird auf die Datei, nicht
-          // auf eine Meldung. Im gewaehlten Ziel entsteht ein Unterordner mit
-          // Zeitstempel -- so ueberschreibt die naechste Sicherung nicht die
-          // letzte gute, und genau das wird hier mitgeprueft.
+          const sicherungen = path.join(stickOrt, 'Sicherungen');
           for (let i = 0; i < 60 && !geschrieben; i++) {
             await page.waitForTimeout(500);
             try {
-              geschrieben = fs.readdirSync(sicherungsZiel)
-                .map((name) => path.join(sicherungsZiel, name))
+              geschrieben = fs.readdirSync(sicherungen)
+                .map((name) => path.join(sicherungen, name))
                 .find((dir) => fs.existsSync(path.join(dir, 'manifest.json'))) || null;
             } catch { geschrieben = null; }
           }
           const dateien = geschrieben ? fs.readdirSync(geschrieben) : [];
           check(!!geschrieben && dateien.includes('export.json'),
-            'Nach dem Klick liegt eine echte Sicherung auf der Platte',
-            `${geschrieben || sicherungsZiel}: ${dateien.join(', ') || 'leer'}`);
+            'Nach dem Klick liegt eine echte Sicherung auf dem Stick',
+            `${geschrieben || sicherungen}: ${dateien.join(', ') || 'leer'}`);
           if (geschrieben) {
             const pruefung = await app.backup.verify(geschrieben);
             check(pruefung.ok, 'und sie ist vollständig (Manifest und Prüfsummen stimmen)',
               pruefung.ok ? `${dateien.length} Dateien` : JSON.stringify(pruefung.problems.slice(0, 2)));
+            await page.waitForTimeout(600);
             const gemeldet = await page.locator('main').innerText();
             check(gemeldet.includes(geschrieben), 'Die Oberfläche nennt denselben Pfad, der wirklich beschrieben wurde');
-            check(/Zeitstempel/i.test(gemeldet) || path.basename(geschrieben).startsWith('export-'),
-              'und sie liegt in einem eigenen Ordner, überschreibt also keine ältere',
-              path.basename(geschrieben));
+            check(/Zuletzt gesichert gerade eben · auf dem Stick/.test(gemeldet),
+              'und daneben steht still „Zuletzt gesichert gerade eben · auf dem Stick"');
           }
         }
       }
 
       /* --- und zurueck: ohne Vorschau wird nichts geschrieben --- */
-      const quelleFeld = page.getByLabel('Ordner oder Datei der Sicherung');
       if (!geschrieben) {
         hmm('Die Wiederherstellung lässt sich prüfen', 'es wurde keine Sicherung geschrieben');
-      } else if (!(await quelleFeld.count())) {
-        bad('Die Quelle einer Wiederherstellung lässt sich eintragen');
       } else {
-        await quelleFeld.fill(geschrieben);
-        const zurueck = page.getByRole('button', { name: /^Wiederherstellen$/ });
-        check(await zurueck.count() > 0 && await zurueck.first().isDisabled(),
-          'Ohne Vorschau ist „Wiederherstellen" gesperrt');
-        const ansehen = page.getByRole('button', { name: /^Erst ansehen/ });
-        check(await ansehen.count() > 0, 'Es gibt einen Weg, vorher zu sehen was passiert');
-        if (await ansehen.count()) {
-          const saetzeVorher = store.count('note');
-          await ansehen.first().click();
-          await page.waitForTimeout(2500);
-          const vorschauText = await page.locator('main').innerText();
-          check(/geschrieben ist noch nichts/i.test(vorschauText),
-            'Die Vorschau sagt ausdrücklich, dass noch nichts geschrieben wurde');
-          check(store.count('note') === saetzeVorher,
-            'und sie hat wirklich nichts geschrieben', `${saetzeVorher} Notizen, unverändert`);
-          check(/Zugangstoken/i.test(vorschauText),
-            'Was NICHT mitreist, steht in der Vorschau');
-          check(await zurueck.first().isDisabled() === false,
-            'Erst danach wird „Wiederherstellen" frei');
+        await page.locator('summary', { hasText: 'Von einer Sicherung wiederherstellen' }).click();
+        await page.waitForTimeout(900);
+        const quelleFeld = page.getByLabel('Ordner oder Datei der Sicherung');
+        if (!(await quelleFeld.count())) {
+          bad('„Von einer Sicherung wiederherstellen" öffnet ein Feld für die Quelle');
+        } else {
+          await quelleFeld.fill(geschrieben);
+          const zurueck = page.getByRole('button', { name: /^Wiederherstellen$/ });
+          check(await zurueck.count() > 0 && await zurueck.first().isDisabled(),
+            'Ohne Vorschau ist „Wiederherstellen" gesperrt');
+          const ansehen = page.getByRole('button', { name: /^Erst ansehen/ });
+          check(await ansehen.count() > 0, 'Es gibt einen Weg, vorher zu sehen was passiert');
+          if (await ansehen.count()) {
+            const saetzeVorher = store.count('note');
+            await ansehen.first().click();
+            await page.waitForTimeout(2500);
+            const vorschauText = await page.locator('main').innerText();
+            check(/geschrieben ist noch nichts/i.test(vorschauText),
+              'Die Vorschau sagt ausdrücklich, dass noch nichts geschrieben wurde');
+            check(store.count('note') === saetzeVorher,
+              'und sie hat wirklich nichts geschrieben', `${saetzeVorher} Notizen, unverändert`);
+            check(/Zugangstoken/i.test(vorschauText),
+              'Was NICHT mitreist, steht in der Vorschau');
+            check(await zurueck.first().isDisabled() === false,
+              'Erst danach wird „Wiederherstellen" frei');
+          }
         }
       }
     } finally {
-      fs.rmSync(sicherungsZiel, { recursive: true, force: true });
+      fs.rmSync(stickOrt, { recursive: true, force: true });
     }
 
     check(errors.length === 0, 'Keine Konsolenfehler während all dessen',
@@ -648,6 +686,130 @@ async function pruefeSchale(page, base, store) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Das Gehirn                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Das Gehirn nach docs/vorlage/gehirn-obsidian.png. Geprueft wird, was man
+ * nicht aus einem Unit-Test lesen kann: dass die Leinwand wirklich ein Netz
+ * zeigt, dass es zur Ruhe kommt und danach stillsteht (ein Gehirn, das offen
+ * liegt, darf auf dem Schullaptop keine Rechenzeit fressen), dass das Panel
+ * oben rechts die vier Abschnitte der Vorlage hat, und dass Suchen, Antippen
+ * und "Oeffnen" bis zum richtigen Eintrag durchschlagen. Dazu die Kachel
+ * rechts: ein kleiner Ausschnitt, dessen Antippen das Gehirn dort oeffnet.
+ */
+async function pruefeGehirn(page, base, store) {
+  const warte = (ms) => page.waitForTimeout(ms);
+  await page.evaluate(() => { try { localStorage.removeItem('neural-os:gehirn'); } catch { /* egal */ } });
+  await page.goto(`${base}/#/graph`, { waitUntil: 'domcontentloaded' });
+  await dismissWelcome(page);
+  const start = Date.now();
+  const ruht = await page.waitForFunction(() => {
+    const g = document.querySelector('.gh');
+    return g && g.dataset.ruhe === 'ja';
+  }, null, { timeout: 15000 }).then(() => true, () => false);
+  check(ruht, 'Die Wolke kommt zur Ruhe', ruht ? `nach ${Date.now() - start} ms` : 'nach 15 s noch in Bewegung');
+
+  // Gezeichnet ist, was Pixel hat -- nicht, was im DOM steht.
+  const bild = () => page.evaluate(() => {
+    const c = document.querySelector('.gh__canvas');
+    if (!c || !c.width) return null;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let gemalt = 0;
+    let summe = 0;
+    let licht = 0;
+    for (let i = 3; i < d.length; i += 4 * 7) {
+      if (d[i] > 0) {
+        gemalt++;
+        licht += d[i];
+      }
+      summe = (summe * 31 + d[i - 3] + d[i]) % 1000000007;
+    }
+    // Mittlere Deckkraft der gemalten Stichproben: faellt stark, wenn alles
+    // ausser dem Gewaehlten zuruecktritt.
+    return { gemalt, summe, deckung: gemalt ? licht / gemalt : 0 };
+  });
+  await warte(600);
+  const a = await bild();
+  check(a && a.gemalt > 500, 'Die Leinwand zeigt ein Netz', a ? `${a.gemalt} gemalte Stichproben` : 'keine Leinwand');
+  await warte(900);
+  const b = await bild();
+  check(a && b && a.summe === b.summe, 'In Ruhe steht das Bild still (keine Rechenzeit im Leerlauf)',
+    a && b ? (a.summe === b.summe ? 'zwei Aufnahmen im Abstand von 0,9 s sind gleich' : 'das Bild ändert sich noch') : '');
+
+  // Auf schmaler Karte ist das Panel zu; der Knopf oben rechts oeffnet es.
+  if (await page.locator('.gh__opener').isVisible()) await page.locator('.gh__opener').click();
+  const abschnitte = await page.locator('.gh__panel summary').allInnerTexts();
+  check(['Filter', 'Gruppen', 'Anzeige', 'Kräfte'].every((t, i) => (abschnitte[i] || '').trim() === t),
+    'Oben rechts das Panel der Vorlage: Filter, Gruppen, Anzeige, Kräfte', abschnitte.map((t) => t.trim()).join(' · '));
+
+  // Suchen -> Eingabetaste -> Kaertchen -> Oeffnen -> der richtige Eintrag.
+  const ziel = store.all('note').find((n) => n.data.title === 'Notiz 7');
+  await page.locator('.gh__panel summary', { hasText: 'Filter' }).first().click();
+  await warte(250);
+  const feld = page.getByLabel('Im Gehirn suchen');
+  if (!ziel || !(await feld.count())) {
+    bad('Die Suche im Gehirn lässt sich bedienen', ziel ? 'kein Suchfeld' : 'Testnotiz fehlt');
+  } else {
+    await feld.fill('Notiz 7');
+    await warte(300);
+    await feld.press('Enter');
+    await warte(700);
+    const karte = page.locator('.gh__card');
+    const titel = (await karte.locator('.gh__card-title').innerText().catch(() => '')).trim();
+    check(await karte.isVisible() && titel === 'Notiz 7', 'Suchen und Eingabetaste wählen den Knoten, das Kärtchen nennt ihn', titel || 'kein Kärtchen');
+    // Schliessen und Suche leeren muss das Zuruecktreten wieder aufheben --
+    // frueher blieb das Netz danach gedaempft stehen.
+    const gewaehlt = await bild();
+    await karte.getByRole('button', { name: 'Auswahl schließen' }).click();
+    await feld.fill('');
+    await feld.press('Escape');
+    await warte(700);
+    const frei = await bild();
+    check(gewaehlt && frei && a && frei.deckung > gewaehlt.deckung * 1.3 && frei.deckung > a.deckung * 0.75,
+      'Auswahl schließen und Suche leeren holen das ganze Netz zurück',
+      gewaehlt && frei && a ? `Deckung ${Math.round(a.deckung)} → gewählt ${Math.round(gewaehlt.deckung)} → danach ${Math.round(frei.deckung)}` : '');
+    await feld.fill('Notiz 7');
+    await warte(300);
+    await feld.press('Enter');
+    await warte(700);
+    const zaehler = async () => (await page.locator('.gh__count').innerText().catch(() => '')).trim();
+    const vorher = await zaehler();
+    const chip = page.locator('.gh__chips .chip', { hasText: 'Notizen' }).first();
+    if (await chip.count()) {
+      await chip.click();
+      await warte(400);
+      const nachher = await zaehler();
+      check(nachher !== vorher, 'Eine Art ausblenden wirkt sofort', `${vorher} → ${nachher}`);
+      await chip.click();
+      await warte(300);
+    }
+    await karte.getByRole('button', { name: 'Öffnen' }).click();
+    await warte(900);
+    const hash = await page.evaluate(() => window.location.hash);
+    check(hash === `#/notes?id=${encodeURIComponent(ziel.id)}`, '„Öffnen“ führt zu genau diesem Eintrag', hash);
+  }
+
+  // Die Kachel: ein Ausschnitt mit Mitte im Akzent, Antippen oeffnet das Gehirn dort.
+  await page.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+  await warte(600);
+  if (await page.evaluate(() => (document.querySelector('.shell') || {}).dataset?.rechts === 'zu')) {
+    const auf = page.getByRole('button', { name: 'Übersicht ausklappen' }).first();
+    if (await auf.count()) await auf.click();
+  }
+  const link = page.locator('.tile[data-tile="gehirn"] a.ghk');
+  await link.waitFor({ state: 'visible', timeout: 6000 }).catch(() => {});
+  const href = await link.getAttribute('href').catch(() => null);
+  check(!!href && href.startsWith('#/graph?focus='), 'Die Kachel „Gehirn“ zeigt einen Ausschnitt und verweist auf seine Mitte', href || 'kein Ausschnitt');
+  if (href) {
+    await link.click();
+    await warte(1200);
+    const gewaehlt = (await page.locator('.gh__card-title').innerText().catch(() => '')).trim();
+    check(!!gewaehlt, 'Antippen öffnet das Gehirn mit genau dieser Mitte gewählt', gewaehlt || 'nichts gewählt');
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Kalender, Notizen, Projekte                                         */
 /* ------------------------------------------------------------------ */
 
@@ -666,7 +828,7 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
   const heute = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   const termine = () => store.all('event');
 
-  /* --- Kalender: eintragen --- */
+  /* --- Kalender: Monatsblatt --- */
   await page.goto(`${base}/#/kalender`, { waitUntil: 'domcontentloaded' });
   await warte(1200);
   const blatt = await page.evaluate(() => ({
@@ -675,23 +837,56 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
   }));
   check(blatt.tage >= 28 && blatt.tage <= 42 && blatt.tage % 7 === 0 && blatt.heute === 1,
     'Der Kalender zeigt ein Monatsblatt aus ganzen Wochen, heute ist markiert', `${blatt.tage} Tage, ${blatt.heute}× heute`);
+
+  /* --- Schnell eintragen: ein Satz, Vorschau, Enter --- */
+  // "heute" ausdruecklich: so trifft die Pruefung zu jeder Tageszeit denselben Tag.
   const vorher = termine().length;
-  await page.getByRole('button', { name: /^Termin$/ }).click();
+  const feld = page.getByRole('textbox', { name: 'Neuer Termin' });
+  await feld.fill('heute 10:00-10:30 Probe beim Zahnarzt');
   await warte(400);
-  await page.getByLabel('Titel', { exact: true }).fill('Probe beim Zahnarzt');
-  await page.getByLabel('von', { exact: true }).fill('10:00');
-  await page.getByLabel('bis', { exact: true }).fill('10:30');
-  await page.getByRole('button', { name: /^Eintragen$/ }).click();
+  const vorschau = (await page.locator('.kal__quick-pop').innerText().catch(() => '')).replace(/\s+/g, ' ');
+  check(/10:00–10:30/.test(vorschau) && /Probe beim Zahnarzt/.test(vorschau),
+    'Schnell eintragen: die Vorschau sagt vorher, was daraus wird', vorschau.slice(0, 80));
+  await feld.press('Enter');
   await warte(1300);
   const probe = termine().find((t) => t.data.title === 'Probe beim Zahnarzt');
   check(termine().length === vorher + 1 && !!probe && probe.data.start === `${heute}T10:00` && probe.data.end === `${heute}T10:30`,
-    '„Termin“ → Titel, Tag, Uhrzeit → „Eintragen“ legt ihn wirklich im Tresor an',
+    '„heute 10:00-10:30 Probe beim Zahnarzt“ + Enter legt ihn wirklich im Tresor an',
     probe ? `${probe.data.start}–${probe.data.end}, Herkunft ${probe.data.source}` : `${vorher} → ${termine().length}`);
-  check(!!probe && probe.data.source === 'user', 'und zwar als „von dir“, nicht als automatisch erkannt');
-  const imBlatt = await page.locator('.kal__day.is-today .kal__pill', { hasText: 'Probe beim Zahnarzt' }).count();
+  check(!!probe && probe.data.source === 'user', 'und zwar als „von dir“, nicht als von der KI');
+  check(await page.locator('.kal__day.is-today .kal__pill', { hasText: 'Probe beim Zahnarzt' }).count() === 1,
+    'Er steht sofort am heutigen Tag');
+
+  await feld.fill('heute 12:00 Wegwerf-Termin');
+  await warte(300);
+  await feld.press('Enter');
+  await warte(1300);
+  const wegwerf = termine().find((t) => t.data.title === 'Wegwerf-Termin');
+  const zurueckKnopf = page.locator('.toast', { hasText: 'Wegwerf-Termin' }).getByRole('button', { name: 'Rückgängig' });
+  if (wegwerf && await zurueckKnopf.count()) {
+    await zurueckKnopf.first().click();
+    await warte(1300);
+    check(store.get(wegwerf.id) === null, '„Rückgängig“ nimmt einen gerade eingetragenen Termin wieder heraus');
+  } else {
+    bad('Nach dem Eintragen steht „Rückgängig“ bereit', wegwerf ? 'kein Knopf in der Meldung' : 'nicht angelegt');
+  }
+
+  /* --- das ganze Formular, mit Erinnerung --- */
+  await page.getByRole('button', { name: 'Mit allen Feldern anlegen' }).click();
+  await warte(400);
+  await page.getByLabel('Titel', { exact: true }).fill('Formular-Probe');
+  await page.getByLabel('von', { exact: true }).fill('13:00');
+  await page.getByLabel('bis', { exact: true }).fill('13:45');
+  await page.getByLabel('Erinnerung', { exact: true }).selectOption('15');
+  await page.getByRole('button', { name: /^Eintragen$/ }).click();
+  await warte(1300);
+  const formular = termine().find((t) => t.data.title === 'Formular-Probe');
+  check(!!formular && formular.data.start === `${heute}T13:00` && formular.data.end === `${heute}T13:45` && formular.data.reminder === 15,
+    'Das Formular legt Titel, Zeit und Erinnerung im Tresor an',
+    formular ? `${formular.data.start}–${formular.data.end}, Erinnerung ${formular.data.reminder}` : 'nicht angelegt');
   const imDetail = (await page.locator('.kal__sheet').innerText().catch(() => '')).replace(/\s+/g, ' ');
-  check(imBlatt === 1 && /Von dir eingetragen/.test(imDetail),
-    'Er steht sofort am heutigen Tag, und das Blatt sagt, woher er kommt', imDetail.slice(0, 90));
+  check(/Von dir eingetragen/.test(imDetail) && /15 Min vorher/.test(imDetail) && /solange Neural OS offen ist/.test(imDetail),
+    'Das Blatt sagt, woher er kommt, und ehrlich, wann erinnert wird', imDetail.slice(0, 110));
 
   /* --- ein automatischer Termin, live, mit Weg zurueck in den Chat --- */
   const chat = store.create('chat', { title: 'Terminabsprache' });
@@ -703,29 +898,119 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
   await page.goto(`${base}/#/kalender?id=${auto.id}`, { waitUntil: 'domcontentloaded' });
   await warte(1300);
   const autoText = (await page.locator('.kal__sheet').innerText().catch(() => '')).replace(/\s+/g, ' ');
-  check(/Automatisch erkannt/.test(autoText) && /Angelegt aus dem Chat „Terminabsprache“/.test(autoText),
-    'Ein automatischer Termin nennt den Chat, aus dem er stammt', autoText.slice(0, 100));
+  check(/Von der KI aus dem Chat „Terminabsprache“/.test(autoText),
+    'Ein Termin der KI nennt den Chat, aus dem er stammt', autoText.slice(0, 100));
   const zumChat = page.getByRole('button', { name: /Zum Chat/ });
   if (await zumChat.count()) {
     await zumChat.first().click();
     await warte(900);
     check(page.url().endsWith(`#/chat?id=${chat.id}`), '„Zum Chat“ führt in genau dieses Gespräch', page.url().split('#')[1]);
   } else {
-    bad('„Zum Chat“ ist am automatischen Termin');
+    bad('„Zum Chat“ ist am Termin der KI');
   }
 
-  /* --- loeschen --- */
+  /* --- Woche: ziehen verschiebt, im Tresor, mit Rückgängig --- */
+  await page.goto(`${base}/#/kalender`, { waitUntil: 'domcontentloaded' });
+  await warte(1200);
+  await page.getByRole('button', { name: /^Woche$/ }).click();
+  await warte(900);
+  const stunde = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.kal')).getPropertyValue('--kal-hour')));
+  const ziehe = async (locator, dy, dx = 0, oben = 5) => {
+    await locator.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+    const box = await locator.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + oben);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + dx, box.y + oben + dy, { steps: 8 });
+    await page.mouse.up();
+  };
+  if (probe) {
+    await ziehe(page.locator('.kal__block', { hasText: 'Probe beim Zahnarzt' }).first(), stunde);
+    await warte(1300);
+    const gezogen = store.get(probe.id);
+    check(!!gezogen && gezogen.data.start === `${heute}T11:00` && gezogen.data.end === `${heute}T11:30`,
+      'Woche: eine Stunde tiefer gezogen ist der Termin im Tresor eine Stunde später', gezogen ? `${gezogen.data.start}–${gezogen.data.end}` : 'weg');
+    const rueck = page.locator('.toast', { hasText: 'Probe beim Zahnarzt' }).getByRole('button', { name: 'Rückgängig' });
+    if (await rueck.count()) {
+      await rueck.first().click();
+      await warte(1300);
+      check(store.get(probe.id).data.start === `${heute}T10:00`, 'und „Rückgängig“ legt ihn zurück auf 10:00', store.get(probe.id).data.start);
+    } else {
+      bad('Nach dem Ziehen steht „Rückgängig“ bereit');
+    }
+  }
+
+  /* --- Serie: "Nur dieser Termin" --- */
+  const { createEvent } = require('../src/http/api/events');
+  const serie = createEvent(store, {
+    title: 'Serien-Probe', start: `${heute}T15:00`, end: `${heute}T15:30`,
+    recurrence: { freq: 'daily', interval: 1, until: null, count: 3 },
+  });
+  await store.flush();
+  await warte(1500);
+  const vorkommen = page.locator(`.kal__block[data-key="${serie.id}@${heute}"]`);
+  if (!(await vorkommen.count())) {
+    bad('Eine Serie erscheint je Vorkommen im Raster', 'heutiges Vorkommen nicht gefunden');
+  } else {
+    await ziehe(vorkommen, stunde);
+    await warte(600);
+    const frage = page.locator('.kal__frage');
+    check(await frage.count() === 1, 'Serie gezogen: die Frage „Nur dieser Termin / Alle“ erscheint');
+    if (await frage.count()) {
+      await frage.getByRole('button', { name: 'Nur dieser Termin' }).click();
+      await warte(1400);
+      const danach = store.get(serie.id);
+      const einzeln = termine().filter((t) => t.data.title === 'Serien-Probe' && t.id !== serie.id);
+      check((danach.data.exdates || []).includes(heute) && einzeln.length === 1 && einzeln[0].data.start === `${heute}T16:00`,
+        '„Nur dieser Termin“: der Tag fällt aus der Serie, ein Einzeltermin um 16:00 entsteht',
+        `exdates ${JSON.stringify(danach.data.exdates)}, einzeln ${einzeln.map((t) => t.data.start).join(', ')}`);
+    }
+  }
+
+  /* --- loeschen: ohne Rueckfrage, dafuer mit Rueckgaengig --- */
   if (probe) {
     await page.goto(`${base}/#/kalender?id=${probe.id}`, { waitUntil: 'domcontentloaded' });
-    await warte(1200);
+    await warte(1300);
     await page.locator('.kal__sheet').getByRole('button', { name: /Löschen/ }).click();
-    await warte(400);
-    await page.locator('.dialog').getByRole('button', { name: /^Löschen$/ }).click();
     await warte(1200);
     check(store.get(probe.id) === null && !!store.get(probe.id, { includeDeleted: true }),
       '„Löschen“ nimmt ihn aus dem Kalender – weich, also umkehrbar');
-    check(await page.locator('.kal__pill', { hasText: 'Probe beim Zahnarzt' }).count() === 0,
-      'und er verschwindet aus dem Monatsblatt');
+    check(await page.locator('.kal__block, .kal__pill', { hasText: 'Probe beim Zahnarzt' }).count() === 0,
+      'und er verschwindet aus der Ansicht');
+    const wieder = page.locator('.toast', { hasText: 'Probe beim Zahnarzt' }).getByRole('button', { name: 'Rückgängig' });
+    if (await wieder.count()) {
+      await wieder.first().click();
+      await warte(1300);
+      check(!!store.get(probe.id), '„Rückgängig“ holt den gelöschten Termin zurück');
+    } else {
+      bad('Nach dem Löschen steht „Rückgängig“ bereit');
+    }
+  }
+
+  /* --- Tasten: L, M, T --- */
+  await page.keyboard.press('Escape');
+  await warte(300);
+  await page.locator('.kal__title').click();
+  await page.keyboard.press('l');
+  await warte(900);
+  const liste = (await page.locator('.kal__liste').innerText().catch(() => '')).replace(/\s+/g, ' ');
+  check(/Heute/.test(liste) && /Probe beim Zahnarzt|Formular-Probe/.test(liste), 'Taste L zeigt „Als Nächstes“ ab heute', liste.slice(0, 80));
+  await page.keyboard.press('m');
+  await warte(900);
+  check(await page.locator('.kal__weeks').count() === 1, 'Taste M zurück zum Monat');
+
+  /* --- Erinnerung oben rechts, solange Neural OS offen ist --- */
+  const bald = new Date(Date.now() + 10 * 60000);
+  const wandzeit = (t) => `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T${pad(t.getHours())}:${pad(t.getMinutes())}`;
+  store.create('event', { title: 'Erinnerungs-Probe', start: wandzeit(bald), end: wandzeit(new Date(bald.getTime() + 30 * 60000)), location: 'Flur', reminder: 15 });
+  await store.flush();
+  await warte(1800);
+  const karte = page.locator('.erin__card', { hasText: 'Erinnerungs-Probe' });
+  const karteText = (await karte.innerText().catch(() => '')).replace(/\s+/g, ' ');
+  check(await karte.count() === 1 && /In \d+ Min/.test(karteText), 'Eine Erinnerung erscheint oben rechts, ohne Neuladen', karteText.slice(0, 80));
+  if (await karte.count()) {
+    await karte.getByRole('button', { name: 'Erinnerung schließen' }).click();
+    await warte(300);
+    check(await karte.count() === 0, 'und geht mit dem Kreuz wieder weg');
   }
 
   /* --- die Kachel "Kalender", live --- */

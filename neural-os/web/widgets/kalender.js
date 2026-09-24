@@ -6,6 +6,9 @@
  * ist die Frage, die man beim Seitenblick stellt. Ist heute nichts, sagt die
  * Kachel das ehrlich und nennt den naechsten Termin, statt leer zu wirken.
  *
+ * Serien kommen je Vorkommen (Vertrag B: gleiche id, `occurrence`); ein
+ * Antippen oeffnet genau dieses Vorkommen (`&am=JJJJ-MM-TT`).
+ *
  * Live ueber den Bus (record.* mit Satzart `event`): legt die KI im Chat einen
  * Termin fuer heute an, steht er hier, waehrend die Antwort noch laeuft. Um
  * Mitternacht rueckt die Kachel von selbst auf den neuen Tag.
@@ -90,6 +93,12 @@ function when(value) {
   return { day: toDay(d), hm: `${pad(d.getHours())}:${pad(d.getMinutes())}`, ms: d.getTime() };
 }
 
+/** Wohin ein Antippen fuehrt: der Termin, bei Serien genau dieses Vorkommen. */
+function ziel(r) {
+  const occ = r.occurrence || (r.data && r.data.occurrence) || null;
+  return `#/kalender?id=${encodeURIComponent(r.id)}${occ ? `&am=${occ}` : ''}`;
+}
+
 function span(data) {
   const start = when(data.start);
   if (!start) return null;
@@ -158,9 +167,9 @@ export function mount(el, ctx) {
       const ul = h('ul.kwk__list');
       for (const { r, s } of heute.slice(0, MAX_ROWS)) {
         const [von, bis] = label(s, day);
-        const sub = r.data.location || (r.data.source === 'auto' ? 'automatisch erkannt' : '');
+        const sub = r.data.location || (r.data.source === 'auto' ? 'von der KI' : '');
         ul.appendChild(h('li', null, h('a.kwk__row', {
-          href: `#/kalender?id=${encodeURIComponent(r.id)}`,
+          href: ziel(r),
           class: past(s, day) ? 'is-past' : '',
           'aria-label': `${bis ? `${von} bis ${bis}` : von}, ${r.data.title}${r.data.location ? `, ${r.data.location}` : ''}`,
         },
@@ -181,7 +190,7 @@ export function mount(el, ctx) {
         ? 'Morgen'
         : formatDate(new Date(`${next.s.firstDay}T12:00:00`), { weekday: 'short', day: 'numeric', month: 'short' });
       const zeit = next.s.allDay ? '' : ` · ${next.s.start.hm}`;
-      body.appendChild(h('a.kwk__next', { href: `#/kalender?id=${encodeURIComponent(next.r.id)}` },
+      body.appendChild(h('a.kwk__next', { href: ziel(next.r) },
         h('span.kwk__next-label', null, text(`Als Nächstes · ${tag}${zeit}`)),
         h('span.kwk__next-title', null, text(next.r.data.title))));
     }

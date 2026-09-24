@@ -122,6 +122,18 @@ const FIELDS = {
     projectId: { type: 'string', nullable: true, default: null },
     chatId: { type: 'string', nullable: true, default: null },
     source: { type: 'string', default: 'user', enum: ['user', 'auto'] },
+    /**
+     * Wiederholung (Vertrag A): {freq, interval, byDay, until, count} oder
+     * null. Gespeichert wird die REGEL, nicht jedes Vorkommen: "jeden
+     * Dienstag" ist ein Satz, keine 52. Ausgerechnet wird in
+     * src/kalender/wiederholung.js; die Pruefung im Einzelnen macht die
+     * Termin-Route, weil nur sie den Beginn kennt, an dem die Regel haengt.
+     */
+    recurrence: { type: 'object', nullable: true, default: null },
+    /** Ausgelassene Vorkommen einer Serie als 'YYYY-MM-DD'. */
+    exdates: { type: 'string[]', default: [] },
+    /** Erinnerung so viele Minuten vor Beginn, oder null. */
+    reminder: { type: 'number', nullable: true, default: null },
   },
   agent: {
     name: { type: 'string', required: true, max: 200 },

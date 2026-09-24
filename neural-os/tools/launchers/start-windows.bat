@@ -49,7 +49,8 @@ echo   Laufzeit:  %PLAT%
 echo   Daten:     %STICK%data
 echo.
 echo   Gleich oeffnet sich dein Browser. Dieses Fenster bitte offen lassen -
-echo   solange es offen ist, laeuft Neural OS. Beenden mit Strg+C.
+echo   solange es offen ist, laeuft Neural OS. Zum Aufhoeren in Neural OS
+echo   unter Einstellungen -^> Stick auf "Beenden ^& abziehen" tippen.
 echo.
 
 set "NEURAL_OS_HOME=%STICK%data"
@@ -57,8 +58,17 @@ set "NEURAL_OS_HOME=%STICK%data"
 set "CODE=%ERRORLEVEL%"
 echo.
 if not "%CODE%"=="0" goto :crashed
-echo   Neural OS wurde beendet.
-goto :end
+
+rem Sauber beendet: das Arbeitsverzeichnis dieses Fensters liegt auf dem
+rem Stick, und solange es dort liegt, meldet Windows den Stick als "in
+rem Verwendung". Also weg vom Stick, kurz Bescheid geben, Fenster zu.
+cd /d "%SystemRoot%"
+echo   Neural OS wurde beendet. Alles ist gespeichert.
+echo   Jetzt kannst du den Stick abziehen.
+echo.
+timeout /t 6 >nul 2>&1
+endlocal
+exit /b 0
 
 :crashed
 echo   Neural OS wurde mit Fehler %CODE% beendet.
@@ -80,15 +90,11 @@ echo   Das heisst: Der Stick wurde auf einem Rechner mit einem anderen
 echo   Betriebssystem oder einer anderen Prozessorarchitektur vorbereitet.
 echo.
 echo   So legst du die fehlende Laufzeit nach:
-echo     1. Stick in einen Windows-Rechner stecken, auf dem Neural OS schon
-echo        laeuft. Dort in der Seitenleiste den Bereich "Stick" oeffnen
-echo        (oder g dann t), den Pfad des Sticks eintragen und unter
-echo        "Welche Rechner der Stick starten kann" bei diesem System auf
-echo        "Jetzt kopieren" klicken. Das braucht kein Internet.
-echo     2. Oder: auf einem Rechner MIT Internet denselben Bereich oeffnen
-echo        und dort die Laufzeit "%PLAT%" holen; sie wird dann als
-echo        offizielles Node-Paket geladen und geprueft.
-echo     3. Oder: Node.js ab Version 20 auf diesem Rechner installieren
+echo     1. Stick an einem Rechner mit Neural OS und Internet einstecken.
+echo        Dort unter Einstellungen -^> Stick noch einmal auf
+echo        "Stick vorbereiten" tippen und "Erlauben" waehlen. Dein Wissen
+echo        auf dem Stick bleibt dabei, wie es ist.
+echo     2. Oder: Node.js ab Version 20 auf diesem Rechner installieren
 echo        (nodejs.org) und dann in diesem Ordner ausfuehren:
 echo            node app\bin\neural-os.js start --open
 echo.
@@ -100,10 +106,9 @@ echo   Der Programmordner "app" fehlt auf dem Stick oder ist unvollstaendig.
 echo   Gesucht wurde:  %STICK%app\bin\neural-os.js
 echo.
 echo   Das passiert, wenn der Stick waehrend des Kopierens abgezogen wurde.
-echo   Stecke ihn in den Rechner, auf dem du ihn vorbereitet hast, und rufe
-echo   dort im Bereich "Stick" erst "Stick pruefen" und dann
-echo   "Nur Programm erneuern" auf. Deine Daten in "data" sind davon
-echo   nicht betroffen - die werden beim Erneuern nie angefasst.
+echo   Stecke ihn an einem Rechner mit Neural OS ein und tippe dort unter
+echo   Einstellungen -^> Stick auf "Stick vorbereiten". Deine Daten in
+echo   "data" sind davon nicht betroffen - die werden dabei nie angefasst.
 echo.
 goto :end
 

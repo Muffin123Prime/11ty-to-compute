@@ -3,13 +3,37 @@
 /**
  * Kalender, Notizen, Projekte -- die Routen dieses Bereichs.
  *
- * Termine (Vertrag 3)
+ * Termine (Vertrag 3, erweitert um Serien: Vertrag A-E vom 23.09.2026)
  * -------------------
  *   GET    /api/events/zeitraum?from=YYYY-MM-DD&to=YYYY-MM-DD
+ *   GET    /api/events/ueberschneidungen?start=…&end=…[&ohne=<id>]
+ *   GET    /api/events/export.ics?from=…&to=…
  *   POST   /api/events
  *   GET    /api/events/:id
- *   PATCH  /api/events/:id
- *   DELETE /api/events/:id
+ *   GET    /api/events/:id/ics
+ *   PATCH  /api/events/:id[?nur=YYYY-MM-DD]
+ *   DELETE /api/events/:id[?nur=YYYY-MM-DD]
+ *
+ * Serien. Ein Termin mit `recurrence` ist eine Serie; gespeichert ist die
+ * Regel, nicht jedes Vorkommen. Der Zeitraum liefert JEDES Vorkommen als
+ * eigenes Element: dieselbe `id` (die der Serie), `start`/`end` auf den Tag
+ * des Vorkommens gelegt, dazu `occurrence: 'YYYY-MM-DD'` und
+ * `recurring: true` -- am Element UND in `data`, damit keine Oberflaeche an
+ * der falschen Stelle sucht. `serie: {start, end}` nennt Beginn und Ende der
+ * Serie selbst: wer die GANZE Serie aendert, schickt diese, nicht die
+ * verschobenen (sonst wandert der Anfang der Serie auf das angetippte
+ * Vorkommen und alle frueheren verschwinden). Einzeltermine tragen
+ * `occurrence: null`, `recurring: false`.
+ *
+ * `?nur=YYYY-MM-DD` aendert oder loescht genau ein Vorkommen: der Tag
+ * wandert in `exdates` der Serie, beim Aendern entsteht ein Einzeltermin mit
+ * den neuen Werten (`ausSerie: {id, tag}` sagt, woher er kommt). Beide
+ * Schreibvorgaenge sind EINE Gruppe im Aenderungsverlauf -- ein
+ * "rueckgaengig" nimmt beide zurueck. Jede schreibende Antwort nennt unter
+ * `rueckgaengig` den Verlaufseintrag dafuer (POST /api/history/:seq/undo).
+ *
+ * Wiederholungen werden in src/kalender/wiederholung.js ausgerechnet -- dort
+ * und nur dort, auch fuer die Werkzeuge der KI.
  *
  * Die Liste steht NICHT unter `GET /api/events?from=…&to=…`, wie der Vertrag
  * sie zuerst vorsah: unter genau dieser Adresse laeuft seit jeher der
@@ -55,6 +79,9 @@ const {
   intParam,
   strParam,
 } = require('./support');
+const w = require('../../kalender/wiederholung');
+const ics = require('../../kalender/ics');
+const { gemeinsam } = require('../../store/history');
 
 /* ------------------------------------------------------------------ */
 /* Zeit                                                                */
@@ -66,6 +93,19 @@ const ZONED_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9
 
 /** Der laengste Zeitraum, den eine Anfrage abdeckt: gut ein Jahr. */
 const MAX_RANGE_DAYS = 400;
+/**
+ * Hoechstens so viele Termine (Vorkommen mitgezaehlt) je Anfrage. Eine
+ * taegliche Serie ueber 400 Tage sind schon 400; fuenf davon sind eine Liste,
+ * die keine Ansicht mehr sinnvoll zeigt. Lieber ein Satz als eine Antwort, an
+ * der der Browser erstickt.
+ */
+const MAX_VORKOMMEN = 2000;
+/**
+ * Ein Termin ohne Ende zaehlt fuer Ueberschneidungen wie eine Stunde -- so
+ * zeichnet ihn auch die Wochenansicht. Als Punkt ohne Dauer ueberschnitte
+ * "10 Uhr Zahnarzt" nie etwas, auch nicht "10 bis 11 Uhr Training".
+ */
+const OHNE_ENDE_MS = 60 * 60000;
 
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -156,7 +196,9 @@ function spanOf(data) {
 /* Termine pruefen und anlegen                                         */
 /* ------------------------------------------------------------------ */
 
-const EVENT_FIELDS = ['title', 'start', 'end', 'allDay', 'location', 'body', 'projectId', 'chatId', 'source'];
+const EVENT_FIELDS = ['title', 'start', 'end', 'allDay', 'location', 'body', 'projectId', 'chatId', 'source', 'recurrence', 'exdates', 'reminder'];
+
+const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
 function notFound(message) {
   return new NeuralError('NOT_FOUND', message, { status: 404 });
@@ -188,9 +230,12 @@ function eventInput(body) {
  *
  * @param {object} store
  * @param {object} merged   alle Felder, wie sie danach gelten sollen
+ * @param {{geerbteChatId?:string|null}} [opts]  ein Vorkommen, das aus seiner
+ *   Serie geloest wird, erbt deren Chat -- auch wenn der inzwischen geloescht
+ *   ist: die Herkunft bleibt wahr, auch wenn das Gespraech weg ist.
  * @returns {object}        die zu speichernden Felder
  */
-function checkEvent(store, merged) {
+function checkEvent(store, merged, opts = {}) {
   const out = {};
 
   if (typeof merged.title !== 'string' || !merged.title.trim()) {
@@ -248,7 +293,8 @@ function checkEvent(store, merged) {
       out[key] = null;
       continue;
     }
-    if (!liveOfType(store, value, type)) throw new ValidationError(`Das ${label} "${String(value)}" gibt es nicht.`);
+    const geerbt = key === 'chatId' && opts.geerbteChatId && value === opts.geerbteChatId;
+    if (!geerbt && !liveOfType(store, value, type)) throw new ValidationError(`Das ${label} "${String(value)}" gibt es nicht.`);
     out[key] = value;
   }
 
@@ -262,6 +308,18 @@ function checkEvent(store, merged) {
     throw new ValidationError('Ein automatisch erkannter Termin braucht den Chat, aus dem er stammt ("chatId").');
   }
   out.source = source;
+
+  // Wiederholung. Die Regel haengt am Tag des Beginns ("monatlich" heisst:
+  // am selben Tag des Monats wie der erste Termin).
+  if (merged.recurrence !== undefined && merged.recurrence !== null && w.hatZone(out.start)) {
+    throw new ValidationError('Eine Serie braucht die Uhrzeit vor Ort ("JJJJ-MM-TTTHH:MM") – '
+      + 'ein Zeitpunkt mit Zone würde bei jeder Zeitumstellung um eine Stunde wandern.');
+  }
+  out.recurrence = w.regelPruefen(merged.recurrence, out.start.slice(0, 10));
+  // Ausnahmen gibt es nur an Serien; wird aus einer Serie ein einzelner
+  // Termin, verlieren sie ihren Sinn.
+  out.exdates = out.recurrence ? w.ausnahmenPruefen(merged.exdates) : [];
+  out.reminder = w.erinnerungPruefen(merged.reminder);
   return out;
 }
 
@@ -270,13 +328,24 @@ function checkEvent(store, merged) {
  * damit dieselben Pruefungen gelten wie ueber HTTP.
  *
  * @param {object} store
- * @param {object} input  title, start, end?, allDay?, location?, body?, projectId?, chatId?, source?
+ * @param {object} input  title, start, end?, allDay?, location?, body?, projectId?, chatId?, source?,
+ *                        recurrence?, exdates?, reminder?
+ * @param {{stempel?:object}} [opts]  Herkunftsstempel eines Agentenlaufs (runId, agentId),
+ *   den der Aenderungsverlauf als Rueckfall liest
  */
-function createEvent(store, input) {
+function createEvent(store, input, opts = {}) {
   const raw = asObject(input, 'Der Termin');
   refuseDayAsTime(raw, raw.start);
   const data = checkEvent(store, raw);
-  return store.create('event', data);
+  return store.create('event', { ...data, ...stempelVon(opts) });
+}
+
+function stempelVon(opts) {
+  const out = {};
+  const st = opts && opts.stempel;
+  if (st && typeof st.runId === 'string' && st.runId) out.runId = st.runId;
+  if (st && typeof st.agentId === 'string' && st.agentId) out.agentId = st.agentId;
+  return out;
 }
 
 /**
@@ -296,7 +365,7 @@ function refuseDayAsTime(input, start) {
  * wer einen automatisch angelegten Termin verschiebt, macht ihn dadurch nicht
  * zu seinem eigenen, und "angelegt aus dem Chat …" soll stimmen bleiben.
  */
-function updateEvent(store, id, patch) {
+function updateEvent(store, id, patch, opts = {}) {
   const existing = liveOfType(store, id, 'event');
   if (!existing) throw notFound('Diesen Termin gibt es nicht (mehr).');
   const input = asObject(patch, 'Die Änderung');
@@ -307,6 +376,9 @@ function updateEvent(store, id, patch) {
   }
   const keys = Object.keys(input).filter((k) => EVENT_FIELDS.includes(k));
   if (!keys.length) throw new ValidationError('Es wurden keine Felder zum Ändern übergeben.');
+  if (opts.nur !== undefined && opts.nur !== null && opts.nur !== '') {
+    return aendernAm(store, existing, opts.nur, input, opts).record;
+  }
   const merged = { ...existing.data, ...input };
   // Ein Wechsel auf "mit Uhrzeit" ohne neuen Beginn hiesse, den Tag als
   // Zeitpunkt zu nehmen -- das ist keine Uhrzeit, sondern ein Missverstaendnis.
@@ -320,6 +392,68 @@ function updateEvent(store, id, patch) {
   }
   if (!Object.keys(changed).length) return existing;
   return store.update(existing.id, changed);
+}
+
+/**
+ * Prueft, dass `tag` ein Vorkommen der Serie ist. Ein Tag, an dem die Serie
+ * gar nicht stattfindet, ist ein Fehler, keine stille Ausnahme: sonst stuende
+ * in `exdates` ein Tag, den niemand je sehen konnte.
+ */
+function vorkommenPruefen(serie, tag) {
+  if (typeof tag !== 'string' || !w.gueltigerTag(tag)) {
+    throw new ValidationError(`"nur" muss ein Tag der Form JJJJ-MM-TT sein (empfangen: ${String(tag)}).`);
+  }
+  if (!w.istSerie(serie.data)) {
+    throw new ValidationError(`„${serie.data.title}“ wiederholt sich nicht – ein einzelnes Vorkommen gibt es nur bei Serien.`);
+  }
+  if (!w.istVorkommen(serie.data, tag)) {
+    throw notFound(`Am ${w.datumDeutsch(tag)} findet „${serie.data.title}“ nicht statt.`);
+  }
+}
+
+/**
+ * Genau EIN Vorkommen einer Serie aendern (Vertrag C).
+ *
+ * Der Tag wandert in `exdates` der Serie, und ein Einzeltermin mit den neuen
+ * Werten entsteht. Beides in einer Transaktion (scheitert das Schreiben,
+ * bleibt beides aus) und in einer Verlaufsgruppe (rueckgaengig nimmt beides
+ * zurueck).
+ *
+ * @returns {{record:object, serie:object}}  der neue Einzeltermin und die Serie danach
+ */
+function aendernAm(store, serie, tag, input, opts = {}) {
+  vorkommenPruefen(serie, tag);
+  if (has(input, 'recurrence') && input.recurrence !== null) {
+    throw new ValidationError('Ein einzelnes Vorkommen hat keine eigene Wiederholung. Ohne „nur“ ändert sich die ganze Serie.');
+  }
+  const lage = w.aufTagLegen(serie.data, tag);
+  const merged = { ...serie.data, start: lage.start, end: lage.end, ...input, recurrence: null, exdates: [] };
+  refuseDayAsTime(input, merged.start);
+  if (input.allDay === true && !has(input, 'end')) merged.end = null;
+  const data = checkEvent(store, merged, { geerbteChatId: serie.data.chatId || null });
+  const exdates = w.ausnahmenPruefen([...(Array.isArray(serie.data.exdates) ? serie.data.exdates : []), tag]);
+  return store.transaction(() => gemeinsam(() => {
+    const neueSerie = store.update(serie.id, { exdates });
+    const record = store.create('event', { ...data, ausSerie: { id: serie.id, tag }, ...stempelVon(opts) });
+    return { record, serie: neueSerie };
+  }));
+}
+
+/**
+ * Einen Termin loeschen (weich; POST /api/records/:id/restore holt ihn
+ * zurueck) -- oder mit `nur` genau ein Vorkommen einer Serie auslassen.
+ *
+ * @returns {{record:object, ausgelassen:string|null}}
+ */
+function deleteEvent(store, id, opts = {}) {
+  const existing = liveOfType(store, id, 'event');
+  if (!existing) throw notFound('Diesen Termin gibt es nicht (mehr).');
+  if (opts.nur !== undefined && opts.nur !== null && opts.nur !== '') {
+    vorkommenPruefen(existing, opts.nur);
+    const exdates = w.ausnahmenPruefen([...(Array.isArray(existing.data.exdates) ? existing.data.exdates : []), opts.nur]);
+    return { record: store.update(existing.id, { exdates }), ausgelassen: opts.nur };
+  }
+  return { record: store.remove(existing.id), ausgelassen: null };
 }
 
 /* ------------------------------------------------------------------ */
@@ -349,21 +483,139 @@ function readRange(query) {
   return { from, to };
 }
 
+/** Ein Einzeltermin, wie der Zeitraum ihn liefert (Vertrag B). */
+function einzelEintrag(record) {
+  return {
+    ...record,
+    data: { ...record.data, occurrence: null, recurring: false },
+    occurrence: null,
+    recurring: false,
+  };
+}
+
 /**
- * Alle Termine, die den Zeitraum beruehren, nach Beginn sortiert. Ein Termin
- * vom 30. bis 2. gehoert in beide Monate.
+ * Ein Vorkommen einer Serie: die Felder der Serie, Beginn und Ende auf den
+ * Tag gelegt, dieselbe id. `serie` nennt Beginn und Ende der Serie selbst.
  */
-function eventsInRange(store, from, to) {
+function vorkommenEintrag(record, tag) {
+  const lage = w.aufTagLegen(record.data, tag);
+  return {
+    ...record,
+    data: { ...record.data, start: lage.start, end: lage.end, occurrence: tag, recurring: true },
+    occurrence: tag,
+    recurring: true,
+    serie: { start: record.data.start, end: record.data.end || null },
+  };
+}
+
+function zuViele() {
+  return new ValidationError(`In diesem Zeitraum liegen mehr als ${MAX_VORKOMMEN} Termine. Bitte einen kürzeren Zeitraum wählen.`);
+}
+
+/**
+ * Alle Termine, die den Zeitraum beruehren, nach Beginn sortiert -- Serien
+ * je Vorkommen. Ein Termin vom 30. bis 2. gehoert in beide Monate.
+ *
+ * @returns {object[]}  Eintraege nach Vertrag B (einzelEintrag / vorkommenEintrag)
+ */
+function eventsInRange(store, from, to, { max = MAX_VORKOMMEN } = {}) {
   const out = [];
   for (const record of store.all('event')) {
-    const span = spanOf(record.data);
-    if (!span) continue; // ein unlesbarer Altbestand: nicht erfinden, wohin er gehoert
-    if (span.firstDay > to || span.lastDay < from) continue;
-    out.push({ record, span });
+    if (w.istSerie(record.data)) {
+      for (const tag of w.vorkommenImZeitraum(record.data, from, to, { max })) {
+        const eintrag = vorkommenEintrag(record, tag);
+        out.push({ eintrag, ms: spanOf(eintrag.data).startMs });
+      }
+    } else {
+      const span = spanOf(record.data);
+      if (!span) continue; // ein unlesbarer Altbestand: nicht erfinden, wohin er gehoert
+      if (span.firstDay > to || span.lastDay < from) continue;
+      out.push({ eintrag: einzelEintrag(record), ms: span.startMs });
+    }
+    if (out.length > max) throw zuViele();
   }
-  out.sort((a, b) => (a.span.startMs - b.span.startMs)
-    || String(a.record.data.title).localeCompare(String(b.record.data.title), 'de'));
-  return out.map((entry) => entry.record);
+  out.sort((a, b) => (a.ms - b.ms)
+    || String(a.eintrag.data.title).localeCompare(String(b.eintrag.data.title), 'de')
+    || (a.eintrag.id < b.eintrag.id ? -1 : a.eintrag.id > b.eintrag.id ? 1 : 0));
+  return out.map((x) => x.eintrag);
+}
+
+/**
+ * Die gespeicherten Termine (Serien EINMAL, als Regel), die den Zeitraum
+ * beruehren -- fuer die Kalenderdatei, in der eine Serie eine RRULE ist und
+ * nicht 52 Einzeltermine.
+ */
+function recordsInRange(store, from, to) {
+  const out = [];
+  for (const record of store.all('event')) {
+    if (w.istSerie(record.data)) {
+      if (w.vorkommenImZeitraum(record.data, from, to, { max: 0 }).length) out.push(record);
+      continue;
+    }
+    const span = spanOf(record.data);
+    if (span && span.firstDay <= to && span.lastDay >= from) out.push(record);
+  }
+  if (out.length > MAX_VORKOMMEN) throw zuViele();
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* Ueberschneidungen                                                   */
+/* ------------------------------------------------------------------ */
+
+/** [Beginn, Ende) eines Eintrags mit Uhrzeit in ms; null fuer ganztaegige. */
+function fenster(data) {
+  if (data.allDay) return null;
+  const start = parseWhen(data.start);
+  if (!start || start.kind === 'date') return null;
+  const end = parseWhen(data.end);
+  let e = end && end.kind !== 'date' ? end.ms : start.ms + OHNE_ENDE_MS;
+  if (e <= start.ms) e = start.ms + OHNE_ENDE_MS;
+  return { s: start.ms, e };
+}
+
+/**
+ * Termine (und Vorkommen), die sich mit dem Zeitraum ueberschneiden
+ * (Vertrag E).
+ *
+ * - Mit Uhrzeit: [start, end) ueberschneidet [s, e), wenn s < end und
+ *   start < e. Wer um 11 Uhr endet, stoesst an 11 Uhr, ueberschneidet es
+ *   aber nicht.
+ * - Ganztaegig ueberschneidet nichts mit Uhrzeit (und umgekehrt): ein
+ *   Geburtstag steht dem Zahnarzt nicht im Weg. Ganztaegiges ueberschneidet
+ *   Ganztaegiges, wenn sich die Tage beruehren.
+ *
+ * @param {{start:string, end?:string|null, ohne?:string|null}} q
+ */
+function ueberschneidungen(store, { start, end = null, ohne = null } = {}) {
+  const qs = parseWhen(start);
+  if (!qs) throw new ValidationError(`"start" ist kein gültiger Zeitpunkt (empfangen: ${String(start ?? '')}).`);
+  const qe = end === null || end === undefined || end === '' ? null : parseWhen(end);
+  if (end && !qe) throw new ValidationError(`"end" ist kein gültiger Zeitpunkt (empfangen: ${String(end)}).`);
+
+  if (qs.kind === 'date') {
+    const firstDay = qs.day;
+    const lastDay = qe ? qe.day : qs.day;
+    if (lastDay < firstDay) throw new ValidationError('Das Ende liegt vor dem Beginn.');
+    if (daysBetween(firstDay, lastDay) > MAX_RANGE_DAYS) throw new ValidationError(`Der Zeitraum ist zu lang (höchstens ${MAX_RANGE_DAYS} Tage).`);
+    return eventsInRange(store, firstDay, lastDay).filter((x) => x.id !== ohne && x.data.allDay === true);
+  }
+
+  if (qe && qe.kind === 'date') throw new ValidationError('Ein Zeitraum mit Uhrzeit braucht auch beim Ende eine Uhrzeit.');
+  const s = qs.ms;
+  let e = qe ? qe.ms : s + OHNE_ENDE_MS;
+  if (e < s) throw new ValidationError('Das Ende liegt vor dem Beginn.');
+  if (e === s) e = s + OHNE_ENDE_MS;
+  const firstDay = qs.day;
+  const lastDay = dayString(new Date(e - 1));
+  if (daysBetween(firstDay, lastDay) > MAX_RANGE_DAYS) throw new ValidationError(`Der Zeitraum ist zu lang (höchstens ${MAX_RANGE_DAYS} Tage).`);
+  // Einen Tag frueher anfangen: ein Termin, der gestern Abend begann und
+  // heute frueh endet, liegt nur mit seinem Ende im gefragten Tag.
+  return eventsInRange(store, addDays(firstDay, -1), lastDay).filter((x) => {
+    if (x.id === ohne) return false;
+    const f = fenster(x.data);
+    return !!f && f.s < e && s < f.e;
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -487,16 +739,33 @@ function lightNote(record) {
   };
 }
 
-function lightEvent(record) {
+/**
+ * Ein Termin fuer die Projektansicht. Eine Serie erscheint mit ihrem
+ * NAECHSTEN Vorkommen -- "naechster Termin: Training, 7. Januar 2025" waere
+ * fuer eine Serie, die jede Woche stattfindet, eine falsche Auskunft.
+ */
+function lightEvent(record, heute = dayString(new Date())) {
   const data = record.data || {};
+  let { start, end } = data;
+  let occurrence = null;
+  const serie = w.istSerie(data);
+  if (serie) {
+    const tag = w.naechstesVorkommen(data, heute);
+    if (tag) {
+      ({ start, end } = w.aufTagLegen(data, tag));
+      occurrence = tag;
+    }
+  }
   return {
     id: record.id,
     title: data.title,
-    start: data.start,
-    end: data.end || null,
+    start,
+    end: end || null,
     allDay: !!data.allDay,
     location: data.location || '',
     source: data.source || 'user',
+    recurring: serie,
+    occurrence,
     updatedAt: record.updatedAt,
   };
 }
@@ -533,7 +802,8 @@ function describeProject(bucket, now = Date.now(), full = false) {
   const { project } = bucket;
   const chats = [...bucket.chats.values()].sort(byUpdatedDesc);
   const notes = [...bucket.note.values()].sort(byUpdatedDesc);
-  const events = [...bucket.event.values()].map(lightEvent).sort(eventOrder);
+  const heute = dayString(new Date(now));
+  const events = [...bucket.event.values()].map((r) => lightEvent(r, heute)).sort(eventOrder);
   const tasks = [...bucket.task.values()].map(lightTask).sort(taskOrder);
 
   let zuletzt = project.updatedAt;
@@ -581,6 +851,67 @@ function describeProject(bucket, now = Date.now(), full = false) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Antworten                                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Welcher Verlaufseintrag die gerade geschehene Aenderung zuruecknimmt.
+ * Die Oberflaeche braucht die Nummer fuer "Rückgängig"
+ * (POST /api/history/:seq/undo); bei einer Gruppe nimmt jeder ihrer
+ * Eintraege die ganze Gruppe zurueck. Ohne Verlauf (etwa in einem Test ohne
+ * das Teilsystem) ehrlich null.
+ */
+function verlaufStand(rc) {
+  const history = rc.ctx && rc.ctx.history;
+  if (!history || typeof history.list !== 'function') return null;
+  try {
+    const [neuester] = history.list({ limit: 1 }).items;
+    return neuester ? neuester.seq : 0;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {number|null} stand  die hoechste Verlaufsnummer VOR dem Schreiben.
+ *   Nur was danach entstand, gehoert zu dieser Anfrage: aendert ein PATCH
+ *   nichts (dieselben Werte), gibt es auch nichts zurueckzunehmen -- und die
+ *   Nummer einer AELTEREN Aenderung anzubieten hiesse, dass "Rückgängig" etwa
+ *   das Anlegen zuruecknimmt und der Termin verschwindet.
+ */
+function rueckgaengigFuer(rc, id, stand) {
+  const history = rc.ctx && rc.ctx.history;
+  if (!history || typeof history.list !== 'function' || stand === null || stand === undefined) return null;
+  try {
+    const { items } = history.list({ type: 'event', limit: 20 });
+    const eintrag = items.find((e) => e.id === id && e.seq > stand && e.canUndo);
+    if (!eintrag) return null;
+    return { eintrag: eintrag.seq, pfad: `/api/history/${eintrag.seq}/undo`, gruppe: eintrag.gruppe || null };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Eine Kalenderdatei senden. `attachment`, damit Safari auf dem iPad sie als
+ * Datei behandelt und "Zum Kalender hinzufügen" anbietet, statt Text zu zeigen.
+ */
+function kalenderSenden(rc, text, name) {
+  const body = Buffer.from(text, 'utf8');
+  const { res } = rc;
+  res.writeHead(200, {
+    'Content-Type': 'text/calendar; charset=utf-8',
+    'Content-Length': body.length,
+    'Content-Disposition': `attachment; filename="${name}"`,
+    'Cache-Control': 'no-store',
+  });
+  if (rc.method === 'HEAD') res.end();
+  else res.end(body);
+  rc.handled = true;
+  return undefined;
+}
+
+/* ------------------------------------------------------------------ */
 /* Routen                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -602,11 +933,36 @@ function register(router) {
     };
   });
 
+  // Vor `/api/events/:id` registriert: der Router nimmt die erste passende
+  // Route, und ":id" passte sonst auch auf "ueberschneidungen".
+  router.get('/api/events/ueberschneidungen', (rc) => {
+    rc.requireCapability('read');
+    const store = need(rc.ctx.store, 'Der Speicher');
+    const start = strParam(rc.query, 'start', 40);
+    if (!start) throw new ValidationError('"start" fehlt (JJJJ-MM-TT oder JJJJ-MM-TTTHH:MM).');
+    const items = ueberschneidungen(store, {
+      start,
+      end: strParam(rc.query, 'end', 40) || null,
+      ohne: strParam(rc.query, 'ohne', 80) || null,
+    });
+    return { items, total: items.length };
+  });
+
+  router.get('/api/events/export.ics', (rc) => {
+    rc.requireCapability('read');
+    const store = need(rc.ctx.store, 'Der Speicher');
+    const { from, to } = readRange(rc.query);
+    const text = ics.kalenderDatei(recordsInRange(store, from, to), { name: 'Neural OS' });
+    return kalenderSenden(rc, text, `neural-os-${from}-bis-${to}.ics`);
+  });
+
   router.post('/api/events', async (rc) => {
     rc.requireCapability('write');
     const store = need(rc.ctx.store, 'Der Speicher');
-    const record = createEvent(store, eventInput(asObject(await rc.body())));
-    return { record };
+    const input = eventInput(asObject(await rc.body()));
+    const stand = verlaufStand(rc);
+    const record = createEvent(store, input);
+    return { record, rueckgaengig: rueckgaengigFuer(rc, record.id, stand) };
   });
 
   router.get('/api/events/:id', (rc) => {
@@ -620,23 +976,41 @@ function register(router) {
       record,
       chat: chats[record.data.chatId] || null,
       projekt: projekte[record.data.projectId] || null,
+      // In Worten, wie die Serie gespeichert ist ("jeden Dienstag bis 24.12.2026").
+      wiederholung: w.istSerie(record.data) ? w.inWorten(record.data.recurrence, record.data.start.slice(0, 10)) : null,
     };
+  });
+
+  router.get('/api/events/:id/ics', (rc) => {
+    rc.requireCapability('read');
+    const store = need(rc.ctx.store, 'Der Speicher');
+    const record = liveOfType(store, rc.params.id, 'event');
+    if (!record) throw notFound('Diesen Termin gibt es nicht (mehr).');
+    return kalenderSenden(rc, ics.kalenderDatei([record], { name: 'Neural OS' }), ics.dateiname(record.data.title));
   });
 
   router.patch('/api/events/:id', async (rc) => {
     rc.requireCapability('write');
     const store = need(rc.ctx.store, 'Der Speicher');
-    const record = updateEvent(store, rc.params.id, eventInput(asObject(await rc.body())));
-    return { record };
+    const nur = strParam(rc.query, 'nur', 20) || null;
+    const input = eventInput(asObject(await rc.body()));
+    const stand = verlaufStand(rc);
+    const record = updateEvent(store, rc.params.id, input, { nur });
+    const out = { record, rueckgaengig: rueckgaengigFuer(rc, record.id, stand) };
+    // Nur ein Vorkommen: die Antwort ist der NEUE Einzeltermin (Vertrag C);
+    // die Serie danach steht daneben, damit niemand sie neu laden muss.
+    if (nur) out.serie = store.get(rc.params.id);
+    return out;
   });
 
   router.delete('/api/events/:id', (rc) => {
     rc.requireCapability('write');
     const store = need(rc.ctx.store, 'Der Speicher');
-    const record = liveOfType(store, rc.params.id, 'event');
-    if (!record) throw notFound('Diesen Termin gibt es nicht (mehr).');
-    // Weich geloescht: POST /api/records/:id/restore holt ihn zurueck.
-    return { record: store.remove(record.id) };
+    // Ohne `nur` weich geloescht: POST /api/records/:id/restore holt ihn zurueck.
+    // Mit `nur` bleibt die Serie und laesst nur diesen Tag aus.
+    const stand = verlaufStand(rc);
+    const { record, ausgelassen } = deleteEvent(store, rc.params.id, { nur: strParam(rc.query, 'nur', 20) || null });
+    return { record, ausgelassen, rueckgaengig: rueckgaengigFuer(rc, record.id, stand) };
   });
 
   /* --------------------------------------------------------- Notizen */
@@ -704,7 +1078,12 @@ module.exports = {
   register,
   createEvent,
   updateEvent,
+  deleteEvent,
+  aendernAm,
   parseWhen,
   spanOf,
   eventsInRange,
+  recordsInRange,
+  ueberschneidungen,
+  MAX_VORKOMMEN,
 };

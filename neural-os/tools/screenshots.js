@@ -67,7 +67,7 @@ const OUT = (() => {
 const VIEWS = [
   ['chat', 'chat'], ['kalender', 'kalender'], ['notes', 'notizen'], ['projects', 'projekte'],
   ['agents', 'agenten'], ['graph', 'gehirn'], ['workshop', 'werkstatt'], ['settings', 'einstellungen'],
-  ['network', 'netz'], ['stick', 'stick'], ['backup', 'sicherung'],
+  ['network', 'netz'], ['stick', 'stick'],
 ];
 
 /** Hell ist eine Wahl, keine Systemvorgabe: dunkel ist die Voreinstellung. */
@@ -257,13 +257,17 @@ async function los(page, base, view, warten = 1000) {
   // wird, was der Nutzer dort tut -- und woher ein Eintrag stammt.
   {
     const { c, p } = await mach('dark');
+    // Kalender (Bereich Kalender-Oberflaeche): jede Ansicht, das Seitenblatt,
+    // Schnell-Eintragen mit Vorschau, Ziehen mitten im Vorgang, die Frage bei
+    // Serien und der Erinnerungshinweis.
     await los(p, base, 'kalender', 1400);
-    await step('Kalender: automatischer Termin mit seinem Chat', async () => {
-      const eintrag = p.locator('.kal__entry').first();
+    await step('Kalender: Monat', async () => { await shot(p, 'kalender-monat-dunkel'); });
+    await step('Kalender: Termin der KI mit seinem Chat', async () => {
+      const eintrag = p.locator('.kal__entry', { hasText: 'Zahnarzt' }).first();
       await eintrag.waitFor({ state: 'visible', timeout: 4000 });
       await eintrag.click();
       await p.waitForTimeout(900);
-      await shot(p, 'kalender-termin-aus-dem-chat-dunkel');
+      await shot(p, 'kalender-termin-der-ki-dunkel');
       await p.keyboard.press('Escape');
       await p.waitForTimeout(300);
     });
@@ -271,11 +275,72 @@ async function los(page, base, view, warten = 1000) {
       await klick(p, /^Woche$/, { warten: 900 });
       await shot(p, 'kalender-woche-dunkel');
     });
-    await step('Kalender: neuer Termin', async () => {
-      await klick(p, /^Termin$/, { warten: 600 });
-      await shot(p, 'kalender-neuer-termin-dunkel');
+    await step('Kalender: Serie im Seitenblatt', async () => {
+      const block = p.locator('.kal__block', { hasText: 'Training' }).first();
+      await block.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+      await block.click();
+      await p.waitForTimeout(900);
+      await shot(p, 'kalender-serie-seitenblatt-dunkel');
       await p.keyboard.press('Escape');
-      await klick(p, /^Monat$/, { warten: 400 });
+      await p.waitForTimeout(300);
+    });
+    await step('Kalender: Ziehen mitten im Vorgang', async () => {
+      const block = p.locator('.kal__block', { hasText: 'Dichtung' }).first();
+      await block.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+      const box = await block.boundingBox();
+      await p.mouse.move(box.x + box.width / 2, box.y + 6);
+      await p.mouse.down();
+      await p.mouse.move(box.x + box.width * 1.5, box.y + 70, { steps: 10 });
+      await p.waitForTimeout(200);
+      await shot(p, 'kalender-ziehen-dunkel');
+      await p.keyboard.press('Escape');
+      await p.mouse.up();
+      await p.waitForTimeout(400);
+    });
+    await step('Kalender: Serie gezogen -- nur dieser oder alle', async () => {
+      const block = p.locator('.kal__block', { hasText: 'Training' }).last();
+      await block.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+      const box = await block.boundingBox();
+      await p.mouse.move(box.x + box.width / 2, box.y + 6);
+      await p.mouse.down();
+      await p.mouse.move(box.x + box.width / 2, box.y + 54, { steps: 8 });
+      await p.mouse.up();
+      await p.waitForTimeout(500);
+      await shot(p, 'kalender-serie-frage-dunkel');
+      await klick(p, /^Abbrechen$/, { warten: 400 });
+    });
+    await step('Kalender: Tag', async () => {
+      await klick(p, /^Tag$/, { warten: 900 });
+      await shot(p, 'kalender-tag-dunkel');
+    });
+    await step('Kalender: Liste „Als Nächstes“', async () => {
+      await klick(p, /^Liste$/, { warten: 900 });
+      await shot(p, 'kalender-liste-dunkel');
+    });
+    await step('Kalender: Schnell eintragen mit Vorschau', async () => {
+      const feld = p.getByRole('textbox', { name: 'Neuer Termin' });
+      await feld.click();
+      await p.keyboard.type('jeden Dienstag 18-19:30 Chorprobe @ Gemeindehaus', { delay: 15 });
+      await p.waitForTimeout(700);
+      await shot(p, 'kalender-schnell-eintragen-dunkel');
+      await feld.fill('');
+      await p.keyboard.press('Escape');
+      await klick(p, /^Monat$/, { warten: 600 });
+    });
+    await step('Kalender: Erinnerung oben rechts', async () => {
+      // Ein eigener Termin, der jetzt faellig ist -- und danach wieder weg,
+      // damit der Hinweis nicht auf den Bildern der anderen Bereiche steht.
+      const pad = (n) => String(n).padStart(2, '0');
+      const wand = (t) => `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T${pad(t.getHours())}:${pad(t.getMinutes())}`;
+      const bald = new Date(Date.now() + 12 * 60000);
+      const probe = app.store.create('event', { title: 'Rückruf Hausverwaltung', start: wand(bald), end: wand(new Date(bald.getTime() + 15 * 60000)), location: 'Büro', reminder: 15 });
+      try {
+        await p.locator('.erin__card').first().waitFor({ state: 'visible', timeout: 6000 });
+        await p.waitForTimeout(400);
+        await shot(p, 'kalender-erinnerung-dunkel');
+      } finally {
+        app.store.remove(probe.id);
+      }
     });
     await step('Notiz aus dem Chat, geöffnet', async () => {
       await los(p, base, 'notes', 1400);
@@ -289,28 +354,68 @@ async function los(page, base, view, warten = 1000) {
     await c.close();
   }
 
+  {
+    // Kalender hell, und auf dem iPad des Nutzers (quer, mit dem Finger).
+    for (const [mode, name] of [['woche', 'woche'], ['monat', 'monat']]) {
+      const { c, p } = await mach('light');
+      await p.addInitScript((m) => { try { localStorage.setItem('neural-os:kalender-ansicht', m); } catch { /* egal */ } }, mode);
+      await los(p, base, 'kalender', 1400);
+      await step(`Kalender: ${name} (hell)`, async () => { await shot(p, `kalender-${name}-hell`); });
+      await c.close();
+    }
+    for (const [mode, name] of [['woche', 'woche'], ['monat', 'monat'], ['liste', 'liste']]) {
+      const { c, p } = await mach('dark', { breite: 1180, hoehe: 820, finger: true });
+      await p.addInitScript((m) => { try { localStorage.setItem('neural-os:kalender-ansicht', m); } catch { /* egal */ } }, mode);
+      await los(p, base, 'kalender', 1400);
+      await step(`Kalender: ${name} (iPad quer)`, async () => { await shot(p, `ipad-quer-kalender-${name}-dunkel`); });
+      await c.close();
+    }
+  }
+
   /* ================================================== 4 · Das Gehirn */
+  //
+  // Nach docs/vorlage/gehirn-obsidian.png: das ruhende Netz, das Panel oben
+  // rechts mit Filter, Gruppen, Anzeige, Kraefte, ein gewaehlter Knoten mit
+  // seinem schmalen Kaertchen.
   {
     const { c, p } = await mach('dark');
-    await los(p, base, 'graph', 3000);
-    await step('Gehirn: Knoten gewählt', async () => {
-      const box = await p.locator('canvas').first().boundingBox();
-      await p.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await los(p, base, 'graph', 800);
+    const ruhe = () => p.waitForFunction(() => {
+      const g = document.querySelector('.gh');
+      return g && g.dataset.ruhe === 'ja';
+    }, null, { timeout: 12000 });
+    await step('Gehirn: das ruhende Netz', async () => {
+      await ruhe();
+      await p.waitForTimeout(700);
+      await shot(p, 'gehirn-dunkel');
+    });
+    await step('Gehirn: Suchen und Wählen', async () => {
+      // Das Panel ist auf schmaler Karte zu; dann wird es erst geoeffnet.
+      if (await p.locator('.gh__opener').isVisible()) await p.locator('.gh__opener').click();
+      await p.locator('.gh__panel summary', { hasText: 'Filter' }).first().click();
+      await p.getByLabel('Im Gehirn suchen').fill('Espresso');
+      await p.getByLabel('Im Gehirn suchen').press('Enter');
+      await p.locator('.gh__card').waitFor({ state: 'visible', timeout: 4000 });
+      await p.waitForTimeout(900);
+      await shot(p, 'gehirn-auswahl-dunkel');
+    });
+    await step('Gehirn: Gruppen nach Thema', async () => {
+      await p.getByRole('button', { name: 'Auswahl schließen' }).click();
+      await p.getByLabel('Im Gehirn suchen').fill('');
+      await p.getByLabel('Im Gehirn suchen').press('Escape');
+      await p.locator('.gh__panel summary', { hasText: 'Filter' }).first().click();
+      await p.locator('.gh__panel summary', { hasText: 'Gruppen' }).first().click();
+      await p.getByRole('switch', { name: 'Nach Thema einfärben' }).click();
+      await p.keyboard.press('0');
       await p.waitForTimeout(1200);
-      await shot(p, 'gehirn-inspektor-dunkel');
-    });
-    await step('Gehirn: Fokus', async () => {
-      await klick(p, /^Fokus$/, { warten: 1800 });
-      await shot(p, 'gehirn-fokus-dunkel');
-      await klick(p, /^Fokus$/, { warten: 1200 });
-    });
-    await step('Gehirn: Gruppen', async () => {
-      await klick(p, /^Gruppen$/, { warten: 2000 });
       await shot(p, 'gehirn-gruppen-dunkel');
     });
-    await step('Gehirn: nur Notizen', async () => {
-      await klick(p, /^Notizen \d+$/, { warten: 1500 });
-      await shot(p, 'gehirn-nur-notizen-dunkel');
+    await step('Gehirn: Anzeige und Kräfte', async () => {
+      await p.locator('.gh__panel summary', { hasText: 'Gruppen' }).first().click();
+      await p.locator('.gh__panel summary', { hasText: 'Anzeige' }).first().click();
+      await p.locator('.gh__panel summary', { hasText: 'Kräfte' }).first().click();
+      await p.waitForTimeout(500);
+      await shot(p, 'gehirn-panel-dunkel');
     });
     await c.close();
   }
@@ -515,57 +620,69 @@ async function los(page, base, view, warten = 1000) {
     await c.close();
   }
 
-  /* =============================================== 12 · Sicherung */
+  /* ======================================= 12 · Stick und Sicherung */
   //
-  // Die Sicherung ist der Grund, aus dem jemand dieses Programm ueberhaupt
-  // einem Dienst vorzieht -- und war bis vor kurzem auf keinem einzigen der
-  // 93 Bilder zu sehen. Drei Zustaende sind es wert, festgehalten zu werden:
-  // "noch nie gesichert" (der Zustand, in dem die meisten sind), die fertige
-  // Sicherung samt Pfad, und die Vorschau vor dem Zurueckspielen.
+  // Der Bereich "Stick" hat vier Knoepfe: Stick vorbereiten, Jetzt sichern,
+  // (klein) Wiederherstellen, Beenden & abziehen. Festgehalten wird jeder
+  // Zustand, den ein Mensch dort sieht -- die Rueckfrage nach dem Internet,
+  // der Balken, "fertig" mit der Anleitung, die Sicherung auf dem Stick und
+  // die Vorschau vor dem Zurueckspielen. "Beenden" kommt ganz zum Schluss
+  // (Abschnitt 99), weil danach kein Server mehr da ist.
+  //
+  // An diesem Rechner steckt kein Stick. Die Suche ist trotzdem die echte
+  // Funktion; nur ihre Wurzel zeigt auf einen Ordner, der wie /media aussieht.
+  const medien = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-shots-medien-'));
+  const stickOrt = path.join(medien, 'USB-STICK');
+  fs.mkdirSync(stickOrt);
   {
-    const { c, p } = await mach('light');
-    // Bewusst OHNE eigenes Ziel: der Vorgabeordner ist genau der, in dem die
-    // Liste nachsieht. Ein Bild von einer Sicherung, die anschliessend in der
-    // eigenen Liste fehlt, waere eine Anleitung zum Missverstaendnis.
-    const exportOrdner = path.join(home, 'exports');
-    await los(p, base, 'backup', 1400);
-    await step('Sicherung: noch nie gesichert', async () => {
-      await shot(p, 'sicherung-noch-keine-hell');
+    const stickMod = require('../src/portable/stick');
+    app.findeLaufwerke = (opts) => stickMod.findeLaufwerke({
+      ...opts, platform: 'linux', wurzeln: [medien], einhaengepunkt: (d) => d === stickOrt,
     });
-    await step('Sicherung: geschrieben', async () => {
-      await klick(p, /^Jetzt sichern/, { warten: 600 });
-      // Auf die Datei warten, nicht auf eine Meldung: was gezeigt wird, soll
-      // dem entsprechen, was wirklich auf der Platte liegt.
-      for (let i = 0; i < 40; i++) {
-        await p.waitForTimeout(400);
-        try {
-          if (fs.readdirSync(exportOrdner).some((d) => fs.existsSync(path.join(exportOrdner, d, 'manifest.json')))) break;
-        } catch { /* noch nicht da */ }
+    const { c, p } = await mach('dark');
+    await los(p, base, 'stick', 1600);
+    await step('Stick: gefunden, ein Knopf', async () => { await shot(p, 'stick-gefunden-dunkel'); });
+    await step('Stick: die eine Rückfrage', async () => {
+      await klick(p, /^Stick vorbereiten$/, { warten: 900 });
+      await shot(p, 'stick-rueckfrage-internet-dunkel');
+    });
+    await step('Stick: der Balken', async () => {
+      await klick(p, /^Nur /, { warten: 10 });
+      await p.locator('.stickv__bar').waitFor({ timeout: 10000 });
+      for (let i = 0; i < 200; i++) {
+        const t = await p.locator('.stickv__lauf-text').innerText().catch(() => '');
+        const m = /^(\d+) %/.exec(t);
+        if (m && Number(m[1]) >= 15) break;
+        await p.waitForTimeout(20);
       }
-      await p.waitForTimeout(1500);
-      await shot(p, 'sicherung-geschrieben-hell');
+      await shot(p, 'stick-balken-dunkel');
     });
-    await step('Sicherung: Liste und Prüfung', async () => {
-      await klick(p, /^Prüfen$/, { warten: 2500 });
-      await shot(p, 'sicherung-geprueft-hell');
+    await step('Stick: fertig, drei Sätze', async () => {
+      await p.locator('.stickv__fertig').waitFor({ timeout: 120000 });
+      await p.waitForTimeout(600);
+      await shot(p, 'stick-fertig-dunkel');
+    });
+    await step('Sicherung: auf dem Stick', async () => {
+      await klick(p, /^Jetzt sichern$/, { warten: 300 });
+      await p.locator('.stickv__sichern [role=status]').waitFor({ timeout: 60000 });
+      await p.waitForTimeout(600);
+      await shot(p, 'sicherung-auf-dem-stick-dunkel');
     });
     await step('Sicherung: Vorschau vor dem Zurückspielen', async () => {
-      await klick(p, /Zum Wiederherstellen wählen/, { warten: 2500 });
-      await shot(p, 'sicherung-vorschau-hell');
-    });
-    await step('Sicherung: alles ersetzen', async () => {
-      await p.getByRole('radio', { name: /vollständig ersetzen/ }).first().check();
-      await klick(p, /^Erst ansehen/, { warten: 2500 });
-      await shot(p, 'sicherung-alles-ersetzen-hell');
+      await p.locator('summary', { hasText: 'Von einer Sicherung wiederherstellen' }).click();
+      await p.waitForTimeout(900);
+      await p.locator('.stickv__eintrag').first().click();
+      await p.locator('.stickv__vorschau').waitFor({ timeout: 30000 });
+      await p.locator('.stickv__vorschau').scrollIntoViewIfNeeded();
+      await p.waitForTimeout(500);
+      await shot(p, 'sicherung-vorschau-dunkel');
     });
     await c.close();
   }
-
-  /* ============================================== 13 · Sicherung, dunkel */
   {
-    const { c, p } = await mach('dark');
-    await los(p, base, 'backup', 1400);
-    await step('Sicherung: dunkel', async () => { await shot(p, 'sicherung-zustand-dunkel'); });
+    const { c, p } = await mach('light');
+    await los(p, base, 'stick', 1600);
+    await step('Stick: hell', async () => { await shot(p, 'stick-hell'); });
     await c.close();
   }
 
@@ -579,10 +696,35 @@ async function los(page, base, view, warten = 1000) {
     await c.close();
   }
 
+  /* ====================================== 99 · Beenden & abziehen */
+  //
+  // Zuletzt, weil danach kein Server mehr da ist. Das Ende ist das echte
+  // app.close(); nur process.exit (das die Kommandozeile danach aufruft)
+  // bleibt hier aus, sonst endete dieses Werkzeug mitten im Bild.
+  {
+    app.beenden = () => app.close();
+    const { c, p } = await mach('dark', { breite: 1180, hoehe: 820, finger: true });
+    await los(p, base, 'stick', 1600);
+    // Nach dem Beenden antwortet absichtlich kein Server mehr. Was die Schale
+    // und die Kacheln danach vergeblich abfragen, ist der Beweis dafuer und
+    // kein Fehler der Anwendung -- es zaehlt deshalb nicht als Konsolenfehler.
+    const konsoleVorher = konsole.length;
+    await step('Beenden & abziehen', async () => {
+      await klick(p, /Beenden & abziehen/, { warten: 400 });
+      await klick(p, /^Beenden$/, { warten: 200 });
+      await p.locator('.stickv__ende[data-zustand="fertig"]').waitFor({ timeout: 30000 });
+      await p.waitForTimeout(400);
+      await shot(p, 'stick-jetzt-abziehen-ipad-dunkel');
+    });
+    await c.close();
+    konsole.splice(konsoleVorher);
+  }
+
   await browser.close();
   await app.close();
 
   fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(medien, { recursive: true, force: true });
 
   console.log(`\n${G}${gemacht.length} Bilder${X} in ${OUT}`);
   if (fehlt.length) {

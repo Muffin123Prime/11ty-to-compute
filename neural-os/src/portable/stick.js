@@ -161,6 +161,10 @@ const LAUNCHERS = [
 const EXCLUDED_NAMES = new Set([
   'node_modules', '.git', 'vault', 'data', 'exports', 'runs', 'trash',
   'audit.jsonl', 'secrets.json', '.DS_Store', '.lock', PORTABLE_MARKER,
+  // Die Ausgabe von `npm run shots` (gemessen 14 MB, 97 Bilder). Sie ist
+  // Anschauungsmaterial fuer Entwickler, kein Teil des Programms, und
+  // verdoppelte die Kopierzeit fuer "Stick vorbereiten".
+  'screenshots',
 ]);
 
 /** Dropped when copying a home directory onto the stick (see EXCLUDED_NAMES). */
@@ -2841,10 +2845,26 @@ function createStick(deps = {}) {
     }
     let stand = 0;
     const downloads = new Map();
-    const melde = (key, anteil, event) => {
+    // Ein Satz je Schritt, ohne die Prozentzahl des Teilschritts: neben dem
+    // einen Balken stuende sonst "30 % · … (50/169, 55 %)". Der Satz des
+    // Teilschritts bleibt als `detail` erhalten.
+    const satz = (key, n) => {
+      if (key === 'source') return 'Programm wird kopiert …';
+      if (key === 'data') return 'Dein Wissen wird kopiert …';
+      if (key === 'local') return `Laufzeit für ${plattformName(LOCAL_PLATFORM)} wird kopiert …`;
+      if (key.startsWith('dl:')) {
+        const name = plattformName(key.slice(3));
+        if (n === 1) return `Laufzeit für ${name}: Prüfsummen werden geladen …`;
+        if (n === 2) return `Laufzeit für ${name} wird geladen …`;
+        return `Laufzeit für ${name} wird entpackt …`;
+      }
+      return null;
+    };
+    const melde = (key, anteil, event, n) => {
       const b = band.get(key);
       if (b) stand = Math.max(stand, Math.round(b.von + b.breite * Math.max(0, Math.min(1, anteil))));
-      progress({ ...event, percent: stand, schritt: key });
+      const message = (event && event.fertig) ? event.message : (satz(key, n) || (event && event.message));
+      progress({ ...event, detail: event && event.message, message, percent: stand, schritt: key });
     };
     const weiter = (event) => {
       if (!event) return;
@@ -2859,16 +2879,16 @@ function createStick(deps = {}) {
           const key = `dl:${event.platform}`;
           const n = (downloads.get(key) || 0) + 1;
           downloads.set(key, n);
-          melde(key, n === 1 ? 0.05 : n === 2 ? 0.25 : 0.85, event);
+          melde(key, n === 1 ? 0.05 : n === 2 ? 0.25 : 0.85, event, n);
         }
       } else if (phase === 'check') {
-        melde('source', 0, event);
+        melde('source', 0, { ...event, message: 'Wird vorbereitet …', fertig: true });
       } else if (phase === 'finish') {
         // prepare() schreibt Starter und LIESMICH ganz zum Schluss, update()
         // gleich nach dem Programm -- danach kommen dort noch die Laufzeiten.
         if (plan.fall === 'neu') {
           stand = Math.max(stand, 98);
-          progress({ ...event, percent: stand });
+          progress({ ...event, detail: event.message, message: 'Starter werden geschrieben …', percent: stand });
         } else {
           melde('source', 1, event);
         }
@@ -2902,7 +2922,7 @@ function createStick(deps = {}) {
         const r = await addRuntimeLocked(root, LOCAL_PLATFORM, { signal });
         bytes += r.bytes || 0;
         files += 1;
-        melde('local', 1, { phase: 'runtime', message: `Laufzeit für ${plattformName(LOCAL_PLATFORM)} liegt auf dem Stick.`, platform: LOCAL_PLATFORM });
+        melde('local', 1, { phase: 'runtime', message: `Laufzeit für ${plattformName(LOCAL_PLATFORM)} liegt auf dem Stick.`, platform: LOCAL_PLATFORM, fertig: true });
       }
       for (const platform of plan.andere) {
         throwIfAborted(signal, 'Das Vorbereiten des Sticks');
@@ -2916,7 +2936,7 @@ function createStick(deps = {}) {
           fehlend.push({ platform, grund: message, code: (err && err.code) || null });
           log.warn(`Laufzeit ${platform} fehlgeschlagen: ${message}`);
         }
-        melde(`dl:${platform}`, 1, { phase: 'runtime', message: `${plattformName(platform)}: erledigt.`, platform });
+        melde(`dl:${platform}`, 1, { phase: 'runtime', message: `${plattformName(platform)}: erledigt.`, platform, fertig: true });
       }
       if (plan.fall === 'eigener' && (plan.andere.length || plan.lokalFehlt)) {
         // Die LIESMICH nennt die Laufzeiten; sie soll nach dem Nachlegen stimmen.

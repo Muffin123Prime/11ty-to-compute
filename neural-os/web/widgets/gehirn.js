@@ -44,9 +44,9 @@ function ensureStyle() {
 /** Wie viele Nachbarn einen Namen bekommen. Mehr waere in 380 px Breite Gedraenge. */
 const MAX_NAMEN = 6;
 /** Direkte Nachbarn im Bild (die ohne Namen sind leise Punkte). */
-const MAX_NACHBARN = 9;
+const MAX_NACHBARN = 7;
 /** Zweiter Kreis: nur ein Hauch, damit man sieht, dass es weitergeht. */
-const MAX_ZWEITE = 6;
+const MAX_ZWEITE = 4;
 /** So viel wird geladen; gezeigt wird danach nur der Ausschnitt oben. */
 const MAX_KNOTEN = 60;
 /** Arten, die nie die Mitte sind: Buchhaltung, kein Thema. */
@@ -149,7 +149,50 @@ export function mount(el, ctx) {
       nodes: nodes.filter((node) => drin.has(node.id)),
       edges: edges.filter((e) => drin.has(e.from) && drin.has(e.to)),
       nachbarn,
+      zweite,
+      adj,
     };
+  }
+
+  /**
+   * Das Bild der Vorlage: die Mitte in der Mitte, die Nachbarn im Kreis
+   * darum (leicht unregelmaessig, damit es nicht wie ein Zifferblatt
+   * aussieht), die leisen Punkte weiter aussen hinter ihrem Nachbarn.
+   * Fest gelegt statt simuliert: eine Kachel soll bei jedem Oeffnen gleich
+   * aussehen und nicht nachschwingen.
+   */
+  function lage(mitte, nachbarn, zweite, adj) {
+    const pos = new Map([[mitte, { x: 0, y: 0 }]]);
+    // Nachbarn, die untereinander verbunden sind, nebeneinander: weniger Kreuzungen.
+    const rest = nachbarn.map((node) => node.id);
+    const reihe = [];
+    while (rest.length) {
+      let next = rest.shift();
+      reihe.push(next);
+      for (;;) {
+        const nah = rest.findIndex((id) => (adj.get(next) || new Set()).has(id));
+        if (nah < 0) break;
+        next = rest.splice(nah, 1)[0];
+        reihe.push(next);
+      }
+    }
+    // Wenige Nachbarn verteilen sich nicht ueber den ganzen Kreis: zwei
+    // gegenueber saehen aus wie ein Strich, nicht wie ein Netz.
+    const n = reihe.length < 4 ? reihe.length + 1 : reihe.length;
+    const wobble = [1, 0.84, 1.06, 0.9, 1.02, 0.8, 0.96];
+    reihe.forEach((id, i) => {
+      const a = -Math.PI / 2 + 0.35 + (i / n) * Math.PI * 2;
+      const r = 100 * wobble[i % wobble.length];
+      pos.set(id, { x: Math.cos(a) * r * 1.45, y: Math.sin(a) * r });
+    });
+    zweite.forEach((id, j) => {
+      const eltern = reihe.find((nb) => (adj.get(nb) || new Set()).has(id));
+      const p = eltern ? pos.get(eltern) : { x: 1, y: 0 };
+      const a = Math.atan2(p.y, p.x / 1.45) + (j % 2 ? 0.32 : -0.32);
+      const r = 150;
+      pos.set(id, { x: Math.cos(a) * r * 1.45, y: Math.sin(a) * r });
+    });
+    return pos;
   }
 
   function zeichnen(mitte, alleKnoten, alleKanten) {
@@ -157,7 +200,8 @@ export function mount(el, ctx) {
       leer('Noch leer. Was die KI über dich lernt, wächst hier als Netz.');
       return;
     }
-    const { nodes, edges, nachbarn } = ausschnitt(mitte, alleKnoten, alleKanten);
+    const { nodes, edges, nachbarn, zweite, adj } = ausschnitt(mitte, alleKnoten, alleKanten);
+    const pos = lage(mitte, nachbarn, zweite, adj);
     const byId = new Map(nodes.map((node) => [node.id, node]));
     const genannt = nachbarn.slice(0, MAX_NAMEN);
 
@@ -178,12 +222,11 @@ export function mount(el, ctx) {
     link.setAttribute('aria-label', beschreibung);
     link.setAttribute('title', beschreibung);
 
-    graph.setData({ nodes, edges });
-    graph.pin(mitte, 0, 0);
+    // Neue Objekte mit Lage: die Daten der Antwort bleiben unberuehrt.
+    graph.setData({ nodes: nodes.map((node) => ({ ...node, ...pos.get(node.id) })), edges });
+    graph.freeze();
     graph.setLabels({ always: genannt.map((node) => node.id), rings: genannt.map((node) => node.id) });
     graph.setSelection(mitte);
-    graph.prewarm(320, 120);
-    graph.freeze();
     graph.fitToView({ animate: false });
   }
 

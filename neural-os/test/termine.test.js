@@ -353,3 +353,267 @@ test('GET /api/projekte sammelt Chats, Termine, Notizen und Aufgaben ein; das zu
     assert.equal((await request(base, 'GET', `/api/projekte/${chat.id}`)).status, 404);
   });
 });
+
+/* ------------------------------------------------ Serien (Vertrag A-E) */
+
+/**
+ * Die ganze Anwendung (mit Aenderungsverlauf), weil "rueckgaengig" hier
+ * mitgeprueft wird -- der kleine Server oben hat keinen Verlauf.
+ */
+async function withApp(fn) {
+  const { createApp, seedIfEmpty } = require('../src/app');
+  const { home, cleanup } = tempHome('nos-serien');
+  let app = null;
+  try {
+    app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false });
+    await seedIfEmpty(app);
+    const server = await app.listen();
+    const base = `http://127.0.0.1:${server.server.address().port}`;
+    return await fn({ app, store: app.store, base });
+  } finally {
+    if (app) await app.close().catch(() => {});
+    cleanup();
+  }
+}
+
+const TRAINING = {
+  title: 'Training', start: '2026-09-29T18:00', end: '2026-09-29T19:30', location: 'Halle 3',
+  recurrence: { freq: 'weekly', until: '2026-12-24' },
+};
+
+test('Serie: der Zeitraum Okt-Dez liefert jeden Dienstag bis Weihnachten -- je Vorkommen, mit der id der Serie', async () => {
+  await withServer(async ({ base }) => {
+    const res = await request(base, 'POST', '/api/events', TRAINING);
+    assert.equal(res.status, 200, res.text);
+    const serie = res.json.record;
+    assert.deepEqual(serie.data.recurrence, { freq: 'weekly', interval: 1, byDay: [], until: '2026-12-24', count: null });
+    assert.deepEqual(serie.data.exdates, []);
+    assert.equal(serie.data.reminder, null);
+    const einzel = await request(base, 'POST', '/api/events', { title: 'Elternabend', start: '2026-10-06T19:00', end: '2026-10-06T21:00' });
+
+    const liste = await request(base, 'GET', '/api/events/zeitraum?from=2026-10-01&to=2026-12-31');
+    assert.equal(liste.status, 200, liste.text);
+    const vorkommen = liste.json.items.filter((x) => x.recurring);
+    assert.deepEqual(vorkommen.map((x) => x.occurrence), [
+      '2026-10-06', '2026-10-13', '2026-10-20', '2026-10-27', '2026-11-03', '2026-11-10',
+      '2026-11-17', '2026-11-24', '2026-12-01', '2026-12-08', '2026-12-15', '2026-12-22',
+    ]);
+    assert.ok(vorkommen.every((x) => x.id === serie.id), 'dieselbe id wie die Serie');
+    const okt27 = vorkommen.find((x) => x.occurrence === '2026-10-27');
+    assert.equal(okt27.data.start, '2026-10-27T18:00', 'nach der Zeitumstellung weiter 18:00 Wandzeit');
+    assert.equal(okt27.data.end, '2026-10-27T19:30');
+    assert.equal(okt27.data.occurrence, '2026-10-27', 'auch in data, damit keine Ansicht falsch sucht');
+    assert.equal(okt27.data.recurring, true);
+    assert.deepEqual(okt27.serie, { start: '2026-09-29T18:00', end: '2026-09-29T19:30' });
+    const e = liste.json.items.find((x) => x.id === einzel.json.record.id);
+    assert.equal(e.occurrence, null);
+    assert.equal(e.recurring, false);
+    // Sortiert nach Beginn: am 6.10. erst das Training (18:00), dann der Elternabend (19:00).
+    assert.deepEqual(liste.json.items.slice(0, 2).map((x) => x.data.title), ['Training', 'Elternabend']);
+    assert.equal(liste.json.total, 13);
+  });
+});
+
+test('Serie am 27.10. auch in Berliner Zeit: die Sortierung nach Beginn ueberlebt die Zeitumstellung', async () => {
+  const vorher = process.env.TZ;
+  process.env.TZ = 'Europe/Berlin';
+  try {
+    await withServer(async ({ base }) => {
+      await request(base, 'POST', '/api/events', TRAINING);
+      await request(base, 'POST', '/api/events', { title: 'Vorher', start: '2026-10-27T17:30', end: '2026-10-27T17:45' });
+      const tag = await request(base, 'GET', '/api/events/zeitraum?from=2026-10-27&to=2026-10-27');
+      assert.deepEqual(tag.json.items.map((x) => [x.data.title, x.data.start]), [['Vorher', '2026-10-27T17:30'], ['Training', '2026-10-27T18:00']]);
+      assert.equal(new Date(2026, 9, 27, 18, 0).getHours(), 18);
+    });
+  } finally {
+    if (vorher === undefined) delete process.env.TZ;
+    else process.env.TZ = vorher;
+  }
+});
+
+test('Serien werden streng geprueft; Zeitpunkte mit Zone werden keine Serie', async () => {
+  await withServer(async ({ base, store }) => {
+    const faelle = [
+      [{ ...TRAINING, recurrence: { freq: 'fortnightly' } }, /freq/],
+      [{ ...TRAINING, recurrence: { freq: 'weekly', until: '2026-09-01' } }, /bevor sie beginnt/],
+      [{ ...TRAINING, recurrence: { freq: 'weekly', until: '2026-12-24', count: 5 } }, /nicht beides/],
+      [{ ...TRAINING, recurrence: { freq: 'monthly', byDay: ['TU'] } }, /wöchentlich/],
+      [{ ...TRAINING, recurrence: 'jeden Dienstag' }, /Objekt/],
+      [{ ...TRAINING, start: '2026-09-29T16:00:00Z', end: null }, /Zone/],
+      [{ ...TRAINING, reminder: 7 }, /reminder/],
+      [{ ...TRAINING, exdates: ['2026-02-30'] }, /exdates/],
+    ];
+    for (const [body, muster] of faelle) {
+      const res = await request(base, 'POST', '/api/events', body);
+      assert.equal(res.status, 400, `${JSON.stringify(body)} → HTTP ${res.status}`);
+      assert.match(res.json.error.message, muster);
+    }
+    assert.equal(store.count('event'), 0);
+  });
+});
+
+test('Ein Vorkommen verschieben (?nur): Serie bekommt den Tag als Ausnahme, ein Einzeltermin entsteht; rueckgaengig stellt beides her', async () => {
+  await withApp(async ({ app, store, base }) => {
+    const serie = (await request(base, 'POST', '/api/events', TRAINING)).json.record;
+    const res = await request(base, 'PATCH', `/api/events/${serie.id}?nur=2026-10-27`, { start: '2026-10-28T19:00', end: '2026-10-28T20:30' });
+    assert.equal(res.status, 200, res.text);
+    const neu = res.json.record;
+    assert.notEqual(neu.id, serie.id, 'die Antwort ist der NEUE Einzeltermin');
+    assert.equal(neu.data.title, 'Training');
+    assert.equal(neu.data.location, 'Halle 3', 'erbt die Felder der Serie');
+    assert.equal(neu.data.start, '2026-10-28T19:00');
+    assert.equal(neu.data.recurrence, null);
+    assert.deepEqual(neu.data.ausSerie, { id: serie.id, tag: '2026-10-27' });
+    assert.deepEqual(store.get(serie.id).data.exdates, ['2026-10-27']);
+    assert.deepEqual(res.json.serie.data.exdates, ['2026-10-27']);
+
+    const woche = await request(base, 'GET', '/api/events/zeitraum?from=2026-10-26&to=2026-11-01');
+    assert.deepEqual(woche.json.items.map((x) => [x.id, x.data.start]), [[neu.id, '2026-10-28T19:00']],
+      'am 27. kein Training mehr, am 28. der verschobene Termin');
+
+    // Rueckgaengig ueber die Nummer aus der Antwort -- EIN Schritt nimmt beides zurueck.
+    assert.ok(res.json.rueckgaengig && Number.isInteger(res.json.rueckgaengig.eintrag), JSON.stringify(res.json.rueckgaengig));
+    const undo = await request(base, 'POST', res.json.rueckgaengig.pfad, {});
+    assert.equal(undo.status, 200, undo.text);
+    assert.equal(undo.json.mitgenommen.length, 1, 'die zweite Hälfte ging mit');
+    assert.equal(store.get(neu.id), null, 'der Einzeltermin ist weg');
+    assert.deepEqual(store.get(serie.id).data.exdates, [], 'die Ausnahme ist weg');
+    const danach = await request(base, 'GET', '/api/events/zeitraum?from=2026-10-26&to=2026-11-01');
+    assert.deepEqual(danach.json.items.map((x) => [x.id, x.data.start]), [[serie.id, '2026-10-27T18:00']]);
+    assert.ok(app.history);
+  });
+});
+
+test('Ein Vorkommen auslassen (DELETE ?nur) und die ganze Serie aendern; beides rueckgaengig machbar', async () => {
+  await withApp(async ({ app, store, base }) => {
+    const serie = (await request(base, 'POST', '/api/events', TRAINING)).json.record;
+    const weg = await request(base, 'DELETE', `/api/events/${serie.id}?nur=2026-11-10`);
+    assert.equal(weg.status, 200, weg.text);
+    assert.equal(weg.json.ausgelassen, '2026-11-10');
+    assert.ok(store.get(serie.id), 'die Serie bleibt');
+    assert.deepEqual(store.get(serie.id).data.exdates, ['2026-11-10']);
+    const nov = await request(base, 'GET', '/api/events/zeitraum?from=2026-11-01&to=2026-11-30');
+    assert.deepEqual(nov.json.items.map((x) => x.occurrence), ['2026-11-03', '2026-11-17', '2026-11-24']);
+    await app.history.undo(weg.json.rueckgaengig.eintrag);
+    assert.deepEqual(store.get(serie.id).data.exdates, []);
+
+    // Ganze Serie: neue Uhrzeit, gilt fuer jedes Vorkommen.
+    const alle = await request(base, 'PATCH', `/api/events/${serie.id}`, { start: '2026-09-29T17:00', end: '2026-09-29T18:30' });
+    assert.equal(alle.status, 200, alle.text);
+    const okt = await request(base, 'GET', '/api/events/zeitraum?from=2026-10-27&to=2026-10-27');
+    assert.equal(okt.json.items[0].data.start, '2026-10-27T17:00');
+
+    // Nicht-Vorkommen und Nicht-Serie werden abgewiesen, nichts wird geschrieben.
+    const rev = store.get(serie.id).rev;
+    const mittwoch = await request(base, 'DELETE', `/api/events/${serie.id}?nur=2026-10-28`);
+    assert.equal(mittwoch.status, 404);
+    assert.match(mittwoch.json.error.message, /28\.10\.2026 findet „Training“ nicht statt/);
+    assert.equal((await request(base, 'PATCH', `/api/events/${serie.id}?nur=2027-01-05`, { title: 'x' })).status, 404, 'nach dem Ende der Serie');
+    assert.equal((await request(base, 'PATCH', `/api/events/${serie.id}?nur=gestern`, { title: 'x' })).status, 400);
+    const einzel = (await request(base, 'POST', '/api/events', { title: 'Einmal', start: '2026-10-01T10:00' })).json.record;
+    assert.equal((await request(base, 'DELETE', `/api/events/${einzel.id}?nur=2026-10-01`)).status, 400, 'kein Vorkommen ohne Serie');
+    assert.equal(store.get(serie.id).rev, rev);
+    assert.ok(store.get(einzel.id));
+
+    // Ohne ?nur: die ganze Serie weich geloescht.
+    const ganz = await request(base, 'DELETE', `/api/events/${serie.id}`);
+    assert.equal(ganz.status, 200);
+    assert.equal(store.get(serie.id), null);
+    assert.equal((await request(base, 'GET', '/api/events/zeitraum?from=2026-10-01&to=2026-12-31')).json.items.filter((x) => x.recurring).length, 0);
+  });
+});
+
+test('Ein alter Termin ohne die neuen Felder bekommt eine Serie -- und rueckgaengig macht ihn wieder einmalig', async () => {
+  await withApp(async ({ app, store, base }) => {
+    // So sieht ein Termin von vor dem 23.09.2026 im Tresor aus: ohne
+    // recurrence/exdates/reminder. validate() fuellt heute Vorgaben ein;
+    // den Altbestand stellt der Test her, indem er die drei Felder fuer
+    // einen Augenblick aus dem Schema nimmt.
+    const schema = require('../src/store/schema');
+    const neu = {};
+    for (const k of ['recurrence', 'exdates', 'reminder']) {
+      neu[k] = schema.FIELDS.event[k];
+      delete schema.FIELDS.event[k];
+    }
+    let alt;
+    try {
+      alt = store.create('event', { title: 'Chor', start: '2026-10-01T19:00', allDay: false, source: 'user' });
+    } finally {
+      Object.assign(schema.FIELDS.event, neu);
+    }
+    assert.equal('recurrence' in store.get(alt.id).data, false, 'wirklich ein Altbestand');
+    const res = await request(base, 'PATCH', `/api/events/${alt.id}`, { recurrence: { freq: 'weekly' } });
+    assert.equal(res.status, 200, res.text);
+    assert.equal(res.json.record.data.recurrence.freq, 'weekly');
+    const r = await app.history.undo(res.json.rueckgaengig.eintrag);
+    assert.equal(r.applied.note, undefined, 'kein „Feld hatte vorher keinen Wert“');
+    assert.equal(store.get(alt.id).data.recurrence, null, 'wieder ein einzelner Termin');
+  });
+});
+
+test('Ueberschneidungen: mit Uhrzeit nach Minuten, ganztaegig nur mit ganztaegig, ohne=<id> laesst sich selbst aus', async () => {
+  await withServer(async ({ base }) => {
+    const training = (await request(base, 'POST', '/api/events', TRAINING)).json.record;
+    const eltern = (await request(base, 'POST', '/api/events', { title: 'Elternabend', start: '2026-10-13T19:00', end: '2026-10-13T21:00' })).json.record;
+    const ferien = (await request(base, 'POST', '/api/events', { title: 'Herbstferien', start: '2026-10-12', end: '2026-10-23' })).json.record;
+    await request(base, 'POST', '/api/events', { title: 'Ohne Ende', start: '2026-10-14T09:00' });
+    const u = async (q) => {
+      const r = await request(base, 'GET', `/api/events/ueberschneidungen?${q}`);
+      assert.equal(r.status, 200, r.text);
+      return r.json.items.map((x) => `${x.data.title}${x.occurrence ? `@${x.occurrence}` : ''}`);
+    };
+    assert.deepEqual(await u('start=2026-10-13T18:30&end=2026-10-13T19:15'), ['Training@2026-10-13', 'Elternabend'],
+      'ein Vorkommen der Serie zählt; die Ferien (ganztägig) nicht');
+    assert.deepEqual(await u('start=2026-10-13T19:30&end=2026-10-13T20:00'), ['Elternabend'], 'um 19:30 endet das Training');
+    assert.deepEqual(await u('start=2026-10-13T21:00&end=2026-10-13T22:00'), [], 'wer um 21 Uhr endet, stößt an, überschneidet nicht');
+    assert.deepEqual(await u('start=2026-10-14T09:30'), ['Ohne Ende'], 'ohne Ende zählt eine Stunde');
+    assert.deepEqual(await u('start=2026-10-20&end=2026-10-21'), ['Herbstferien'], 'ganztägig nur mit ganztägig');
+    assert.deepEqual(await u(`start=2026-10-13T18:30&end=2026-10-13T19:15&ohne=${training.id}`), ['Elternabend']);
+    assert.ok(eltern.id && ferien.id);
+    assert.equal((await request(base, 'GET', '/api/events/ueberschneidungen')).status, 400);
+    assert.equal((await request(base, 'GET', '/api/events/ueberschneidungen?start=morgen')).status, 400);
+  });
+});
+
+test('Mehr als 2000 Vorkommen in einer Anfrage: ein Satz statt einer Liste, an der der Browser erstickt', async () => {
+  await withServer(async ({ base, store }) => {
+    for (let i = 0; i < 6; i++) {
+      store.create('event', { title: `Täglich ${i}`, start: '2026-01-01T0' + i + ':00', recurrence: { freq: 'daily', interval: 1, byDay: [], until: null, count: null } });
+    }
+    const zuViel = await request(base, 'GET', '/api/events/zeitraum?from=2026-01-01&to=2027-01-31');
+    assert.equal(zuViel.status, 400);
+    assert.match(zuViel.json.error.message, /mehr als 2000/);
+    const monat = await request(base, 'GET', '/api/events/zeitraum?from=2026-10-01&to=2026-10-31');
+    assert.equal(monat.json.total, 6 * 31);
+  });
+});
+
+test('Projekte nennen bei einer Serie das NAECHSTE Vorkommen', async () => {
+  await withServer(async ({ base, store }) => {
+    const p = store.create('project', { name: 'Verein' });
+    const start = new Date();
+    start.setDate(start.getDate() - 14);
+    const tag = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`;
+    store.create('event', { title: 'Training', start: `${tag}T23:00`, projectId: p.id, recurrence: { freq: 'weekly', interval: 1, byDay: [], until: null, count: null } });
+    const res = await request(base, 'GET', '/api/projekte');
+    const naechster = res.json.items[0].naechsterTermin;
+    assert.ok(naechster, 'die Serie läuft weiter, also gibt es einen nächsten Termin');
+    assert.equal(naechster.recurring, true);
+    assert.ok(naechster.start.slice(0, 10) >= tag, `${naechster.start} liegt nicht vor dem Beginn`);
+    assert.ok(Date.parse(naechster.start) >= Date.now() - 24 * 3600 * 1000, `${naechster.start} ist nicht mehr zwei Wochen alt`);
+  });
+});
+
+test('Aendert ein PATCH nichts, bietet die Antwort auch kein Rueckgaengig an (sonst naehme es das Anlegen zurueck)', async () => {
+  await withApp(async ({ store, base }) => {
+    const t = (await request(base, 'POST', '/api/events', { title: 'Zahnarzt', start: '2026-10-02T10:00' })).json;
+    assert.ok(t.rueckgaengig, 'das Anlegen selbst ist rückgängig machbar');
+    const gleich = await request(base, 'PATCH', `/api/events/${t.record.id}`, { title: 'Zahnarzt' });
+    assert.equal(gleich.status, 200, gleich.text);
+    assert.equal(gleich.json.rueckgaengig, null, 'nichts geändert, nichts zurückzunehmen');
+    const anders = await request(base, 'PATCH', `/api/events/${t.record.id}`, { title: 'Zahnärztin' });
+    assert.ok(anders.json.rueckgaengig && anders.json.rueckgaengig.eintrag > t.rueckgaengig.eintrag);
+    await request(base, 'POST', anders.json.rueckgaengig.pfad, {});
+    assert.equal(store.get(t.record.id).data.title, 'Zahnarzt', 'zurückgenommen wurde die Umbenennung, nicht das Anlegen');
+  });
+});

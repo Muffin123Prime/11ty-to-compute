@@ -29,7 +29,9 @@
  */
 
 const { withActor } = require('../kernel/actor');
-const { ValidationError, asNeuralError } = require('../kernel/errors');
+const { NeuralError, ValidationError, asNeuralError } = require('../kernel/errors');
+const kalender = require('../http/api/events');
+const wdh = require('../kalender/wiederholung');
 
 const AGENT_ID = 'claude';
 
@@ -37,6 +39,9 @@ const AGENT_ID = 'claude';
 const ROLLEN = Object.freeze({
   rueckfrage: 'planung',
   termin_anlegen: 'kalender',
+  termine_lesen: 'kalender',
+  termin_aendern: 'kalender',
+  termin_loeschen: 'kalender',
   notiz_anlegen: 'notizen',
   merken: 'gedaechtnis',
   projekt_anpassen: 'projekte',
@@ -70,9 +75,51 @@ function werkzeug(name, description, properties, required) {
   });
 }
 
+/*
+ * Kalender: gemeinsame Bausteine.
+ *
+ * Die Feldnamen sind deutsch, weil Claude sie aus deutschen Saetzen fuellt;
+ * gespeichert wird in der Form aus Vertrag A (freq/interval/byDay/…). Die
+ * Wochentage heissen deshalb MO DI MI DO FR SA SO und werden erst beim
+ * Speichern auf die Norm (MO TU WE TH FR SA SU) umgeschrieben.
+ *
+ * Keine minimum/maximum/minLength im Schema: die kennt der strenge Modus
+ * nicht. Die Grenzen stehen in der Beschreibung und werden in
+ * `eingabePruefen()` durchgesetzt.
+ */
+const RHYTHMUS = Object.freeze({ taeglich: 'daily', woechentlich: 'weekly', monatlich: 'monthly', jaehrlich: 'yearly' });
+const TAGE_DE = Object.freeze(['MO', 'DI', 'MI', 'DO', 'FR', 'SA', 'SO']);
+const TAG_DE_ZU_NORM = Object.freeze({ MO: 'MO', DI: 'TU', MI: 'WE', DO: 'TH', FR: 'FR', SA: 'SA', SO: 'SU' });
+
+const WIEDERHOLUNG = Object.freeze({
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    rhythmus: {
+      type: 'string',
+      enum: Object.keys(RHYTHMUS),
+      description: 'Wie oft. monatlich/jaehrlich = am selben Tag wie start; gibt es den Tag in einem Monat nicht (31.), fällt der Termin dort aus.',
+    },
+    alle: { type: 'integer', description: 'Jede wievielte Einheit: 1 = jede Woche, 2 = jede zweite Woche. Weglassen = 1. Höchstens 99.' },
+    wochentage: {
+      type: 'array',
+      items: { type: 'string', enum: TAGE_DE },
+      description: 'Nur bei woechentlich und nur, wenn andere oder mehrere Tage gemeint sind als der Wochentag von start („Montag und Donnerstag“ = ["MO","DO"]).',
+    },
+    bis: { type: 'string', description: 'Letzter möglicher Tag YYYY-MM-DD, einschließlich („bis Weihnachten“). Weglassen, wenn kein Ende genannt ist.' },
+    anzahl: { type: 'integer', description: 'Wie oft insgesamt („zehnmal“), höchstens 999. Nicht zusammen mit bis.' },
+  },
+  required: ['rhythmus'],
+});
+
+const ERINNERUNG_MINUTEN = Object.freeze([...wdh.ERINNERUNGEN]);
+
 /**
  * Die Definitionen, wie sie an Claude gehen. Reihenfolge und Wortlaut sind
- * Teil des gecachten Präfixes: nicht pro Anfrage verändern.
+ * Teil des gecachten Präfixes: nicht pro Anfrage verändern. Die Reihenfolge
+ * ist fest vereinbart (Vertrag F): rueckfrage, termin_anlegen, termine_lesen,
+ * termin_aendern, termin_loeschen, notiz_anlegen, merken, projekt_anpassen --
+ * danach hängt der Anbieter web_search und web_fetch an.
  */
 const DEFINITIONEN = Object.freeze([
   werkzeug(
@@ -93,16 +140,73 @@ const DEFINITIONEN = Object.freeze([
     'Trägt einen Termin in den Kalender des Nutzers ein. Benutze es, wenn der Nutzer einen Termin, eine Verabredung '
       + 'oder eine Frist mit Datum nennt – auch nebenbei („am Dienstag um 10 Zahnarzt“, „Abgabe ist am 3.11.“). '
       + 'Rechne relative Angaben („morgen“, „nächsten Freitag“) mit dem heutigen Datum aus der Nachricht in ein festes Datum um. '
-      + 'Sind Tag oder Uhrzeit unklar, frag vorher mit rueckfrage.',
+      + 'Sind Tag oder Uhrzeit unklar, frag vorher mit rueckfrage. '
+      + 'Wiederkehrendes („jeden Dienstag um 18 Uhr Training“) ist EIN Aufruf mit wiederholung, nicht viele Einzeltermine. '
+      + 'Die Antwort nennt Termine, mit denen sich der neue überschneidet.',
     {
       titel: { type: 'string', description: 'Kurzer Titel, z. B. „Zahnarzt“.' },
-      start: { type: 'string', description: 'Beginn: YYYY-MM-DD bei ganztägigen Terminen, sonst YYYY-MM-DDTHH:MM in Ortszeit.' },
+      start: { type: 'string', description: 'Beginn: YYYY-MM-DD bei ganztägigen Terminen, sonst YYYY-MM-DDTHH:MM in Ortszeit. Bei Serien das erste Vorkommen.' },
       ende: { type: 'string', description: 'Ende im selben Format wie start. Weglassen, wenn unbekannt.' },
       ganztaegig: { type: 'boolean', description: 'true für Termine ohne Uhrzeit (Fristen, Geburtstage, Ferien).' },
       ort: { type: 'string', description: 'Ort, falls genannt.' },
       notiz: { type: 'string', description: 'Weitere Angaben, falls genannt.' },
+      wiederholung: { ...WIEDERHOLUNG, description: 'Nur für wiederkehrende Termine. Sonst weglassen.' },
+      erinnerung_minuten: {
+        type: 'integer',
+        enum: ERINNERUNG_MINUTEN,
+        description: 'Nur wenn der Nutzer eine Erinnerung will: so viele Minuten vorher („eine Stunde vorher“ = 60, „am Vortag“ = 1440).',
+      },
     },
     ['titel', 'start', 'ganztaegig'],
+  ),
+  werkzeug(
+    'termine_lesen',
+    'Liest die Termine des Nutzers in einem Zeitraum, als kurze Liste mit id. '
+      + 'Benutze es, bevor du einen Termin änderst oder löschst, und wenn der Nutzer fragt, was ansteht '
+      + '(„was hab ich morgen“, „wann war nochmal …“). '
+      + 'Wiederkehrende Termine stehen je Vorkommen einmal da: gleiche id, der Tag in vorkommen.',
+    {
+      von: { type: 'string', description: 'Erster Tag, YYYY-MM-DD.' },
+      bis: { type: 'string', description: 'Letzter Tag, YYYY-MM-DD, einschließlich. Höchstens 400 Tage nach von.' },
+      suche: { type: 'string', description: 'Nur Termine, deren Titel, Ort oder Notiz dieses Wort enthält („Zahnarzt“). Weglassen für alle.' },
+    },
+    ['von', 'bis'],
+  ),
+  werkzeug(
+    'termin_aendern',
+    'Ändert einen Termin, der schon im Kalender steht: verschieben, umbenennen, Ort, Notiz, Erinnerung, Wiederholung. '
+      + 'Hol dir vorher mit termine_lesen die id. Gib nur an, was sich ändert; ohne end behält der Termin seine Dauer. '
+      + 'Bei Serien: mit nur_am ändert sich nur dieses eine Vorkommen („nur diesen Dienstag“), ohne nur_am die ganze Serie.',
+    {
+      id: { type: 'string', description: 'Die id aus termine_lesen.' },
+      nur_am: { type: 'string', description: 'Nur bei Serien: der Tag (YYYY-MM-DD, wie in vorkommen) des einen Vorkommens, das sich ändern soll.' },
+      titel: { type: 'string', description: 'Neuer Titel.' },
+      start: { type: 'string', description: 'Neuer Beginn: YYYY-MM-DD (ganztägig) oder YYYY-MM-DDTHH:MM. Bei einer ganzen Serie der neue Beginn der Serie.' },
+      end: { type: 'string', description: 'Neues Ende im selben Format wie start.' },
+      ganztaegig: { type: 'boolean', description: 'true = ganztägig, false = mit Uhrzeit (dann start mit Uhrzeit angeben).' },
+      ort: { type: 'string', description: 'Neuer Ort; leerer Text entfernt ihn.' },
+      notiz: { type: 'string', description: 'Neue Notiz; leerer Text entfernt sie.' },
+      wiederholung: {
+        anyOf: [WIEDERHOLUNG, { type: 'null' }],
+        description: 'Neue Wiederholung der ganzen Serie. null beendet die Wiederholung (aus der Serie wird ein einzelner Termin).',
+      },
+      erinnerung_minuten: {
+        anyOf: [{ type: 'integer', enum: ERINNERUNG_MINUTEN }, { type: 'null' }],
+        description: 'Erinnerung so viele Minuten vorher; null = keine Erinnerung.',
+      },
+    },
+    ['id'],
+  ),
+  werkzeug(
+    'termin_loeschen',
+    'Löscht einen Termin (lässt sich rückgängig machen). Hol dir vorher mit termine_lesen die id. '
+      + 'Bei Serien: mit nur_am fällt nur dieses eine Vorkommen aus, ohne nur_am verschwindet die ganze Serie – '
+      + 'ist unklar, was gemeint ist, frag vorher mit rueckfrage.',
+    {
+      id: { type: 'string', description: 'Die id aus termine_lesen.' },
+      nur_am: { type: 'string', description: 'Nur bei Serien: der Tag (YYYY-MM-DD, wie in vorkommen), der ausfallen soll.' },
+    },
+    ['id'],
   ),
   werkzeug(
     'notiz_anlegen',
@@ -149,7 +253,34 @@ function istEigenesWerkzeug(name) {
 
 /* ------------------------------------------------------ Prüfung */
 
+function istObjekt(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+function erlaubtNull(def) {
+  return Array.isArray(def.anyOf) && def.anyOf.some((d) => d && d.type === 'null');
+}
+
+/**
+ * Ein Wert gegen seinen Schemateil -- rekursiv, weil `wiederholung` ein
+ * Objekt im Objekt ist. Kennt genau die Formen, die in DEFINITIONEN
+ * vorkommen: string/boolean/integer (mit enum), array, object mit
+ * additionalProperties:false, anyOf mit null.
+ */
 function typPruefen(feld, def, wert, fehler) {
+  if (Array.isArray(def.anyOf)) {
+    if (wert === null && erlaubtNull(def)) return;
+    let erste = null;
+    for (const alt of def.anyOf) {
+      if (!alt || alt.type === 'null') continue;
+      const f = [];
+      typPruefen(feld, alt, wert, f);
+      if (!f.length) return;
+      if (!erste) erste = f;
+    }
+    fehler.push(...(erste || [`„${feld}“ hat einen ungültigen Wert.`]));
+    return;
+  }
   if (def.type === 'string') {
     if (typeof wert !== 'string') fehler.push(`„${feld}“ muss Text sein.`);
     else if (def.enum && !def.enum.includes(wert)) fehler.push(`„${feld}“ muss eines von ${def.enum.join(', ')} sein.`);
@@ -159,11 +290,57 @@ function typPruefen(feld, def, wert, fehler) {
     if (typeof wert !== 'boolean') fehler.push(`„${feld}“ muss true oder false sein.`);
     return;
   }
+  if (def.type === 'integer') {
+    if (typeof wert !== 'number' || !Number.isInteger(wert)) fehler.push(`„${feld}“ muss eine ganze Zahl sein.`);
+    else if (def.enum && !def.enum.includes(wert)) fehler.push(`„${feld}“ muss eines von ${def.enum.join(', ')} sein.`);
+    return;
+  }
   if (def.type === 'array') {
-    if (!Array.isArray(wert)) fehler.push(`„${feld}“ muss eine Liste sein.`);
-    else if (def.items && def.items.type === 'string' && wert.some((x) => typeof x !== 'string')) {
-      fehler.push(`„${feld}“ darf nur Text enthalten.`);
+    if (!Array.isArray(wert)) {
+      fehler.push(`„${feld}“ muss eine Liste sein.`);
+      return;
     }
+    if (def.items && def.items.type === 'string' && wert.some((x) => typeof x !== 'string')) {
+      fehler.push(`„${feld}“ darf nur Text enthalten.`);
+      return;
+    }
+    if (def.items && def.items.enum) {
+      const falsch = wert.filter((x) => !def.items.enum.includes(x));
+      if (falsch.length) fehler.push(`„${feld}“ darf nur ${def.items.enum.join(', ')} enthalten (nicht ${falsch.map(String).join(', ')}).`);
+    }
+    return;
+  }
+  if (def.type === 'object') {
+    if (!istObjekt(wert)) {
+      fehler.push(`„${feld}“ muss ein Objekt sein.`);
+      return;
+    }
+    objektPruefen(feld, def, wert, fehler);
+  }
+}
+
+/**
+ * Felder eines Objekts pruefen: unbekannte Felder, Pflichtfelder, Typen.
+ * `null` bei einem Feld, das null nicht kennt, zaehlt wie "weggelassen" --
+ * so war es immer, und Claude schickt fuer "unbekannt" gern null.
+ */
+function objektPruefen(pfad, schema, obj, fehler) {
+  const name = (key) => (pfad ? `${pfad}.${key}` : key);
+  for (const key of Object.keys(obj)) {
+    if (Object.prototype.hasOwnProperty.call(schema.properties, key)) continue;
+    // Ein haeufiger Verwechsler zwischen termin_anlegen (ende) und
+    // termin_aendern (end): gleich sagen, wie es hier heisst.
+    const statt = key === 'ende' && schema.properties.end ? 'end' : key === 'end' && schema.properties.ende ? 'ende' : null;
+    fehler.push(statt ? `Unbekanntes Feld „${name(key)}“ – hier heißt es „${name(statt)}“.` : `Unbekanntes Feld „${name(key)}“.`);
+  }
+  for (const key of schema.required || []) {
+    if (obj[key] === undefined || obj[key] === null) fehler.push(`Pflichtfeld „${name(key)}“ fehlt.`);
+  }
+  for (const [key, feldDef] of Object.entries(schema.properties)) {
+    const wert = obj[key];
+    if (wert === undefined) continue;
+    if (wert === null && !erlaubtNull(feldDef)) continue;
+    typPruefen(name(key), feldDef, wert, fehler);
   }
 }
 
@@ -198,6 +375,50 @@ function laenge(feld, wert, min, max, fehler) {
   if (n > max) fehler.push(`„${feld}“ ist zu lang (höchstens ${max} Zeichen).`);
 }
 
+/**
+ * `wiederholung` (deutsche Felder) in die gespeicherte Form (Vertrag A).
+ * Prueft, was sich ohne den Termin pruefen laesst; den Rest (bis vor dem
+ * Beginn der Serie …) prueft dieselbe Regel wie die Route
+ * (wiederholung.regelPruefen), damit KI und Oberflaeche nie verschieden
+ * streng sind.
+ *
+ * @returns {undefined|null|object}  undefined = nicht angegeben, null = keine Wiederholung
+ */
+function wiederholungLesen(roh, fehler, startTag) {
+  if (roh === undefined) return undefined;
+  if (roh === null) return null;
+  const freq = RHYTHMUS[roh.rhythmus];
+  const interval = roh.alle === undefined || roh.alle === null ? 1 : roh.alle;
+  if (interval < 1 || interval > wdh.MAX_INTERVALL) fehler.push(`„wiederholung.alle“ muss zwischen 1 und ${wdh.MAX_INTERVALL} liegen.`);
+  const tage = Array.isArray(roh.wochentage) ? roh.wochentage : [];
+  if (new Set(tage).size !== tage.length) fehler.push('„wiederholung.wochentage“ nennt einen Tag doppelt.');
+  if (tage.length && freq !== 'weekly') fehler.push('„wiederholung.wochentage“ gibt es nur beim rhythmus „woechentlich“.');
+  const until = roh.bis === undefined || roh.bis === null || roh.bis === '' ? null : String(roh.bis).trim();
+  if (until !== null && !wdh.gueltigerTag(until)) fehler.push(`„wiederholung.bis“ ist kein gültiger Tag (YYYY-MM-DD): ${until}.`);
+  const count = roh.anzahl === undefined || roh.anzahl === null ? null : roh.anzahl;
+  if (count !== null && (count < 1 || count > wdh.MAX_ANZAHL)) fehler.push(`„wiederholung.anzahl“ muss zwischen 1 und ${wdh.MAX_ANZAHL} liegen.`);
+  if (until && count) fehler.push('Entweder „wiederholung.bis“ oder „wiederholung.anzahl“, nicht beides.');
+  const regel = { freq, interval, byDay: tage.map((t) => TAG_DE_ZU_NORM[t]), until, count };
+  if (!fehler.length && startTag) {
+    try {
+      wdh.regelPruefen(regel, startTag);
+    } catch (err) {
+      fehler.push(until && until < startTag ? '„wiederholung.bis“ liegt vor dem Beginn.' : err.message);
+    }
+  }
+  return regel;
+}
+
+function tagPruefen(feld, wert, fehler) {
+  if (wert === undefined || wert === null) return null;
+  const s = String(wert).trim();
+  if (!wdh.gueltigerTag(s)) {
+    fehler.push(`„${feld}“ ist kein gültiger Tag (YYYY-MM-DD).`);
+    return null;
+  }
+  return s;
+}
+
 /** Inhaltliche Regeln je Werkzeug, NACH der Typprüfung. Gibt den bereinigten Wert zurück. */
 const REGELN = {
   rueckfrage(e, fehler) {
@@ -225,6 +446,7 @@ const REGELN = {
     }
     if (e.ort !== undefined) laenge('ort', e.ort, 0, 200, fehler);
     if (e.notiz !== undefined) laenge('notiz', e.notiz, 0, 4000, fehler);
+    const wiederholung = wiederholungLesen(e.wiederholung, fehler, start ? start.wert.slice(0, 10) : null);
     return {
       titel: String(e.titel || '').trim(),
       start: start ? start.wert : null,
@@ -232,7 +454,65 @@ const REGELN = {
       ganztaegig: e.ganztaegig,
       ort: typeof e.ort === 'string' ? e.ort.trim() : '',
       notiz: typeof e.notiz === 'string' ? e.notiz.trim() : '',
+      wiederholung: wiederholung || null,
+      erinnerung: e.erinnerung_minuten === undefined || e.erinnerung_minuten === null ? null : e.erinnerung_minuten,
     };
+  },
+  termine_lesen(e, fehler) {
+    const von = tagPruefen('von', e.von, fehler);
+    const bis = tagPruefen('bis', e.bis, fehler);
+    if (von && bis) {
+      if (bis < von) fehler.push('„bis“ liegt vor „von“.');
+      else if (wdh.tageZwischen(von, bis) > 400) fehler.push('Höchstens 400 Tage auf einmal – bitte den Zeitraum teilen.');
+    }
+    if (e.suche !== undefined) laenge('suche', e.suche, 0, 100, fehler);
+    const suche = typeof e.suche === 'string' ? e.suche.trim() : '';
+    return { von, bis, suche };
+  },
+  termin_aendern(e, fehler) {
+    laenge('id', e.id, 1, 80, fehler);
+    const nurAm = tagPruefen('nur_am', e.nur_am, fehler);
+    if (e.titel !== undefined) laenge('titel', e.titel, 1, 200, fehler);
+    let start = null;
+    if (e.start !== undefined && e.start !== null) {
+      start = zeitLesen(e.start);
+      if (!start) fehler.push('„start“ ist kein gültiges Datum (YYYY-MM-DD oder YYYY-MM-DDTHH:MM).');
+    }
+    let ende = null;
+    if (e.end !== undefined && e.end !== null && String(e.end).trim() !== '') {
+      ende = zeitLesen(e.end);
+      if (!ende) fehler.push('„end“ ist kein gültiges Datum (YYYY-MM-DD oder YYYY-MM-DDTHH:MM).');
+    }
+    if (start && e.ganztaegig === true && start.art !== 'datum') fehler.push('Bei ganztägigen Terminen steht in „start“ nur das Datum (YYYY-MM-DD).');
+    if (start && e.ganztaegig === false && start.art !== 'zeit') fehler.push('Ein Termin mit Uhrzeit braucht „start“ als YYYY-MM-DDTHH:MM.');
+    if (!start && e.ganztaegig === false) fehler.push('Beim Wechsel auf „mit Uhrzeit“ bitte „start“ mit Uhrzeit angeben.');
+    if (start && ende) {
+      if (ende.art !== start.art) fehler.push('„end“ muss im selben Format stehen wie „start“.');
+      else if (ende.ms < start.ms) fehler.push('„end“ liegt vor „start“.');
+    }
+    if (e.ort !== undefined) laenge('ort', e.ort, 0, 200, fehler);
+    if (e.notiz !== undefined) laenge('notiz', e.notiz, 0, 4000, fehler);
+    const wiederholung = wiederholungLesen(e.wiederholung, fehler, null);
+    if (nurAm && wiederholung) fehler.push('Ein einzelnes Vorkommen (nur_am) hat keine eigene Wiederholung – ohne nur_am ändert sich die ganze Serie.');
+    const aenderungen = ['titel', 'start', 'end', 'ganztaegig', 'ort', 'notiz', 'wiederholung', 'erinnerung_minuten']
+      .filter((k) => e[k] !== undefined && (e[k] !== null || k === 'wiederholung' || k === 'erinnerung_minuten'));
+    if (!aenderungen.length) fehler.push('Nichts zu ändern: gib mindestens ein Feld an, das sich ändern soll.');
+    return {
+      id: String(e.id || '').trim(),
+      nurAm,
+      titel: typeof e.titel === 'string' ? e.titel.trim() : undefined,
+      start: start ? start.wert : undefined,
+      end: ende ? ende.wert : undefined,
+      ganztaegig: typeof e.ganztaegig === 'boolean' ? e.ganztaegig : undefined,
+      ort: typeof e.ort === 'string' ? e.ort.trim() : undefined,
+      notiz: typeof e.notiz === 'string' ? e.notiz.trim() : undefined,
+      wiederholung,
+      erinnerung: e.erinnerung_minuten,
+    };
+  },
+  termin_loeschen(e, fehler) {
+    laenge('id', e.id, 1, 80, fehler);
+    return { id: String(e.id || '').trim(), nurAm: tagPruefen('nur_am', e.nur_am, fehler) };
   },
   notiz_anlegen(e, fehler) {
     laenge('titel', e.titel, 1, 200, fehler);
@@ -276,21 +556,11 @@ function eingabePruefen(name, eingabe, parseFehler) {
   const roh = parseFehler ? parseFehler.roh : safeJson(eingabe);
   if (!def) return { ok: false, fehler: `Unbekanntes Werkzeug „${name}“.`, roh };
   if (parseFehler) return { ok: false, fehler: parseFehler.fehler, roh };
-  if (!eingabe || typeof eingabe !== 'object' || Array.isArray(eingabe)) {
+  if (!istObjekt(eingabe)) {
     return { ok: false, fehler: 'Die Eingabe ist kein Objekt.', roh };
   }
-  const schema = def.input_schema;
   const fehler = [];
-  for (const key of Object.keys(eingabe)) {
-    if (!Object.prototype.hasOwnProperty.call(schema.properties, key)) fehler.push(`Unbekanntes Feld „${key}“.`);
-  }
-  for (const key of schema.required) {
-    if (eingabe[key] === undefined || eingabe[key] === null) fehler.push(`Pflichtfeld „${key}“ fehlt.`);
-  }
-  for (const [key, feldDef] of Object.entries(schema.properties)) {
-    if (eingabe[key] === undefined || eingabe[key] === null) continue;
-    typPruefen(key, feldDef, eingabe[key], fehler);
-  }
+  objektPruefen('', def.input_schema, eingabe, fehler);
   if (fehler.length) return { ok: false, fehler: fehler.join(' '), roh };
   const wert = REGELN[name](eingabe, fehler);
   if (fehler.length) return { ok: false, fehler: fehler.join(' '), roh };
@@ -331,6 +601,45 @@ function zeitDeutsch(wert) {
   const datum = `${WOCHENTAG[d.getDay()]} ${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`;
   if (z.art === 'datum') return datum;
   return `${datum}, ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} Uhr`;
+}
+
+/** "Di. 29.09.2026, 10:00–10:45 Uhr" -- der Wochentag ausgerechnet, nicht geraten. */
+function spanneDeutsch(start, ende) {
+  const a = zeitLesen(start);
+  const b = zeitLesen(ende);
+  if (!a) return String(start || '');
+  if (!b) return zeitDeutsch(start);
+  if (a.art === 'datum') return b.wert === a.wert ? zeitDeutsch(start) : `${zeitDeutsch(start)} bis ${zeitDeutsch(ende)}`;
+  if (b.wert.slice(0, 10) === a.wert.slice(0, 10)) return `${zeitDeutsch(start).replace(/ Uhr$/, '')}–${b.wert.slice(11, 16)} Uhr`;
+  return `${zeitDeutsch(start)} bis ${zeitDeutsch(ende)}`;
+}
+
+/** Wandzeit als Minutenzahl -- ohne Zeitzone, damit eine Dauer die Zeitumstellung nicht spuert. */
+function wandMinuten(wert) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(wert);
+  return m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])) / 60000 : null;
+}
+
+function ausWandMinuten(min) {
+  const d = new Date(min * 60000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}T${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
+/**
+ * "Verschieb den Zahnarzt auf Freitag": nur der Beginn ist genannt, die Dauer
+ * soll bleiben. Ohne das laege das alte Ende vor dem neuen Beginn, und der
+ * Termin liesse sich gar nicht verschieben.
+ * @returns {string|null|undefined}  undefined = kein Ende zu setzen
+ */
+function dauerBehalten(altStart, altEnde, neuStart) {
+  if (!altEnde) return undefined;
+  const a = zeitLesen(altStart);
+  const b = zeitLesen(altEnde);
+  const n = zeitLesen(neuStart);
+  if (!a || !b || !n || a.art !== n.art || b.art !== a.art) return null;
+  if (a.art === 'datum') return wdh.plusTage(n.wert, wdh.tageZwischen(a.wert, b.wert));
+  return ausWandMinuten(wandMinuten(n.wert) + (wandMinuten(b.wert) - wandMinuten(a.wert)));
 }
 
 function kurz(text, max) {
@@ -499,6 +808,82 @@ function createWerkzeuge({ store, bus, logger } = {}) {
 
   /* ------------------------------------------------ die Ausführungen */
 
+  /* ------------------------------------------------ Kalender-Helfer */
+
+  /** Ein Termin (Satz der Satzart event) oder ein klarer Satz, warum nicht. */
+  function terminHolen(id) {
+    const rec = typeof id === 'string' && id ? store.get(id) : null;
+    if (!rec || rec.type !== 'event') {
+      // NeuralError statt NotFoundError: dessen Satz endet auf Englisch ("… not found").
+      throw new NeuralError('NOT_FOUND', `Einen Termin mit der id „${kurz(id, 60)}“ gibt es nicht. Hol dir die id mit termine_lesen.`, { status: 404 });
+    }
+    return rec;
+  }
+
+  function heuteTag() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  /**
+   * Womit sich ein Termin ueberschneidet -- fuer die Antwort an Claude, das
+   * es dem Nutzer in einem Satz sagen soll. Bei Serien die Vorkommen der
+   * naechsten 90 Tage (ab heute bzw. ab Beginn), hoechstens fuenf Treffer:
+   * die Antwort soll einen Hinweis geben, keine Liste.
+   */
+  function ueberschneidungenFuer(rec) {
+    const d = rec.data || {};
+    let lagen;
+    if (wdh.istSerie(d)) {
+      const beginn = d.start.slice(0, 10);
+      const ab = beginn > heuteTag() ? beginn : heuteTag();
+      lagen = wdh.vorkommenImZeitraum(d, ab, wdh.plusTage(ab, 90), { max: 40 }).slice(0, 40).map((tag) => wdh.aufTagLegen(d, tag));
+    } else {
+      lagen = [{ start: d.start, end: d.end || null }];
+    }
+    const treffer = new Map();
+    for (const lage of lagen) {
+      let liste = [];
+      try {
+        liste = kalender.ueberschneidungen(store, {
+          start: d.allDay ? lage.start.slice(0, 10) : lage.start,
+          end: lage.end ? (d.allDay ? lage.end.slice(0, 10) : lage.end) : null,
+          ohne: rec.id,
+        });
+      } catch (err) {
+        log.debug(`Überschneidungen für ${rec.id}: ${err && err.message}`);
+      }
+      for (const x of liste) {
+        const key = `${x.id}|${x.occurrence || ''}`;
+        if (!treffer.has(key)) treffer.set(key, { id: x.id, titel: x.data.title, wann: spanneDeutsch(x.data.start, x.data.end) });
+      }
+      if (treffer.size >= 5) break;
+    }
+    return [...treffer.values()].slice(0, 5);
+  }
+
+  function ueberschneidungSatz(liste) {
+    if (!liste.length) return '';
+    return ` · überschneidet sich mit ${liste.slice(0, 2).map((u) => `„${kurz(u.titel, 40)}“`).join(', ')}${liste.length > 2 ? ' …' : ''}`;
+  }
+
+  function terminKurz(rec) {
+    const d = rec.data || {};
+    const serie = wdh.istSerie(d);
+    return {
+      id: rec.id,
+      titel: d.title,
+      start: d.start,
+      end: d.end || null,
+      ganztaegig: !!d.allDay,
+      wann: spanneDeutsch(d.start, d.end),
+      wiederholung: serie ? wdh.inWorten(d.recurrence, d.start.slice(0, 10)) : null,
+      erinnerung_minuten: Number.isInteger(d.reminder) ? d.reminder : null,
+    };
+  }
+
+  /* ------------------------------------------------ die Ausführungen */
+
   const AUSFUEHRUNG = {
     termin_anlegen(w, k, lauf) {
       const vorhanden = store.all('event').find((ev) => gleich(ev.data.title, w.titel) && ev.data.start === w.start);
@@ -509,7 +894,10 @@ function createWerkzeuge({ store, bus, logger } = {}) {
           produced: [],
         };
       }
-      const ev = alsAgent(lauf, 'kalender', () => store.create('event', {
+      // Ueber dieselbe Pruefung wie die Oberflaeche (src/http/api/events.js):
+      // ein Termin, den die KI anlegt, ist nicht weniger streng geprueft als
+      // einer, den der Nutzer eintippt.
+      const ev = alsAgent(lauf, 'kalender', () => kalender.createEvent(store, {
         title: w.titel,
         start: w.start,
         end: w.ende,
@@ -518,13 +906,121 @@ function createWerkzeuge({ store, bus, logger } = {}) {
         body: w.notiz,
         chatId: k.chatId || null,
         source: 'auto',
-        runId: lauf.runId || undefined,
-        agentId: AGENT_ID,
-      }));
+        recurrence: w.wiederholung,
+        reminder: w.erinnerung,
+      }, { stempel: { runId: lauf.runId || undefined, agentId: AGENT_ID } }));
+      const kurzform = terminKurz(ev);
+      const ueber = ueberschneidungenFuer(ev);
+      const inhalt = {
+        ok: true,
+        id: ev.id,
+        titel: w.titel,
+        start: ev.data.start,
+        ende: ev.data.end,
+        wann: kurzform.wann,
+        ...(kurzform.wiederholung ? { wiederholung: kurzform.wiederholung } : {}),
+        ...(kurzform.erinnerung_minuten !== null ? { erinnerung_minuten: kurzform.erinnerung_minuten } : {}),
+        ueberschneidungen: ueber,
+        hinweis: ueber.length
+          ? 'Steht jetzt im Kalender. Er überschneidet sich mit den genannten Terminen – sag das dem Nutzer in einem Satz.'
+          : 'Steht jetzt im Kalender.',
+      };
       return {
-        inhalt: { ok: true, id: ev.id, titel: w.titel, start: w.start, ende: w.ende, hinweis: 'Steht jetzt im Kalender.' },
-        ergebnis: `${w.titel} · ${zeitDeutsch(w.start)}`,
+        inhalt,
+        ergebnis: `${w.titel} · ${kurzform.wann}${kurzform.wiederholung ? ` · ${kurzform.wiederholung}` : ''}${ueberschneidungSatz(ueber)}`,
         produced: [ev.id],
+      };
+    },
+
+    termine_lesen(w) {
+      const suche = w.suche.toLowerCase();
+      const alle = kalender.eventsInRange(store, w.von, w.bis);
+      const passend = suche
+        ? alle.filter((x) => [x.data.title, x.data.location, x.data.body].some((t) => String(t || '').toLowerCase().includes(suche)))
+        : alle;
+      const GRENZE = 150;
+      const termine = passend.slice(0, GRENZE).map((x) => ({
+        id: x.id,
+        titel: x.data.title,
+        start: x.data.start,
+        end: x.data.end || null,
+        ort: x.data.location || null,
+        wiederkehrend: !!x.recurring,
+        vorkommen: x.occurrence || null,
+        wann: spanneDeutsch(x.data.start, x.data.end),
+        ...(x.recurring ? { wiederholung: wdh.inWorten(x.data.recurrence, String(x.serie && x.serie.start || x.data.start).slice(0, 10)) } : {}),
+      }));
+      const inhalt = { ok: true, von: w.von, bis: w.bis, anzahl: passend.length, termine };
+      if (passend.length > GRENZE) {
+        inhalt.weitere = passend.length - GRENZE;
+        inhalt.hinweis = 'Nicht alle gezeigt – für den Rest den Zeitraum verkleinern oder suche benutzen.';
+      }
+      const was = suche ? ` zu „${kurz(w.suche, 30)}“` : '';
+      return {
+        inhalt,
+        ergebnis: passend.length ? `${passend.length} Termin${passend.length === 1 ? '' : 'e'}${was} gefunden` : `Keine Termine${was}`,
+        produced: [],
+      };
+    },
+
+    termin_aendern(w, k, lauf) {
+      const vorher = terminHolen(w.id);
+      let basis = vorher.data;
+      if (w.nurAm) basis = { ...vorher.data, ...wdh.aufTagLegen(vorher.data, w.nurAm) };
+      const patch = {};
+      if (w.titel !== undefined) patch.title = w.titel;
+      if (w.start !== undefined) patch.start = w.start;
+      if (w.end !== undefined) patch.end = w.end;
+      else if (w.start !== undefined) {
+        const ende = dauerBehalten(basis.start, basis.end, w.start);
+        if (ende !== undefined) patch.end = ende;
+      }
+      if (w.ganztaegig !== undefined) patch.allDay = w.ganztaegig;
+      if (w.ort !== undefined) patch.location = w.ort;
+      if (w.notiz !== undefined) patch.body = w.notiz;
+      if (w.wiederholung !== undefined) patch.recurrence = w.wiederholung;
+      if (w.erinnerung !== undefined) patch.reminder = w.erinnerung;
+      const rec = alsAgent(lauf, 'kalender', () => kalender.updateEvent(store, vorher.id, patch, {
+        nur: w.nurAm || null,
+        stempel: { runId: lauf.runId || undefined, agentId: AGENT_ID },
+      }));
+      const kurzform = terminKurz(rec);
+      const ueber = ueberschneidungenFuer(rec);
+      const inhalt = {
+        ok: true,
+        id: rec.id,
+        ...(w.nurAm ? { nur_am: w.nurAm, serie: vorher.id, hinweis_serie: 'Nur dieses Vorkommen geändert; es ist jetzt ein eigener Termin mit neuer id. Die Serie bleibt.' } : {}),
+        titel: rec.data.title,
+        start: rec.data.start,
+        end: rec.data.end || null,
+        wann: kurzform.wann,
+        ...(kurzform.wiederholung ? { wiederholung: kurzform.wiederholung } : {}),
+        erinnerung_minuten: kurzform.erinnerung_minuten,
+        ueberschneidungen: ueber,
+        hinweis: ueber.length ? 'Geändert. Er überschneidet sich mit den genannten Terminen – sag das in einem Satz.' : 'Geändert.',
+      };
+      return {
+        inhalt,
+        ergebnis: `${kurz(rec.data.title, 50)} → ${kurzform.wann}${w.nurAm ? ' (nur dieses Mal)' : ''}${ueberschneidungSatz(ueber)}`,
+        produced: [rec.id],
+      };
+    },
+
+    termin_loeschen(w, k, lauf) {
+      const vorher = terminHolen(w.id);
+      const { ausgelassen } = alsAgent(lauf, 'kalender', () => kalender.deleteEvent(store, vorher.id, { nur: w.nurAm || null }));
+      const titel = kurz(vorher.data.title, 60);
+      if (ausgelassen) {
+        return {
+          inhalt: { ok: true, id: vorher.id, ausgelassen, hinweis: `Nur am ${zeitDeutsch(ausgelassen)} fällt „${titel}“ aus; die Serie bleibt.` },
+          ergebnis: `„${titel}“ fällt am ${zeitDeutsch(ausgelassen)} aus`,
+          produced: [],
+        };
+      }
+      return {
+        inhalt: { ok: true, id: vorher.id, geloescht: true, hinweis: 'Gelöscht. Lässt sich im Verlauf rückgängig machen.' },
+        ergebnis: `„${titel}“ gelöscht`,
+        produced: [],
       };
     },
 
@@ -618,8 +1114,16 @@ function createWerkzeuge({ store, bus, logger } = {}) {
     },
   };
 
+  const terminTitel = (id) => {
+    const rec = typeof id === 'string' && id ? store.get(id) : null;
+    return rec && rec.type === 'event' ? kurz(rec.data.title, 50) : 'Termin';
+  };
+
   const TITEL = {
     termin_anlegen: (w) => `Termin: ${kurz(w.titel, 60)}`,
+    termine_lesen: (w) => (w.suche ? `Kalender: sucht „${kurz(w.suche, 40)}“` : `Kalender: ${zeitDeutsch(w.von)} bis ${zeitDeutsch(w.bis)}`),
+    termin_aendern: (w) => `Termin ändern: ${terminTitel(w.id)}`,
+    termin_loeschen: (w) => `Termin löschen: ${terminTitel(w.id)}`,
     notiz_anlegen: (w) => `Notiz: ${kurz(w.titel, 60)}`,
     merken: (w) => `Merkt sich: ${kurz(w.fakt, 60)}`,
     projekt_anpassen: (w) => `Projekt: ${kurz(w.name, 60)}`,
@@ -628,6 +1132,9 @@ function createWerkzeuge({ store, bus, logger } = {}) {
 
   const SCHRITT = {
     termin_anlegen: 'Trägt in den Kalender ein',
+    termine_lesen: 'Liest den Kalender',
+    termin_aendern: 'Ändert den Termin',
+    termin_loeschen: 'Löscht den Termin',
     notiz_anlegen: 'Schreibt die Notiz',
     merken: 'Merkt es sich',
     projekt_anpassen: 'Pflegt das Projekt',

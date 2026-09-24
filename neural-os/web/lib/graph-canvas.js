@@ -359,9 +359,15 @@ function createQuadtree() {
  *   onSelect?: (node:object|null) => void,
  *   onOpen?: (node:object) => void,
  *   onHover?: (node:object|null) => void,
- *   onSettle?: () => void,
+ *   onSettle?: () => void,         // die Wolke ruht, die Bildschleife steht
+ *   onWake?: () => void,           // sie bewegt sich wieder (Ziehen, Filter, neue Daten)
  *   onUserMove?: () => void,       // der Mensch hat die Kamera bewegt
  * }} [options]
+ *
+ * Rueckgabe: setData, setFilter, setOrphans, pin, setHighlight, setColors,
+ * setSettings, setLabels, setSelection, refreshTheme, prewarm, reheat,
+ * fitToView, focus, zoomBy, resize, screenPosition, neighbours, stats,
+ * freeze, stopFollowing, destroy; Getter transform, settings, selectedId.
  */
 export function createGraphCanvas(canvas, options = {}) {
   if (!canvas || typeof canvas.getContext !== 'function') {
@@ -419,6 +425,12 @@ export function createGraphCanvas(canvas, options = {}) {
   let adjList = new Int32Array(0);
 
   let structure = '';
+  /**
+   * Beim Nachladen mit wenigen neuen Knoten duerfen sich nur diese und ihre
+   * direkten Nachbarn bewegen. Die Karte, die der Mensch gerade ansieht,
+   * bleibt stehen -- eine neue Notiz soll dazukommen, nicht alles umwerfen.
+   */
+  let mobile = null;
   let pendingColors = null; // zuletzt gesetzte Themenfarben, fuer Theme-Wechsel und Nachladen
   let filterFn = null;
   let showOrphans = true;
@@ -460,7 +472,9 @@ export function createGraphCanvas(canvas, options = {}) {
   let focusSlot = -1; // der Knoten, um den gerade das Licht faellt
   let fade = 0; // 0..1: wie weit der Rest zurueckgetreten ist
   let fadeTarget = 0;
-  let brightKey = '';
+  // null heisst "neu berechnen"; '' heisst "kein Licht". Beides mit ''
+  // auszudruecken hat das Ausschalten des Suchlichts verschluckt.
+  let brightKey = null;
 
   let animation = null; // {from, to, start, duration}
   let autoFit = false; // die Kamera folgt der Wolke, bis jemand selbst eingreift
@@ -506,7 +520,7 @@ export function createGraphCanvas(canvas, options = {}) {
 
     // Alles Grau ist eine Mischung aus Grund und Schrift. Dadurch stimmt der
     // Abstand zum Grund in beiden Darstellungen, ohne zweite Farbtabelle.
-    const nodeLo = mix(ground, fg, dark ? 0.6 : 0.5);
+    const nodeLo = mix(ground, fg, dark ? 0.66 : 0.52);
     const nodeHi = mix(ground, fg, dark ? 0.86 : 0.82);
     const tiers = [0, 1, 2, 3].map((t) => mix(nodeLo, nodeHi, t / 3));
     palette = {
@@ -518,8 +532,9 @@ export function createGraphCanvas(canvas, options = {}) {
       accentText,
       tiers: tiers.map((c) => rgba(c)),
       line: mix(ground, fg, dark ? 0.42 : 0.4),
-      lineAlpha: dark ? 0.55 : 0.5,
-      label: rgba(mix(ground, fg, dark ? 0.66 : 0.7)),
+      lineAlpha: dark ? 0.7 : 0.6,
+      label: rgba(mix(ground, fg, mini ? 0.8 : dark ? 0.66 : 0.7)),
+      ringFill: rgba(mix(ground, fg, 0.9)),
       labelStrong: rgba(fg),
       halo: rgba(ground, 0.82),
       ring: rgba(mix(ground, fg, dark ? 0.34 : 0.3)),
@@ -534,7 +549,7 @@ export function createGraphCanvas(canvas, options = {}) {
 
   function radiusOf(slot) {
     const d = degree[slot];
-    const base = mini ? 2.6 : 2.4;
+    const base = mini ? 2.8 : 2.8;
     return settings.nodeScale * Math.min(base + 1.2 * Math.sqrt(d), mini ? 7 : 15);
   }
 
@@ -630,6 +645,8 @@ export function createGraphCanvas(canvas, options = {}) {
 
     // Positionen: bekannte behalten, neue neben einen bekannten Nachbarn.
     let fresh = 0;
+    const freshMask = new Uint8Array(n);
+    mobile = null;
     for (let i = 0; i < n; i++) {
       const was = old.index.get(nodes[i].id);
       if (was !== undefined && was < old.posX.length) {
@@ -640,8 +657,15 @@ export function createGraphCanvas(canvas, options = {}) {
         fixed[i] = old.fixed[was];
         fixX[i] = old.fixX[was];
         fixY[i] = old.fixY[was];
+      } else if (Number.isFinite(nodes[i].x) && Number.isFinite(nodes[i].y)) {
+        // Eine Lage, die der Aufrufer vorgibt (die Kachel legt ihr Bild selbst).
+        posX[i] = nodes[i].x;
+        posY[i] = nodes[i].y;
+        velX[i] = 0;
+        velY[i] = 0;
       } else {
         posX[i] = NaN;
+        freshMask[i] = 1;
         fresh++;
       }
     }
@@ -651,12 +675,23 @@ export function createGraphCanvas(canvas, options = {}) {
     selected = selectedId !== null && index.has(selectedId) ? index.get(selectedId) : -1;
     hovered = hoveredId !== null && index.has(hoveredId) ? index.get(hoveredId) : -1;
     highlightSet = null;
-    brightKey = '';
+    brightKey = null;
     applyFilter();
     // Ein Nachladen ohne neue Knoten oder Linien bewegt nichts: die Karte
     // bleibt, wie der Mensch sie gerade ansieht.
     const shape = `${n}:${m}`;
-    if (fresh > 0 || shape !== structure) reheat(fresh === n ? 1 : 0.4);
+    if (fresh === n) reheat(1);
+    else if (fresh > 0 && fresh <= Math.max(12, n * 0.1)) {
+      mobile = new Uint8Array(n);
+      for (let i = 0; i < n; i++) {
+        if (!freshMask[i]) continue;
+        mobile[i] = 1;
+        for (let q = adjStart[i]; q < adjStart[i + 1]; q++) mobile[adjList[q]] = 1;
+      }
+      alpha = Math.max(alpha, 0.5);
+      settledOnce = false;
+    } else if (fresh > 0) reheat(0.4);
+    else if (shape !== structure) reheat(0.12);
     structure = shape;
     if (pendingColors) setColors(pendingColors.colorOf, pendingColors.list);
     requestFrame();
@@ -769,7 +804,7 @@ export function createGraphCanvas(canvas, options = {}) {
     if (selected >= 0 && !visible[selected]) selected = -1;
     if (hovered >= 0 && !visible[hovered]) hovered = -1;
     recomputeSizes();
-    brightKey = '';
+    brightKey = null;
   }
 
   function recomputeSizes() {
@@ -788,7 +823,9 @@ export function createGraphCanvas(canvas, options = {}) {
   /* ---------------------------- Physik ----------------------------- */
 
   function reheat(value = 0.6) {
+    mobile = null; // wer bewusst anstoesst, bewegt das Ganze
     alpha = Math.max(alpha, value);
+    if (settledOnce) emit('onWake');
     settledOnce = false;
     requestFrame();
     return api;
@@ -828,7 +865,9 @@ export function createGraphCanvas(canvas, options = {}) {
     const need = (orphans * 22) / TAU;
     ringCentreX = cx;
     ringCentreY = cy;
-    ringRadius = Math.max(far * 1.05 + 26 * settings.linkDistance, need, 80);
+    // Ein sichtbarer Abstand zwischen Wolke und Ring, wie in der Vorlage:
+    // die Waisen sollen als eigener Kranz lesbar sein, nicht als Saum.
+    ringRadius = Math.max(far * 1.14 + 36 * settings.linkDistance, need, 80);
   }
 
   function tick() {
@@ -890,9 +929,11 @@ export function createGraphCanvas(canvas, options = {}) {
     const decay = 1 - PHYS.velocityDecay;
     for (let i = 0; i < n; i++) {
       if (!visible[i]) continue;
-      if (fixed[i]) {
-        posX[i] = fixX[i];
-        posY[i] = fixY[i];
+      if (fixed[i] || (mobile && !mobile[i])) {
+        if (fixed[i]) {
+          posX[i] = fixX[i];
+          posY[i] = fixY[i];
+        }
         velX[i] = 0;
         velY[i] = 0;
         continue;
@@ -957,14 +998,6 @@ export function createGraphCanvas(canvas, options = {}) {
 
   /* ---------------------------- Kamera ----------------------------- */
 
-  function worldToScreenX(x) {
-    return x * transform.k + transform.x;
-  }
-
-  function worldToScreenY(y) {
-    return y * transform.k + transform.y;
-  }
-
   function bounds(slots) {
     let minX = Infinity;
     let minY = Infinity;
@@ -986,8 +1019,9 @@ export function createGraphCanvas(canvas, options = {}) {
   function fitTransform(pad) {
     const box = bounds(null);
     if (!box || !width || !height) return null;
-    const padX = pad !== undefined ? pad : mini ? 30 : 48;
-    const padY = pad !== undefined ? pad : mini ? 22 : 48;
+    // Die Kachel braucht seitlich Platz fuer die Namen neben den Punkten.
+    const padX = pad !== undefined ? pad : mini ? clamp(width * 0.2, 30, 90) : 48;
+    const padY = pad !== undefined ? pad : mini ? 26 : 48;
     const bw = Math.max(box.maxX - box.minX, 1);
     const bh = Math.max(box.maxY - box.minY, 1);
     // Ein kleines Netz wird nicht auf Briefmarkengroesse aufgeblasen: ueber
@@ -1146,6 +1180,7 @@ export function createGraphCanvas(canvas, options = {}) {
       tick();
       if (alpha < PHYS.alphaMin && alphaTarget === 0) {
         alpha = 0;
+        mobile = null;
         if (!settledOnce) {
           settledOnce = true;
           if (autoFit) {
@@ -1279,8 +1314,14 @@ export function createGraphCanvas(canvas, options = {}) {
     }
   }
 
+  /**
+   * Beim Heranzoomen wachsen die Abstaende linear, die Punkte nur gedaempft
+   * (k^0.6): so wird das Netz beim Hineingehen luftiger statt dass ein Hub
+   * zur Scheibe aufquillt.
+   */
   function screenRadius(i, k) {
-    return Math.max(radius[i] * k, mini ? 1.6 : 1.15);
+    const grow = k <= 1 ? k : Math.pow(k, 0.6);
+    return Math.max(radius[i] * grow, mini ? 1.6 : 1.15);
   }
 
   function drawNodes(k) {
@@ -1321,8 +1362,18 @@ export function createGraphCanvas(canvas, options = {}) {
     }
     fillAll(normal);
 
-    // Kachel: die direkten Nachbarn tragen einen feinen Ring (Vorlage).
+    // Kachel: die direkten Nachbarn sind helle Punkte mit feinem Ring (Vorlage).
     if (ringIds && ringIds.size) {
+      ctx.beginPath();
+      for (const id of ringIds) {
+        const i = index.get(id);
+        if (i === undefined || !visible[i] || i === selected) continue;
+        const r = screenRadius(i, k);
+        ctx.moveTo(sx[i] + r, sy[i]);
+        ctx.arc(sx[i], sy[i], r, 0, TAU);
+      }
+      ctx.fillStyle = palette.ringFill;
+      ctx.fill();
       ctx.beginPath();
       for (const id of ringIds) {
         const i = index.get(id);
@@ -1388,7 +1439,7 @@ export function createGraphCanvas(canvas, options = {}) {
 
   function labelText(i) {
     const node = nodes[i];
-    return clip(node.label || node.title || node.id, mini ? 18 : 34);
+    return clip(node.label || node.title || node.id, mini ? 17 : 34);
   }
 
   /**
@@ -1400,7 +1451,7 @@ export function createGraphCanvas(canvas, options = {}) {
   function drawLabels(k) {
     // Halbe Pixel als Stufen: sonst aendert jeder Zoomschritt die Schrift
     // und jede Breite muesste neu gemessen werden.
-    const px = mini ? 11.5 : Math.round(clamp(10.5 + 1.6 * Math.log2(Math.max(k, 0.25) + 1), 10.5, 15) * 2) / 2;
+    const px = mini ? 12.5 : Math.round(clamp(10.5 + 1.6 * Math.log2(Math.max(k, 0.25) + 1), 10.5, 15) * 2) / 2;
     const font = `${px}px ${fontFamily}`;
     ctx.font = font;
     ctx.textBaseline = 'top';
@@ -1456,12 +1507,13 @@ export function createGraphCanvas(canvas, options = {}) {
       }
     }
     const focusFirst = [...forced].sort((p, q) => (p === focusSlot || p === selected ? -1 : 0) - (q === focusSlot || q === selected ? -1 : 0) || degree[q] - degree[p]);
-    for (const i of focusFirst) list.push([i, 1, true]);
+    // Nachbarn blenden mit dem Licht ein und aus, statt am Ende wegzuspringen.
+    for (const i of focusFirst) list.push([i, i === selected || mini ? 1 : Math.max(fade, 0.04), true]);
     if (!mini) {
       for (let o = 0; o < labelOrder.length; o++) {
         const i = labelOrder[o];
         if (!visible[i] || forced.has(i)) continue;
-        const importance = radius[i] / (2.4 * settings.nodeScale);
+        const importance = radius[i] / (2.8 * settings.nodeScale);
         let a = clamp((k * importance - lz) / (0.45 * lz), 0, 1);
         if (lit && !bright[i]) a *= 1 - fade * 0.85;
         else if (lit && highlightSet && bright[i]) a = Math.max(a, fade * 0.9);
@@ -1472,6 +1524,33 @@ export function createGraphCanvas(canvas, options = {}) {
     }
 
     const hgt = px * 1.25;
+    if (mini) {
+      // In der Kachel sind die Punkte selbst belegt: ein Name, der auf dem
+      // eigenen oder einem fremden Punkt liegt, liest sich nicht.
+      for (let i = 0; i < n; i++) {
+        if (!visible[i]) continue;
+        const r = screenRadius(i, k) + 3;
+        occupy({ x: sx[i] - r, y: sy[i] - r, w: r * 2, h: r * 2, own: i });
+      }
+    }
+    const fits = (x, y, w) => x >= 2 && y >= 2 && x + w <= width - 2 && y + hgt <= height - 2;
+    const free = (x, y, w, self) => {
+      const c0 = Math.floor((x - 2) / cell);
+      const c1 = Math.floor((x + w + 2) / cell);
+      const r0 = Math.floor((y - 1) / cell);
+      const r1 = Math.floor((y + hgt + 1) / cell);
+      for (let cx = c0; cx <= c1; cx++) {
+        for (let cy = r0; cy <= r1; cy++) {
+          const cellList = grid.get(cx * 100003 + cy);
+          if (!cellList) continue;
+          for (const b of cellList) {
+            if (b.own === self) continue;
+            if (x - 2 < b.x + b.w && x + w + 2 > b.x && y - 1 < b.y + b.h && y + hgt + 1 > b.y) return false;
+          }
+        }
+      }
+      return true;
+    };
     for (const [i, a, isForced] of list) {
       const r = screenRadius(i, k);
       if (!onScreen(i, 200)) continue;
@@ -1480,21 +1559,23 @@ export function createGraphCanvas(canvas, options = {}) {
       let y;
       if (mini) {
         // Nach aussen: vom Mittelpunkt der Kachel weg, wie in der Vorlage.
+        // Passt es dort nicht (Rand, fremder Punkt), dann darunter, darueber
+        // oder zur anderen Seite -- nie auf den eigenen Punkt geschoben.
         const dx = sx[i] - width / 2;
         const dy = sy[i] - height / 2;
-        const isCentre = i === selected;
-        if (isCentre) {
-          x = sx[i] + r + 9;
-          y = sy[i] - hgt / 2;
-        } else if (Math.abs(dx) > Math.abs(dy) * 1.4) {
-          x = dx > 0 ? sx[i] + r + 8 : sx[i] - r - 8 - w;
-          y = sy[i] - hgt / 2;
-        } else {
-          x = sx[i] - w / 2;
-          y = dy > 0 ? sy[i] + r + 6 : sy[i] - r - 6 - hgt;
-        }
-        x = clamp(x, 2, Math.max(2, width - w - 2));
-        y = clamp(y, 2, Math.max(2, height - hgt - 2));
+        const right = [sx[i] + r + 8, sy[i] - hgt / 2];
+        const left = [sx[i] - r - 8 - w, sy[i] - hgt / 2];
+        const below = [sx[i] - w / 2, sy[i] + r + 6];
+        const above = [sx[i] - w / 2, sy[i] - r - 6 - hgt];
+        let cands;
+        if (i === selected) cands = [right, below, above, left];
+        else if (Math.abs(dx) > Math.abs(dy) * 1.2) cands = dx > 0 ? [right, below, above, left] : [left, below, above, right];
+        else cands = dy > 0 ? [below, dx > 0 ? right : left, above] : [above, dx > 0 ? right : left, below];
+        const pick = cands.find(([cx, cy]) => fits(cx, cy, w) && free(cx, cy, w, i))
+          || cands.find(([cx, cy]) => fits(cx, cy, w))
+          || cands[0];
+        x = clamp(pick[0], 2, Math.max(2, width - w - 2));
+        y = clamp(pick[1], 2, Math.max(2, height - hgt - 2));
       } else {
         x = sx[i] - w / 2;
         y = sy[i] + r + 3;
@@ -1608,8 +1689,11 @@ export function createGraphCanvas(canvas, options = {}) {
       canvas.setPointerCapture(event.pointerId);
     } catch { /* ein Stift ohne Capture geht auch */ }
     if (pointers.size === 2) {
-      // Zwei Finger: zoomen und schieben, ein angefangener Zug endet.
+      // Zwei Finger: zoomen und schieben, ein angefangener Zug endet -- und
+      // das Licht, das der erste Finger auf einem Knoten angemacht hat, geht
+      // aus. Sonst bliebe der Knoten nach dem Zoomen blau haengen.
       if (gesture && gesture.kind === 'node' && gesture.dragging) releaseNode(gesture.slot);
+      if (event.pointerType === 'touch') setHovered(-1);
       const [a, b] = [...pointers.values()];
       gesture = { kind: 'pinch', dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
       userMoved();
@@ -1821,15 +1905,21 @@ export function createGraphCanvas(canvas, options = {}) {
     const slot = id == null ? -1 : index.get(id);
     selected = slot === undefined ? -1 : slot;
     if (selected >= 0 && !visible[selected]) selected = -1;
-    brightKey = '';
+    brightKey = null;
     requestFrame();
     return api;
   }
 
   function setFilter(fn) {
     filterFn = typeof fn === 'function' ? fn : null;
+    const before = visible.slice();
     applyFilter();
-    reheat(0.35);
+    // Nur wenn sich wirklich etwas zeigt oder verschwindet, kommt Bewegung
+    // in die Wolke. Ein Nachladen mit demselben Filter laesst sie in Ruhe.
+    let changed = before.length !== visible.length;
+    for (let i = 0; !changed && i < visible.length; i++) changed = before[i] !== visible[i];
+    if (changed) reheat(0.35);
+    else requestFrame();
     return api;
   }
 
@@ -1863,7 +1953,7 @@ export function createGraphCanvas(canvas, options = {}) {
         if (s !== undefined && visible[s]) highlightSet.add(s);
       }
     }
-    brightKey = '';
+    brightKey = null;
     requestFrame();
     return api;
   }

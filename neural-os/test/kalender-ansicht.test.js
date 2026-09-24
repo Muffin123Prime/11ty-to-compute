@@ -23,8 +23,10 @@ const { pathToFileURL } = require('node:url');
 const { test, tempHome } = require('./harness');
 
 const loaded = new Map();
-async function load(view) {
-  if (loaded.has(view)) return loaded.get(view);
+/** Eine Ansicht (web/views) -- oder mit ordner 'lib' ein Baustein aus web/lib. */
+async function load(view, ordner = 'views') {
+  const schluessel = `${ordner}/${view}`;
+  if (loaded.has(schluessel)) return loaded.get(schluessel);
   const web = path.join(__dirname, '..', 'web');
   const { home, cleanup } = tempHome('nos-kal-view');
   const asModule = (src) => src.replace(/(from\s+')([^']+)\.js(')/g, (m, head, spec, tail) => `${head}./${path.basename(spec)}.mjs${tail}`);
@@ -32,10 +34,10 @@ async function load(view) {
   for (const file of fs.readdirSync(path.join(web, 'lib'))) {
     if (file.endsWith('.js')) copy(path.join(web, 'lib', file), file.replace(/\.js$/, '.mjs'));
   }
-  copy(path.join(web, 'views', `${view}.js`), `${view}.mjs`);
+  if (ordner !== 'lib') copy(path.join(web, ordner, `${view}.js`), `${view}.mjs`);
   try {
     const mod = await import(pathToFileURL(path.join(home, `${view}.mjs`)).href);
-    loaded.set(view, mod);
+    loaded.set(schluessel, mod);
     return mod;
   } finally {
     cleanup();
@@ -128,6 +130,167 @@ test('layoutDay legt Ueberschneidendes nebeneinander und den Rest in volle Breit
   assert.equal(by.c.lanes, 2);
   assert.deepEqual([by.d.lane, by.d.lanes], [0, 1]);
   assert.deepEqual(k.layoutDay([]), []);
+});
+
+/* ------------------------------------- Kalender: Serien, Ziehen, Balken */
+
+test('eintragAus: Einzeltermin und Vorkommen einer Serie (Vertrag B), am Element oder in data', async () => {
+  const k = await load('kalender');
+  const einzel = k.eintragAus({
+    id: 'event_a', type: 'event', occurrence: null, recurring: false,
+    data: { title: 'Zahnarzt', start: '2026-09-23T09:00', end: '2026-09-23T10:00', occurrence: null, recurring: false },
+  });
+  assert.equal(einzel.key, 'event_a@');
+  assert.equal(einzel.recurring, false);
+  const serie = { freq: 'weekly', interval: 1, byDay: ['TU'], until: null, count: null };
+  const vk = k.eintragAus({
+    id: 'event_s', occurrence: '2026-09-29', recurring: true, serie: { start: '2026-09-08T18:00', end: '2026-09-08T19:30' },
+    data: { title: 'Training', start: '2026-09-29T18:00', end: '2026-09-29T19:30', recurrence: serie, occurrence: '2026-09-29', recurring: true },
+  });
+  assert.equal(vk.key, 'event_s@2026-09-29', 'jedes Vorkommen hat seinen eigenen Schluessel, die id bleibt die der Serie');
+  assert.equal(vk.id, 'event_s');
+  assert.equal(vk.recurring, true);
+  assert.equal(vk.span.firstDay, '2026-09-29');
+  const nurInData = k.eintragAus({ id: 'event_s', data: { title: 'Training', start: '2026-10-06T18:00', recurrence: serie, occurrence: '2026-10-06', recurring: true } });
+  assert.equal(nurInData.occurrence, '2026-10-06');
+  assert.equal(nurInData.recurring, true);
+  assert.equal(k.eintragAus({ id: 'event_x', data: { title: 'kaputt', start: 'morgen' } }), null);
+  assert.equal(k.eintragAus(null), null);
+  assert.equal(k.eintragAus({ data: { title: 'ohne id', start: '2026-09-23' } }), null);
+});
+
+test('verschieben und snap: auf der Wanduhr im 15-Minuten-Raster, auch ueber die Zeitumstellung', async () => {
+  const k = await load('kalender');
+  assert.deepEqual(k.verschieben('2026-10-24T10:00', '2026-10-24T11:00', 1440), { start: '2026-10-25T10:00', end: '2026-10-25T11:00' },
+    'am 25.10.2026 wird die Uhr umgestellt: ein Tag spaeter ist trotzdem 10:00');
+  assert.deepEqual(k.verschieben('2026-09-23T23:30', '2026-09-24T00:30', 45), { start: '2026-09-24T00:15', end: '2026-09-24T01:15' });
+  assert.deepEqual(k.verschieben('2026-10-03', '2026-10-05', 2 * 1440, true), { start: '2026-10-05', end: '2026-10-07' });
+  assert.deepEqual(k.verschieben('2026-10-03', null, 1440, true), { start: '2026-10-04', end: null });
+  assert.deepEqual(k.verschieben('2026-09-23T09:00', null, -30), { start: '2026-09-23T08:30', end: null });
+  assert.equal(k.verschieben('kaputt', null, 15), null);
+  assert.deepEqual([k.snap(7), k.snap(8), k.snap(52), k.snap(53), k.snap(-8)], [0, 15, 45, 60, -15]);
+  assert.equal(k.alsWand('2026-09-23T09:30:00'), '2026-09-23T09:30');
+  assert.equal(k.alsWand('2026-09-23'), '2026-09-23');
+});
+
+test('aufTag: eine Serie auf einen ihrer Tage gelegt, Dauer bleibt', async () => {
+  const k = await load('kalender');
+  assert.deepEqual(k.aufTag({ start: '2026-09-01T18:00', end: '2026-09-01T19:30' }, '2026-10-27'),
+    { start: '2026-10-27T18:00', end: '2026-10-27T19:30' }, 'nach der Zeitumstellung immer noch 18:00');
+  assert.deepEqual(k.aufTag({ start: '2026-09-01', end: '2026-09-03', allDay: true }, '2026-10-01'), { start: '2026-10-01', end: '2026-10-03' });
+  assert.deepEqual(k.aufTag({ start: '2026-09-01T22:00', end: '2026-09-02T01:00' }, '2026-09-08'), { start: '2026-09-08T22:00', end: '2026-09-09T01:00' });
+});
+
+test('serienPatch: "Alle" -- jeden Dienstag gezogen auf Mittwoch wird jeden Mittwoch', async () => {
+  const k = await load('kalender');
+  const serie = {
+    start: '2026-09-08T18:00', end: '2026-09-08T19:30',
+    recurrence: { freq: 'weekly', interval: 1, byDay: ['TU'], until: '2026-12-15', count: null },
+    exdates: ['2026-09-15'],
+  };
+  const alt = { start: '2026-09-29T18:00', end: '2026-09-29T19:30' };
+  const p = k.serienPatch(serie, alt, { start: '2026-09-30T18:30', end: '2026-09-30T20:00' });
+  assert.equal(p.start, '2026-09-09T18:30', 'der Beginn der SERIE wandert, nicht der des angetippten Vorkommens');
+  assert.equal(p.end, '2026-09-09T20:00');
+  assert.deepEqual(p.recurrence.byDay, ['WE']);
+  assert.equal(p.recurrence.until, '2026-12-16', 'das letzte Vorkommen wandert mit und faellt nicht weg');
+  assert.deepEqual(p.exdates, ['2026-09-16'], 'der ausgelassene Tag bleibt derselbe Termin');
+
+  const laenger = k.serienPatch(serie, alt, { start: alt.start, end: '2026-09-29T20:00' });
+  assert.deepEqual(laenger, { start: '2026-09-08T18:00', end: '2026-09-08T20:00' }, 'nur laenger: Regel und Ausnahmen bleiben, wie sie sind');
+
+  const miete = { start: '2026-09-01', allDay: true, end: null, recurrence: { freq: 'monthly', interval: 1, until: null, count: null } };
+  const m = k.serienPatch(miete, { start: '2026-10-01', end: null }, { start: '2026-10-02', end: null });
+  assert.equal(m.start, '2026-09-02');
+  assert.equal(m.recurrence.freq, 'monthly');
+  assert.equal(m.recurrence.byDay, undefined, 'byDay gibt es nur bei woechentlich (Vertrag A)');
+
+  const sonntag = { start: '2026-09-06T23:00', end: '2026-09-06T23:30', recurrence: { freq: 'weekly', interval: 1, byDay: ['SU'], until: null, count: null } };
+  const nacht = k.serienPatch(sonntag, { start: '2026-09-27T23:00', end: '2026-09-27T23:30' }, { start: '2026-09-28T00:30', end: '2026-09-28T01:00' });
+  assert.deepEqual(nacht.recurrence.byDay, ['MO'], 'ueber Mitternacht gezogen: der Wochentag wandert mit');
+});
+
+test('packeBalken und istBalken: Ganztaegiges als Balken, jeder in der obersten freien Zeile', async () => {
+  const k = await load('kalender');
+  const lanes = Object.fromEntries(k.packeBalken([
+    { key: 'feier', von: 5, bis: 5 },
+    { key: 'urlaub', von: 0, bis: 4 },
+    { key: 'arzt', von: 1, bis: 1 },
+    { key: 'messe', von: 3, bis: 5 },
+  ]).map((b) => [b.key, b.lane]));
+  assert.deepEqual(lanes, { urlaub: 0, arzt: 1, messe: 1, feier: 0 });
+  assert.equal(k.istBalken(k.spanOf({ start: '2026-10-03', allDay: true })), true);
+  assert.equal(k.istBalken(k.spanOf({ start: '2026-09-26T22:00', end: '2026-09-27T02:00' })), false, 'eine Nacht bleibt im Raster');
+  assert.equal(k.istBalken(k.spanOf({ start: '2026-09-26T10:00', end: '2026-09-27T12:00' })), true, 'ab 24 Stunden ein Balken');
+});
+
+test('gruppiereNachTag: "Als Naechstes" -- was schon laeuft, steht bei heute', async () => {
+  const k = await load('kalender');
+  const e = (id, data, occurrence = null) => k.eintragAus({ id, occurrence, data: { title: id, ...data } });
+  const gruppen = k.gruppiereNachTag([
+    e('spaet', { start: '2026-09-23T18:00' }),
+    e('urlaub', { start: '2026-09-21', end: '2026-09-25', allDay: true }),
+    e('frueh', { start: '2026-09-23T08:00' }),
+    e('vorbei', { start: '2026-09-20T08:00' }),
+    e('morgen', { start: '2026-09-24T09:00' }),
+    e('zuweit', { start: '2026-12-24' }),
+  ], '2026-09-23', '2026-10-22');
+  assert.deepEqual(gruppen.map((g) => [g.day, g.eintraege.map((x) => x.id)]), [
+    ['2026-09-23', ['urlaub', 'frueh', 'spaet']],
+    ['2026-09-24', ['morgen']],
+  ]);
+});
+
+test('rangeFor: jede Ansicht laedt genau, was sie zeigt', async () => {
+  const k = await load('kalender');
+  assert.deepEqual(k.rangeFor('woche', '2026-09-23'), { from: '2026-09-21', to: '2026-09-27' });
+  assert.deepEqual(k.rangeFor('monat', '2026-09-23'), { from: '2026-08-31', to: '2026-10-04' });
+  assert.deepEqual(k.rangeFor('tag', '2026-09-23'), { from: '2026-08-31', to: '2026-10-04' }, 'Tag laedt den Monat: der kleine Monat daneben zeigt Punkte');
+  assert.deepEqual(k.rangeFor('liste', '2026-01-01', 60, '2026-09-23'), { from: '2026-09-23', to: '2026-11-21' });
+});
+
+/* ------------------------------------------------------------ Erinnerung */
+
+test('Erinnerung in Worten', async () => {
+  const r = await load('erinnerung', 'lib');
+  assert.deepEqual([null, 0, 5, 15, 60, 120, 1440].map(r.erinnerungInWorten),
+    ['Keine', 'Zum Beginn', '5 Min vorher', '15 Min vorher', '1 Std vorher', '2 Std vorher', '1 Tag vorher']);
+  assert.deepEqual(r.ERINNERUNG_OPTIONEN, [null, 0, 5, 10, 15, 30, 60, 120, 1440], 'die Stufen aus Vertrag A');
+});
+
+test('faellige: eine Erinnerung zur Zeit Beginn minus Vorlauf, bis kurz nach Beginn, nicht wenn weggeklickt', async () => {
+  const r = await load('erinnerung', 'lib');
+  const um = (h, m) => new Date(2026, 8, 23, h, m).getTime();
+  const items = [
+    { id: 'event_z', data: { title: 'Zahnarzt', location: 'Bibliothek', start: '2026-09-23T10:00', reminder: 15 } },
+    { id: 'event_o', data: { title: 'Ohne Erinnerung', start: '2026-09-23T10:00', reminder: null } },
+    { id: 'event_t', occurrence: '2026-09-23', data: { title: 'Training', start: '2026-09-23T10:05', reminder: 30, occurrence: '2026-09-23' } },
+  ];
+  assert.deepEqual(r.faellige(items, um(9, 30)).map((e) => e.id), []);
+  assert.deepEqual(r.faellige(items, um(9, 40)).map((e) => e.id), ['event_t'], 'Training: 10:05 minus 30 Minuten');
+  const jetzt = r.faellige(items, um(9, 50));
+  assert.deepEqual(jetzt.map((e) => e.id), ['event_z', 'event_t']);
+  assert.equal(r.hinweisText(jetzt[0], um(9, 50)), 'In 10 Min · Zahnarzt · Bibliothek');
+  assert.equal(jetzt[1].key, 'event_t|2026-09-23|2026-09-23T10:05|30', 'jedes Vorkommen einer Serie erinnert fuer sich');
+  assert.equal(r.faellige(items, um(10, 9)).length, 2, 'kurz nach Beginn steht der Hinweis noch');
+  assert.equal(r.faellige(items, um(10, 20)).length, 0, 'wer eine Viertelstunde spaeter oeffnet, braucht ihn nicht mehr');
+  assert.deepEqual(r.faellige(items, um(9, 50), new Set([jetzt[0].key])).map((e) => e.id), ['event_t'], 'weggeklickt bleibt weg');
+  const verschoben = [{ ...items[0], data: { ...items[0].data, start: '2026-09-23T10:05' } }];
+  assert.equal(r.faellige(verschoben, um(9, 55), new Set([jetzt[0].key])).length, 1, 'verschoben erinnert neu');
+});
+
+test('Erinnerung: ganztaegig um neun, Texte vor, bei und nach Beginn', async () => {
+  const r = await load('erinnerung', 'lib');
+  assert.equal(r.beginnMs('2026-09-24'), new Date(2026, 8, 24, 9, 0).getTime());
+  const vortag = r.faellige([{ id: 'event_m', data: { title: 'Miete', start: '2026-09-24', allDay: true, reminder: 1440 } }], new Date(2026, 8, 23, 9, 1).getTime());
+  assert.equal(vortag.length, 1, '"1 Tag vorher" meldet sich am Vortag um neun');
+  assert.equal(r.wannText(new Date(2026, 8, 24, 9, 0).getTime(), new Date(2026, 8, 23, 9, 1).getTime()), 'Morgen 09:00');
+  const zehn = new Date(2026, 8, 23, 10, 0).getTime();
+  assert.equal(r.wannText(zehn, zehn), 'Jetzt');
+  assert.equal(r.wannText(zehn, zehn + 2 * 60000), 'Seit 2 Min');
+  assert.equal(r.wannText(zehn, zehn - 60 * 60000), 'In 1 Std');
+  assert.equal(r.wannText(zehn, zehn - 90 * 60000), 'Heute 10:00');
+  assert.equal(r.beginnMs('kaputt'), null);
 });
 
 /* --------------------------------------------------- Notizwand, Projekte */
