@@ -697,3 +697,34 @@ test('Starter Mac und Linux: sh, LF, kein NEURAL_OS_HOME, macOS-11-Probe, Quaran
   assert.ok(mac.includes('Auf diesem Stick fehlt das Programm für den Mac.'));
   assert.ok(!/xattr[^\n]*"\$0"/.test(mac), 'das wirkungslose xattr auf "$0" entfällt');
 });
+
+test('Eine ältere Version (Sperre {pid, at}) läuft noch: der Starter beendet sie selbst und startet die neue', async () => {
+  // So sah es beim Nutzer aus: Die alte App (vor Paket S) lief im Hintergrund
+  // weiter, der neue Starter sagte "Bitte dort beenden" -- und in der alten
+  // Oberfläche gibt es keinen Knopf dafür.
+  const u = umgebung('nos-s-aeltere');
+  const alt = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  try {
+    fs.mkdirSync(u.home, { recursive: true });
+    fs.writeFileSync(path.join(u.home, '.lock'), JSON.stringify({ pid: alt.pid, at: new Date().toISOString() }));
+    fs.mkdirSync(path.join(u.home, 'vault'), { recursive: true });
+    fs.writeFileSync(path.join(u.home, 'vault', '.lock'), JSON.stringify({ pid: alt.pid, at: new Date().toISOString() }));
+
+    const r = await lauf(['start', '--hintergrund', '--open', '--home', u.home, '--port', '0'], { env: u.env });
+    assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /Eine ältere Version lief noch und wurde beendet\./);
+    assert.ok(!lebt(alt.pid), 'die alte Version lebt noch');
+
+    const z = leseZettel(u.home);
+    assert.ok(z && z.zustand === 'bereit', 'die neue Version läuft nicht');
+    assert.notEqual(z.pid, alt.pid);
+    assert.deepEqual(u.geoeffnet(), [z.url]);
+
+    const b = await rufe(`http://127.0.0.1:${z.port}/api/system/beenden`, { method: 'POST', body: {} });
+    assert.equal(b.status, 202, b.text);
+    await bis(() => !lebt(z.pid), { ms: 5000, was: 'Dienst endet nach [Beenden]' });
+  } finally {
+    try { alt.kill('SIGKILL'); } catch { /* schon weg */ }
+    await u.cleanup();
+  }
+});

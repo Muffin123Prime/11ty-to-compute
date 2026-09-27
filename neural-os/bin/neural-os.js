@@ -530,15 +530,50 @@ async function cmdDienst(flags) {
  */
 async function laufendesAbwarten(paths, dauertNoch) {
   const bis = Date.now() + WARTEN_MS;
+  let aeltereVersucht = false;
   for (;;) {
     const befund = await laufzettel.pruefen(paths);
     if (befund.zustand === 'laeuft') return { url: befund.url };
-    if (befund.zustand === 'aeltere') return { satz: 'Neural OS läuft schon (ältere Version). Bitte dort beenden.' };
+    if (befund.zustand === 'aeltere') {
+      // Eine Version von vor Paket S läuft noch (Sperre {pid, at}). Sie kennt
+      // weder [Beenden] noch einen Stopp-Schlüssel, und der Nutzer hat in
+      // ihrer Oberfläche keinen Knopf dafür -- also beendet der Starter sie
+      // selbst, sonst zeigt der Browser für immer die alte App (so gesehen
+      // beim Nutzer nach dem Herunterladen einer neuen Fassung).
+      if (aeltereVersucht || !(await aeltereBeenden(befund.pid))) {
+        return { satz: 'Neural OS läuft schon (ältere Version). Bitte dort beenden.' };
+      }
+      aeltereVersucht = true;
+      sagen('Eine ältere Version lief noch und wurde beendet.');
+      continue; // pruefen sagt jetzt "verwaist", und anlegen räumt die Sperren weg
+    }
     if (befund.zustand !== 'startet') return {};
     if (Date.now() > bis) return { grund: 'Ein anderer Start ist nach 120 s nicht fertig geworden.' };
     dauertNoch();
     await schlafen(300);
   }
+}
+
+/**
+ * Eine ältere Version (Sperre ohne Laufzettel) beenden: SIGTERM, das sie
+ * sauber schließt (unter Windows ist es ein hartes Ende -- ihr Speicher
+ * ist reines Anhängen, es geht höchstens der letzte Satz verloren), dann bis
+ * zu 10 s warten. Ein anderes Konto (EPERM) oder ein Prozess, der nicht
+ * stirbt, ergibt false.
+ * @returns {Promise<boolean>} tot?
+ */
+async function aeltereBeenden(pid) {
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  try { process.kill(pid, 'SIGTERM'); } catch (err) {
+    if (err && err.code === 'ESRCH') return true;
+    return false;
+  }
+  const bis = Date.now() + 10000;
+  while (Date.now() < bis) {
+    if (!laufzettel.pidLebt(pid)) return true;
+    await schlafen(100);
+  }
+  return false;
 }
 
 /** Kann hier geschrieben werden? Ein schreibgeschützter Stick scheitert sonst erst im Tresor. */
@@ -695,7 +730,11 @@ async function cmdStop(flags) {
   const paths = pathsMod.layout(homeAus(flags));
   const befund = await laufzettel.pruefen(paths);
   if (befund.zustand === 'startet') { sagen('Neural OS startet gerade; gleich noch einmal versuchen.'); return 1; }
-  if (befund.zustand === 'aeltere') { sagen('Neural OS läuft schon (ältere Version). Bitte dort beenden.'); return 1; }
+  if (befund.zustand === 'aeltere') {
+    if (!(await aeltereBeenden(befund.pid))) { sagen('Neural OS läuft schon (ältere Version). Bitte dort beenden.'); return 1; }
+    sagen('Eine ältere Version lief noch und wurde beendet.');
+    return 0;
+  }
   if (befund.zustand !== 'laeuft') { sagen('Neural OS läuft nicht.'); return 0; }
   const z = befund.zettel;
 
