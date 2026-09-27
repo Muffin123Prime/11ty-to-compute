@@ -113,6 +113,57 @@ async function befuellen(app) {
   const weitereIds = {};
   for (const [title, body, tags] of weitere) weitereIds[title] = s.create('note', { title, body, tags }).id;
 
+  // --- Wissensuniversum: Schule, Projekte, Personen, Orte ----------------
+  //
+  // Der Stoff fuer die zoombare Themenkarte (GET /api/graph/universum):
+  // #schule umfasst #biologie, #genetik und #geschichte (Kinder), ein Projekt
+  // mit Ideen/Recherche/Design bildet ein eigenes Thema, Begriffe der Art
+  // `topic` fallen mit ihrem Schlagwort zusammen, Personen und Orte haengen
+  // ueber [[Links]] an. Zwei Notizen bleiben absichtlich ohne alles
+  // ("Unverbunden"), und "Chlorophyll absorbiert Licht" hat weder Schlagwort
+  // noch Link -- sie ist der Fall aus der Vision, den die
+  // Verbindungsvorschlaege finden muessen.
+  {
+    const begriffe = [
+      ['Schule', 'topic', 'Alles aus dem Unterricht, nach Faechern.'],
+      ['Biologie', 'topic', 'Lehre vom Leben: Zellen, Stoffwechsel, Vererbung.'],
+      ['Geschichte', 'topic', 'Vom Ersten Weltkrieg bis zur Gegenwart.'],
+      ['Chlorophyll', 'term', 'Der grüne Farbstoff in den Chloroplasten; absorbiert rotes und blaues Licht.'],
+      ['Frau Dr. Keller', 'person', 'Biologielehrerin, Leistungskurs.'],
+      ['Jonas', 'person', 'Freund; hilft im Garten und beim Smart-Glasses-Prototyp.'],
+      ['Berlin', 'place', 'Hauptstadt; Schulfahrt und Gedenkstätten.'],
+    ];
+    for (const [name, kind, description] of begriffe) s.create('entity', { name, kind, description });
+
+    const glasses = s.create('project', { name: 'Smart Glasses', description: 'Eine Brille, die Notizen einblendet. Mit [[Jonas]]: Ideen, Recherche, Design.', tags: ['technik'] });
+    s.create('task', { title: 'Waveguide-Muster bestellen', projectId: glasses.id, due: tage(4), priority: 2 });
+    s.create('task', { title: 'Rahmen drucken', projectId: glasses.id, status: 'doing' });
+
+    const wissen = [
+      ['Photosynthese', 'Pflanzen wandeln Lichtenergie in chemische Energie um. Das [[Chlorophyll]] in den Chloroplasten absorbiert Licht; aus Wasser und CO₂ entstehen Zucker und Sauerstoff. Gegenstück: [[Zellatmung]].\n\n> [!info] Merksatz\n> 6 CO₂ + 6 H₂O → C₆H₁₂O₆ + 6 O₂', ['schule', 'biologie']],
+      ['Zellatmung', 'Zucker wird in den Mitochondrien mit Sauerstoff zu CO₂ und Wasser abgebaut; dabei entsteht ATP. Umkehrung der [[Photosynthese]]. Ort: die [[Zellen]] aller Lebewesen.', ['schule', 'biologie']],
+      ['Zellen', 'Kleinste lebende Einheit. Tierzelle ohne Zellwand, Pflanzenzelle mit Zellwand und Chloroplasten. Im Kern liegt die [[DNA]].', ['schule', 'biologie']],
+      ['DNA', 'Doppelhelix aus vier Basen (A, T, G, C). Träger der Erbinformation, siehe [[Genetik]]. Watson und Crick, 1953.', ['schule', 'biologie', 'genetik']],
+      ['Genetik', 'Vererbungslehre: Mendel, dominante und rezessive Merkmale, Kreuzungsschema. Grundlage ist die [[DNA]]. Prüfungsstoff bei [[Frau Dr. Keller]].', ['schule', 'biologie', 'genetik']],
+      ['Mendelsche Regeln', 'Uniformitätsregel, Spaltungsregel, Unabhängigkeitsregel. Gehört zur [[Genetik]].', ['schule', 'biologie', 'genetik']],
+      ['Pflanzen brauchen Licht', 'Ohne Licht keine [[Photosynthese]]: Keimlinge im Schrank werden lang und blass. Versuch mit Kresse auf der Fensterbank und im Schrank.', ['biologie']],
+      ['Erster Weltkrieg', 'Juli-Krise 1914, Bündnissysteme, Stellungskrieg. Ende 1918. Folgen: Versailler Vertrag, siehe [[Zweiter Weltkrieg]].', ['schule', 'geschichte']],
+      ['Zweiter Weltkrieg', '1939 bis 1945. Überfall auf Polen, Wannseekonferenz, Kapitulation. Gedenkstätten in [[Berlin]].', ['schule', 'geschichte']],
+      ['Weimarer Republik', 'Zwischen den Kriegen: Inflation 1923, goldene Zwanziger, Weltwirtschaftskrise. Vorlauf zum [[Zweiter Weltkrieg|Zweiten Weltkrieg]].', ['schule', 'geschichte']],
+      ['Smart Glasses: Ideen', 'Notizen einblenden, Übersetzung, Navigation. Mit [[Jonas]] besprochen.', ['smartglasses']],
+      ['Smart Glasses: Recherche', 'Waveguide-Displays, Akku unter 30 Gramm, Bluetooth LE. Prototyp mit ESP32.', ['smartglasses']],
+      ['Smart Glasses: Design', 'Rahmen aus dem 3D-Drucker, Bügel mit Kamera. Skizzen im Heft.', ['smartglasses']],
+      ['Chlorophyll absorbiert Licht', 'Chlorophyll absorbiert rotes und blaues Licht, grünes wird reflektiert – deshalb sehen Blätter grün aus.', []],
+      ['Zitat des Tages', 'Was man nicht aufschreibt, hat man nicht gedacht.', []],
+      ['Einkaufszettel Mittwoch', 'Milch, Brot, Batterien.', []],
+    ];
+    for (const [title, body, tags] of wissen) {
+      const data = { title, body, tags };
+      if (title.startsWith('Smart Glasses:')) data.projectId = glasses.id;
+      s.create('note', data);
+    }
+  }
+
   if (app.graph && app.graph.scanAll) app.graph.scanAll(s, {});
 
   // --- Chats -------------------------------------------------------------

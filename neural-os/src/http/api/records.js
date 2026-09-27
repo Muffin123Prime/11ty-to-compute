@@ -187,6 +187,31 @@ function register(router) {
   });
 
   /**
+   * "Verknuepft mit" fuer die Informationskarte und den Notizfuss (Vertrag B):
+   * eingehend, ausgehend, dazu Vorschlaege mit dem Grund in Worten
+   * ("3 gemeinsame Begriffe: Licht, Chlorophyll, Blatt") und die Themen,
+   * in denen der Satz auf der Karte liegt. Abgelehnte Vorschlaege fehlen.
+   */
+  router.get('/api/records/:id/verknuepft', (rc) => {
+    rc.requireCapability('read');
+    const store = need(rc.ctx.store, 'Der Speicher');
+    const record = mustGet(store, rc.params.id);
+    const { verknuepfungenVon } = require('./graph');
+    const universum = require('../../graph/universum');
+    const { eingehend, ausgehend } = verknuepfungenVon(store, record.id);
+    const limit = intParam(rc.query, 'limit', universum.MAX_VORSCHLAEGE, 1, 50);
+    let vorschlaege = [];
+    try {
+      vorschlaege = universum.vorschlaegeFuer(store, record.id, { limit });
+    } catch { /* ein Satz ohne Text hat keine Vorschlaege */ }
+    let themen = [];
+    try {
+      themen = universum.themenVon(store, record.id);
+    } catch { /* die Karte ist kein Muss fuer diese Antwort */ }
+    return { id: record.id, eingehend, ausgehend, vorschlaege, themen };
+  });
+
+  /**
    * Search.
    *
    * `mode` decides HOW, and the answer always says which mode actually ran.

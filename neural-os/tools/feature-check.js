@@ -626,6 +626,151 @@ async function checkGraph() {
     const r = ok(await api.post('/api/graph/rescan'), 'rescan');
     return JSON.stringify(r).slice(0, 80);
   });
+
+  /* --- Wissensuniversum (Vertrag A-F vom 27.09.2026) ------------------ */
+
+  /** Den echten Ereignisstrom lesen, bis ein Ereignis `name` passt. */
+  const stromBis = (name, passt, ms = 3000) => new Promise((resolve, reject) => {
+    const req = http.get({ host: '127.0.0.1', port: PORT, path: '/api/events' }, (res) => {
+      let puffer = '';
+      let aktuell = null;
+      const timer = setTimeout(() => { req.destroy(); reject(new Error(`kein ${name} nach ${ms} ms`)); }, ms);
+      res.on('data', (chunk) => {
+        puffer += chunk.toString('utf8');
+        let idx;
+        while ((idx = puffer.indexOf('\n')) >= 0) {
+          const zeile = puffer.slice(0, idx);
+          puffer = puffer.slice(idx + 1);
+          if (zeile.startsWith('event:')) aktuell = zeile.slice(6).trim();
+          else if (zeile.startsWith('data:') && aktuell === name) {
+            let daten = zeile.slice(5).trim();
+            try { daten = JSON.parse(daten); } catch { /* Klartext */ }
+            if (!passt(daten)) continue;
+            clearTimeout(timer);
+            req.destroy();
+            resolve(daten);
+            return;
+          }
+        }
+      });
+      res.on('error', () => {});
+    });
+    req.on('error', (err) => { if (err.code !== 'ECONNRESET') reject(err); });
+  });
+  const kurz = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  let foto = null;
+  let pflanzen = null;
+  let chloro = null;
+  let stand = null;
+  await check('Universum Ebene 0: Themen mit Kindern (Schule → Biologie, Geschichte), Farbe 0-7, höchstens 40 Kreise', async () => {
+    for (const [title, tags, body] of [
+      ['Photosynthese (Prüfung)', ['schule', 'biologie'], 'Pflanzen wandeln Licht in Energie um. Chlorophyll im Blatt absorbiert Licht.'],
+      ['Zellatmung (Prüfung)', ['schule', 'biologie'], 'Zucker wird mit Sauerstoff abgebaut. Umkehrung der [[Photosynthese (Prüfung)]].'],
+      ['Zellen (Prüfung)', ['schule', 'biologie'], 'Kleinste Einheit des Lebens.'],
+      ['Erster Weltkrieg (Prüfung)', ['schule', 'geschichte'], '1914 bis 1918.'],
+      ['Zweiter Weltkrieg (Prüfung)', ['schule', 'geschichte'], '1939 bis 1945. Siehe [[Erster Weltkrieg (Prüfung)]].'],
+    ]) {
+      const r = ok(await api.post('/api/records', { type: 'note', data: { title, body, tags } }), title);
+      if (title.startsWith('Photosynthese')) foto = r.record;
+    }
+    const t0 = Date.now();
+    const e0 = ok(await api.get('/api/graph/universum?tiefe=0'), 'universum');
+    const ms = Date.now() - t0;
+    assert(e0.ebene === 0 && Array.isArray(e0.themen) && e0.themen.length > 0, 'keine Themen');
+    assert(e0.themen.length <= 40, `${e0.themen.length} Kreise auf Ebene 0`);
+    const schule = e0.themen.find((t) => t.id === 'thema:schule');
+    assert(schule, `kein Thema Schule (${e0.themen.map((t) => t.name).join(', ')})`);
+    const kinder = schule.kinder.map((k) => k.name);
+    assert(kinder.includes('Biologie') && kinder.includes('Geschichte'), `Kinder von Schule: ${kinder.join(', ') || 'keine'}`);
+    for (const t of e0.themen) {
+      assert(Number.isInteger(t.farbe) && t.farbe >= 0 && t.farbe <= 7, `Farbe ${t.farbe} ist kein Index 0-7`);
+      assert(t.knoten.length >= 1 && t.knoten.length <= 5, `${t.knoten.length} wichtigste Knoten`);
+      assert(typeof t.name === 'string' && Number.isInteger(t.anzahl), 'Thema ohne Name oder Anzahl');
+    }
+    stand = e0.stand;
+    return `${e0.themen.length} Themen (${e0.gesamt.knoten} Knoten, ${e0.gesamt.kanten} Kanten) in ${ms} ms; Schule → ${kinder.join(', ')}`;
+  });
+  await check('Universum Ebene 1: ein Thema mit Knoten, Kanten und Nachbarn außerhalb; danach aus dem Cache', async () => {
+    const e1 = ok(await api.get('/api/graph/universum?tiefe=1&thema=thema:biologie'), 'ebene 1');
+    assert(e1.ebene === 1 && e1.thema && e1.thema.name === 'Biologie', 'falsches Thema');
+    const drin = e1.knoten.filter((k) => !k.ausserhalb);
+    assert(drin.length >= 3, `${drin.length} Knoten im Thema`);
+    assert(e1.kanten.length >= 1, 'keine Kanten im Thema');
+    assert(e1.thema.eltern === 'thema:schule', 'Biologie liegt nicht unter Schule');
+    const wieder = ok(await api.get('/api/graph/universum?tiefe=0'), 'cache');
+    assert(wieder.ausCache === true, 'die zweite Anfrage kam nicht aus dem Cache');
+    assert((await api.get('/api/graph/universum?tiefe=1&thema=thema:gibtesnicht')).status === 404, 'unbekanntes Thema ist kein 404');
+    assert((await api.get('/api/graph/universum?tiefe=1')).status === 400, 'Ebene 1 ohne Thema ist kein 400');
+    const pfad = [...e1.thema.pfad.map((p) => p.name), e1.thema.name].join(' › ');
+    return `${drin.length} Knoten, ${e1.knoten.length - drin.length} außerhalb, ${e1.kanten.length} Kanten; Pfad ${pfad}; Ebene 0 danach aus dem Cache in ${wieder.dauerMs} ms`;
+  });
+  await check('Der Photosynthese-Fall: „Pflanzen brauchen Licht“ und „Chlorophyll absorbiert Licht“ finden einander (graph.vorschlaege über den Strom)', async () => {
+    assert(foto, 'Photosynthese fehlt');
+    pflanzen = ok(await api.post('/api/records', { type: 'note', data: { title: 'Pflanzen brauchen Licht', body: 'Ohne Licht wachsen Pflanzen nicht.' } }), 'pflanzen').record;
+    await kurz(120);
+    const titel = 'Chlorophyll absorbiert Licht';
+    const strom = stromBis('graph.vorschlaege', (d) => d.payload && d.payload.vorschlaege.some((v) => v.id === pflanzen.id));
+    await kurz(30);
+    chloro = ok(await api.post('/api/records', { type: 'note', data: { title: titel, body: 'Chlorophyll absorbiert rotes und blaues Licht.' } }), 'chloro').record;
+    const evt = await strom;
+    assert(evt.payload.recordId === chloro.id, `Ereignis fuer ${evt.payload.recordId} statt ${chloro.id}`);
+    const ids = evt.payload.vorschlaege.map((v) => v.id);
+    assert(ids.includes(foto.id) && ids.includes(pflanzen.id), `Vorschläge: ${evt.payload.vorschlaege.map((v) => v.title).join(', ')}`);
+    assert(evt.payload.vorschlaege.length <= 5, `${evt.payload.vorschlaege.length} Vorschläge, erlaubt sind 5`);
+    const v = ok(await api.get(`/api/records/${chloro.id}/verknuepft`), 'verknuepft');
+    assert(Array.isArray(v.eingehend) && Array.isArray(v.ausgehend) && Array.isArray(v.vorschlaege), 'verknuepft hat nicht die Form {eingehend, ausgehend, vorschlaege}');
+    const s = v.vorschlaege.find((x) => x.id === foto.id);
+    assert(s && /gemeinsame Begriffe/.test(s.grund) && s.grund.includes('Licht'), s ? s.grund : 'Photosynthese nicht unter den Vorschlägen');
+    return `Ich habe ${evt.payload.anzahl} mögliche Verbindungen gefunden — z. B. „${s.title}“: ${s.grund}`;
+  });
+  await check('[Alle verbinden]: manuelle Kanten, graph.kante live über den Strom, Cache verfällt, Rückgängig nimmt sie zurück', async () => {
+    assert(chloro && foto && pflanzen, 'Notizen fehlen');
+    const strom = stromBis('graph.kante', (d) => d.payload && d.payload.neu && d.payload.edge.data.from === chloro.id);
+    await kurz(30);
+    const v = ok(await api.post('/api/graph/verbinden', { from: chloro.id, to: [foto.id, pflanzen.id], kind: 'related', reason: 'Alle verbinden' }), 'verbinden');
+    assert(v.edges.length === 2 && v.neu.length === 2, `${v.edges.length} Kanten, ${v.neu.length} neu`);
+    assert(v.edges.every((e) => body(e).source === 'manual'), 'keine manuelle Kante');
+    assert(v.rueckgaengig && v.rueckgaengig.pfad === '/api/graph/rueckgaengig', 'kein Rückgängig in der Antwort');
+    const k = await strom;
+    assert(k.payload.von && k.payload.zu && k.payload.von.label === 'Chlorophyll absorbiert Licht', 'graph.kante ohne beide Enden');
+    const nach = ok(await api.get(`/api/records/${chloro.id}/verknuepft`), 'verknuepft');
+    assert(nach.ausgehend.length === 2 && nach.vorschlaege.length === 0, 'verbundene Knoten werden noch vorgeschlagen');
+    // Ein neuer Stand beweist den Neubau; /verknuepft eben hat ihn womoeglich schon ausgeloest.
+    const e0 = ok(await api.get('/api/graph/universum?tiefe=0'), 'universum');
+    assert(e0.stand > stand, `Cache nicht verfallen (stand ${stand} → ${e0.stand})`);
+    const z = ok(await api.post(v.rueckgaengig.pfad, v.rueckgaengig.body), 'rueckgaengig');
+    assert(z.anzahl === 2, `${z.anzahl} zurückgenommen`);
+    const danach = ok(await api.get(`/api/records/${chloro.id}/verknuepft`), 'verknuepft');
+    assert(danach.ausgehend.length === 0 && danach.vorschlaege.some((s) => s.id === foto.id), 'nach Rückgängig fehlen die Vorschläge');
+    return `2 Kanten angelegt (graph.kante nach ${k.at ? 'sofort' : '?'}), Stand ${stand} → ${e0.stand}, 2 zurückgenommen`;
+  });
+  await check('[Ablehnen]: derselbe Vorschlag kommt nicht wieder', async () => {
+    const a = ok(await api.post('/api/graph/ablehnen', { from: chloro.id, to: [foto.id] }), 'ablehnen');
+    assert(a.abgelehnt.length === 1, JSON.stringify(a));
+    const v = ok(await api.get(`/api/records/${chloro.id}/verknuepft`), 'verknuepft');
+    assert(!v.vorschlaege.some((s) => s.id === foto.id), 'Photosynthese wird trotz Ablehnung vorgeschlagen');
+    assert(v.vorschlaege.some((s) => s.id === pflanzen.id), 'die anderen Vorschläge müssen bleiben');
+    const rueck = ok(await api.get(`/api/records/${foto.id}/verknuepft`), 'verknuepft foto');
+    assert(!rueck.vorschlaege.some((s) => s.id === chloro.id), 'von der anderen Seite her kommt er wieder');
+    return 'abgelehnt, in beide Richtungen unterdrückt, keine Kante gezogen';
+  });
+  await check('KI-Zusammenfassung: ehrlich, solange keine KI sie liefert', async () => {
+    const z = ok(await api.post('/api/graph/zusammenfassung', { id: foto.id }), 'zusammenfassung');
+    if (z.verfuegbar === true) {
+      assert(typeof z.text === 'string' && z.text.trim(), 'verfügbar, aber ohne Text');
+      return `KI-Text: ${z.text.slice(0, 60)}`;
+    }
+    assert(z.verfuegbar === false && z.text === null, 'weder verfügbar noch ehrlich leer');
+    assert(z.grund === 'Kommt, sobald eine KI verbunden ist.', `unerwarteter Satz: ${z.grund}`);
+    return `„${z.grund}“ (keine KI verbunden, wie erwartet)`;
+  });
+  await check('Suche ohne exakte Wörter: „Zeug über Pflanzen und Licht“ findet die Pflanzen-Notizen zuerst', async () => {
+    const r = ok(await api.get(`/api/search?q=${encodeURIComponent('Zeug über Pflanzen und Licht')}&limit=5`), 'search');
+    const ids = r.items.map((h) => h.record.id);
+    assert(ids.includes(pflanzen.id) && ids.includes(foto.id), `oben: ${r.items.map((h) => h.record.data.title).join(', ')}`);
+    return `${r.total} Treffer, oben: ${r.items.slice(0, 3).map((h) => h.record.data.title).join(', ')}`;
+  });
 }
 
 async function checkChat() {

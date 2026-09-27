@@ -225,6 +225,18 @@ async function createApp(opts = {}) {
     bus.on('record.updated', rederive);
   }
 
+  // Das Wissensuniversum (src/graph/universum.js): sein Cache verfaellt bei
+  // jedem Schreibvorgang, jede neue Kante wird als 'graph.kante' gemeldet,
+  // und nach dem Speichern einer Notiz kommen die Verbindungsvorschlaege als
+  // 'graph.vorschlaege'. Haengt NACH der Ableitung am Bus, damit die
+  // Vorschlaege sehen, was der Text schon verknuepft hat.
+  const universumMod = tryRequire('./graph/universum');
+  const universum = universumMod && typeof universumMod.attach === 'function'
+    ? optional(failures, 'universum', () => universumMod.attach({
+      store, bus, logger: log, istAusgesetzt: () => derivationSuspended > 0,
+    }))
+    : null;
+
   // --- Altlast: Lernkarten aus einer frueheren Fassung ----------------------
   //
   // Der Bereich "Lernen" ist entfallen. Vorhandene 'card'-Saetze werden hier
@@ -818,6 +830,7 @@ async function createApp(opts = {}) {
         // heruntergefahrenes Teilsystem ueberlebt, arbeitet auf einem Speicher
         // weiter, den gerade jemand schliesst.
         ['history', () => history && history.stop && history.stop()],
+        ['universum', () => universum && universum.detach && universum.detach()],
         ['scheduler', () => scheduler && scheduler.stop && scheduler.stop()],
         ['triggers', () => triggers && triggers.stop && triggers.stop()],
         ['server', () => app.server && app.server.close()],

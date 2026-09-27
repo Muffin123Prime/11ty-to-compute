@@ -240,7 +240,23 @@ export function mount(el, ctx) {
     clearTimeout(wartet);
     wartet = setTimeout(() => { if (alive) laden(); }, 1800);
   };
+  /**
+   * Eine neue Verbindung zwischen zwei Knoten, die die Kachel gerade zeigt,
+   * erscheint sofort (Vertrag D): die Linie zieht sich, beide Punkte ruecken
+   * ein Stueck -- und nach einem Augenblick steht das Bild wieder still,
+   * bis das gebuendelte Nachladen den Ausschnitt neu legt.
+   */
+  const kante = (payload) => {
+    if (!alive) return;
+    const edge = payload && payload.edge;
+    const d = edge && edge.data ? edge.data : edge;
+    if (graph && d && !payload.entfernt && typeof d.from === 'string' && typeof d.to === 'string' && graph.addEdge({ from: d.from, to: d.to })) {
+      setTimeout(() => { if (alive && graph) graph.freeze(); }, 260);
+    }
+    bald();
+  };
   if (bus && typeof bus.on === 'function') {
+    offs.push(bus.on('graph.kante', kante));
     for (const name of ['record.created', 'record.updated', 'record.deleted', 'edge.created', 'edge.deleted', 'graph.rescanned', 'chat.message']) {
       offs.push(bus.on(name, bald));
     }

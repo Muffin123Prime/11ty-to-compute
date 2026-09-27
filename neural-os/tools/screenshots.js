@@ -374,50 +374,153 @@ async function los(page, base, view, warten = 1000) {
 
   /* ================================================== 4 · Das Gehirn */
   //
-  // Nach docs/vorlage/gehirn-obsidian.png: das ruhende Netz, das Panel oben
-  // rechts mit Filter, Gruppen, Anzeige, Kraefte, ein gewaehlter Knoten mit
-  // seinem schmalen Kaertchen.
+  // Das Wissensuniversum (Vision vom 27.09.2026): Ebene 0 mit Themenkreisen,
+  // hineingezoomt in ein Thema, ein ueberfahrener Knoten mit Nachbarn, ein
+  // gewaehlter mit seiner Informationskarte, die ruhige Themenkarte, der
+  // leere Zustand -- dunkel, hell und auf dem iPad quer mit dem Finger.
   {
     const { c, p } = await mach('dark');
-    await los(p, base, 'graph', 800);
+    const bereit = () => p.waitForFunction(() => {
+      const g = document.querySelector('.gh');
+      return g && g.gehirn && (g.gehirn.themen > 0 || g.gehirn.leer);
+    }, null, { timeout: 15000 });
     const ruhe = () => p.waitForFunction(() => {
       const g = document.querySelector('.gh');
       return g && g.dataset.ruhe === 'ja';
     }, null, { timeout: 12000 });
-    await step('Gehirn: das ruhende Netz', async () => {
-      await ruhe();
-      await p.waitForTimeout(700);
-      await shot(p, 'gehirn-dunkel');
+    const groesstes = () => p.evaluate(() => {
+      const g = document.querySelector('.gh').gehirn;
+      let best = null;
+      for (const id of g.themenIds) {
+        const q = g.screenPosition(id);
+        if (q && (!best || q.r > best.r)) best = { id, ...q };
+      }
+      return best;
     });
-    await step('Gehirn: Suchen und Wählen', async () => {
-      // Das Panel ist auf schmaler Karte zu; dann wird es erst geoeffnet.
-      if (await p.locator('.gh__opener').isVisible()) await p.locator('.gh__opener').click();
-      await p.locator('.gh__panel summary', { hasText: 'Filter' }).first().click();
-      await p.getByLabel('Im Gehirn suchen').fill('Espresso');
-      await p.getByLabel('Im Gehirn suchen').press('Enter');
-      await p.locator('.gh__card').waitFor({ state: 'visible', timeout: 4000 });
-      await p.waitForTimeout(900);
-      await shot(p, 'gehirn-auswahl-dunkel');
-    });
-    await step('Gehirn: Gruppen nach Thema', async () => {
-      await p.getByRole('button', { name: 'Auswahl schließen' }).click();
-      await p.getByLabel('Im Gehirn suchen').fill('');
-      await p.getByLabel('Im Gehirn suchen').press('Escape');
-      await p.locator('.gh__panel summary', { hasText: 'Filter' }).first().click();
-      await p.locator('.gh__panel summary', { hasText: 'Gruppen' }).first().click();
-      await p.getByRole('switch', { name: 'Nach Thema einfärben' }).click();
-      await p.keyboard.press('0');
+    await los(p, base, 'graph', 600);
+    await step('Gehirn: das Universum', async () => {
+      await bereit();
       await p.waitForTimeout(1200);
-      await shot(p, 'gehirn-gruppen-dunkel');
+      await shot(p, 'gehirn-universum-dunkel');
     });
-    await step('Gehirn: Anzeige und Kräfte', async () => {
-      await p.locator('.gh__panel summary', { hasText: 'Gruppen' }).first().click();
-      await p.locator('.gh__panel summary', { hasText: 'Anzeige' }).first().click();
-      await p.locator('.gh__panel summary', { hasText: 'Kräfte' }).first().click();
+    let kreis = null;
+    let box = null;
+    await step('Gehirn: ein Thema überfahren', async () => {
+      kreis = await groesstes();
+      box = await p.locator('.gh').boundingBox();
+      if (!kreis || !box) throw new Error('kein Themenkreis');
+      await p.mouse.move(box.x + kreis.x, box.y + kreis.y);
       await p.waitForTimeout(500);
-      await shot(p, 'gehirn-panel-dunkel');
+      await shot(p, 'gehirn-universum-hover-dunkel');
+    });
+    await step('Gehirn: hineingezoomt in ein Thema', async () => {
+      if (!kreis) throw new Error('kein Themenkreis');
+      await p.mouse.click(box.x + kreis.x, box.y + kreis.y);
+      await p.waitForFunction(() => document.querySelector('.gh').gehirn.ebene === 1, null, { timeout: 8000 });
+      await ruhe();
+      await p.waitForTimeout(600);
+      await shot(p, 'gehirn-thema-dunkel');
+    });
+    let knoten = null;
+    await step('Gehirn: Knoten überfahren, Nachbarn hell, Rest tritt zurück', async () => {
+      knoten = await p.evaluate(() => {
+        const g = document.querySelector('.gh').gehirn;
+        // Der Knoten mit den meisten Nachbarn ist der lesbarste Fall.
+        let best = null;
+        for (const id of g.ids) {
+          const q = g.screenPosition(id);
+          if (q && (!best || q.r > best.r)) best = { id, ...q };
+        }
+        return best;
+      });
+      if (!knoten) throw new Error('kein Knoten');
+      await p.mouse.move(box.x + knoten.x, box.y + knoten.y);
+      await p.waitForTimeout(500);
+      await shot(p, 'gehirn-hover-dunkel');
+    });
+    await step('Gehirn: Auswahl mit Informationskarte', async () => {
+      if (!knoten) throw new Error('kein Knoten');
+      await p.mouse.click(box.x + knoten.x, box.y + knoten.y);
+      await p.locator('.gh__card').waitFor({ state: 'visible', timeout: 6000 });
+      await p.locator('.gh__link').first().waitFor({ state: 'visible', timeout: 6000 }).catch(() => {});
+      await p.waitForTimeout(900);
+      await shot(p, 'gehirn-auswahl-karte-dunkel');
+    });
+    await step('Gehirn: die Themenkarte', async () => {
+      await p.getByRole('button', { name: 'Auswahl schließen' }).click().catch(() => {});
+      await p.getByRole('tab', { name: 'Karte' }).click();
+      await p.locator('.wk__tile').first().waitFor({ state: 'visible', timeout: 6000 });
+      await p.waitForTimeout(500);
+      await shot(p, 'gehirn-karte-dunkel');
+      await p.locator('.wk__tile').first().click();
+      await p.locator('.wk__row').first().waitFor({ state: 'visible', timeout: 6000 });
+      await p.waitForTimeout(500);
+      await shot(p, 'gehirn-karte-thema-dunkel');
     });
     await c.close();
+  }
+  {
+    const { c, p } = await mach('light');
+    await los(p, base, 'graph', 600);
+    await step('Gehirn: Universum (hell)', async () => {
+      await p.waitForFunction(() => { const g = document.querySelector('.gh'); return g && g.gehirn && g.gehirn.themen > 0; }, null, { timeout: 15000 });
+      await p.waitForTimeout(1200);
+      await shot(p, 'gehirn-universum-hell');
+    });
+    await step('Gehirn: Thema (hell)', async () => {
+      const id = await p.evaluate(() => document.querySelector('.gh').gehirn.themenIds[0]);
+      await p.evaluate((t) => document.querySelector('.gh').gehirn.tauchen(t), id);
+      await p.waitForFunction(() => document.querySelector('.gh').dataset.ruhe === 'ja', null, { timeout: 12000 });
+      await p.waitForTimeout(600);
+      await shot(p, 'gehirn-thema-hell');
+    });
+    await c.close();
+  }
+  {
+    // Das iPad des Nutzers, quer, mit dem Finger: Antippen oeffnet ein Thema.
+    const { c, p } = await mach('dark', { breite: 1180, hoehe: 820, finger: true });
+    await los(p, base, 'graph', 600);
+    await step('Gehirn: Universum (iPad quer)', async () => {
+      await p.waitForFunction(() => { const g = document.querySelector('.gh'); return g && g.gehirn && g.gehirn.themen > 0; }, null, { timeout: 15000 });
+      await p.waitForTimeout(1200);
+      await shot(p, 'ipad-quer-gehirn-universum-dunkel');
+    });
+    await step('Gehirn: Thema angetippt (iPad quer)', async () => {
+      const kreis = await p.evaluate(() => {
+        const g = document.querySelector('.gh').gehirn;
+        let best = null;
+        for (const id of g.themenIds) {
+          const q = g.screenPosition(id);
+          if (q && (!best || q.r > best.r)) best = { id, ...q };
+        }
+        return best;
+      });
+      const box = await p.locator('.gh').boundingBox();
+      if (!kreis || !box) throw new Error('kein Themenkreis');
+      await p.touchscreen.tap(box.x + kreis.x, box.y + kreis.y);
+      await p.waitForFunction(() => document.querySelector('.gh').dataset.ruhe === 'ja', null, { timeout: 12000 });
+      await p.waitForTimeout(600);
+      await shot(p, 'ipad-quer-gehirn-thema-dunkel');
+    });
+    await c.close();
+  }
+  {
+    // Der leere Zustand: ein zweiter, wirklich leerer Tresor (ohne Startsaetze).
+    const leerHome = fs.mkdtempSync(path.join(os.tmpdir(), 'neural-os-shots-leer-'));
+    const leerApp = await createApp({ home: leerHome, port: 0, host: '127.0.0.1', logLevel: 'error' });
+    await leerApp.loadModules({});
+    const leerServer = await leerApp.listen();
+    const leerBase = `http://127.0.0.1:${leerServer.server.address().port}`;
+    const { c, p } = await mach('dark');
+    await los(p, leerBase, 'graph', 600);
+    await step('Gehirn: leerer Zustand', async () => {
+      await p.waitForFunction(() => { const g = document.querySelector('.gh'); return g && g.gehirn && g.gehirn.leer; }, null, { timeout: 15000 });
+      await p.waitForTimeout(500);
+      await shot(p, 'gehirn-leer-dunkel');
+    });
+    await c.close();
+    await leerApp.close();
+    fs.rmSync(leerHome, { recursive: true, force: true });
   }
 
   /* ====================================================== 5 · Chat */

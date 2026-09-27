@@ -28,7 +28,7 @@
 
 const { NotFoundError, ValidationError } = require('../kernel/errors');
 const { GRAPH_TYPES, EDGE_KINDS } = require('../store/schema');
-const { fold, tokenise } = require('../store/search');
+const { fold, tokenise, tokenSpans } = require('../store/search');
 
 const DEFAULT_LIMIT = 600;
 const MAX_LIMIT = 5000;
@@ -54,6 +54,12 @@ const STOPWORDS = new Set([
   'the', 'and', 'or', 'not', 'but', 'for', 'with', 'from', 'this', 'that', 'these', 'those',
   'are', 'was', 'were', 'been', 'has', 'have', 'had', 'will', 'would', 'can', 'could', 'should',
   'you', 'your', 'our', 'its', 'their', 'into', 'out', 'about', 'more', 'than', 'then', 'them',
+  // Fuellwoerter, die in Notizen staendig vorkommen und nie ein Thema tragen.
+  'siehe', 'sowie', 'bzw', 'etwa', 'sehr', 'ganz', 'wieder', 'immer', 'dabei', 'dazu', 'hier', 'dort',
+  'alle', 'allem', 'aller', 'jede', 'jeder', 'jedes', 'kein', 'keine', 'keinen', 'mein', 'meine',
+  'dein', 'deine', 'seine', 'ihre', 'unsere', 'muss', 'sollte', 'koennen', 'koennte', 'wollen',
+  'machen', 'macht', 'gibt', 'geht', 'kommt', 'steht', 'liegt', 'zwischen', 'seit', 'bis', 'beim',
+  'ins', 'ans', 'aufs', 'eher', 'also', 'doch', 'mal', 'gut', 'viel', 'viele', 'wenig', 'zwei', 'drei',
 ]);
 
 /* ---------------------------------------------------------------- labels */
@@ -486,10 +492,71 @@ function textOf(record) {
   return parts.join('\n');
 }
 
+/**
+ * Flexionsendungen, die zwei Schreibweisen desselben Wortes trennen.
+ * Laengste zuerst, damit "-ungen" nicht als "-en" endet.
+ */
+const ENDUNGEN = ['ungen', 'ung', 'ern', 'en', 'er', 'em', 'es', 'e', 'n', 's'];
+const STAMM_MIN = 4;
+
+/**
+ * Eine kleine, ehrliche Stammform fuer Deutsch: Endungen abschneiden, bis
+ * nichts mehr passt (hoechstens zwei Runden), nie unter vier Zeichen.
+ *
+ * "Pflanzen", "Pflanze" und "pflanz" landen so auf demselben Schluessel,
+ * "Lichts" bei "licht". Das ist kein Lemmatisierer: "Blaetter" und "Blatt"
+ * bleiben getrennt, und die Doku sagt das auch. Es ist genau so viel, dass
+ * "Pflanzen brauchen Licht" und "Die Pflanze im Licht" einander finden,
+ * ohne dass ein Sprachmodell im Spiel ist. Nur fuer den Vergleich gedacht --
+ * angezeigt wird immer das Wort, wie der Nutzer es geschrieben hat.
+ */
+function stamm(term) {
+  let out = term;
+  for (let runde = 0; runde < 2; runde++) {
+    let getroffen = false;
+    for (const endung of ENDUNGEN) {
+      if (out.length - endung.length >= STAMM_MIN && out.endsWith(endung)) {
+        out = out.slice(0, -endung.length);
+        getroffen = true;
+        break;
+      }
+    }
+    if (!getroffen) break;
+  }
+  return out;
+}
+
+/**
+ * Stammform -> Schreibweise im Text (die erste), fuer alles, was der Nutzer
+ * spaeter zu lesen bekommt ("3 gemeinsame Begriffe: Licht, Chlorophyll, Blatt").
+ */
+/**
+ * Die eigenen Schlagworte zaehlen nicht als Begriffe: sie gehen schon in die
+ * Schlagwort-Aehnlichkeit ein, und "2 gemeinsame Begriffe: schule, biologie"
+ * neben "2 gemeinsame Schlagworte: #schule, #biologie" waere dieselbe
+ * Beobachtung zweimal.
+ */
+function eigeneTags(record) {
+  return new Set(tagsOf(record).map((t) => fold(t)));
+}
+
+function termMap(record) {
+  const text = textOf(record);
+  const tags = eigeneTags(record);
+  const map = new Map();
+  for (const span of tokenSpans(text, 3)) {
+    if (STOPWORDS.has(span.term) || tags.has(span.term)) continue;
+    const key = stamm(span.term);
+    if (!map.has(key)) map.set(key, text.slice(span.start, span.end));
+  }
+  return map;
+}
+
 function termSet(record) {
   const set = new Set();
+  const tags = eigeneTags(record);
   for (const term of tokenise(textOf(record), 3)) {
-    if (!STOPWORDS.has(term)) set.add(term);
+    if (!STOPWORDS.has(term) && !tags.has(term)) set.add(stamm(term));
   }
   return set;
 }
@@ -512,11 +579,19 @@ function jaccard(a, b) {
  *
  * Nothing is written. The caller shows the proposals; a person decides.
  *
+ * `opts.candidates` laesst den Aufrufer die Vergleichsmenge vorgeben (etwa
+ * aus der Volltextsuche vorgefiltert, siehe src/graph/universum.js); ohne sie
+ * gilt wie bisher die juengste Scheibe des Tresors.
+ *
  * @param {object} store
  * @param {string} recordId
- * @param {{limit?:number, minScore?:number, types?:string[], pool?:number}} [opts]
+ * @param {{limit?:number, minScore?:number, types?:string[], pool?:number,
+ *          candidates?:object[], exclude?:Set<string>}} [opts]
  * @returns {Array<{id:string,type:string,label:string,score:number,tagScore:number,
- *                  termScore:number,sharedTags:string[],sharedTerms:string[],reason:string}>}
+ *                  termScore:number,sharedTags:string[],sharedTerms:string[],
+ *                  gemeinsam:number,reason:string,grund:string}>}
+ *          `sharedTerms` in der Schreibweise des Ausgangstextes; `grund` ist
+ *          der Satz fuer die Karte ("3 gemeinsame Begriffe: Licht, …").
  */
 function suggestLinks(store, recordId, opts = {}) {
   if (!store || typeof store.list !== 'function' || !store.edges) {
@@ -531,6 +606,7 @@ function suggestLinks(store, recordId, opts = {}) {
   // Bound the worst case on a huge vault: comparing against every record is
   // O(n) per call, so we look at the most recently touched slice by default.
   const pool = intOpt(opts.pool, 2000, 1, 20000);
+  const exclude = opts.exclude instanceof Set ? opts.exclude : null;
 
   const connected = new Set([record.id]);
   try {
@@ -540,23 +616,35 @@ function suggestLinks(store, recordId, opts = {}) {
     }
   } catch { /* a store without edges for this id */ }
 
-  const ownTerms = termSet(record);
+  const ownWords = termMap(record);
+  const ownTerms = new Set(ownWords.keys());
   const ownTags = new Set(tagsOf(record).map((t) => fold(t)));
   const ownTagLabels = new Map(tagsOf(record).map((t) => [fold(t), t]));
   if (!ownTerms.size && !ownTags.size) return [];
 
   let candidates = [];
-  for (const type of types) {
-    let res;
-    try { res = store.list(type, { sort: 'updatedAt', order: 'desc', limit: pool }); } catch { continue; }
-    for (const other of res.items) {
-      if (connected.has(other.id)) continue;
+  const seen = new Set();
+  if (Array.isArray(opts.candidates)) {
+    for (const other of opts.candidates) {
+      if (!other || typeof other.id !== 'string' || seen.has(other.id)) continue;
+      if (connected.has(other.id) || (exclude && exclude.has(other.id))) continue;
+      if (!types.includes(other.type)) continue;
+      seen.add(other.id);
       candidates.push(other);
     }
-  }
-  if (candidates.length > pool) {
-    candidates.sort((a, b) => (a.updatedAt === b.updatedAt ? (a.id < b.id ? -1 : 1) : (a.updatedAt < b.updatedAt ? 1 : -1)));
-    candidates = candidates.slice(0, pool);
+  } else {
+    for (const type of types) {
+      let res;
+      try { res = store.list(type, { sort: 'updatedAt', order: 'desc', limit: pool }); } catch { continue; }
+      for (const other of res.items) {
+        if (connected.has(other.id) || (exclude && exclude.has(other.id))) continue;
+        candidates.push(other);
+      }
+    }
+    if (candidates.length > pool) {
+      candidates.sort((a, b) => (a.updatedAt === b.updatedAt ? (a.id < b.id ? -1 : 1) : (a.updatedAt < b.updatedAt ? 1 : -1)));
+      candidates = candidates.slice(0, pool);
+    }
   }
 
   const scored = [];
@@ -571,10 +659,12 @@ function suggestLinks(store, recordId, opts = {}) {
     const score = 0.6 * tagScore + 0.4 * termScore;
     if (score < minScore) continue;
 
+    let gemeinsam = 0;
     const sharedTerms = [];
     for (const term of ownTerms) {
-      if (otherTerms.has(term)) sharedTerms.push(term);
-      if (sharedTerms.length >= 5) break;
+      if (!otherTerms.has(term)) continue;
+      gemeinsam++;
+      if (sharedTerms.length < 5) sharedTerms.push(ownWords.get(term) || term);
     }
 
     const reasons = [];
@@ -590,14 +680,36 @@ function suggestLinks(store, recordId, opts = {}) {
       termScore: Math.round(termScore * 1000) / 1000,
       sharedTags,
       sharedTerms,
+      gemeinsam,
       // German, user-visible: this string is the entire justification the user
       // gets before deciding, so it names the actual evidence.
       reason: reasons.length ? `Vorschlag wegen ${reasons.join(' und ')}` : 'Vorschlag wegen Textaehnlichkeit',
+      grund: grundSatz(sharedTags, sharedTerms, gemeinsam),
     });
   }
 
   scored.sort((a, b) => (b.score === a.score ? (a.id < b.id ? -1 : 1) : b.score - a.score));
   return scored.slice(0, limit);
+}
+
+/**
+ * Der Satz auf der Vorschlagskarte. Zaehlt ehrlich (alle gemeinsamen
+ * Begriffe, nicht nur die drei genannten) und beugt richtig:
+ * "1 gemeinsamer Begriff: Licht" / "3 gemeinsame Begriffe: Licht, Blatt, …".
+ */
+function grundSatz(sharedTags, sharedTerms, gemeinsam) {
+  const teile = [];
+  if (sharedTags.length) {
+    const n = sharedTags.length;
+    const liste = sharedTags.slice(0, 3).map((t) => `#${t}`).join(', ') + (n > 3 ? ', …' : '');
+    teile.push(n === 1 ? `1 gemeinsames Schlagwort: ${liste}` : `${n} gemeinsame Schlagworte: ${liste}`);
+  }
+  if (sharedTerms.length) {
+    const n = Math.max(gemeinsam, sharedTerms.length);
+    const liste = sharedTerms.slice(0, 3).join(', ') + (n > 3 ? ', …' : '');
+    teile.push(n === 1 ? `1 gemeinsamer Begriff: ${liste}` : `${n} gemeinsame Begriffe: ${liste}`);
+  }
+  return teile.length ? teile.join(' · ') : 'Aehnlicher Text';
 }
 
 module.exports = {
@@ -606,5 +718,9 @@ module.exports = {
   clusters,
   suggestLinks,
   snippetOf,
+  tagsOf,
+  stamm,
+  termMap,
+  termSet,
   STOPWORDS,
 };

@@ -189,6 +189,14 @@ const BULLET_RE = /^( *)([-*+])([ \t]+)(.*)$/;
 const ORDERED_RE = /^( *)(\d{1,9})([.)])([ \t]+)(.*)$/;
 const TASK_RE = /^\[([ xX])\][ \t]+(.*)$/;
 const TABLE_DELIM_RE = /^ {0,3}\|?[ \t]*:?-{1,}:?[ \t]*(?:\|[ \t]*:?-{1,}:?[ \t]*)*\|?[ \t]*$/;
+/** `[!info] Titel`, `[!warning]-`, `[!tip]+ Titel` -- die erste Zeile eines Callouts. */
+const CALLOUT_RE = /^\[!([A-Za-z][\w-]{0,30})\]([+-]?)(?:[ \t]+(.*))?[ \t]*$/;
+/**
+ * Eine Aufgabenzeile im Quelltext -- dieselbe Form, die parseList als
+ * Aufgabe erkennt (Listenzeichen, `[ ]`/`[x]`, dann Leerraum), auch in
+ * einem Zitat (`> - [ ]`) und eingerueckt.
+ */
+const TASK_LINE_RE = /^([ \t>]*)(?:[-*+]|\d{1,9}[.)])[ \t]+\[([ xX])\](?=[ \t]+)/;
 
 function isBlank(line) {
   return !line || /^[ \t]*$/.test(line);
@@ -265,6 +273,20 @@ function parseBlocks(lines, depth = 0) {
           continue;
         }
         break;
+      }
+      // Ein Callout ist ein Zitat, dessen erste Zeile `[!art] Titel` ist --
+      // die Schreibweise von Obsidian, damit importierte Notizen gleich
+      // richtig aussehen. Unbekannte Arten werden nicht abgelehnt, sondern
+      // wie "Hinweis" gezeigt: die Notiz bleibt lesbar.
+      const callout = inner.length ? CALLOUT_RE.exec(inner[0]) : null;
+      if (callout) {
+        blocks.push({
+          type: 'callout',
+          kind: callout[1].toLowerCase(),
+          title: (callout[3] || '').trim(),
+          blocks: parseBlocks(inner.slice(1), depth + 1),
+        });
+        continue;
       }
       blocks.push({ type: 'quote', blocks: parseBlocks(inner, depth + 1) });
       continue;
@@ -786,7 +808,64 @@ function makeContext(options = {}) {
     kopierKarten: options.kopierKarten === true,
     /** Erledigt-Listen als blaue Haken-Kreise wie in der Vorlage statt Kästchen. */
     hakenKreise: options.hakenKreise === true,
+    /**
+     * Antippbare Haken: `(index, erledigt, event)` fuer die n-te Aufgabe im
+     * Quelltext (Reihenfolge wie `extractTasks`). Ohne diese Funktion sind
+     * die Kaestchen nur Anzeige.
+     */
+    onTask: typeof options.onTask === 'function' ? options.onTask : null,
+    taskIndex: 0,
   };
+}
+
+const CALLOUT_LABEL = {
+  info: 'Info', hinweis: 'Hinweis', note: 'Notiz', tip: 'Tipp', tipp: 'Tipp', hint: 'Tipp',
+  warning: 'Achtung', warn: 'Achtung', achtung: 'Achtung', caution: 'Vorsicht', attention: 'Achtung',
+  danger: 'Gefahr', error: 'Fehler', fehler: 'Fehler', bug: 'Fehler', failure: 'Fehler',
+  success: 'Erledigt', done: 'Erledigt', check: 'Erledigt',
+  question: 'Frage', frage: 'Frage', help: 'Frage', faq: 'Frage',
+  quote: 'Zitat', zitat: 'Zitat', cite: 'Zitat',
+  example: 'Beispiel', beispiel: 'Beispiel',
+  abstract: 'Zusammenfassung', summary: 'Zusammenfassung', tldr: 'Zusammenfassung',
+  todo: 'Zu tun', idea: 'Idee', idee: 'Idee',
+};
+
+/** Die Farbfamilie je Art -- vier Toene aus app.css, nichts Eigenes. */
+const CALLOUT_TONE = {
+  warning: 'warn', warn: 'warn', achtung: 'warn', caution: 'warn', attention: 'warn', todo: 'warn',
+  danger: 'danger', error: 'danger', fehler: 'danger', bug: 'danger', failure: 'danger',
+  success: 'ok', done: 'ok', check: 'ok',
+  quote: 'neutral', zitat: 'neutral', cite: 'neutral', example: 'neutral', beispiel: 'neutral',
+  abstract: 'neutral', summary: 'neutral', tldr: 'neutral',
+};
+
+const CALLOUT_ICON = {
+  accent: '<circle cx="10" cy="10" r="7.4"/><path d="M10 9.2v4.4M10 6.5h.01"/>',
+  warn: '<path d="M10 3.2 17.5 16.4h-15z"/><path d="M10 8.2v3.5M10 13.9h.01"/>',
+  danger: '<circle cx="10" cy="10" r="7.4"/><path d="m7.4 7.4 5.2 5.2M12.6 7.4l-5.2 5.2"/>',
+  ok: '<circle cx="10" cy="10" r="7.4"/><path d="m6.8 10.2 2.2 2.2 4.2-4.6"/>',
+  neutral: '<path d="M6.2 5.4h7.6M6.2 9.6h7.6M6.2 13.8h4.8"/>',
+};
+
+/** Callout-Art -> {label, tone}. Rein, damit die Zuordnung pruefbar ist. */
+export function calloutInfo(kind) {
+  const key = String(kind || '').toLowerCase();
+  return {
+    kind: key,
+    label: CALLOUT_LABEL[key] || (key ? key.charAt(0).toUpperCase() + key.slice(1) : 'Hinweis'),
+    tone: CALLOUT_TONE[key] || 'accent',
+  };
+}
+
+function renderCallout(block, ctx) {
+  const info = calloutInfo(block.kind);
+  const head = h('div.md-callout__head', null,
+    h('span.md-callout__icon', { 'aria-hidden': 'true' }, icon(CALLOUT_ICON[info.tone] || CALLOUT_ICON.accent)),
+    h('span.md-callout__title', null, block.title
+      ? renderInlineNodes(parseInline(block.title, ctx), ctx)
+      : text(info.label)));
+  const body = h('div.md-callout__body', null, renderBlocks(block.blocks, ctx));
+  return h('aside.md-callout', { dataset: { kind: info.kind || 'info', tone: info.tone } }, head, block.blocks.length ? body : null);
 }
 
 function renderBlocks(blocks, ctx) {
@@ -809,6 +888,9 @@ function renderBlocks(blocks, ctx) {
         break;
       case 'quote':
         nodes.push(h('blockquote.md-quote', null, renderBlocks(block.blocks, ctx)));
+        break;
+      case 'callout':
+        nodes.push(renderCallout(block, ctx));
         break;
       case 'hr':
         nodes.push(h('hr.md-hr'));
@@ -846,17 +928,31 @@ function renderList(block, ctx) {
       }, icon(item.checked ? HAKEN_VOLL : HAKEN_LEER)));
     } else if (item.checked !== null) {
       li.classList.add('md-item--task');
-      li.appendChild(h('input.md-check', {
+      if (item.checked) li.classList.add('is-erledigt');
+      // Die Nummer der Aufgabe im Quelltext, damit ein Klick genau diese
+      // Zeile umschreibt (setzeHaken). Gezaehlt werden nur echte `[ ]`-Zeilen,
+      // nicht die Haken, die hakenLesen aus einem Emoji macht.
+      const index = raw.checked !== null ? ctx.taskIndex++ : -1;
+      const check = h('input.md-check', {
         type: 'checkbox',
         checked: item.checked === true,
-        disabled: true,
+        disabled: !ctx.onTask || index < 0,
         'aria-label': item.checked ? 'Erledigt' : 'Offen',
-      }));
+        dataset: index >= 0 ? { task: String(index) } : null,
+      });
+      if (ctx.onTask && index >= 0) {
+        check.addEventListener('change', (event) => {
+          const result = ctx.onTask(index, check.checked, event);
+          // Wer ablehnt (false), bekommt das Kaestchen zurueckgesetzt.
+          if (result === false) check.checked = !check.checked;
+        });
+      }
+      li.appendChild(check);
     }
     const children = block.loose
       ? renderBlocks(item.blocks, ctx)
       : renderTightItem(item.blocks, ctx);
-    const inhalt = item.checked !== null && ctx.hakenKreise ? h('span.md-haken__text') : li;
+    const inhalt = item.checked !== null ? h(ctx.hakenKreise ? 'span.md-haken__text' : 'span.md-task__text') : li;
     for (const child of children) inhalt.appendChild(child);
     if (inhalt !== li) li.appendChild(inhalt);
     listNode.appendChild(li);
@@ -1651,6 +1747,10 @@ function plainBlocks(blocks, ctx, out) {
       case 'quote':
         plainBlocks(block.blocks, ctx, out);
         break;
+      case 'callout':
+        if (block.title) out.push(plainInline(parseInline(block.title, ctx)));
+        plainBlocks(block.blocks, ctx, out);
+        break;
       case 'list':
         for (const item of block.items) {
           const buffer = [];
@@ -1733,6 +1833,10 @@ export function extractLinks(source) {
     for (const block of blocks) {
       if (block.type === 'paragraph' || block.type === 'heading') walkInline(parseInline(block.text, ctx));
       else if (block.type === 'quote') walkBlocks(block.blocks);
+      else if (block.type === 'callout') {
+        if (block.title) walkInline(parseInline(block.title, ctx));
+        walkBlocks(block.blocks);
+      }
       else if (block.type === 'list') block.items.forEach((item) => walkBlocks(item.blocks));
       else if (block.type === 'table') {
         block.head.forEach((cell) => walkInline(parseInline(cell, ctx)));
@@ -1742,6 +1846,79 @@ export function extractLinks(source) {
   };
   walkBlocks(parseBlocks(content));
   return { wikiLinks, tags };
+}
+
+/* ------------------------------------------------------------------ */
+/* Aufgaben im Quelltext                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Jede Aufgabenzeile (`- [ ]`, `- [x]`, auch nummeriert oder in einem
+ * Zitat), in der Reihenfolge des Quelltexts -- derselben, in der der
+ * Renderer die Kaestchen zaehlt. Zeilen in Codebloecken zaehlen nicht.
+ *
+ * @returns {Array<{index:number, line:number, checked:boolean, text:string}>}
+ */
+export function extractTasks(source) {
+  const lines = normalise(source).split('\n');
+  const out = [];
+  let fence = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (f) {
+      if (!fence) fence = f[1][0];
+      else if (f[1][0] === fence) fence = null;
+      continue;
+    }
+    if (fence) continue;
+    const m = TASK_LINE_RE.exec(line);
+    if (!m) continue;
+    out.push({
+      index: out.length,
+      line: i,
+      checked: m[2].toLowerCase() === 'x',
+      text: line.slice(m[0].length).trim(),
+    });
+  }
+  return out;
+}
+
+/**
+ * Den n-ten Haken im Quelltext setzen oder loesen und den neuen Quelltext
+ * zurueckgeben. Alles andere bleibt Zeichen fuer Zeichen, wie es war --
+ * auch Zeilenenden (CRLF) und Tabs, denn die Notiz gehoert dem Nutzer, nicht
+ * dem Renderer. Gibt es die Aufgabe nicht, kommt der Text unveraendert zurueck.
+ *
+ * @param {string} source
+ * @param {number} index  0-basiert, wie in `extractTasks`
+ * @param {boolean} checked
+ * @returns {string}
+ */
+export function setzeHaken(source, index, checked) {
+  const src = String(source === null || source === undefined ? '' : source);
+  const lines = src.split(/(\r\n|\r|\n)/); // Trenner bleiben erhalten
+  let seen = 0;
+  let fence = null;
+  for (let i = 0; i < lines.length; i += 2) {
+    const line = lines[i];
+    const f = /^ {0,3}(`{3,}|~{3,})/.exec(line.replace(/\t/g, '    '));
+    if (f) {
+      if (!fence) fence = f[1][0];
+      else if (f[1][0] === fence) fence = null;
+      continue;
+    }
+    if (fence) continue;
+    const m = TASK_LINE_RE.exec(line);
+    if (!m) continue;
+    if (seen === index) {
+      const pos = m[0].lastIndexOf('[');
+      lines[i] = `${line.slice(0, pos + 1)}${checked ? 'x' : ' '}${line.slice(pos + 2)}`;
+      return lines.join('');
+    }
+    seen += 1;
+  }
+  return src;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1832,6 +2009,29 @@ const MARKDOWN_CSS = `
 .md-item { margin: 2px 0; }
 .md-item--task { list-style: none; margin-left: calc(var(--sp-3) * -1); padding-left: var(--sp-3); position: relative; }
 .md-check { position: absolute; left: 0; top: 3px; margin: 0; accent-color: var(--accent); }
+.md-check:not(:disabled) { cursor: pointer; width: 16px; height: 16px; }
+.md-item--task.is-erledigt > .md-task__text { color: var(--fg-subtle); text-decoration: line-through; text-decoration-color: var(--border-strong); }
+.md-callout {
+  margin: 0 0 var(--sp-2);
+  padding: 10px 14px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+}
+.md-callout__head { display: flex; align-items: center; gap: 8px; font-weight: 500; color: var(--accent-text); }
+.md-callout__icon { display: inline-flex; flex: none; }
+.md-callout__icon svg { width: 16px; height: 16px; }
+.md-callout__body { margin-top: 6px; color: var(--fg-muted); }
+.md-callout__body > :last-child { margin-bottom: 0; }
+.md-callout[data-tone="warn"] { border-left-color: var(--warn); }
+.md-callout[data-tone="warn"] .md-callout__head { color: var(--warn); }
+.md-callout[data-tone="danger"] { border-left-color: var(--danger); }
+.md-callout[data-tone="danger"] .md-callout__head { color: var(--danger); }
+.md-callout[data-tone="ok"] { border-left-color: var(--ok); }
+.md-callout[data-tone="ok"] .md-callout__head { color: var(--ok); }
+.md-callout[data-tone="neutral"] { border-left-color: var(--border-strong); }
+.md-callout[data-tone="neutral"] .md-callout__head { color: var(--fg-muted); }
 .md-quote {
   margin: 0 0 var(--sp-2);
   padding: var(--sp-05) 0 var(--sp-05) var(--sp-2);

@@ -364,6 +364,7 @@ async function createServer(ctx = {}) {
     require('./api/secondlook'),
     require('./api/stick'),
     require('./api/events'),
+    require('./api/notizen'),
     require('./api/beenden'),
   ]) {
     mod.register(router);

@@ -715,29 +715,38 @@ async function pruefeSchale(page, base, store) {
 /* ------------------------------------------------------------------ */
 
 /**
- * Das Gehirn nach docs/vorlage/gehirn-obsidian.png. Geprueft wird, was man
- * nicht aus einem Unit-Test lesen kann: dass die Leinwand wirklich ein Netz
- * zeigt, dass es zur Ruhe kommt und danach stillsteht (ein Gehirn, das offen
- * liegt, darf auf dem Schullaptop keine Rechenzeit fressen), dass das Panel
- * oben rechts die vier Abschnitte der Vorlage hat, und dass Suchen, Antippen
- * und "Oeffnen" bis zum richtigen Eintrag durchschlagen. Dazu die Kachel
- * rechts: ein kleiner Ausschnitt, dessen Antippen das Gehirn dort oeffnet.
+ * Das Gehirn als Wissensuniversum (Vision vom 27.09.2026). Geprueft wird,
+ * was man nicht aus einem Unit-Test lesen kann: dass Ebene 0 wirklich
+ * Themenkreise zeichnet, dass ein Klick auf einen Kreis in Ebene 1 fuehrt
+ * (Brotkrumen, Adresse), dass das Netz zur Ruhe kommt und dann stillsteht
+ * (ein Gehirn, das offen liegt, darf auf dem Schullaptop keine Rechenzeit
+ * fressen), dass Suchen und Eingabetaste den Eintrag waehlen und die Karte
+ * rechts seine Verknuepfungen nennt, dass "Oeffnen" bis zum richtigen
+ * Eintrag durchschlaegt, dass Escape eine Ebene hoch geht, dass eine neue
+ * Verbindung aus dem Tresor OHNE Neuladen im Bild ankommt (Bus), dass die
+ * Karte (Themenkarte) Kacheln und Eintraege zeigt -- und dass die Kachel
+ * rechts das Gehirn an ihrer Mitte oeffnet.
  */
 async function pruefeGehirn(page, base, store) {
   const warte = (ms) => page.waitForTimeout(ms);
-  await page.evaluate(() => { try { localStorage.removeItem('neural-os:gehirn'); } catch { /* egal */ } });
+  const zustand = () => page.evaluate(() => {
+    const g = document.querySelector('.gh');
+    const a = g && g.gehirn;
+    return a ? { ebene: a.ebene, thema: a.thema ? a.thema.name : null, sel: a.selectedId, nodes: a.nodes, themen: a.themen, klein: a.klein, leer: a.leer, ids: a.ids } : null;
+  });
   await page.goto(`${base}/#/graph`, { waitUntil: 'domcontentloaded' });
   await dismissWelcome(page);
   const start = Date.now();
-  const ruht = await page.waitForFunction(() => {
+  const da = await page.waitForFunction(() => {
     const g = document.querySelector('.gh');
-    return g && g.dataset.ruhe === 'ja';
+    return g && g.gehirn && (g.gehirn.themen > 0 || g.gehirn.leer);
   }, null, { timeout: 15000 }).then(() => true, () => false);
-  check(ruht, 'Die Wolke kommt zur Ruhe', ruht ? `nach ${Date.now() - start} ms` : 'nach 15 s noch in Bewegung');
+  let z = await zustand();
+  check(da && z && z.ebene === 0 && z.themen >= 2, 'Ebene 0 zeigt Themenbereiche (aus Schlagworten und Verbindungen)', z ? `${z.themen} Themen nach ${Date.now() - start} ms` : 'kein Gehirn');
 
   // Gezeichnet ist, was Pixel hat -- nicht, was im DOM steht.
-  const bild = () => page.evaluate(() => {
-    const c = document.querySelector('.gh__canvas');
+  const bild = (sel) => page.evaluate((s) => {
+    const c = document.querySelector(s);
     if (!c || !c.width) return null;
     const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
     let gemalt = 0;
@@ -750,69 +759,137 @@ async function pruefeGehirn(page, base, store) {
       }
       summe = (summe * 31 + d[i - 3] + d[i]) % 1000000007;
     }
-    // Mittlere Deckkraft der gemalten Stichproben: faellt stark, wenn alles
-    // ausser dem Gewaehlten zuruecktritt.
     return { gemalt, summe, deckung: gemalt ? licht / gemalt : 0 };
+  }, sel);
+  await warte(1100); // der weiche Aufbau (720 ms) ist dann durch
+  const u = await bild('.gh__canvas--uni');
+  check(u && u.gemalt > 400, 'Die Leinwand der Ebene 0 zeigt Kreise', u ? `${u.gemalt} gemalte Stichproben` : 'keine Leinwand');
+  const krumeOben = (await page.locator('.gh__crumb').allInnerTexts()).map((t) => t.trim());
+  check(krumeOben[0] && krumeOben[0].startsWith('Mein Wissen'), 'Die Brotkrumen beginnen mit „Mein Wissen“', krumeOben.join(' › '));
+
+  // Klick auf den groessten Kreis -> Ebene 1 dieses Themas.
+  const groesstes = await page.evaluate(() => {
+    const g = document.querySelector('.gh').gehirn;
+    let best = null;
+    for (const id of g.themenIds || []) {
+      const p = g.screenPosition(id);
+      if (p && (!best || p.r > best.r)) best = { id, ...p };
+    }
+    return best;
   });
+  const box = await page.locator('.gh').boundingBox();
+  if (!groesstes || !box) bad('Ein Klick auf einen Themenkreis öffnet das Thema', 'kein Kreis gefunden');
+  else {
+    await page.mouse.click(box.x + groesstes.x, box.y + groesstes.y);
+    const drin = await page.waitForFunction(() => { const g = document.querySelector('.gh'); return g && g.gehirn.ebene === 1 && g.gehirn.nodes > 0; }, null, { timeout: 8000 }).then(() => true, () => false);
+    z = await zustand();
+    const hash = await page.evaluate(() => window.location.hash);
+    check(drin && z.thema && hash.startsWith('#/graph?thema='), 'Ein Klick auf einen Themenkreis öffnet das Thema als Netz, die Adresse folgt', `${z && z.thema} · ${z && z.nodes} Knoten · ${hash}`);
+    const krumen = (await page.locator('.gh__crumb').allInnerTexts()).map((t) => t.trim());
+    check(krumen.length >= 2 && krumen[0].startsWith('Mein Wissen') && krumen[1].startsWith(String(z.thema || '')), 'Die Brotkrumen zeigen „Mein Wissen › Thema“', krumen.join(' › '));
+  }
+  const ruht = await page.waitForFunction(() => {
+    const g = document.querySelector('.gh');
+    return g && g.dataset.ruhe === 'ja';
+  }, null, { timeout: 15000 }).then(() => true, () => false);
+  check(ruht, 'Das Netz kommt zur Ruhe', ruht ? `nach ${Date.now() - start} ms` : 'nach 15 s noch in Bewegung');
   await warte(600);
-  const a = await bild();
-  check(a && a.gemalt > 500, 'Die Leinwand zeigt ein Netz', a ? `${a.gemalt} gemalte Stichproben` : 'keine Leinwand');
+  const a = await bild('.gh__canvas--netz');
+  check(a && a.gemalt > 300, 'Die Leinwand der Ebene 1 zeigt ein Netz', a ? `${a.gemalt} gemalte Stichproben` : 'keine Leinwand');
   await warte(900);
-  const b = await bild();
+  const b = await bild('.gh__canvas--netz');
   check(a && b && a.summe === b.summe, 'In Ruhe steht das Bild still (keine Rechenzeit im Leerlauf)',
     a && b ? (a.summe === b.summe ? 'zwei Aufnahmen im Abstand von 0,9 s sind gleich' : 'das Bild ändert sich noch') : '');
 
-  // Auf schmaler Karte ist das Panel zu; der Knopf oben rechts oeffnet es.
-  if (await page.locator('.gh__opener').isVisible()) await page.locator('.gh__opener').click();
-  const abschnitte = await page.locator('.gh__panel summary').allInnerTexts();
-  check(['Filter', 'Gruppen', 'Anzeige', 'Kräfte'].every((t, i) => (abschnitte[i] || '').trim() === t),
-    'Oben rechts das Panel der Vorlage: Filter, Gruppen, Anzeige, Kräfte', abschnitte.map((t) => t.trim()).join(' · '));
+  // Eine neue Verbindung aus dem Tresor kommt ueber den Bus ins Bild -- ohne Neuladen.
+  z = await zustand();
+  const ids = (z && z.ids) || [];
+  if (ids.length >= 2) {
+    const vorher = await page.evaluate(() => document.querySelector('.gh').gehirn.stats().visibleEdges);
+    // Zwei Knoten des Themas, zwischen denen es noch keine Linie gibt.
+    const von = ids[0];
+    const schon = new Set();
+    for (const e of store.edges.for(von, { direction: 'both' })) {
+      schon.add(e.data.from);
+      schon.add(e.data.to);
+    }
+    const zu = ids.find((id) => id !== von && !schon.has(id));
+    if (!zu) hmm('Eine neue Verbindung erscheint sofort im Netz', 'alle Knoten des Themas hängen schon am ersten');
+    else {
+      store.edges.add({ from: von, to: zu, kind: 'related', source: 'manual', reason: 'Prüfung: neue Verbindung' });
+      const kam = await page.waitForFunction((n) => document.querySelector('.gh').gehirn.stats().visibleEdges > n, vorher, { timeout: 5000 }).then(() => true, () => false);
+      const nachher = await page.evaluate(() => document.querySelector('.gh').gehirn.stats().visibleEdges);
+      check(kam, 'Eine neue Verbindung erscheint sofort im Netz (Bus graph.kante, kein Neuladen)', `${vorher} → ${nachher} Linien`);
+    }
+  } else hmm('Eine neue Verbindung erscheint sofort im Netz', 'zu wenige Knoten im Thema');
 
-  // Suchen -> Eingabetaste -> Kaertchen -> Oeffnen -> der richtige Eintrag.
+  // Suchen -> Eingabetaste -> Karte rechts -> Oeffnen -> der richtige Eintrag.
   const ziel = store.all('note').find((n) => n.data.title === 'Notiz 7');
-  await page.locator('.gh__panel summary', { hasText: 'Filter' }).first().click();
-  await warte(250);
   const feld = page.getByLabel('Im Gehirn suchen');
   if (!ziel || !(await feld.count())) {
     bad('Die Suche im Gehirn lässt sich bedienen', ziel ? 'kein Suchfeld' : 'Testnotiz fehlt');
   } else {
     await feld.fill('Notiz 7');
-    await warte(300);
+    await warte(500);
     await feld.press('Enter');
-    await warte(700);
     const karte = page.locator('.gh__card');
+    await karte.waitFor({ state: 'visible', timeout: 6000 }).catch(() => {});
+    await warte(700);
     const titel = (await karte.locator('.gh__card-title').innerText().catch(() => '')).trim();
-    check(await karte.isVisible() && titel === 'Notiz 7', 'Suchen und Eingabetaste wählen den Knoten, das Kärtchen nennt ihn', titel || 'kein Kärtchen');
-    // Schliessen und Suche leeren muss das Zuruecktreten wieder aufheben --
-    // frueher blieb das Netz danach gedaempft stehen.
-    const gewaehlt = await bild();
+    check(await karte.isVisible() && titel === 'Notiz 7', 'Suchen und Eingabetaste wählen den Eintrag, die Karte rechts nennt ihn', titel || 'keine Karte');
+    const abschnitte = (await karte.locator('.gh__sec-title').allInnerTexts()).map((t) => t.trim());
+    const links = await karte.locator('.gh__link').count();
+    check(abschnitte.some((t) => /Verknüpft mit/i.test(t)) && links >= 1, 'Die Karte zeigt „Verknüpft mit“ mit Verbindungen und ihrem Grund', `${links} Zeilen · ${abschnitte.join(' · ')}`);
+    check(abschnitte.some((t) => /KI-Zusammenfassung/i.test(t)), 'Die Karte hat den Abschnitt „KI-Zusammenfassung“', abschnitte.join(' · '));
+    await karte.getByRole('button', { name: 'Zusammenfassen' }).click().catch(() => {});
+    await warte(900);
+    const ki = (await karte.locator('.gh__ki').innerText().catch(() => '')).trim();
+    check(ki.length > 0, 'Die KI-Zusammenfassung sagt ehrlich, was sie kann', ki.slice(0, 80));
+    // Gewaehlt: der Rest tritt zurueck; Karte zu: alles kommt wieder.
+    const gewaehlt = await bild('.gh__canvas--netz');
     await karte.getByRole('button', { name: 'Auswahl schließen' }).click();
     await feld.fill('');
     await feld.press('Escape');
     await warte(700);
-    const frei = await bild();
-    check(gewaehlt && frei && a && frei.deckung > gewaehlt.deckung * 1.3 && frei.deckung > a.deckung * 0.75,
-      'Auswahl schließen und Suche leeren holen das ganze Netz zurück',
-      gewaehlt && frei && a ? `Deckung ${Math.round(a.deckung)} → gewählt ${Math.round(gewaehlt.deckung)} → danach ${Math.round(frei.deckung)}` : '');
+    const frei = await bild('.gh__canvas--netz');
+    check(gewaehlt && frei && frei.deckung > gewaehlt.deckung * 1.15,
+      'Auswahl schließen holt das ganze Netz zurück (der Rest tritt nur bei Auswahl auf ein Viertel zurück)',
+      gewaehlt && frei ? `Deckung gewählt ${Math.round(gewaehlt.deckung)} → danach ${Math.round(frei.deckung)}` : '');
     await feld.fill('Notiz 7');
-    await warte(300);
+    await warte(500);
     await feld.press('Enter');
-    await warte(700);
-    const zaehler = async () => (await page.locator('.gh__count').innerText().catch(() => '')).trim();
-    const vorher = await zaehler();
-    const chip = page.locator('.gh__chips .chip', { hasText: 'Notizen' }).first();
-    if (await chip.count()) {
-      await chip.click();
-      await warte(400);
-      const nachher = await zaehler();
-      check(nachher !== vorher, 'Eine Art ausblenden wirkt sofort', `${vorher} → ${nachher}`);
-      await chip.click();
-      await warte(300);
-    }
+    await karte.waitFor({ state: 'visible', timeout: 6000 }).catch(() => {});
+    await warte(500);
     await karte.getByRole('button', { name: 'Öffnen' }).click();
     await warte(900);
     const hash = await page.evaluate(() => window.location.hash);
     check(hash === `#/notes?id=${encodeURIComponent(ziel.id)}`, '„Öffnen“ führt zu genau diesem Eintrag', hash);
+  }
+
+  // Escape geht eine Ebene hoch; die Themenkarte zeigt Kacheln und Eintraege.
+  await page.goto(`${base}/#/graph`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => { const g = document.querySelector('.gh'); return g && g.gehirn && g.gehirn.themen > 0; }, null, { timeout: 15000 }).catch(() => {});
+  await warte(400);
+  const ersteId = await page.evaluate(() => (document.querySelector('.gh').gehirn.themenIds || [])[0] || null);
+  if (ersteId) {
+    await page.evaluate((id) => document.querySelector('.gh').gehirn.tauchen(id), ersteId);
+    await page.waitForFunction(() => document.querySelector('.gh').gehirn.ebene === 1, null, { timeout: 8000 }).catch(() => {});
+    await warte(300);
+    await page.mouse.click(box.x + 20, box.y + box.height - 20); // nirgendwo: nichts gewaehlt
+    await page.keyboard.press('Escape');
+    const oben = await page.waitForFunction(() => document.querySelector('.gh').gehirn.ebene === 0, null, { timeout: 5000 }).then(() => true, () => false);
+    check(oben, 'Escape geht eine Ebene hoch: vom Thema zurück ins Universum', oben ? 'Ebene 0' : 'noch in Ebene 1');
+  } else hmm('Escape geht eine Ebene hoch', 'kein Thema gefunden');
+  await page.getByRole('tab', { name: 'Karte' }).click();
+  await warte(900);
+  const kacheln = await page.locator('.wk__tile').count();
+  check(kacheln >= 2, 'Die Themenkarte zeigt die Themen als ruhige Kacheln', `${kacheln} Kacheln`);
+  if (kacheln) {
+    await page.locator('.wk__tile').first().click();
+    await warte(900);
+    const zeilen = await page.locator('.wk__row').count();
+    const titel = (await page.locator('.wk__title').innerText().catch(() => '')).trim();
+    check(zeilen >= 1 && titel.length > 0, 'Antippen einer Kachel führt tiefer: Überschrift und Einträge des Themas', `${titel} · ${zeilen} Einträge`);
   }
 
   // Die Kachel: ein Ausschnitt mit Mitte im Akzent, Antippen oeffnet das Gehirn dort.
@@ -828,9 +905,11 @@ async function pruefeGehirn(page, base, store) {
   check(!!href && href.startsWith('#/graph?focus='), 'Die Kachel „Gehirn“ zeigt einen Ausschnitt und verweist auf seine Mitte', href || 'kein Ausschnitt');
   if (href) {
     await link.click();
-    await warte(1200);
+    await page.locator('.gh__card').waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+    await warte(600);
     const gewaehlt = (await page.locator('.gh__card-title').innerText().catch(() => '')).trim();
-    check(!!gewaehlt, 'Antippen öffnet das Gehirn mit genau dieser Mitte gewählt', gewaehlt || 'nichts gewählt');
+    const krumen = (await page.locator('.gh__crumb').allInnerTexts()).map((t) => t.trim());
+    check(!!gewaehlt, 'Antippen öffnet das Gehirn mit genau dieser Mitte gewählt (Umfeld, Karte offen)', gewaehlt ? `${gewaehlt} · ${krumen.join(' › ')}` : 'nichts gewählt');
   }
 }
 

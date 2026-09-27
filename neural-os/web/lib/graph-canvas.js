@@ -28,7 +28,29 @@
  *    bei jedem Zoom duenn bleibt und eine Schrift scharf.
  * 6. **Finger zuerst.** Pointer-Events statt Maus-Events: ein Finger zieht und
  *    verschiebt, zwei Finger zoomen, Antippen waehlt, zweimal Antippen
- *    oeffnet. Auf dem iPad ueber WLAN ist das die ganze Bedienung.
+ *    oeffnet, langes Druecken meldet sich (onLongPress). Auf dem iPad ueber
+ *    WLAN ist das die ganze Bedienung.
+ *
+ * Seit dem Wissensuniversum (web/views/graph.js) kann derselbe Zeichner
+ * zweierlei zeigen:
+ *
+ * 7. **Themen-Ebene** (`themen: true`): wenige grosse, ruhige Kreise -- ein
+ *    Kreis je Themenbereich, Groesse nach Anzahl, Name in der Mitte,
+ *    darunter "42 Eintraege", ein Hauch Farbe je Thema (Saettigung niedrig,
+ *    aus den Marken der Oberflaeche gemischt). Die Lage rechnet
+ *    `layoutThemen()` deterministisch vor; Physik laeuft dort nicht.
+ * 8. **Weicher Aufbau** (`enter()`): Knoten wachsen in Wellen aus dem Nichts,
+ *    Linien blenden nach; 600-900 ms, ease-out. Nichts fliegt herum.
+ * 9. **Art im Knoten**: ab einem Bildschirmradius von 7 px traegt ein Punkt
+ *    ein winziges Symbol seiner Art (Notiz, Projekt, Person, Ort, Begriff,
+ *    Datei, Termin ...) in der Farbe des Grundes -- dezent, und nur dann,
+ *    wenn man nah genug ist, dass es lesbar waere.
+ * 10. **Neue Verbindung**: eine Kante, die zu geladenen Daten dazukommt,
+ *    zieht sich in 400 ms vom einen zum anderen Knoten; beide bewegen sich
+ *    leicht (nudge), der Rest bleibt stehen.
+ * 11. **Zoomschwellen**: wer auf der Themen-Ebene ueber die Schwelle
+ *    hineinzoomt, bekommt `onDive(thema)`; wer auf der Netz-Ebene weit
+ *    herauszoomt, `onSurface()`. Die Ansicht entscheidet, was das heisst.
  */
 
 /* ------------------------------------------------------------------ */
@@ -39,6 +61,110 @@ const TAU = Math.PI * 2;
 
 /** Arten, die als Knoten vorkommen koennen (wie schema.GRAPH_TYPES). */
 export const GRAPH_TYPES = ['note', 'chat', 'project', 'task', 'event', 'agent', 'file', 'entity', 'run'];
+
+/**
+ * Acht Themen-Toene, keiner davon blau: Blau ist der eine Akzent und heisst
+ * "gewaehlt". Der Zeichner mischt sie tief ins Grau der Oberflaeche -- ein
+ * Hauch Farbe, kein Anstrich. Der Server nennt nur den Index (0-7).
+ */
+export const THEME_HUES = ['#5fb8a5', '#d4a857', '#a98bd6', '#8cbc6a', '#d9828f', '#b9b56a', '#cc86c0', '#d98f5c'];
+
+/** Themenkreise: Radius in Welt-Einheiten, zwischen diesen beiden Werten. */
+export const THEMA_R_MIN = 30;
+export const THEMA_R_MAX = 92;
+
+/**
+ * Radius eines Themenkreises: Wurzel aus dem Anteil am groessten Thema, damit
+ * die Flaeche mit der Anzahl waechst und ein Thema mit 400 Eintraegen nicht
+ * das Zehnfache eines Themas mit 40 einnimmt.
+ */
+export function themaRadius(anzahl, maxAnzahl) {
+  const a = Math.max(0, Number(anzahl) || 0);
+  const mx = Math.max(1, Number(maxAnzahl) || 1);
+  return THEMA_R_MIN + (THEMA_R_MAX - THEMA_R_MIN) * Math.sqrt(Math.min(1, a / mx));
+}
+
+/**
+ * Die Lage der Themenkreise, deterministisch: gleiche Daten, gleiche Karte.
+ * Das groesste Thema in die Mitte, die weiteren der Groesse nach auf eine
+ * Spirale; dann 120 Runden Entspannung -- Kreise, die sich ueberlappen,
+ * schieben sich auseinander, Themen mit gemeinsamen Eintraegen ruecken
+ * leicht zusammen, alles strebt sanft zur Mitte. Kein Zufall im Spiel.
+ *
+ * @param {Array<{id:string, anzahl:number}>} themen
+ * @param {Array<{from:string, to:string, anzahl?:number}>} [links]
+ * @returns {Map<string, {x:number, y:number, r:number}>}
+ */
+export function layoutThemen(themen, links = []) {
+  const list = (Array.isArray(themen) ? themen : []).filter((t) => t && typeof t.id === 'string');
+  const n = list.length;
+  const out = new Map();
+  if (!n) return out;
+  const maxA = list.reduce((mx, t) => Math.max(mx, Number(t.anzahl) || 0), 1);
+  const order = list.map((_, i) => i).sort((p, q) => ((Number(list[q].anzahl) || 0) - (Number(list[p].anzahl) || 0)) || (list[p].id < list[q].id ? -1 : 1));
+  const r = new Float64Array(n);
+  const x = new Float64Array(n);
+  const y = new Float64Array(n);
+  const GAP = 28;
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  order.forEach((i, rank) => {
+    r[i] = themaRadius(list[i].anzahl, maxA);
+    if (rank === 0) return;
+    const a = rank * golden;
+    const d = THEMA_R_MAX + r[i] + 58 * Math.sqrt(rank);
+    x[i] = Math.cos(a) * d;
+    y[i] = Math.sin(a) * d;
+  });
+  const idx = new Map(list.map((t, i) => [t.id, i]));
+  const L = [];
+  for (const l of links || []) {
+    const a = idx.get(l && l.from);
+    const b = idx.get(l && l.to);
+    if (a === undefined || b === undefined || a === b) continue;
+    L.push([a, b, Math.max(1, Number(l.anzahl) || 1)]);
+  }
+  const ROUNDS = 120;
+  for (let it = 0; it < ROUNDS; it++) {
+    const t = 1 - it / ROUNDS;
+    for (const [a, b, w] of L) {
+      const dx = x[b] - x[a];
+      const dy = y[b] - y[a];
+      const d = Math.hypot(dx, dy) || 1;
+      const want = r[a] + r[b] + GAP * 2;
+      if (d <= want) continue;
+      const f = ((d - want) / d) * 0.02 * Math.min(1, Math.log2(1 + w) / 3);
+      x[a] += dx * f;
+      y[a] += dy * f;
+      x[b] -= dx * f;
+      y[b] -= dy * f;
+    }
+    for (let i = 0; i < n; i++) {
+      x[i] *= 1 - 0.012 * t;
+      y[i] *= 1 - 0.012 * t;
+    }
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        let dx = x[j] - x[i];
+        let dy = y[j] - y[i];
+        let d = Math.hypot(dx, dy);
+        if (d < 1e-6) {
+          dx = jitter(i * 31 + j) * 1000;
+          dy = jitter(j * 31 + i) * 1000;
+          d = Math.hypot(dx, dy) || 1;
+        }
+        const want = r[i] + r[j] + GAP;
+        if (d >= want) continue;
+        const f = ((want - d) / d) * 0.5;
+        x[i] -= dx * f;
+        y[i] -= dy * f;
+        x[j] += dx * f;
+        y[j] += dy * f;
+      }
+    }
+  }
+  for (let i = 0; i < n; i++) out.set(list[i].id, { x: x[i], y: y[i], r: r[i] });
+  return out;
+}
 
 /**
  * Was die Ansicht im Panel verstellen kann. 1 heisst "wie gedacht"; die
@@ -92,6 +218,28 @@ const CLICK_SLOP = 5; // so weit darf sich ein Klick bewegen und bleibt ein Klic
 const DOUBLE_TAP_MS = 320;
 const MOVE_MS = 380;
 const FADE_MS = 160; // Hervorheben und Zuruecktreten, wie in Obsidian: kurz, aber sichtbar
+const ENTER_MS = 720; // weicher Aufbau eines Bildes (Vision: 600-900 ms, ease-out)
+const ENTER_WAVE_MS = 70; // Abstand der vier Wellen: Hubs zuerst, Blaetter zuletzt
+const EDGE_GROW_MS = 420; // eine neue Linie zieht sich vom einen zum anderen Knoten
+const LONG_PRESS_MS = 480;
+const GLYPH_MIN_R = 7; // ab diesem Bildschirmradius traegt ein Punkt sein Art-Symbol
+const DICHT_AB = 160; // ab so vielen sichtbaren Knoten gelten die Zoomstufen fuer Namen (LOD)
+const DIVE_FACTOR = 2.3; // Themen-Ebene: so weit ueber das Eingepasste hinein -> onDive
+const SURFACE_FACTOR = 0.42; // Netz-Ebene: so weit unter das Eingepasste heraus -> onSurface
+
+/** "1.234" -- fuer "1.234 Eintraege" unter einem Themennamen. */
+function formatCount(value) {
+  const nr = Number(value) || 0;
+  try {
+    return nr.toLocaleString('de-DE');
+  } catch {
+    return String(nr);
+  }
+}
+
+function easeOut(t) {
+  return t <= 0 ? 0 : t >= 1 ? 1 : 1 - Math.pow(1 - t, 3);
+}
 
 /* ------------------------------------------------------------------ */
 /* Kleine Helfer                                                       */
@@ -366,18 +514,23 @@ function createQuadtree() {
  * @param {HTMLCanvasElement} canvas
  * @param {{
  *   mini?: boolean,               // Kachel: keine Bedienung, feste Beschriftungen, nach aussen
+ *   themen?: boolean,             // Themen-Ebene: grosse Kreise mit Namen, keine Physik
  *   onSelect?: (node:object|null) => void,
  *   onOpen?: (node:object) => void,
  *   onHover?: (node:object|null) => void,
+ *   onLongPress?: (node:object) => void, // Finger bleibt auf einem Knoten liegen
+ *   onDive?: (node:object) => void,      // Themen-Ebene: ueber die Schwelle hineingezoomt
+ *   onSurface?: () => void,              // Netz-Ebene: unter die Schwelle herausgezoomt
  *   onSettle?: () => void,         // die Wolke ruht, die Bildschleife steht
  *   onWake?: () => void,           // sie bewegt sich wieder (Ziehen, Filter, neue Daten)
  *   onUserMove?: () => void,       // der Mensch hat die Kamera bewegt
  * }} [options]
  *
  * Rueckgabe: setData, setFilter, setOrphans, pin, setHighlight, setColors,
- * setSettings, setLabels, setSelection, refreshTheme, prewarm, reheat,
- * fitToView, focus, zoomBy, resize, screenPosition, neighbours, stats,
- * freeze, stopFollowing, destroy; Getter transform, settings, selectedId.
+ * setSettings, setLabels, setSelection, setPadding, refreshTheme, prewarm,
+ * reheat, enter, nudge, addEdge, fitToView, focus, zoomBy, resize,
+ * screenPosition, neighbours, neighbourhood, nodeAtScreen, stats, freeze,
+ * stopFollowing, destroy; Getter transform, settings, selectedId, fitZoom.
  */
 export function createGraphCanvas(canvas, options = {}) {
   if (!canvas || typeof canvas.getContext !== 'function') {
@@ -387,6 +540,7 @@ export function createGraphCanvas(canvas, options = {}) {
   if (!ctx) throw new Error('createGraphCanvas(): 2D-Kontext nicht verfügbar.');
 
   const mini = !!options.mini;
+  const themen = !!options.themen;
   const interactive = !mini;
   const emit = (name, ...args) => {
     const fn = options[name];
@@ -432,8 +586,19 @@ export function createGraphCanvas(canvas, options = {}) {
   let edgeStrength = new Float64Array(0);
   let edgeBias = new Float64Array(0);
   let edgeVisible = new Uint8Array(0);
+  let edgeWeight = new Float64Array(0); // Themen-Ebene: wie viele Eintraege zwei Themen teilen
+  let edgeBorn = new Float64Array(0); // Zeitpunkt, zu dem eine Linie dazukam (0 = schon immer da)
+  let growingUntil = 0; // solange zieht sich noch eine neue Linie
   let adjStart = new Int32Array(1);
   let adjList = new Int32Array(0);
+  let outside = new Uint8Array(0); // Ebene 1: Nachbar ausserhalb des Themas (ausserhalb: true)
+  let labelRank = new Int32Array(0); // Platz in labelOrder: 0 = groesster Knoten
+  let maxAnzahl = 1; // Themen-Ebene: das groesste Thema
+  let visibleCount = 0; // sichtbare Knoten -- ein kleines Netz traegt alle Namen
+  let enterStart = 0; // weicher Aufbau: Beginn in performance.now(), 0 = keiner
+  let frameNow = 0;
+  let padding = { top: 48, right: 48, bottom: 48, left: 48 }; // Rand beim Einpassen
+  let levelArmed = true; // Zoomschwelle: einmal melden, dann erst wieder nach dem Zurueck
 
   let structure = '';
   /**
@@ -449,7 +614,8 @@ export function createGraphCanvas(canvas, options = {}) {
   let colors = []; // gedaempfte Themenfarben als rgba-Strings
   let alwaysLabel = null; // Set<id> -- Kachel: diese immer beschriften
   let ringIds = null; // Set<id> -- Kachel: diese mit Ring
-  let dimAlpha = mini ? 0.42 : 0.1;
+  // Der Rest tritt auf ein Viertel zurueck (Vision: "Rest auf 25 % Deckkraft").
+  let dimAlpha = mini ? 0.42 : themen ? 0.3 : 0.25;
 
   // Zwei Baeume: die verbundene Wolke und der Ring der Waisen. Getrennt,
   // weil die gesammelte Abstossung von achthundert Knoten die Waisen sonst
@@ -552,13 +718,28 @@ export function createGraphCanvas(canvas, options = {}) {
       accentFill: rgba(accent),
       accentGlow: rgba(accent, dark ? 0.22 : 0.16),
       accentLine: rgba(accent, 0.85),
+      // Das Art-Symbol im Punkt: die Farbe des Grundes, damit es sich
+      // eindrueckt statt aufzutragen.
+      glyph: rgba(ground, 0.9),
+      themeText: rgba(fg, dark ? 0.92 : 0.9),
+      themeSub: rgba(mix(ground, fg, dark ? 0.6 : 0.55)),
     };
+    // Themenkreise: ein Grau aus Grund und Schrift, mit einem Hauch des
+    // Themen-Tons -- Saettigung niedrig, in beiden Darstellungen.
+    const themeBase = mix(ground, fg, dark ? 0.13 : 0.06);
+    palette.themeFill = THEME_HUES.map((css) => rgba(mix(themeBase, parseColor(ctx, css, fg), dark ? 0.14 : 0.085)));
+    palette.themeRing = THEME_HUES.map((css) => rgba(mix(mix(ground, fg, dark ? 0.32 : 0.28), parseColor(ctx, css, fg), 0.36)));
+    palette.themeFillPlain = rgba(themeBase);
+    palette.themeRingPlain = rgba(mix(ground, fg, dark ? 0.3 : 0.26));
+    palette.themeLine = mix(ground, fg, dark ? 0.36 : 0.36);
     labelWidthCache = new Array(n);
   }
 
   /* ---------------------------- Daten setzen ----------------------- */
 
   function radiusOf(slot) {
+    // Themen-Ebene: die Groesse ist die Anzahl, nicht der Grad.
+    if (themen) return themaRadius(nodes[slot].anzahl, maxAnzahl);
     // Die sichtbaren Linien: ein Agent, dessen Laeufe ausgeblendet sind,
     // liegt als Waise im Ring und soll dort kein dicker Punkt sein.
     const d = visDegree[slot];
@@ -573,14 +754,28 @@ export function createGraphCanvas(canvas, options = {}) {
 
   /**
    * @param {{nodes: object[], edges: object[]}} data
+   * @param {{beweglich?: string[]}} [opts] nur diese Knoten (und ihre
+   *   Nachbarn) duerfen sich bewegen -- fuer eine neue Verbindung, die zu
+   *   einer ruhenden Karte dazukommt.
    * Knoten brauchen `id`; Kanten `from`/`to`. Positionen bleiben pro id
    * erhalten, damit ein Nachladen die Karte nicht unter der Hand umwirft.
    */
-  function setData(data) {
+  function setData(data, opts = {}) {
     const inNodes = Array.isArray(data && data.nodes) ? data.nodes : [];
     const inEdges = Array.isArray(data && data.edges) ? data.edges : [];
 
     const old = { index, posX, posY, velX, velY, fixed, fixX, fixY };
+    const oldNodes = nodes;
+    const oldM = m;
+    // Welche Linien es schon gab: eine neue zieht sich gleich sichtbar.
+    const oldKeys = new Set();
+    if (oldM > 0 && oldM < 60000) {
+      for (let e = 0; e < oldM; e++) {
+        const p = oldNodes[edgeA[e]].id;
+        const q = oldNodes[edgeB[e]].id;
+        oldKeys.add(p < q ? `${p}\u0001${q}` : `${q}\u0001${p}`);
+      }
+    }
     const selectedId = selected >= 0 ? nodes[selected].id : null;
     const hoveredId = hovered >= 0 ? nodes[hovered].id : null;
 
@@ -592,6 +787,13 @@ export function createGraphCanvas(canvas, options = {}) {
       nodes.push(node);
     }
     n = nodes.length;
+    maxAnzahl = 1;
+    outside = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      if (nodes[i].ausserhalb) outside[i] = 1;
+      const a = Number(nodes[i].anzahl) || 0;
+      if (a > maxAnzahl) maxAnzahl = a;
+    }
 
     posX = new Float64Array(n);
     posY = new Float64Array(n);
@@ -615,7 +817,11 @@ export function createGraphCanvas(canvas, options = {}) {
 
     const a = [];
     const b = [];
+    const w = [];
+    const born = [];
     const seen = new Set();
+    const now = performance.now();
+    let births = 0;
     for (const edge of inEdges) {
       if (!edge) continue;
       const ia = index.get(edge.from);
@@ -628,12 +834,28 @@ export function createGraphCanvas(canvas, options = {}) {
       seen.add(key);
       a.push(ia);
       b.push(ib);
+      w.push(Math.max(1, Number(edge.anzahl) || Number(edge.weight) || 1));
       degree[ia]++;
       degree[ib]++;
+      let fresh = 0;
+      if (oldKeys.size) {
+        const p = nodes[ia].id;
+        const q = nodes[ib].id;
+        if (!oldKeys.has(p < q ? `${p}\u0001${q}` : `${q}\u0001${p}`)) {
+          fresh = now;
+          births++;
+        }
+      }
+      born.push(fresh);
     }
     m = a.length;
     edgeA = Int32Array.from(a);
     edgeB = Int32Array.from(b);
+    edgeWeight = Float64Array.from(w);
+    // Wenige neue Linien ziehen sich sichtbar; ein ganz neues Bild nicht --
+    // das baut sich als Ganzes auf (enter), nicht Linie fuer Linie.
+    edgeBorn = births > 0 && births <= 24 ? Float64Array.from(born) : new Float64Array(m);
+    if (births > 0 && births <= 24) growingUntil = now + EDGE_GROW_MS;
     edgeStrength = new Float64Array(m);
     edgeBias = new Float64Array(m);
     edgeVisible = new Uint8Array(m);
@@ -655,6 +877,8 @@ export function createGraphCanvas(canvas, options = {}) {
     // Beschriftungen: die wichtigsten zuerst, damit sie bei Platzmangel gewinnen.
     labelOrder = Int32Array.from({ length: n }, (_, i) => i);
     labelOrder.sort((p, q) => (degree[q] - degree[p]) || (p - q));
+    labelRank = new Int32Array(n);
+    for (let o = 0; o < n; o++) labelRank[labelOrder[o]] = o;
 
     // Positionen: bekannte behalten, neue neben einen bekannten Nachbarn.
     let fresh = 0;
@@ -690,18 +914,29 @@ export function createGraphCanvas(canvas, options = {}) {
     highlightSet = null;
     brightKey = null;
     applyFilter();
+    const beweglich = Array.isArray(opts.beweglich) ? opts.beweglich.map((id) => index.get(id)).filter((s) => s !== undefined) : null;
     // Ein Nachladen ohne neue Knoten oder Linien bewegt nichts: die Karte
     // bleibt, wie der Mensch sie gerade ansieht.
     const shape = `${n}:${m}`;
-    if (fresh === n) reheat(1);
-    else if (fresh > 0 && fresh <= Math.max(12, n * 0.1)) {
+    if (themen) {
+      // Die Themen-Ebene liegt fest (layoutThemen); nur Kreise ohne Lage
+      // bekommen eine, damit nichts uebereinander liegt.
+      alpha = 0;
+      alphaTarget = 0;
+      mobile = null;
+    } else if (fresh === n) reheat(1);
+    else if ((fresh > 0 && fresh <= Math.max(12, n * 0.1)) || (beweglich && beweglich.length && fresh === 0)) {
+      // Wenige neue Knoten oder eine neue Verbindung: nur die Betroffenen
+      // und ihre Nachbarn bewegen sich leicht; die Karte bleibt stehen.
       mobile = new Uint8Array(n);
-      for (let i = 0; i < n; i++) {
-        if (!freshMask[i]) continue;
+      const anfassen = (i) => {
         mobile[i] = 1;
         for (let q = adjStart[i]; q < adjStart[i + 1]; q++) mobile[adjList[q]] = 1;
-      }
-      alpha = Math.max(alpha, 0.5);
+      };
+      for (let i = 0; i < n; i++) if (freshMask[i]) anfassen(i);
+      if (beweglich) for (const s of beweglich) anfassen(s);
+      alpha = Math.max(alpha, fresh > 0 ? 0.5 : 0.22);
+      if (settledOnce) emit('onWake');
       settledOnce = false;
     } else if (fresh > 0) reheat(0.4);
     else if (shape !== structure) reheat(0.12);
@@ -816,6 +1051,8 @@ export function createGraphCanvas(canvas, options = {}) {
     // Wer unsichtbar wird, darf nicht gewaehlt bleiben.
     if (selected >= 0 && !visible[selected]) selected = -1;
     if (hovered >= 0 && !visible[hovered]) hovered = -1;
+    visibleCount = 0;
+    for (let i = 0; i < n; i++) if (visible[i]) visibleCount++;
     computeTop();
     recomputeSizes();
     brightKey = null;
@@ -854,6 +1091,11 @@ export function createGraphCanvas(canvas, options = {}) {
   /* ---------------------------- Physik ----------------------------- */
 
   function reheat(value = 0.6) {
+    if (themen) {
+      // Die Themen-Ebene liegt fest: neu zeichnen, nicht neu rechnen.
+      requestFrame();
+      return api;
+    }
     mobile = null; // wer bewusst anstoesst, bewegt das Ganze
     alpha = Math.max(alpha, value);
     if (settledOnce) emit('onWake');
@@ -901,9 +1143,19 @@ export function createGraphCanvas(canvas, options = {}) {
     ringRadius = Math.max(far * 1.14 + 36 * settings.linkDistance, need, 80);
   }
 
+  /**
+   * Wie schnell die Wolke zur Ruhe kommt: ein grosses Thema (2.000 Knoten)
+   * in rund 170 Schritten, ein kleines in 300 -- bei vielen Knoten ist jede
+   * Sekunde Nachschwingen eine Sekunde Unruhe auf dem ganzen Bild.
+   */
+  function alphaDecayFor(count) {
+    const ticks = count > 1500 ? 170 : count > 400 ? 240 : 300;
+    return 1 - Math.pow(PHYS.alphaMin, 1 / ticks);
+  }
+
   function tick() {
     const t0 = performance.now();
-    alpha += (alphaTarget - alpha) * PHYS.alphaDecay;
+    alpha += (alphaTarget - alpha) * alphaDecayFor(n);
     if (tickCount++ % 6 === 0) updateRing();
 
     // Federn (d3.forceLink): Staerke 1/min(Grad), Anteil nach Grad verteilt.
@@ -1050,19 +1302,44 @@ export function createGraphCanvas(canvas, options = {}) {
   function fitTransform(pad) {
     const box = bounds(null);
     if (!box || !width || !height) return null;
-    // Die Kachel braucht seitlich Platz fuer die Namen neben den Punkten.
-    const padX = pad !== undefined ? pad : mini ? clamp(width * 0.2, 30, 90) : 48;
-    const padY = pad !== undefined ? pad : mini ? 26 : 48;
+    // Die Kachel braucht seitlich Platz fuer die Namen neben den Punkten;
+    // die grosse Ansicht oben Platz fuer Brotkrumen und Suche (setPadding).
+    let top;
+    let right;
+    let bottom;
+    let left;
+    if (typeof pad === 'number') top = right = bottom = left = pad;
+    else if (mini) {
+      left = right = clamp(width * 0.2, 30, 90);
+      top = bottom = 26;
+    } else {
+      const p = pad && typeof pad === 'object' ? pad : padding;
+      top = Number.isFinite(p.top) ? p.top : padding.top;
+      right = Number.isFinite(p.right) ? p.right : padding.right;
+      bottom = Number.isFinite(p.bottom) ? p.bottom : padding.bottom;
+      left = Number.isFinite(p.left) ? p.left : padding.left;
+    }
     const bw = Math.max(box.maxX - box.minX, 1);
     const bh = Math.max(box.maxY - box.minY, 1);
+    const innerW = Math.max(40, width - left - right);
+    const innerH = Math.max(40, height - top - bottom);
     // Ein kleines Netz wird nicht auf Briefmarkengroesse aufgeblasen: ueber
-    // 1.6 sehen zwanzig Punkte aus wie Knoepfe, nicht wie ein Gehirn.
-    const k = clamp(Math.min((width - padX * 2) / bw, (height - padY * 2) / bh), MIN_ZOOM, mini ? 2.2 : 1.6);
+    // 1.6 sehen zwanzig Punkte aus wie Knoepfe, nicht wie ein Gehirn. Die
+    // Themenkreise duerfen etwas groesser, sie tragen ihren Namen innen.
+    const k = clamp(Math.min(innerW / bw, innerH / bh), MIN_ZOOM, mini ? 2.2 : themen ? 1.35 : 2);
     return {
       k,
-      x: width / 2 - ((box.minX + box.maxX) / 2) * k,
-      y: height / 2 - ((box.minY + box.maxY) / 2) * k,
+      x: left + innerW / 2 - ((box.minX + box.maxX) / 2) * k,
+      y: top + innerH / 2 - ((box.minY + box.maxY) / 2) * k,
     };
+  }
+
+  function setPadding(next) {
+    if (next && typeof next === 'object') {
+      padding = { ...padding };
+      for (const key of ['top', 'right', 'bottom', 'left']) if (Number.isFinite(next[key])) padding[key] = next[key];
+    }
+    return api;
   }
 
   function reduceMotion() {
@@ -1127,7 +1404,11 @@ export function createGraphCanvas(canvas, options = {}) {
     if (slot === undefined || !visible[slot]) return api;
     autoFit = false;
     const k = config.zoom ? clamp(config.zoom, MIN_ZOOM, MAX_ZOOM) : Math.max(transform.k, 1.2);
-    const target = { k, x: width / 2 - posX[slot] * k, y: height / 2 - posY[slot] * k };
+    // In die Mitte der freien Flaeche (setPadding): neben einer offenen
+    // Karte, nicht darunter.
+    const cx = mini ? width / 2 : padding.left + Math.max(40, width - padding.left - padding.right) / 2;
+    const cy = mini ? height / 2 : padding.top + Math.max(40, height - padding.top - padding.bottom) / 2;
+    const target = { k, x: cx - posX[slot] * k, y: cy - posY[slot] * k };
     if (config.animate === false) {
       transform = target;
       animation = null;
@@ -1150,10 +1431,12 @@ export function createGraphCanvas(canvas, options = {}) {
       const k = clamp(transform.k * factor, MIN_ZOOM, MAX_ZOOM);
       const f = k / transform.k;
       animateTo({ k, x: cx - (cx - transform.x) * f, y: cy - (cy - transform.y) * f }, 220);
+      checkLevel(cx, cy, k);
     } else {
       animation = null;
       zoomAround(factor, cx, cy);
       requestFrame();
+      checkLevel(cx, cy);
     }
     return api;
   }
@@ -1248,14 +1531,33 @@ export function createGraphCanvas(canvas, options = {}) {
         focusSlot = -1;
       }
     }
+    // Weicher Aufbau und wachsende Linien halten die Schleife am Laufen,
+    // bis sie fertig sind -- dann steht das Bild wieder still.
+    if (enterStart) {
+      if (now < enterStart + ENTER_MS + ENTER_WAVE_MS * 4) busy = true;
+      else enterStart = 0;
+    }
+    if (growingUntil) {
+      if (now < growingUntil) busy = true;
+      else growingUntil = 0;
+    }
 
+    frameNow = now;
     draw();
     if (busy) requestFrame();
     else lastFrame = 0;
   }
 
+  /** 0..1: wie weit ein Knoten im weichen Aufbau ist (Welle 0-3, Hubs zuerst). */
+  function enterProgress(i) {
+    if (!enterStart) return 1;
+    const wave = themen ? Math.min(3, Math.floor((i * 4) / Math.max(1, n))) : Math.min(3, Math.floor((labelRank[i] * 4) / Math.max(1, n)));
+    return easeOut((frameNow - enterStart - wave * ENTER_WAVE_MS) / ENTER_MS);
+  }
+
   function draw() {
     const t0 = performance.now();
+    frameNow = t0;
     if (!palette) readPalette();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -1294,13 +1596,25 @@ export function createGraphCanvas(canvas, options = {}) {
     // Linien bleiben duenn: sie wachsen nur sanft mit dem Zoom mit.
     const lw = settings.linkScale * clamp(0.55 + 0.45 * Math.sqrt(k), 0.5, 1.8) * (mini ? 1.1 : 1);
     ctx.lineCap = 'round';
-    const lineAlpha = palette.lineAlpha * (mini ? 0.9 : 1);
+    // Beim Aufbau blenden die Linien nach den Knoten ein.
+    const enterA = enterStart ? easeOut((frameNow - enterStart - ENTER_WAVE_MS * 2) / ENTER_MS) : 1;
+    if (enterA <= 0) return;
+    const lineAlpha = palette.lineAlpha * (mini ? 0.9 : 1) * enterA;
     const lit = fade > 0;
+    if (themen) {
+      drawThemeLines(k, lineAlpha, lit);
+      return;
+    }
+    const growing = [];
     // Ohne Licht: alle Linien in einem Pfad -- ein Strich fuer tausend Kanten.
     ctx.beginPath();
     let any = false;
     for (let e = 0; e < m; e++) {
       if (!edgeVisible[e]) continue;
+      if (edgeBorn[e] && frameNow - edgeBorn[e] < EDGE_GROW_MS) {
+        growing.push(e);
+        continue;
+      }
       const p = edgeA[e];
       const q = edgeB[e];
       if (lit && (bright[p] && bright[q]) && (focusSlot < 0 || p === focusSlot || q === focusSlot)) continue;
@@ -1312,6 +1626,18 @@ export function createGraphCanvas(canvas, options = {}) {
     if (any) {
       ctx.strokeStyle = rgba(palette.line, lineAlpha * (1 - fade * (1 - dimAlpha * 0.9)));
       ctx.lineWidth = lw;
+      ctx.stroke();
+    }
+    // Eine neue Verbindung zieht sich vom einen zum anderen Knoten, im Akzent.
+    for (const e of growing) {
+      const p = edgeA[e];
+      const q = edgeB[e];
+      const f = easeOut((frameNow - edgeBorn[e]) / EDGE_GROW_MS);
+      ctx.beginPath();
+      ctx.moveTo(sx[p], sy[p]);
+      ctx.lineTo(sx[p] + (sx[q] - sx[p]) * f, sy[p] + (sy[q] - sy[p]) * f);
+      ctx.strokeStyle = rgba(palette.accent, 0.9 - 0.4 * f);
+      ctx.lineWidth = lw * 1.6;
       ctx.stroke();
     }
     if (!lit) return;
@@ -1346,52 +1672,228 @@ export function createGraphCanvas(canvas, options = {}) {
   }
 
   /**
+   * Themen-Ebene: feine Linien zwischen Themen, die Eintraege teilen -- je
+   * mehr gemeinsame, desto etwas kraeftiger (drei Stufen, drei Pfade). Sie
+   * enden am Rand der Kreise, nicht in der Mitte, damit sie nicht unter
+   * dem Namen durchlaufen.
+   */
+  function drawThemeLines(k, lineAlpha, lit) {
+    const stufen = [[], [], []];
+    for (let e = 0; e < m; e++) {
+      if (!edgeVisible[e]) continue;
+      const w = edgeWeight[e];
+      stufen[w >= 6 ? 2 : w >= 2 ? 1 : 0].push(e);
+    }
+    stufen.forEach((liste, stufe) => {
+      if (!liste.length) return;
+      const zeichne = (hell) => {
+        ctx.beginPath();
+        let any = false;
+        for (const e of liste) {
+          const p = edgeA[e];
+          const q = edgeB[e];
+          const imLicht = lit && bright[p] && bright[q] && (focusSlot < 0 || p === focusSlot || q === focusSlot);
+          if (imLicht !== hell) continue;
+          if (!edgeOnScreen(p, q)) continue;
+          const dx = sx[q] - sx[p];
+          const dy = sy[q] - sy[p];
+          const d = Math.hypot(dx, dy) || 1;
+          const rp = screenRadius(p, k) * enterProgress(p) + 3;
+          const rq = screenRadius(q, k) * enterProgress(q) + 3;
+          if (d <= rp + rq) continue;
+          ctx.moveTo(sx[p] + (dx / d) * rp, sy[p] + (dy / d) * rp);
+          ctx.lineTo(sx[q] - (dx / d) * rq, sy[q] - (dy / d) * rq);
+          any = true;
+        }
+        if (!any) return;
+        const a = hell ? Math.min(1, lineAlpha * 1.3) : lineAlpha * (1 - fade * (1 - dimAlpha * 0.9));
+        ctx.strokeStyle = hell ? rgba(palette.accent, 0.35 + 0.45 * fade) : rgba(palette.themeLine, a * (0.55 + stufe * 0.15));
+        ctx.lineWidth = (0.8 + stufe * 0.6) * (hell ? 1.4 : 1);
+        ctx.stroke();
+      };
+      zeichne(false);
+      if (lit) zeichne(true);
+    });
+  }
+
+  /**
    * Beim Heranzoomen wachsen die Abstaende linear, die Punkte nur gedaempft
    * (k^0.6): so wird das Netz beim Hineingehen luftiger statt dass ein Hub
-   * zur Scheibe aufquillt.
+   * zur Scheibe aufquillt. Themenkreise wachsen linear: sie sind Flaechen.
    */
   function screenRadius(i, k) {
+    if (themen) return radius[i] * k;
     const grow = k <= 1 ? k : Math.pow(k, 0.6);
     return Math.max(radius[i] * grow, mini ? 1.6 : 1.15);
   }
 
-  function drawNodes(k) {
+  /**
+   * Das Art-Symbol im Punkt, in der Farbe des Grundes: zwei Zeilen fuer eine
+   * Notiz, ein Ordner fuer ein Projekt, ein Haken fuer eine Aufgabe, ein
+   * Kalenderblatt fuer einen Termin, eine Sprechblase fuer einen Chat, ein
+   * Blatt mit Eselsohr fuer eine Datei, Kopf und Schultern fuer eine Person,
+   * eine Nadel fuer einen Ort, ein Haus fuer eine Organisation, ein kleiner
+   * Kreis fuer einen Begriff.
+   */
+  function glyphPath(type, x, y, s) {
+    switch (type) {
+      case 'note':
+        ctx.moveTo(x - s * 0.8, y - s * 0.35); ctx.lineTo(x + s * 0.8, y - s * 0.35);
+        ctx.moveTo(x - s * 0.8, y + s * 0.35); ctx.lineTo(x + s * 0.25, y + s * 0.35);
+        break;
+      case 'project':
+        ctx.moveTo(x - s, y - s * 0.55); ctx.lineTo(x - s * 0.3, y - s * 0.55); ctx.lineTo(x, y - s * 0.2);
+        ctx.lineTo(x + s, y - s * 0.2); ctx.lineTo(x + s, y + s * 0.7); ctx.lineTo(x - s, y + s * 0.7); ctx.closePath();
+        break;
+      case 'task':
+        ctx.moveTo(x - s * 0.8, y); ctx.lineTo(x - s * 0.2, y + s * 0.6); ctx.lineTo(x + s * 0.9, y - s * 0.6);
+        break;
+      case 'event':
+        ctx.rect(x - s * 0.85, y - s * 0.7, s * 1.7, s * 1.5);
+        ctx.moveTo(x - s * 0.85, y - s * 0.2); ctx.lineTo(x + s * 0.85, y - s * 0.2);
+        break;
+      case 'chat':
+        ctx.moveTo(x - s * 0.9, y - s * 0.6); ctx.lineTo(x + s * 0.9, y - s * 0.6); ctx.lineTo(x + s * 0.9, y + s * 0.4);
+        ctx.lineTo(x - s * 0.1, y + s * 0.4); ctx.lineTo(x - s * 0.6, y + s * 0.9); ctx.lineTo(x - s * 0.6, y + s * 0.4);
+        ctx.lineTo(x - s * 0.9, y + s * 0.4); ctx.closePath();
+        break;
+      case 'file':
+        ctx.moveTo(x - s * 0.7, y - s * 0.9); ctx.lineTo(x + s * 0.2, y - s * 0.9); ctx.lineTo(x + s * 0.7, y - s * 0.4);
+        ctx.lineTo(x + s * 0.7, y + s * 0.9); ctx.lineTo(x - s * 0.7, y + s * 0.9); ctx.closePath();
+        break;
+      case 'person':
+        ctx.moveTo(x + s * 0.35, y - s * 0.45); ctx.arc(x, y - s * 0.45, s * 0.35, 0, TAU);
+        ctx.moveTo(x - s * 0.9, y + s * 0.95); ctx.arc(x, y + s * 0.95, s * 0.9, Math.PI, TAU);
+        break;
+      case 'place':
+        ctx.moveTo(x, y + s * 0.95); ctx.lineTo(x - s * 0.55, y - s * 0.05);
+        ctx.arc(x, y - s * 0.3, s * 0.6, Math.PI * 0.85, Math.PI * 2.15); ctx.lineTo(x, y + s * 0.95);
+        break;
+      case 'org':
+        ctx.rect(x - s * 0.8, y - s * 0.9, s * 1.6, s * 1.8);
+        ctx.moveTo(x - s * 0.3, y - s * 0.4); ctx.lineTo(x + s * 0.3, y - s * 0.4);
+        ctx.moveTo(x - s * 0.3, y + s * 0.1); ctx.lineTo(x + s * 0.3, y + s * 0.1);
+        break;
+      case 'agent': case 'run':
+        ctx.moveTo(x, y - s); ctx.lineTo(x, y + s); ctx.moveTo(x - s, y); ctx.lineTo(x + s, y);
+        break;
+      default:
+        ctx.moveTo(x + s * 0.5, y); ctx.arc(x, y, s * 0.5, 0, TAU);
+    }
+  }
+
+  function glyphType(node) {
+    if (node.type === 'entity') return node.kind === 'topic' ? 'term' : (node.kind || 'term');
+    return node.type || 'note';
+  }
+
+  /**
+   * Themen-Ebene: grosse, ruhige Kreise. Fuellung mit einem Hauch des
+   * Themen-Tons, feiner Ring; ueberfahren oder gewaehlt bekommt der Kreis
+   * den Akzent als Ring und einen weichen Schein. Beim Aufbau wachsen die
+   * Kreise aus ihrer Mitte.
+   */
+  function drawThemes(k) {
     const lit = fade > 0;
+    for (let i = 0; i < n; i++) {
+      if (!visible[i]) continue;
+      const p = enterProgress(i);
+      if (p <= 0) continue;
+      const r = screenRadius(i, k) * (0.6 + 0.4 * p);
+      if (!onScreen(i, r + 4)) continue;
+      const ck = colorKey[i];
+      const hell = lit && (i === focusSlot || i === selected);
+      let a = p;
+      if (lit && !bright[i]) a *= 1 - fade * (1 - dimAlpha);
+      ctx.globalAlpha = a;
+      if (hell || i === selected) {
+        ctx.beginPath();
+        ctx.arc(sx[i], sy[i], r + 7, 0, TAU);
+        ctx.fillStyle = palette.accentGlow;
+        ctx.fill();
+      }
+      ctx.beginPath();
+      ctx.arc(sx[i], sy[i], r, 0, TAU);
+      ctx.fillStyle = ck >= 0 && palette.themeFill[ck] ? palette.themeFill[ck] : palette.themeFillPlain;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(sx[i], sy[i], r - 0.5, 0, TAU);
+      ctx.strokeStyle = hell || i === selected ? rgba(palette.accent, 0.5 + 0.5 * (i === selected ? 1 : fade)) : ck >= 0 && palette.themeRing[ck] ? palette.themeRing[ck] : palette.themeRingPlain;
+      ctx.lineWidth = hell || i === selected ? 1.5 : 1;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawNodes(k) {
+    if (themen) {
+      drawThemes(k);
+      return;
+    }
+    const lit = fade > 0;
+    const entering = !!enterStart;
     // Buendel nach Farbe: ein fill() pro Farbe statt eines pro Knoten. Was
     // zuruecktritt, wird mit Deckkraft gemalt statt mit einer zweiten Farbe
-    // -- so blendet es weich ueber, statt umzuspringen.
+    // -- so blendet es weich ueber, statt umzuspringen. Beim Aufbau kommt
+    // eine vierte Dimension dazu: die Welle (Hubs zuerst).
     const normal = new Map();
     const dimmed = new Map();
+    const outer = new Map(); // Nachbarn ausserhalb des Themas: leiser
+    const glyphs = [];
     for (let i = 0; i < n; i++) {
       if (!visible[i]) continue;
       const r = screenRadius(i, k);
       if (!onScreen(i, r + 2)) continue;
       if (i === selected || (lit && i === focusSlot)) continue; // kommt zuletzt, im Akzent
       const ck = colorKey[i];
-      const style = ck >= 0 && colors[ck] ? colors[ck] : palette.tiers[tierOf(i)];
-      const target = lit && !bright[i] ? dimmed : normal;
+      let style = ck >= 0 && colors[ck] ? colors[ck] : palette.tiers[tierOf(i)];
+      if (entering) style = `${style}\u0001${Math.min(3, Math.floor((labelRank[i] * 4) / Math.max(1, n)))}`;
+      const target = lit && !bright[i] ? dimmed : outside[i] ? outer : normal;
       let list = target.get(style);
       if (!list) target.set(style, (list = []));
       list.push(i);
+      if (r >= GLYPH_MIN_R && (!lit || bright[i]) && glyphs.length < 400) glyphs.push(i);
     }
-    const fillAll = (buckets) => {
-      for (const [style, list] of buckets) {
+    const fillAll = (buckets, baseAlpha) => {
+      for (const [key, list] of buckets) {
+        const cut = key.indexOf('\u0001');
+        const style = cut >= 0 ? key.slice(0, cut) : key;
+        let scale = 1;
+        if (cut >= 0) {
+          scale = easeOut((frameNow - enterStart - Number(key.slice(cut + 1)) * ENTER_WAVE_MS) / ENTER_MS);
+          if (scale <= 0) continue;
+        }
+        ctx.globalAlpha = baseAlpha * scale;
         ctx.beginPath();
         for (const i of list) {
-          const r = screenRadius(i, k);
+          const r = screenRadius(i, k) * scale;
           ctx.moveTo(sx[i] + r, sy[i]);
           ctx.arc(sx[i], sy[i], r, 0, TAU);
         }
         ctx.fillStyle = style;
         ctx.fill();
       }
+      ctx.globalAlpha = 1;
     };
-    if (dimmed.size) {
-      ctx.globalAlpha = 1 - fade * (1 - dimAlpha);
-      fillAll(dimmed);
+    if (dimmed.size) fillAll(dimmed, 1 - fade * (1 - dimAlpha));
+    if (outer.size) fillAll(outer, 0.55);
+    fillAll(normal, 1);
+
+    // Die Art im Punkt -- nur nah genug, nur im Licht, nie beim Aufbau.
+    if (glyphs.length && !entering) {
+      ctx.strokeStyle = palette.glyph;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      for (const i of glyphs) {
+        const r = screenRadius(i, k);
+        ctx.lineWidth = clamp(r * 0.11, 1, 1.5);
+        ctx.globalAlpha = outside[i] ? 0.55 : 0.9;
+        ctx.beginPath();
+        glyphPath(glyphType(nodes[i]), sx[i], sy[i], r * 0.46);
+        ctx.stroke();
+      }
       ctx.globalAlpha = 1;
     }
-    fillAll(normal);
 
     // Kachel: die direkten Nachbarn sind helle Punkte mit feinem Ring (Vorlage).
     if (ringIds && ringIds.size) {
@@ -1450,6 +1952,15 @@ export function createGraphCanvas(canvas, options = {}) {
         ctx.strokeStyle = rgba(palette.fg, 0.55);
         ctx.lineWidth = 1.2;
         ctx.stroke();
+      } else if (r >= GLYPH_MIN_R) {
+        // Auf dem Akzentblau ist das Symbol weiss (--accent-fg), hell wie dunkel.
+        ctx.strokeStyle = rgba({ r: 255, g: 255, b: 255 }, 0.95 * strength);
+        ctx.lineWidth = clamp(r * 0.11, 1, 1.6);
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        glyphPath(glyphType(nodes[i]), sx[i], sy[i], r * 0.42);
+        ctx.stroke();
       }
     }
   }
@@ -1480,7 +1991,98 @@ export function createGraphCanvas(canvas, options = {}) {
    * Nachbarn immer da. Was sich ueberlappen wuerde, faellt weg -- der
    * wichtigere Knoten gewinnt, weil er zuerst kommt.
    */
+  /**
+   * Themen-Ebene: der Name in der Mitte des Kreises, darunter leise
+   * "42 Eintraege". Ist der Kreis auf dem Bildschirm zu klein dafuer, steht
+   * der Name unter dem Kreis. Ein zu langer Name wird auf die Breite des
+   * Kreises gekuerzt -- nicht umgebrochen, ein Kreis ist keine Spalte.
+   */
+  /**
+   * Einen Namen auf hoechstens `maxLines` Zeilen der Breite `maxW` legen
+   * (mit der gerade gesetzten Schrift): Woerter greedy, die letzte Zeile
+   * bekommt bei Bedarf Auslassungspunkte. Ein Kreis ist keine Spalte --
+   * mehr als zwei Zeilen gibt es nicht.
+   */
+  function wrapName(name, maxW, maxLines) {
+    const words = String(name).split(/\s+/).filter(Boolean);
+    const lines = [];
+    let cur = '';
+    for (const w of words) {
+      const probe = cur ? `${cur} ${w}` : w;
+      if (ctx.measureText(probe).width <= maxW || !cur) cur = probe;
+      else {
+        lines.push(cur);
+        cur = w;
+        if (lines.length === maxLines) break;
+      }
+    }
+    if (lines.length < maxLines && cur) lines.push(cur);
+    else if (cur && lines.length === maxLines) lines[maxLines - 1] = `${lines[maxLines - 1]} ${cur}`;
+    if (!lines.length) lines.push(String(name));
+    const last = lines.length - 1;
+    let s = lines[last];
+    while (ctx.measureText(s).width > maxW && s.length > 3) s = `${s.slice(0, s.length - 2).trimEnd()}…`;
+    lines[last] = s;
+    return lines;
+  }
+
+  function drawThemeLabels(k) {
+    const lit = fade > 0;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i < n; i++) {
+      if (!visible[i]) continue;
+      const p = enterProgress(i);
+      if (p <= 0.2) continue;
+      const r = screenRadius(i, k);
+      if (!onScreen(i, r + 40)) continue;
+      const node = nodes[i];
+      let a = easeOut((p - 0.2) / 0.8);
+      if (lit && !bright[i]) a *= 1 - fade * (1 - dimAlpha);
+      const strong = i === selected || (lit && i === focusSlot);
+      const px = clamp(Math.round(r * 0.3), 11, 16);
+      const innen = r >= 30;
+      const font = `500 ${px}px ${fontFamily}`;
+      ctx.font = font;
+      const maxW = innen ? r * 1.72 : 180;
+      const zeilen = wrapName(clip(node.label || node.name || node.id, 48), maxW, innen ? 2 : 1);
+      const count = `${formatCount(node.anzahl)} ${Number(node.anzahl) === 1 ? 'Eintrag' : 'Einträge'}`;
+      const subPx = clamp(Math.round(r * 0.19), 10, 12);
+      ctx.globalAlpha = a;
+      if (innen) {
+        // Name (eine oder zwei Zeilen) und darunter die Zahl, als Block mittig.
+        const zeilenH = px * 1.15;
+        const block = zeilen.length * zeilenH + subPx * 1.3;
+        let y = sy[i] - block / 2 + zeilenH / 2;
+        ctx.fillStyle = strong ? palette.labelStrong : palette.themeText;
+        for (const z of zeilen) {
+          ctx.fillText(z, sx[i], y);
+          y += zeilenH;
+        }
+        ctx.font = `${subPx}px ${fontFamily}`;
+        ctx.fillStyle = palette.themeSub;
+        ctx.fillText(count, sx[i], y - zeilenH / 2 + subPx * 0.85);
+      } else {
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = palette.halo;
+        ctx.strokeText(zeilen[0], sx[i], sy[i] + r + 10);
+        ctx.fillStyle = strong ? palette.labelStrong : palette.themeText;
+        ctx.fillText(zeilen[0], sx[i], sy[i] + r + 10);
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
+  }
+
   function drawLabels(k) {
+    if (themen) {
+      drawThemeLabels(k);
+      return;
+    }
+    // Beim Aufbau kommen die Namen zuletzt.
+    const enterA = enterStart ? easeOut((frameNow - enterStart - ENTER_WAVE_MS * 3) / ENTER_MS) : 1;
+    if (enterA <= 0) return;
     // Halbe Pixel als Stufen: sonst aendert jeder Zoomschritt die Schrift
     // und jede Breite muesste neu gemessen werden.
     const px = mini ? 12.5 : Math.round(clamp(10.5 + 1.6 * Math.log2(Math.max(k, 0.25) + 1), 10.5, 15) * 2) / 2;
@@ -1531,7 +2133,11 @@ export function createGraphCanvas(canvas, options = {}) {
     // Schwelle; die groessten stehen immer (topSlots).
     const fit = mini ? null : fitTransform();
     const schwelle = Math.max(lz, fit ? fit.k * 1.6 * (lz / GRAPH_DEFAULTS.labelZoom) : lz);
-    const gate = clamp((k - 0.8 * schwelle) / (0.2 * schwelle), 0, 1);
+    // Ein Thema mit wenigen Eintraegen (Ebene 1) traegt alle Namen, die
+    // Platz finden -- man will lesen, was man geoeffnet hat. Erst ein
+    // dichtes Netz blendet gewoehnliche Namen nach Zoom ein (LOD).
+    const dicht = visibleCount > DICHT_AB;
+    const gate = dicht ? clamp((k - 0.8 * schwelle) / (0.2 * schwelle), 0, 1) : 1;
     const list = [];
     // Zuerst die, die immer stehen muessen: Fokus und Nachbarn.
     const forced = new Set();
@@ -1554,7 +2160,7 @@ export function createGraphCanvas(canvas, options = {}) {
         const i = labelOrder[o];
         if (!visible[i] || forced.has(i)) continue;
         const importance = radius[i] / (2.8 * settings.nodeScale);
-        let a = clamp((k * importance - lz) / (0.45 * lz), 0, 1);
+        let a = dicht ? clamp((k * importance - lz) / (0.45 * lz), 0, 1) : 1;
         a = topSlots.has(i) ? 1 : a * gate;
         if (lit && !bright[i]) a *= 1 - fade * 0.85;
         else if (lit && highlightSet && bright[i]) a = Math.max(a, fade * 0.9);
@@ -1631,12 +2237,13 @@ export function createGraphCanvas(canvas, options = {}) {
     // Schatten eines Nachbarn.
     ctx.lineWidth = 3;
     ctx.strokeStyle = palette.halo;
-    for (const [i, x, y, a] of placed) {
-      ctx.globalAlpha = a;
+    const alphaOf = (i, a, isForced) => a * enterA * (outside[i] && !isForced ? 0.6 : 1);
+    for (const [i, x, y, a, isForced] of placed) {
+      ctx.globalAlpha = alphaOf(i, a, isForced);
       ctx.strokeText(labelText(i), x, y);
     }
     for (const [i, x, y, a, isForced] of placed) {
-      ctx.globalAlpha = a;
+      ctx.globalAlpha = alphaOf(i, a, isForced);
       const strong = i === focusSlot || i === selected;
       ctx.fillStyle = strong ? palette.labelStrong : isForced && !mini ? palette.labelStrong : palette.label;
       ctx.fillText(labelText(i), x, y);
@@ -1733,6 +2340,7 @@ export function createGraphCanvas(canvas, options = {}) {
       // Zwei Finger: zoomen und schieben, ein angefangener Zug endet -- und
       // das Licht, das der erste Finger auf einem Knoten angemacht hat, geht
       // aus. Sonst bliebe der Knoten nach dem Zoomen blau haengen.
+      clearPress(gesture);
       if (gesture && gesture.kind === 'node' && gesture.dragging) releaseNode(gesture.slot);
       if (event.pointerType === 'touch') setHovered(-1);
       const [a, b] = [...pointers.values()];
@@ -1744,9 +2352,27 @@ export function createGraphCanvas(canvas, options = {}) {
     const slop = event.pointerType === 'touch' ? 14 : 5;
     const slot = nodeAt(p.x, p.y, slop);
     gesture = slot >= 0
-      ? { kind: 'node', slot, start: p, dragging: false, pointerType: event.pointerType }
+      ? { kind: 'node', slot, start: p, dragging: false, pointerType: event.pointerType, timer: 0, longPressed: false }
       : { kind: 'pan', start: p, last: p, moved: false, pointerType: event.pointerType };
-    if (event.pointerType === 'touch' && slot >= 0) setHovered(slot);
+    if (event.pointerType === 'touch' && slot >= 0) {
+      setHovered(slot);
+      // Langes Druecken: der Finger bleibt liegen, ohne zu ziehen.
+      const g = gesture;
+      g.timer = setTimeout(() => {
+        if (gesture !== g || g.dragging || destroyed) return;
+        g.longPressed = true;
+        setSelection(nodes[g.slot].id);
+        emit('onSelect', nodes[g.slot]);
+        emit('onLongPress', nodes[g.slot]);
+      }, LONG_PRESS_MS);
+    }
+  }
+
+  function clearPress(g) {
+    if (g && g.timer) {
+      clearTimeout(g.timer);
+      g.timer = 0;
+    }
   }
 
   function onPointerMove(event) {
@@ -1767,11 +2393,14 @@ export function createGraphCanvas(canvas, options = {}) {
       gesture.dist = dist;
       gesture.mid = mid;
       requestFrame();
+      checkLevel(mid.x, mid.y);
       return;
     }
     if (gesture.kind === 'node') {
       const moved = Math.hypot(p.x - gesture.start.x, p.y - gesture.start.y);
+      if (gesture.longPressed) return; // nach langem Druecken zieht der Finger nicht mehr
       if (!gesture.dragging && moved > CLICK_SLOP) {
+        clearPress(gesture);
         gesture.dragging = true;
         userMoved();
         fixed[gesture.slot] = 1;
@@ -1829,6 +2458,7 @@ export function createGraphCanvas(canvas, options = {}) {
     }
     const g = gesture;
     gesture = null;
+    clearPress(g);
     canvas.style.cursor = hovered >= 0 ? 'pointer' : '';
     if (g.kind === 'node') {
       if (g.dragging) {
@@ -1837,6 +2467,7 @@ export function createGraphCanvas(canvas, options = {}) {
         return;
       }
       if (g.pointerType === 'touch') setHovered(-1);
+      if (g.longPressed) return; // das lange Druecken hat schon gewaehlt
       tap(g.slot, p);
       return;
     }
@@ -1866,8 +2497,52 @@ export function createGraphCanvas(canvas, options = {}) {
 
   function onPointerCancel(event) {
     pointers.delete(event.pointerId);
+    clearPress(gesture);
     if (gesture && gesture.kind === 'node' && gesture.dragging) releaseNode(gesture.slot);
     if (!pointers.size) gesture = null;
+  }
+
+  /**
+   * Zoomschwellen. Themen-Ebene: wer deutlich ueber das Eingepasste hinein
+   * zoomt, meint das Thema unter dem Zeiger -- onDive. Netz-Ebene: wer weit
+   * unter das Eingepasste hinaus zoomt, will die Uebersicht -- onSurface.
+   * Jede Schwelle meldet einmal und erst wieder, wenn der Zoom zurueck war.
+   */
+  function checkLevel(px, py, kOverride) {
+    if (!interactive || !n) return;
+    const fit = fitTransform();
+    if (!fit) return;
+    const k = Number.isFinite(kOverride) ? kOverride : transform.k;
+    if (themen) {
+      if (k > fit.k * DIVE_FACTOR) {
+        if (!levelArmed) return;
+        const slot = nearestNode(px, py, 260);
+        if (slot < 0) return;
+        levelArmed = false;
+        emit('onDive', nodes[slot]);
+      } else if (k < fit.k * 1.5) levelArmed = true;
+    } else if (k < fit.k * SURFACE_FACTOR) {
+      if (!levelArmed) return;
+      levelArmed = false;
+      emit('onSurface');
+    } else if (k > fit.k * 0.7) levelArmed = true;
+  }
+
+  /** Der Knoten, dessen Mitte dem Bildschirmpunkt am naechsten liegt (bis maxDist). */
+  function nearestNode(x, y, maxDist) {
+    let best = -1;
+    let bestD = maxDist * maxDist;
+    for (let i = 0; i < n; i++) {
+      if (!visible[i]) continue;
+      const dx = sx[i] - x;
+      const dy = sy[i] - y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD) {
+        bestD = d2;
+        best = i;
+      }
+    }
+    return best;
   }
 
   function onPointerLeave(event) {
@@ -1885,6 +2560,7 @@ export function createGraphCanvas(canvas, options = {}) {
     userMoved();
     zoomAround(factor, p.x, p.y);
     requestFrame();
+    checkLevel(p.x, p.y);
   }
 
   function onKeyDown(event) {
@@ -2008,9 +2684,10 @@ export function createGraphCanvas(canvas, options = {}) {
     colorKey.fill(-1);
     colors = [];
     if (colorOf && Array.isArray(list) && palette) {
+      // Ein Hauch, kein Anstrich: gut ein Drittel Ton in ein helles Grau.
       colors = list.map((css) => {
         const c = parseColor(ctx, css, palette.fg);
-        return rgba(mix(mix(palette.ground, palette.fg, palette.dark ? 0.72 : 0.6), c, 0.62));
+        return rgba(mix(mix(palette.ground, palette.fg, palette.dark ? 0.74 : 0.58), c, palette.dark ? 0.36 : 0.4));
       });
       for (const [id, k] of colorOf) {
         const s = index.get(id);
@@ -2066,6 +2743,101 @@ export function createGraphCanvas(canvas, options = {}) {
     return out;
   }
 
+  /** Alle ids bis zur Tiefe `depth` um einen Knoten (ihn selbst eingeschlossen), ueber alle geladenen Linien. */
+  function neighbourhood(id, depth = 2) {
+    const start = index.get(id);
+    const out = new Set();
+    if (start === undefined) return out;
+    let frontier = [start];
+    out.add(id);
+    const seen = new Uint8Array(n);
+    seen[start] = 1;
+    for (let d = 0; d < depth && frontier.length; d++) {
+      const next = [];
+      for (const s of frontier) {
+        for (let q = adjStart[s]; q < adjStart[s + 1]; q++) {
+          const t = adjList[q];
+          if (seen[t]) continue;
+          seen[t] = 1;
+          out.add(nodes[t].id);
+          next.push(t);
+        }
+      }
+      frontier = next;
+    }
+    return out;
+  }
+
+  /** Der Knoten unter einem Bildschirmpunkt (CSS-Pixel), oder null. */
+  function nodeAtScreen(x, y, slop = 4) {
+    const s = nodeAt(x, y, slop);
+    return s >= 0 ? nodes[s] : null;
+  }
+
+  /** Weicher Aufbau: Knoten wachsen in Wellen, Linien und Namen blenden nach. */
+  function enter(delayMs = 0) {
+    if (reduceMotion()) {
+      enterStart = 0;
+      requestFrame();
+      return api;
+    }
+    enterStart = performance.now() + Math.max(0, delayMs);
+    requestFrame();
+    return api;
+  }
+
+  /**
+   * Ein leichter Stoss fuer einzelne Knoten (neue Verbindung): sie und ihre
+   * Nachbarn duerfen sich kurz bewegen, der Rest bleibt stehen. Laeuft die
+   * Wolke ohnehin noch, kommt nur der Stoss dazu.
+   */
+  function nudge(ids, strength = 1) {
+    if (themen) return api;
+    const slots = [];
+    for (const id of ids || []) {
+      const s = index.get(id);
+      if (s !== undefined && visible[s]) slots.push(s);
+    }
+    if (!slots.length) return api;
+    if (alpha < PHYS.alphaMin) {
+      mobile = new Uint8Array(n);
+      for (const s of slots) {
+        mobile[s] = 1;
+        for (let q = adjStart[s]; q < adjStart[s + 1]; q++) mobile[adjList[q]] = 1;
+      }
+    }
+    for (const s of slots) {
+      // Richtung deterministisch aus dem Platz, Betrag klein: ein Ruck, kein Sprung.
+      const angle = jitter(s * 17 + 3) * 3000;
+      velX[s] += Math.cos(angle) * 4 * strength;
+      velY[s] += Math.sin(angle) * 4 * strength;
+    }
+    alpha = Math.max(alpha, 0.16);
+    if (settledOnce) emit('onWake');
+    settledOnce = false;
+    requestFrame();
+    return api;
+  }
+
+  /**
+   * Eine Verbindung zu den geladenen Daten dazunehmen, ohne Neuladen: die
+   * Linie zieht sich sichtbar, beide Knoten bewegen sich leicht. Liefert
+   * false, wenn ein Ende nicht geladen ist oder die Linie schon da war.
+   */
+  function addEdge(edge) {
+    if (!edge || typeof edge.from !== 'string' || typeof edge.to !== 'string' || edge.from === edge.to) return false;
+    const a = index.get(edge.from);
+    const b = index.get(edge.to);
+    if (a === undefined || b === undefined) return false;
+    for (let q = adjStart[a]; q < adjStart[a + 1]; q++) if (adjList[q] === b) return false;
+    const edges = new Array(m + 1);
+    for (let e = 0; e < m; e++) edges[e] = { from: nodes[edgeA[e]].id, to: nodes[edgeB[e]].id, weight: edgeWeight[e] };
+    edges[m] = { from: edge.from, to: edge.to, weight: Number(edge.weight) || 1 };
+    setData({ nodes, edges }, { beweglich: [edge.from, edge.to] });
+    nudge([edge.from, edge.to]);
+    return true;
+  }
+
   function stats() {
     let vn = 0;
     let ve = 0;
@@ -2111,20 +2883,29 @@ export function createGraphCanvas(canvas, options = {}) {
     setSettings,
     setLabels,
     setSelection,
+    setPadding,
     refreshTheme,
     prewarm,
     reheat,
+    enter,
+    nudge,
+    addEdge,
     fitToView,
     focus,
     zoomBy,
     resize,
     screenPosition,
     neighbours,
+    neighbourhood,
+    nodeAtScreen,
     stats,
     destroy,
     get transform() { return { ...transform }; },
     get settings() { return { ...settings }; },
     get selectedId() { return selected >= 0 ? nodes[selected].id : null; },
+    /** Der Zoom, bei dem alles eingepasst ist -- Bezug fuer die Schwellen. */
+    get fitZoom() { const f = fitTransform(); return f ? f.k : 1; },
+    get hoveredId() { return hovered >= 0 ? nodes[hovered].id : null; },
     stopFollowing() { autoFit = false; },
     /** Die Kachel will ein ruhiges Bild ohne Nachschwingen. */
     freeze() {

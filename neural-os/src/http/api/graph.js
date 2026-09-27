@@ -13,9 +13,29 @@
  * `POST /api/graph/rescan` re-derives every link from the text that implies
  * it. It can touch the whole vault, so it is a write and it reports real
  * counts rather than a cheerful "done".
+ *
+ * Das Wissensuniversum (Vertrag A-F vom 27.09.2026, src/graph/universum.js)
+ * --------------------------------------------------------------------------
+ *   GET  /api/graph/universum?tiefe=0            Themenbereiche (<= ~40)
+ *   GET  /api/graph/universum?tiefe=1&thema=<id> ein Thema: Knoten, Kanten,
+ *                                                Nachbarn ausserhalb
+ *   POST /api/graph/verbinden    {from, to:[ids], kind?, reason?}
+ *                                -> {edges, neu, bereits, rueckgaengig}
+ *   POST /api/graph/rueckgaengig {edges:[ids]}   nimmt genau diese zurueck
+ *   POST /api/graph/ablehnen     {from, to:[ids]} merkt sich das Paar
+ *   POST /api/graph/zusammenfassung {id}         KI-Zusammenfassung eines
+ *                                                Knotens -- ehrlich: solange
+ *                                                kein Dienst sie liefert,
+ *                                                sagt die Antwort das.
+ *
+ * "Rueckgaengig" laeuft hier bewusst nicht ueber den Aenderungsverlauf:
+ * der nimmt Kanten ausdruecklich nicht auf (src/store/history.js, weil
+ * abgeleitete Kanten beim naechsten Speichern ohnehin neu entstuenden).
+ * Eine von Hand gezogene Kante hat ihre Umkehrung deshalb direkt neben sich.
  */
 
 const schema = require('../../store/schema');
+const universum = require('../../graph/universum');
 const { ValidationError } = require('../../kernel/errors');
 const {
   need,
@@ -23,6 +43,7 @@ const {
   asObject,
   requireString,
   optionalString,
+  requireStringArray,
   intParam,
   boolParam,
   strParam,
@@ -32,7 +53,84 @@ const {
 
 const DIRECTIONS = new Set(['in', 'out', 'both']);
 
+/** Der Satz, den die Karte zeigt, solange keine KI zusammenfassen kann. */
+const KI_FEHLT = 'Kommt, sobald eine KI verbunden ist.';
+
 function register(router) {
+  router.get('/api/graph/universum', (rc) => {
+    rc.requireCapability('read');
+    const store = need(rc.ctx.store, 'Der Speicher');
+    const t0 = Date.now();
+    const tiefe = intParam(rc.query, 'tiefe', 0, 0, 1);
+    const thema = strParam(rc.query, 'thema', 200);
+    const typen = listParam(rc.query, 'typen');
+    if (typen) {
+      for (const type of typen) {
+        if (!schema.GRAPH_TYPES.includes(type)) {
+          throw new ValidationError(`"${type}" ist keine Art, die im Graphen vorkommt. Möglich: ${schema.GRAPH_TYPES.join(', ')}.`);
+        }
+      }
+    }
+    if (tiefe === 1 && !thema) throw new ValidationError('Ebene 1 braucht ein Thema ("thema").');
+
+    const { u, ausCache } = universum.universum(store, { typen: typen || undefined });
+    const out = tiefe === 1 ? universum.ebene1(u, thema) : universum.ebene0(u);
+    out.ausCache = ausCache;
+    out.dauerMs = Date.now() - t0;
+    return out;
+  });
+
+  router.post('/api/graph/verbinden', async (rc) => {
+    rc.requireCapability('write');
+    const store = need(rc.ctx.store, 'Der Speicher');
+    const body = asObject(await rc.body());
+    const from = requireString(body.from, 'from', { max: 80 });
+    const to = requireStringArray(body.to, 'to', { max: 80, maxItems: 100 });
+    const kind = optionalString(body.kind, 'kind', { max: 40 }) || 'related';
+    const reason = optionalString(body.reason, 'reason', { max: 500 }) || undefined;
+    return universum.verbinden(store, from, to, { kind, reason });
+  });
+
+  router.post('/api/graph/rueckgaengig', async (rc) => {
+    rc.requireCapability('write');
+    const store = need(rc.ctx.store, 'Der Speicher');
+    const body = asObject(await rc.body());
+    const edges = requireStringArray(body.edges, 'edges', { max: 80, maxItems: 100 });
+    return universum.rueckgaengig(store, edges);
+  });
+
+  router.post('/api/graph/ablehnen', async (rc) => {
+    rc.requireCapability('write');
+    const store = need(rc.ctx.store, 'Der Speicher');
+    const body = asObject(await rc.body());
+    const from = requireString(body.from, 'from', { max: 80 });
+    const to = requireStringArray(body.to, 'to', { max: 80, maxItems: 100 });
+    return universum.ablehnen(store, from, to);
+  });
+
+  /**
+   * Die KI-Zusammenfassung eines Knotens. Der Chat-Dienst liefert sie ueber
+   * `zusammenfassen({record, verknuepft})` -> {text, modell?}, sobald ein
+   * spaeterer Schritt sie einbaut. Bis dahin sagt die Antwort ehrlich, dass
+   * nichts da ist -- mit 200, damit die Karte den Satz zeigt statt eines
+   * Fehlers, und mit `verfuegbar: false`, damit niemand ihn fuer eine
+   * Zusammenfassung haelt.
+   */
+  router.post('/api/graph/zusammenfassung', async (rc) => {
+    rc.requireCapability('read');
+    const store = need(rc.ctx.store, 'Der Speicher');
+    const body = asObject(await rc.body());
+    const id = requireString(body.id, 'id', { max: 80 });
+    const record = mustGet(store, id);
+    const dienst = rc.ctx.chat && typeof rc.ctx.chat.zusammenfassen === 'function' ? rc.ctx.chat : null;
+    if (!dienst) return { id: record.id, verfuegbar: false, text: null, grund: KI_FEHLT };
+    const verknuepft = verknuepfungenVon(store, record.id);
+    const ergebnis = await dienst.zusammenfassen({ record, verknuepft });
+    const text = ergebnis && typeof ergebnis.text === 'string' ? ergebnis.text.trim() : '';
+    if (!text) return { id: record.id, verfuegbar: false, text: null, grund: KI_FEHLT };
+    return { id: record.id, verfuegbar: true, text, modell: (ergebnis && ergebnis.modell) || null };
+  });
+
   router.get('/api/graph', (rc) => {
     rc.requireCapability('read');
     const store = need(rc.ctx.store, 'Der Speicher');
@@ -140,4 +238,35 @@ function register(router) {
   });
 }
 
-module.exports = { register };
+/**
+ * Eingehende und ausgehende Verknuepfungen eines Satzes, mit dem Titel der
+ * Gegenseite (Vertrag B). Ein Nachbar, den es nicht mehr gibt (Tombstone),
+ * wird ausgelassen statt als "Unbekannt" angezeigt.
+ */
+function verknuepfungenVon(store, id) {
+  const label = require('../../graph/view').label;
+  const eingehend = [];
+  const ausgehend = [];
+  let edges = [];
+  try {
+    edges = store.edges.for(id, { direction: 'both', limit: 500 });
+  } catch { /* ein Satz ohne Kanten */ }
+  for (const edge of edges) {
+    const d = edge.data || {};
+    const raus = d.from === id;
+    const other = store.get(raus ? d.to : d.from);
+    if (!other) continue;
+    (raus ? ausgehend : eingehend).push({
+      id: other.id,
+      type: other.type,
+      title: label(other),
+      kind: d.kind,
+      reason: d.reason || '',
+      source: d.source || 'manual',
+      edgeId: edge.id,
+    });
+  }
+  return { eingehend, ausgehend };
+}
+
+module.exports = { register, verknuepfungenVon, KI_FEHLT };
