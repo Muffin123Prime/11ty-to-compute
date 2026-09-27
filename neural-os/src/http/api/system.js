@@ -148,6 +148,26 @@ function agentState(ctx) {
   return { active, available: !!runtime, pendingApprovals: pending };
 }
 
+/**
+ * Welcher Anbieter antwortet (Gemini oder Claude) und ob er verbunden ist --
+ * ohne Netz, aus Schlüssel, Tresor und Schleuse (src/models/ki.js). Die
+ * Schale zeigt daraus den Status unten links ("Online verbunden · Gemini").
+ */
+function anbieterState(ctx) {
+  const k = ctx.kiDienst;
+  if (!k || typeof k.zustand !== 'function') return null;
+  try {
+    const z = k.zustand();
+    return {
+      aktiv: z.aktiv, name: z.name, verbunden: z.verbunden, modell: z.modell, modellName: z.modellName,
+      schluesselVorhanden: z.schluesselVorhanden, irgendeinSchluessel: z.irgendeinSchluessel,
+      gesperrt: z.gesperrt, grund: z.grund, grundCode: z.grundCode, netz: z.netz,
+    };
+  } catch (err) {
+    return { verbunden: false, grund: (err && err.message) || String(err) };
+  }
+}
+
 /** `{id, name}` dieser KI, frisch gelesen (nach einer Umbenennung gilt sofort der neue Name). */
 function kiState(ctx) {
   const ki = ctx.ki;
@@ -189,6 +209,8 @@ function register(router) {
       // Welche KI antwortet? Der Tab merkt sich die Kennung und schickt sie
       // ab dann mit (X-Neural-OS); der Name steht oben in der Oberfläche.
       ki: kiState(ctx),
+      // Der KI-Anbieter (nicht die Identität): wer antwortet, und ob er kann.
+      anbieter: anbieterState(ctx),
       network: networkState(ctx),
       vault: vaultState(ctx),
       models: modelState(ctx),

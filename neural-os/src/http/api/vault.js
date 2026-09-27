@@ -214,31 +214,38 @@ function sitzungSetzen(rc) {
 }
 
 /**
- * Der Claude-Schlüssel liegt in einer eigenen Datei neben dem Speicher. Wird
- * die PIN eingerichtet, muss auch er versiegelt werden -- sonst läge der
- * teuerste Zugang als einziger im Klartext neben einem verschlüsselten Tresor.
- * (src/models/claude.js versiegelt ihn sonst erst beim nächsten Lesen nach
- * einem Neustart.) Format wie dort: {v:1, versiegelt, inhalt:base64}.
+ * Die Anbieter-Schlüssel (Claude, Gemini) liegen in eigenen Dateien neben dem
+ * Speicher. Wird die PIN eingerichtet, müssen auch sie versiegelt werden --
+ * sonst lägen die teuersten Zugänge als einzige im Klartext neben einem
+ * verschlüsselten Tresor. (src/models/anbieter-dienst.js versiegelt sie
+ * sonst erst beim nächsten Lesen nach einem Neustart.) Format wie dort:
+ * {v:1, versiegelt, inhalt:base64}.
  */
+const SCHLUESSEL_DATEIEN = ['claude-schluessel.json', 'gemini-schluessel.json'];
+
 function claudeNachversiegeln(rc) {
   const vault = rc.ctx.paths && rc.ctx.paths.vault;
   const crypto = rc.ctx.vaultCrypto;
   if (!vault || !crypto || typeof crypto.encryptBuffer !== 'function') return false;
-  const datei = path.join(vault, 'claude-schluessel.json');
-  let huelle;
-  try {
-    huelle = JSON.parse(fs.readFileSync(datei, 'utf8'));
-  } catch {
-    return false;
+  let getan = false;
+  for (const name of SCHLUESSEL_DATEIEN) {
+    const datei = path.join(vault, name);
+    let huelle;
+    try {
+      huelle = JSON.parse(fs.readFileSync(datei, 'utf8'));
+    } catch {
+      continue;
+    }
+    if (!huelle || huelle.versiegelt || typeof huelle.inhalt !== 'string') continue;
+    const klar = Buffer.from(huelle.inhalt, 'base64');
+    const neu = { v: 1, versiegelt: true, inhalt: crypto.encryptBuffer(klar).toString('base64') };
+    const tmp = `${datei}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(neu), { mode: 0o600 });
+    fs.renameSync(tmp, datei);
+    klar.fill(0);
+    getan = true;
   }
-  if (!huelle || huelle.versiegelt || typeof huelle.inhalt !== 'string') return false;
-  const klar = Buffer.from(huelle.inhalt, 'base64');
-  const neu = { v: 1, versiegelt: true, inhalt: crypto.encryptBuffer(klar).toString('base64') };
-  const tmp = `${datei}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify(neu), { mode: 0o600 });
-  fs.renameSync(tmp, datei);
-  klar.fill(0);
-  return true;
+  return getan;
 }
 
 /**

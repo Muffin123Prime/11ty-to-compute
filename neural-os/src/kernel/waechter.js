@@ -10,6 +10,14 @@ const fs = require('node:fs');
  *    ENOENT/EIO/ENODEV/ENXIO -> sofort `ende(0)`, OHNE flush. `node.exe` liegt
  *    selbst auf dem Stick, ein Server ohne Stick kann nichts mehr retten und
  *    nur noch Daten aus dem Speicher ausliefern (Bauplan 0.2);
+ *  - wenn am selben Pfad ein ANDERER Stick steckt: schnell getauscht, unter
+ *    Windows mit demselben Laufwerksbuchstaben. Ein Marker ist dann da, aber
+ *    nicht unserer: andere `kiId`, ein anderes Gerät (`dev`, unter Windows die
+ *    Seriennummer des Laufwerks) oder, außer unter Windows, ein anderer
+ *    Ordner `data/` (dev/ino). Dann sofort `ende(0)`, ohne zu schreiben:
+ *    Alles, was per Pfad geschrieben würde (config.json, Marker, Laufzettel),
+ *    landete auf dem fremden Stick und machte ihn zum Zwilling (Prüfung
+ *    Runde 2, s18);
  *  - im Leerlauf: alle 15 s; kein offener Tab (`streams === 0`), keine
  *    laufende Anfrage, die letzte über 10 min her und der Start über 5 min
  *    her -> `beenden('leerlauf')`, also sauber mit Speichern.
@@ -31,6 +39,10 @@ const WEG_CODES = new Set(['ENOENT', 'EIO', 'ENODEV', 'ENXIO']);
 /**
  * @param {object} opts
  * @param {string|null} opts.marker   `portable.marker`; ohne Marker (Heim-Installation) kein Stick-Wächter
+ * @param {()=>string|null} [opts.kennung]  die Kennung dieser KI, jedes Mal frisch (sie kann sich erneuern)
+ * @param {string|null} [opts.ordner]  `paths.home`, also `data/` auf dem Stick
+ * @param {string} [opts.plattform]
+ * @param {(p:string)=>Promise<string>} [opts.lesen]
  * @param {()=>{streams:number, inFlight:number, letzteAnfrage:number}} opts.aktivitaet
  * @param {(grund:string)=>any} opts.beenden   sauberes Ende (app.close, Laufzettel, exit)
  * @param {(code:number)=>any} [opts.ende]     hartes Ende, Vorgabe process.exit
@@ -48,6 +60,10 @@ function starte({
   setInterval: planen = setInterval,
   clearInterval: abbrechen = clearInterval,
   stat = (p) => fs.promises.stat(p),
+  lesen = (p) => fs.promises.readFile(p, 'utf8'),
+  kennung = null,
+  ordner = null,
+  plattform = process.platform,
   log = null,
 } = {}) {
   const start = jetzt();
@@ -57,12 +73,60 @@ function starte({
   let zaehltAb = 0; // nur nach einem Zeitsprung gesetzt
   let beendet = false;
   const zeitgeber = [];
+  // Woran der eigene Stick zu erkennen ist; beim ersten Blick gemerkt.
+  let bezug = null;
+  // Die Kennung, die zuletzt im Marker stand und passte. Während
+  // `erneuern` steht kurz die alte im Marker und schon die neue im Speicher.
+  let bisher = null;
+
+  /** Was jetzt am Pfad steckt: null = unser Stick, sonst der Grund. */
+  async function fremd(st) {
+    const jetztBezug = { dev: st && st.dev, ordnerDev: undefined, ordnerIno: undefined };
+    if (ordner && plattform !== 'win32') {
+      const o = await stat(ordner);
+      jetztBezug.ordnerDev = o && o.dev;
+      jetztBezug.ordnerIno = o && o.ino;
+    }
+    let kiId;
+    if (typeof kennung === 'function') {
+      let info = null;
+      try {
+        info = JSON.parse(await lesen(marker));
+      } catch (err) {
+        if (err && WEG_CODES.has(err.code)) throw err;
+        info = null; // gerade nicht lesbar: sagt nichts
+      }
+      if (info && typeof info === 'object') kiId = typeof info.kiId === 'string' && info.kiId ? info.kiId : null;
+    }
+    if (!bezug) {
+      bezug = jetztBezug;
+    } else {
+      if (bezug.dev !== jetztBezug.dev) return 'anderes Gerät';
+      if (bezug.ordnerDev !== jetztBezug.ordnerDev || bezug.ordnerIno !== jetztBezug.ordnerIno) return 'anderer Datenordner';
+    }
+    if (kiId === undefined) return null;
+    let eigene = null;
+    try { eigene = kennung(); } catch { eigene = null; }
+    if (kiId === null) return bisher ? 'Marker ohne Kennung' : null;
+    if (kiId === eigene || kiId === bisher || (!eigene && !bisher)) {
+      if (kiId === eigene || !bisher) bisher = kiId;
+      return null;
+    }
+    return 'andere KI';
+  }
 
   async function pruefeStick() {
     if (!marker || beendet || statLaeuft) return;
     statLaeuft = true;
     try {
-      await stat(marker);
+      const st = await stat(marker);
+      const grund = await fremd(st);
+      if (grund) {
+        beendet = true;
+        if (log && log.warn) log.warn(`Am Pfad des Sticks steckt ein anderer (${grund}); Neural OS endet sofort.`);
+        ende(0);
+        return;
+      }
       fehlt = 0;
     } catch (err) {
       if (err && WEG_CODES.has(err.code)) {

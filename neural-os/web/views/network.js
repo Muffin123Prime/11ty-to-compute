@@ -46,7 +46,7 @@ export default {
     if (ctx.bus && typeof ctx.bus.on === 'function') {
       self.cleanups.push(ctx.bus.on('*', (payload, event) => {
         const typ = (event && event.type) || '';
-        if (typ === 'network.mode' || typ === 'network.attempt' || typ === 'network.grant' || typ === 'config.changed' || typ.startsWith('claude')) neu();
+        if (typ === 'network.mode' || typ === 'network.attempt' || typ === 'network.grant' || typ === 'config.changed' || typ.startsWith('claude') || typ.startsWith('gemini') || typ === 'ki.anbieter') neu();
       }));
     }
     await allesLaden(self);
@@ -72,7 +72,7 @@ async function allesLaden(self) {
   const [netz, protokoll, claude, ipad] = await Promise.allSettled([
     self.api.get('/network', { timeoutMs: 10000 }),
     self.api.get('/network/audit', { query: { limit: 400 }, timeoutMs: 10000 }),
-    self.api.get('/claude', { timeoutMs: 8000 }),
+    self.api.get('/ki', { timeoutMs: 8000 }),
     self.api.get('/ipad', { timeoutMs: 8000 }),
   ]);
   if (!self.alive) return;
@@ -90,9 +90,9 @@ function zeichnen(self) {
 }
 
 const SAETZE = {
-  online: ['Online', 'Neural OS darf ins Internet: Claude antwortet und sucht im Netz. Jede Verbindung steht unten.'],
-  lan: ['Nur lokales Netz', 'Neural OS spricht nur mit Geräten in deinem WLAN, nicht mit dem Internet. Claude ist so nicht erreichbar.'],
-  offline: ['Offline', 'Nichts verlässt diesen Rechner. Claude antwortet erst, wenn du online gehst.'],
+  online: ['Online', 'Neural OS darf ins Internet: die KI antwortet und sucht im Netz. Jede Verbindung steht unten.'],
+  lan: ['Nur lokales Netz', 'Neural OS spricht nur mit Geräten in deinem WLAN, nicht mit dem Internet. Die KI ist so nicht erreichbar.'],
+  offline: ['Offline', 'Nichts verlässt diesen Rechner. Die KI antwortet erst, wenn du online gehst.'],
 };
 
 function zeichneZustand(self) {
@@ -140,28 +140,31 @@ function zeichneZustand(self) {
         : null),
     h('label.nwv__schalter-wrap', null, h('span', null, text(mode === 'online' ? 'Online' : 'Offline')), schalter)));
 
-  // Claude will, aber die Schleuse lässt es nicht: das eine, was hier behoben werden kann.
+  // Die KI will, aber die Schleuse lässt es nicht: das eine, was hier behoben
+  // werden kann. Welcher Host, sagt der aktive Anbieter (GET /api/ki).
   const c = self.claude;
   if (mode === 'online' && c && c.grundCode === 'schleuse') {
+    const name = c.name || 'Die KI';
+    const host = c.aktiv === 'claude' ? 'api.anthropic.com' : 'generativelanguage.googleapis.com';
     box.appendChild(h('div.nwv__hinweis', null,
       icon((self.ctx.icons || {}).alert),
-      h('span', null, text('Die Schleuse lässt api.anthropic.com nicht durch – Claude kann so nicht antworten.')),
+      h('span', null, text(`Die Schleuse lässt ${host} nicht durch – ${name} kann so nicht antworten.`)),
       h('button.btn.btn--accent.btn--small', {
         type: 'button',
         onClick: async (ev) => {
           ev.currentTarget.disabled = true;
           const hosts = Array.isArray(n.allowHosts) ? n.allowHosts.slice() : [];
-          if (!hosts.includes('api.anthropic.com')) hosts.push('api.anthropic.com');
+          if (!hosts.includes(host)) hosts.push(host);
           try {
             await self.api.put('/network', { allowHosts: hosts });
-            if (self.alive) self.ctx.toast('Claude ist freigegeben.', 'success');
+            if (self.alive) self.ctx.toast(`${name} ist freigegeben.`, 'success');
           } catch (err) {
             if (self.alive) self.ctx.toast(`Nicht freigegeben: ${err.message || err}`, 'error');
           }
           await allesLaden(self);
           if (self.alive) zeichnen(self);
         },
-      }, text('Claude freigeben'))));
+      }, text(`${name} freigeben`))));
   }
   if (n.hardened === false) {
     box.appendChild(h('p.nwv__satz.meta', null, text('Hinweis: Die Schleuse ist in diesem Prozess nicht erzwungen. Neural OS hält sich daran; ein fremdes Modul müsste es nicht.')));

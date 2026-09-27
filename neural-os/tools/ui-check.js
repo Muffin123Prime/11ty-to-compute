@@ -317,13 +317,27 @@ async function main() {
     await page.goto(`${base}/#/chat?id=${probe.id}`, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(1500);
     const chatText = await page.locator('main').innerText();
-    // Die KI ist Claude. Ohne Schluessel (so laeuft diese Pruefung) steht
-    // statt eines leeren Chats die Karte "Verbinde Claude" mit genau EINEM
-    // Feld da. Den ganzen Weg mit Schluessel (Statist), Rueckfragen, Kopieren,
-    // Stopp und Bearbeiten prueft tools/chat-beweis.js im Browser.
-    check(/Verbinde Claude/.test(chatText) && /console\.anthropic\.com/.test(chatText)
-      && await page.locator('.cv-verbinden input').count() === 1,
-    'Ohne Claude: „Verbinde Claude“ mit einem Feld und dem Satz, wo es den Schlüssel gibt', chatText.replace(/\s+/g, ' ').slice(0, 90));
+    // Die KI ist Gemini (kostenlos) oder Claude. Ohne Schluessel (so laeuft
+    // diese Pruefung) steht statt eines leeren Chats die Karte "Verbinde eine
+    // KI": oben gross Google mit EINEM Feld und dem Satz, wo es den Schluessel
+    // gibt (und dass Google Inhalte nutzen darf); Claude darunter zugeklappt.
+    // Den ganzen Weg mit Schluessel (Statist), Rueckfragen, Kopieren, Stopp
+    // und Bearbeiten prueft tools/chat-beweis.js im Browser.
+    check(/Verbinde eine KI/.test(chatText) && /Kostenlos mit Google/.test(chatText)
+      && /aistudio\.google\.com\/apikey/.test(chatText) && /Google darf Inhalte zur Verbesserung nutzen/.test(chatText)
+      && await page.locator('.cv-verbinden input[aria-label="Google-Schlüssel"]').count() === 1,
+    'Ohne KI: „Verbinde eine KI“ – Google zuerst, ein Feld, der Satz, wo es den Schlüssel gibt', chatText.replace(/\s+/g, ' ').slice(0, 90));
+    // Zugeklappt heisst: die Ueberschrift ist zu lesen, der Claude-Satz noch nicht.
+    check(await page.locator('.cv-verbinden details.cv-verbinden__mehr:not([open])').count() === 1
+      && /Oder Claude \(kostet pro Nutzung\)/.test(chatText)
+      && !/console\.anthropic\.com/.test(chatText),
+    'Claude steht darunter zugeklappt: „Oder Claude (kostet pro Nutzung)“ – sein Satz erst nach dem Aufklappen');
+    await page.locator('.cv-verbinden details.cv-verbinden__mehr > summary').click();
+    await page.waitForTimeout(200);
+    check(await page.locator('.cv-verbinden details.cv-verbinden__mehr[open]').count() === 1
+      && await page.locator('.cv-verbinden input[aria-label="Claude-Schlüssel"]').isVisible()
+      && /console\.anthropic\.com/.test(await page.locator('.cv-verbinden').innerText()),
+    'Aufgeklappt: das Claude-Feld mit dem Satz, wo es den Schlüssel gibt');
     check(await page.locator('.cv-composer__feld').count() === 1 && await page.locator('.cv-composer__clip').count() === 1,
       'Das Eingabefeld ist eine Karte mit Büroklammer und rundem Senden-Knopf');
     check((await page.locator('.topbar__title').innerText()).trim() !== 'Neuer Chat',
@@ -593,9 +607,9 @@ async function pruefeSchale(page, base, store) {
   const gesetzt = await umschalten('online');
   await warte(1600);
   const online = await anzeige();
-  // Ohne Claude-Schluessel darf dort "Online" stehen, aber nie "verbunden".
+  // Ohne Schluessel darf dort "Online" stehen, aber nie "verbunden".
   check(gesetzt === 200 && /^Online/.test(online) && !/verbunden/i.test(online),
-    'Online geschaltet folgt die Anzeige live – und behauptet ohne Claude keine Verbindung',
+    'Online geschaltet folgt die Anzeige live – und behauptet ohne KI keine Verbindung',
     `HTTP ${gesetzt} → ${online}`);
   await umschalten('offline');
   await warte(1600);
@@ -1540,7 +1554,7 @@ async function pruefeSchutzUndIpad(browser, base, app) {
     await seite.waitForTimeout(1200);
     await dismissWelcome(seite);
     const gruppen = await seite.locator('.setv__gruppe h2').allInnerTexts();
-    check(['Claude', 'Schutz', 'iPad verbinden', 'Darstellung', 'Netzwerk', 'Speicher'].every((g) => gruppen.includes(g)),
+    check(['KI', 'Schutz', 'iPad verbinden', 'Darstellung', 'Netzwerk', 'Speicher'].every((g) => gruppen.includes(g)),
       'Die Einstellungen haben die sechs ruhigen Gruppen', gruppen.join(' · '));
     check(await seite.locator('details.setv__mehr:not([open])').count() === 1,
       'Das Technische liegt eingeklappt unter „Für Fortgeschrittene“');

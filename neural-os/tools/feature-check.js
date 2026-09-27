@@ -148,6 +148,8 @@ const SUBSYSTEM_ROUTES = {
   graph: '/api/graph',
   models: '/api/models',
   claude: '/api/claude',
+  gemini: '/api/ki',
+  ki: '/api/ki',
   chat: '/api/chats',
   agents: '/api/agents',
   approvals: '/api/approvals',
@@ -635,12 +637,13 @@ async function checkChat() {
     assert(body(c.record).network === 'offline', 'neuer Chat ist nicht offline');
     return 'offline als Standard';
   });
-  await check('Ohne Claude: ein Satz statt einer erfundenen Antwort – und kein Scheinchat', async () => {
+  await check('Ohne KI: ein Satz statt einer erfundenen Antwort – und kein Scheinchat', async () => {
     const res = await request('POST', `/api/chats/${chatId}/messages`, { inhalt: 'Hallo?' });
     assert(res.status === 409, `HTTP ${res.status} statt 409`);
     const e = res.json && res.json.error;
-    assert(e && e.code === 'CLAUDE_NICHT_VERBUNDEN', `Code ${e && e.code}`);
-    assert(/Claude ist nicht verbunden/.test(e.message), `Satz: ${e.message}`);
+    // Ohne irgendeinen Schlüssel heisst es "keine KI" -- Gemini (kostenlos) oder Claude.
+    assert(e && e.code === 'KI_NICHT_VERBUNDEN', `Code ${e && e.code}`);
+    assert(/Keine KI verbunden/.test(e.message), `Satz: ${e.message}`);
     const msgs = ok(await api.get(`/api/chats/${chatId}/messages`), 'messages');
     const list = msgs.items || msgs.messages || [];
     assert(list.length === 0, `${list.length} Nachricht(en) angelegt, obwohl niemand antworten kann`);
@@ -670,19 +673,29 @@ async function checkModels() {
     assert(z.verbrauch && z.verbrauch.geschaetzt === true, 'Verbrauch nicht als Schätzung gekennzeichnet');
     return z.grund;
   });
-  await check('Die Registry kennt genau einen Anbieter: Claude, mit Anleitung', async () => {
+  await check('Die Registry kennt genau einen Anbieter – den aktiven (ohne Schlüssel: Gemini, kostenlos) – mit Anleitung für beide', async () => {
     const m = ok(await api.get('/api/models'), 'models');
     const providers = m.providers || [];
-    assert(providers.length === 1 && providers[0].id === 'claude', `Anbieter: ${providers.map((p) => p.id).join(', ')}`);
+    assert(providers.length === 1 && providers[0].id === 'gemini', `Anbieter: ${providers.map((p) => p.id).join(', ')}`);
     assert(providers[0].available === false, 'als erreichbar gemeldet');
-    assert(/console\.anthropic\.com/.test(String(m.hint || '')), 'keine Anleitung');
+    assert(/aistudio\.google\.com/.test(String(m.hint || '')) && /console\.anthropic\.com/.test(String(m.hint || '')), 'keine Anleitung für beide');
     assert(!/ollama|11434/i.test(JSON.stringify(m)), 'die Offline-KI steht noch drin');
-    return 'claude, nicht verbunden, mit Anleitung';
+    return 'gemini, nicht verbunden, mit Anleitung';
   });
   await check('Erneutes Suchen fragt kein Netz', async () => {
     const r = ok(await api.post('/api/models/refresh'), 'refresh');
-    assert(r.providers.length === 1, 'mehr als Claude');
+    assert(r.providers.length === 1, 'mehr als ein Anbieter');
     return 'abgeleitet, nicht geprobt';
+  });
+  await check('GET /api/ki nennt beide Anbieter und den aktiven – ohne Schlüssel Gemini', async () => {
+    const z = ok(await api.get('/api/ki'), 'ki');
+    assert(z.aktiv === 'gemini', `aktiv: ${z.aktiv}`);
+    assert(z.eingestellt === null, 'eingestellt, obwohl nie verbunden');
+    assert(z.verbunden === false && z.irgendeinSchluessel === false, 'verbunden ohne Schlüssel');
+    assert(z.anbieter && z.anbieter.gemini && z.anbieter.claude, 'nicht beide Anbieter');
+    assert(z.anbieter.gemini.modell === 'gemini-3.8-flash', `Gemini-Modell ${z.anbieter.gemini.modell}`);
+    assert(z.anbieter.gemini.verbrauch.kostenlos === true, 'Gemini nicht als kostenlos gekennzeichnet');
+    return `${z.aktiv}: ${z.grund}`;
   });
   await check('Offline wird ein Schlüssel weder geprüft noch gespeichert', async () => {
     const vorher = ok(await api.get('/api/config'), 'config').config.network.allowHosts;
@@ -738,6 +751,80 @@ async function checkModels() {
       const letzte = statist.stromAnfragen().pop().body.messages.pop();
       assert(letzte.content[0].type === 'tool_result' && /2 Stunden/.test(letzte.content[0].content), 'die Antwort ging nicht an Claude');
       return `Termin „${termin.data.title}“ angelegt, Rückfrage beantwortet, ${statist.stromAnfragen().length} Aufrufe`;
+    } finally {
+      if (zweite) await zweite.close().catch(() => {});
+      await statist.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
+
+async function checkGemini() {
+  area('6b · Gemini (kostenlos)');
+  // Gemini ist die kostenlose erste Wahl. Der ganze Weg läuft gegen den
+  // Statisten (test/gemini-statist.js), der generateContent spricht -- einen
+  // echten Google-Schlüssel gibt es hier nicht, und so zu tun wäre gelogen.
+  await check('Offline wird ein Google-Schlüssel weder geprüft noch gespeichert', async () => {
+    const vorher = ok(await api.get('/api/config'), 'config').config.network.allowHosts;
+    const r = await api.post('/api/ki/gemini/schluessel', { schluessel: 'AIzaSyPruefGeheim0815abcdefghijklmnopq' });
+    assert(r.status === 409, `HTTP ${r.status}`);
+    assert(r.json.error.code === 'GEMINI_OFFLINE', r.json.error.code);
+    const z = ok(await api.get('/api/ki'), 'ki');
+    assert(z.anbieter.gemini.schluesselVorhanden === false, 'trotzdem gespeichert');
+    const nachher = ok(await api.get('/api/config'), 'config').config.network.allowHosts;
+    assert(JSON.stringify(vorher) === JSON.stringify(nachher), 'offline wurde die Freigabeliste verändert');
+    for (const route of ['/api/ki', '/api/claude', '/api/config', '/api/status', '/api/models']) {
+      const res = await api.get(route);
+      assert(!String(res.text).includes('AIzaSyPruefGeheim0815'), `${route} zeigt den Schlüssel`);
+    }
+    return r.json.error.message;
+  });
+  await check('Mit Gemini (Statist): Schlüssel, Antwort mit Gedankengang, Termin über functionCall, Rückfrage, Quellen – über die echte Leitung', async () => {
+    const { starten, B, antwort } = require('../test/gemini-statist');
+    const { createApp, seedIfEmpty } = require('../src/app');
+    const statist = await starten();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-check-gemini-'));
+    let zweite = null;
+    try {
+      zweite = await createApp({ home: tmp, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false, geminiBasis: statist.url });
+      await seedIfEmpty(zweite);
+      const srv = await zweite.listen();
+      const port = srv.server.address().port;
+      const an = (m, p, b) => request(m, p, b, {}, port);
+      const falsch = await an('POST', '/api/ki/gemini/schluessel', { schluessel: 'AIzaSyFalsch00000000000000000000000000' });
+      assert(falsch.status === 400 && falsch.json.error.message === 'Der Google-Schlüssel stimmt nicht.', `falscher Schlüssel: HTTP ${falsch.status}`);
+      const gut = await an('POST', '/api/ki/gemini/schluessel', { schluessel: statist.schluessel });
+      assert(gut.status === 200 && gut.json.verbunden === true && gut.json.aktiv === 'gemini', `Schlüssel: HTTP ${gut.status} ${gut.text.slice(0, 120)}`);
+      // Keine Freigabe nötig: der Statist ist Loopback. Dass "Verbinden" online
+      // genau generativelanguage.googleapis.com einträgt, prüft test/gemini.test.js.
+      assert(zweite.config.ki.anbieter === 'gemini', 'nach dem ersten Verbinden ist Gemini nicht eingestellt');
+      const status = (await an('GET', '/api/status')).json;
+      assert(status.anbieter && status.anbieter.verbunden === true && status.anbieter.name === 'Gemini', 'der Status kennt den Anbieter nicht');
+      const chat = (await an('POST', '/api/chats', {})).json.record.id;
+      statist.weiter(
+        antwort(B.denken('Ein Termin mit Datum.'), B.text('Trage ich ein.'), B.aufruf('termin_anlegen', { titel: 'Elternabend', start: '2026-10-06T19:30', ganztaegig: false }, { signatur: 'sig_check_1' }), B.ende()),
+        antwort(B.text('Wie lange bleibst du?'), B.aufruf('rueckfrage', { frage: 'Wie lange?', optionen: ['1 Stunde', '2 Stunden'], mehrfach: false }, { signatur: 'sig_check_2' }), B.ende()),
+        antwort(B.suche(['Elternabend Dauer'], [{ url: 'https://www.schule.example/elternabend', titel: 'schule.example' }], { text: 'Gut, zwei Stunden – meist dauert so ein Abend anderthalb bis zwei.' }), B.ende()),
+      );
+      const r1 = await an('POST', `/api/chats/${chat}/messages`, { inhalt: 'Dienstag 19:30 Elternabend' });
+      assert(/event: denken/.test(r1.text), 'kein Gedankengang im Strom');
+      assert(/event: rueckfrage/.test(r1.text), 'keine Rückfrage im Strom');
+      assert(/"stopReason":"rueckfrage"/.test(r1.text), 'der Zug hielt nicht an');
+      const termin = zweite.store.all('event')[0];
+      assert(termin && termin.data.source === 'auto' && termin.data.chatId === chat, 'kein automatischer Termin');
+      const frageId = /"type":"rueckfrage","id":"([^"]+)"/.exec(r1.text)[1];
+      const r2 = await an('POST', `/api/chats/${chat}/rueckfrage`, { id: frageId, antwort: '2 Stunden' });
+      assert(/"stopReason":"end_turn"/.test(r2.text), 'der Zug lief nach der Antwort nicht weiter');
+      assert(/event: quelle/.test(r2.text) && /schule\.example/.test(r2.text), 'keine Quelle aus groundingMetadata');
+      const letzte = statist.stromAnfragen().pop().body;
+      const user = letzte.contents[letzte.contents.length - 1];
+      assert(user.role === 'user' && user.parts[0].functionResponse && /2 Stunden/.test(JSON.stringify(user.parts[0].functionResponse.response)), 'die Antwort ging nicht als functionResponse an Gemini');
+      const modell = letzte.contents[letzte.contents.length - 2];
+      assert(modell.parts.some((p) => p.thoughtSignature === 'sig_check_2'), 'die thoughtSignature ging nicht unverändert zurück');
+      assert(!/tool_result|tool_use|cache_control|"strict"/.test(JSON.stringify(letzte)), 'Anthropic-Form im Gemini-Körper');
+      const z = zweite.gemini.zustand();
+      assert(z.verbrauch.anfragen >= 3 && z.verbrauch.kostenUsd === 0 && z.verbrauch.kostenlos === true, 'Verbrauch nicht gezählt oder nicht kostenlos');
+      return `Termin „${termin.data.title}“ angelegt, Rückfrage beantwortet, 1 Quelle, ${statist.stromAnfragen().length} Aufrufe, Kosten 0`;
     } finally {
       if (zweite) await zweite.close().catch(() => {});
       await statist.close();
@@ -2257,6 +2344,7 @@ const AREAS = {
   graph: checkGraph,
   chat: checkChat,
   modelle: checkModels,
+  gemini: checkGemini,
   netz: checkNetwork,
   agenten: checkAgents,
   daten: checkVaultAndBackup,

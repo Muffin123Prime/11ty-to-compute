@@ -113,14 +113,14 @@ const ICONS = {
  * setzt (ctx.setTitle).
  */
 const VIEWS = [
-  { id: 'chat', title: 'Neuer Chat', head: 'Neuer Chat', icon: ICONS.chat, key: 'c', nav: true, keywords: 'chat unterhaltung fragen gespräch claude ki neu' },
+  { id: 'chat', title: 'Neuer Chat', head: 'Neuer Chat', icon: ICONS.chat, key: 'c', nav: true, keywords: 'chat unterhaltung fragen gespräch claude gemini ki neu' },
   { id: 'kalender', title: 'Kalender', icon: ICONS.calendar, key: 'k', nav: true, keywords: 'termine datum uhrzeit woche tag heute' },
   { id: 'notes', title: 'Notizen', icon: ICONS.notes, key: 'n', nav: true, keywords: 'note texte wissen schreiben post-it' },
   { id: 'projects', title: 'Projekte', icon: ICONS.projects, key: 'p', nav: true, keywords: 'aufgaben tasks vorhaben' },
   { id: 'agents', title: 'Agenten', icon: ICONS.agents, key: 'a', nav: true, keywords: 'helfer hintergrund läufe runs arbeitet' },
   { id: 'graph', title: 'Gehirn', icon: ICONS.graph, key: 'g', nav: true, keywords: 'graph netz verknüpfungen karte gedächtnis wissen' },
   { id: 'workshop', title: 'Werkstatt', icon: ICONS.workshop, key: 'w', nav: true, keywords: 'erweiterungen module code einfügen ändern plugin anpassen' },
-  { id: 'settings', title: 'Einstellungen', icon: ICONS.settings, key: 'e', nav: true, keywords: 'konfiguration tresor pin claude schlüssel darstellung' },
+  { id: 'settings', title: 'Einstellungen', icon: ICONS.settings, key: 'e', nav: true, keywords: 'konfiguration tresor pin claude gemini ki schlüssel darstellung' },
   { id: 'network', title: 'Netzwerk', icon: ICONS.network, key: 'i', nav: false, parent: 'settings', keywords: 'internet online offline schleuse gate freigaben protokoll' },
   { id: 'stick', title: 'Stick', icon: ICONS.stick, key: 't', nav: false, parent: 'settings', keywords: 'usb portabel mitnehmen unterwegs laufzeit fremder rechner' },
   { id: 'backup', title: 'Sicherung', icon: ICONS.backup, key: 'b', nav: false, parent: 'settings', keywords: 'export import backup wiederherstellen notfall kopie' },
@@ -327,6 +327,7 @@ function createShell() {
   async function refreshStatus() {
     try {
       const status = await api.get('/status', { timeoutMs: 8000 });
+      if (zumVorraum(status)) return status;
       state.set('status', status);
       state.set('statusStale', false);
       state.set('statusError', null);
@@ -346,16 +347,18 @@ function createShell() {
   }
 
   /**
-   * Claude ist die KI dieser Anwendung; ob sie verbunden ist, gehoert in den
-   * Status. Die Route kommt aus dem Bereich Claude-Unterbau
-   * (GET /api/claude -> { verbunden, modell, schluesselVorhanden }). Fehlt
-   * sie, ist die Antwort "nicht bekannt" -- nicht "verbunden".
+   * Die KI dieser Anwendung ist Gemini (kostenlos) oder Claude; ob der
+   * gewaehlte Anbieter verbunden ist, gehoert in den Status. `/api/status`
+   * traegt ihn als `anbieter` (src/http/api/system.js), sonst fragt die
+   * Schale GET /api/ki. Fehlt beides, ist die Antwort "nicht bekannt" --
+   * nicht "verbunden". Der Zustandsschluessel heisst aus alter Gewohnheit
+   * weiter `claude`.
    */
   let claudeRouteFehlt = false;
 
   async function refreshClaude(status) {
-    if (status && status.claude && typeof status.claude === 'object') {
-      state.set('claude', { bekannt: true, ...status.claude });
+    if (status && status.anbieter && typeof status.anbieter === 'object') {
+      state.set('claude', { bekannt: true, ...status.anbieter });
       return;
     }
     // Offline ist Claude ohnehin nicht erreichbar; der Status sagt dann
@@ -368,7 +371,7 @@ function createShell() {
       return;
     }
     try {
-      const claude = await api.get('/claude', { timeoutMs: 6000 });
+      const claude = await api.get('/ki', { timeoutMs: 6000 });
       state.set('claude', claude && typeof claude === 'object' ? { bekannt: true, ...claude } : { bekannt: false });
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) claudeRouteFehlt = true;
@@ -425,10 +428,10 @@ function createShell() {
     const payload = event.payload || {};
 
     // Nicht jedes network.*-Ereignis: jeder einzelne Zugriff nach draussen
-    // (jede Claude-Anfrage) meldet sich als network.allow. Den Status aendert
+    // (jede KI-Anfrage) meldet sich als network.allow. Den Status aendert
     // nur ein Wechsel des Modus.
     if (type === 'models.changed' || type === 'config.changed' || type.startsWith('vault.')
-      || type === 'network.mode' || type.startsWith('claude')) {
+      || type === 'network.mode' || type.startsWith('claude') || type.startsWith('gemini') || type === 'ki.anbieter') {
       refreshStatusSoon();
     }
     if (type.startsWith('record.') && (payload.type === 'chat' || (payload.record && payload.record.type === 'chat'))) {
@@ -473,6 +476,24 @@ function createShell() {
     if (!route || route.view !== parseRoute(ziel).view) navigate(ziel);
   }
 
+  /**
+   * Der Vorraum (src/kernel/vorraum.js) antwortet auf /api/status mit
+   * `gesperrt: true`; die laufende Anwendung hat dieses Feld nie. Eine Schale,
+   * die der Service Worker unter "/" aus dem Zwischenspeicher zeigt (alter Tab,
+   * wiederhergestellte Sitzung), geht dann zur PIN-Seite statt "Server
+   * getrennt" zu zeigen (Pruefung Runde 2).
+   */
+  function zumVorraum(status) {
+    if (!status || status.gesperrt !== true) return false;
+    if (eventStream) {
+      const stream = eventStream;
+      eventStream = null;
+      stream.close();
+    }
+    window.location.replace('/api/entsperren');
+    return true;
+  }
+
   function startEventStream() {
     if (eventStream) eventStream.close();
     eventStream = api.events(handleServerEvent, {
@@ -480,6 +501,10 @@ function createShell() {
         if (connState === 'error' && info && info.error && info.error.code === 'PIN_NOETIG') {
           pinNoetig(info.error);
           return;
+        }
+        // 423 vom Vorraum auf den Ereignisstrom: nachsehen, ob es der Vorraum ist.
+        if (connState === 'error' && info && info.error && info.error.code === 'VAULT_LOCKED') {
+          api.get('/status', { timeoutMs: 4000 }).then(zumVorraum, () => {});
         }
         const connected = connState === 'open';
         state.set('connected', connected);
@@ -2154,7 +2179,7 @@ export function describeStatus({ status, stale, connected, ready, claude, pin })
     return {
       key: 'offline',
       label: 'Offline',
-      hint: 'Nichts verlässt dieses Gerät. Claude und die Websuche brauchen Internet.',
+      hint: 'Nichts verlässt dieses Gerät. Die KI und die Websuche brauchen Internet.',
       dot: null,
       offline: true,
     };
@@ -2163,36 +2188,39 @@ export function describeStatus({ status, stale, connected, ready, claude, pin })
     return {
       key: 'lan',
       label: 'Nur lokales Netz',
-      hint: 'Dieses Gerät und dein lokales Netzwerk, kein Internet. Claude ist so nicht erreichbar.',
+      hint: 'Dieses Gerät und dein lokales Netzwerk, kein Internet. Die KI ist so nicht erreichbar.',
       dot: 'warn',
       offline: true,
     };
   }
   if (mode === 'online') {
     const c = claude || { bekannt: false };
+    // Der Name des Anbieters (Gemini oder Claude) kommt vom Server; ohne ihn
+    // (aeltere Antwort mit nur `modell`) steht "KI".
+    const name = typeof c.name === 'string' && c.name ? c.name : 'KI';
     if (c.bekannt && c.verbunden === true) {
       return {
         key: 'online',
-        label: 'Online verbunden',
-        hint: `Internet erlaubt, Claude ist verbunden${c.modell ? ` (${c.modell})` : ''}.`,
+        label: `Online verbunden · ${name}`,
+        hint: `Internet erlaubt, ${name} ist verbunden${c.modell ? ` (${c.modell})` : ''}.`,
         dot: 'ok',
         offline: false,
       };
     }
-    if (c.bekannt && c.schluesselVorhanden === false) {
+    if (c.bekannt && (c.irgendeinSchluessel === false || (c.irgendeinSchluessel === undefined && c.schluesselVorhanden === false))) {
       return {
-        key: 'ohne-claude',
-        label: 'Online · Claude fehlt',
-        hint: 'Internet erlaubt, aber es ist noch kein Claude-Schlüssel hinterlegt. Das geht in den Einstellungen.',
+        key: 'ohne-ki',
+        label: 'Online · KI fehlt',
+        hint: 'Internet erlaubt, aber es ist noch kein Schlüssel hinterlegt. Das geht im Chat oder in den Einstellungen – Google ist kostenlos.',
         dot: 'warn',
         offline: false,
       };
     }
     if (c.bekannt) {
       return {
-        key: 'claude-getrennt',
-        label: 'Online · Claude getrennt',
-        hint: 'Internet erlaubt, Claude antwortet gerade nicht.',
+        key: 'ki-getrennt',
+        label: `Online · ${name} getrennt`,
+        hint: `Internet erlaubt, ${name} antwortet gerade nicht.`,
         dot: 'warn',
         offline: false,
       };
@@ -2200,7 +2228,7 @@ export function describeStatus({ status, stale, connected, ready, claude, pin })
     return {
       key: 'online-ungeprueft',
       label: 'Online',
-      hint: 'Internet ist erlaubt. Ob Claude erreichbar ist, meldet dieser Server nicht.',
+      hint: 'Internet ist erlaubt. Ob die KI erreichbar ist, meldet dieser Server nicht.',
       dot: 'ok',
       offline: false,
     };

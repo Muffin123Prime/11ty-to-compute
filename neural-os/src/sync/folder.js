@@ -265,10 +265,17 @@ function gabelung(verlauf, voll, generation, inhalt) {
 
 /** Ein Abbruch beim Lesen, bevor ein einziger Satz angewendet wurde. */
 class Uebergangen extends Error {
-  constructor(grund) {
+  constructor(grund, info = null) {
     super(grund);
     this.grund = grund;
+    this.info = info;
   }
+}
+
+/** Steht diese Generation (mit diesem Inhalt) auf der Liste der verworfenen? */
+function verworfenEnthaelt(liste, generation, inhalt) {
+  if (!Array.isArray(liste) || !Number.isInteger(generation)) return false;
+  return liste.some((v) => v && v.generation === generation && (v.inhalt || null) === (inhalt || null));
 }
 
 /**
@@ -792,7 +799,11 @@ function createFolderSync(deps = {}) {
     const partner = empfaenger.map((e) => ({ id: e.id, name: typeof e.name === 'string' ? e.name : null }))
       .sort((a, b) => (a.id < b.id ? -1 : 1));
     // Der eigene Name steht im Manifest: ein neuer Name ist ein neuer Stand.
-    const inhalt = sha256(`${lines.join('\n')}\n#${JSON.stringify(partner)}\n#${deviceName()}`).slice(0, 24);
+    // Ebenso ein neuer Paarschlüssel (erneut gekoppelt): Das alte Postfach
+    // ist mit dem alten versiegelt, und das kann der Partner nicht mehr
+    // öffnen (Prüfung Runde 2, zweimal [Koppeln]). Nur ein Hash davon.
+    const schluesselStand = empfaenger.map((e) => `${e.id}:${sha256(e.schluessel).slice(0, 16)}`).sort();
+    const inhalt = sha256(`${lines.join('\n')}\n#${JSON.stringify(partner)}\n#${deviceName()}\n#${schluesselStand.join(',')}`).slice(0, 24);
 
     const s = loadState();
     const zielStand = s.ziele[zielKey] && typeof s.ziele[zielKey] === 'object' ? s.ziele[zielKey] : null;
@@ -826,20 +837,32 @@ function createFolderSync(deps = {}) {
       gesehen: {},
       gesehenInhalt: {},
       basen: {},
+      basenVg: {},
       verlauf: stand.verlauf,
       verlaufVoll: stand.voll === true,
+      // Die Schutzstufe reist mit: Der Partner schreibt nicht mehr an mich,
+      // wenn er eine PIN hat und ich nicht (kopplung.js darfAn).
+      pin: vault.enabled,
     };
+    // Generationen eines Zwillings, die diese KI nach seinem Verschwinden
+    // verworfen hat (kopplung.js): Der Partner, der eine davon zuletzt las,
+    // liest dieses Postfach trotzdem (Prüfung Runde 2).
+    if (Array.isArray(stand.verworfen) && stand.verworfen.length) kopf.verworfen = stand.verworfen;
     for (const e of empfaenger) {
       const g = pf.gelesen(e.id) || {};
       kopf.gesehen[e.id] = Number.isInteger(g.generation) ? g.generation : 0;
       if (typeof g.inhalt === 'string') kopf.gesehenInhalt[e.id] = g.inhalt;
       const eigene = (s.devices[e.id] && s.devices[e.id].bases) || {};
       const basen = {};
+      const vg = {};
       for (const [id, b] of Object.entries(eigene)) {
         const h = merge.baseHash(b);
-        if (h) basen[id] = h;
+        if (!h) continue;
+        basen[id] = h;
+        if (b && Number.isInteger(b.vg)) vg[id] = b.vg;
       }
       kopf.basen[e.id] = basen;
+      kopf.basenVg[e.id] = vg;
     }
 
     report({ phase: 'compress', done: count, total: count });
@@ -1254,7 +1277,16 @@ function createFolderSync(deps = {}) {
       push({ id: entry.id, type: entry.type, status: 'skipped', reason: entry.reason, detail: entry.detail });
     }
 
+    let unentschieden = 0;
     for (const conflict of planned.conflicts) {
+      if (conflict.uhr) {
+        // Eine Löschung bei falscher Uhr: liegen lassen, ohne Basis und ohne
+        // Kopie (merge.plan). Das Postfach wird noch einmal gelesen.
+        unentschieden++;
+        skipped++;
+        push({ id: conflict.recordId, type: conflict.recordType, status: 'unentschieden', reason: 'uhr' });
+        continue;
+      }
       const remote = conflict.remote;
       const hash = merge.fingerprint(remote);
       const { sieger, kopie } = merge.beideBehalten(conflict, { nameLokal: ctx.nameLokal, nameFern: ctx.nameFern });
@@ -1302,7 +1334,7 @@ function createFolderSync(deps = {}) {
       push({ id: conflict.recordId, type: conflict.recordType, status, sieger, kopieId });
     }
 
-    return { results, bases, applied, skipped, conflicts: planned.conflicts.length, neueKopien };
+    return { results, bases, applied, skipped, conflicts: planned.conflicts.length, neueKopien, unentschieden };
   }
 
   /* ------------------------------------------------------------------ pull */
@@ -1505,12 +1537,13 @@ function createFolderSync(deps = {}) {
     const nameLokal = deviceName();
     let nameFern = box.deviceName || null;
 
-    const totals = { fetched: 0, applied: 0, conflicts: 0, skipped: 0, identical: 0, corrupt: 0, kopien: 0 };
+    const totals = { fetched: 0, applied: 0, conflicts: 0, skipped: 0, identical: 0, corrupt: 0, kopien: 0, unentschieden: 0 };
     const refusedTypes = new Map();
     const results = [];
     const baseUpdates = {};
     let resultsTruncated = false;
     let angewendet = false;
+    let neuAnfang = false;
 
     const collectResults = (rows) => {
       for (const row of rows) {
@@ -1535,6 +1568,14 @@ function createFolderSync(deps = {}) {
         () => store.transaction(() => applyPlan(planned, { remoteId, nameLokal, nameFern, kopienImPostfach })),
       );
 
+      // Wann vereinbart: meine Generation jetzt (g) und die gelesene des
+      // Partners (vg). Daran erkennt merge.classify später, welche von zwei
+      // Basen die jüngere ist (Prüfung Runde 2, Rückgängig).
+      const meineGeneration = pf.stand().generation || 0;
+      for (const b of Object.values(outcome.bases)) {
+        b.g = meineGeneration;
+        b.vg = box.generation;
+      }
       Object.assign(bases, outcome.bases);
       Object.assign(baseUpdates, outcome.bases);
       totals.applied += outcome.applied;
@@ -1542,6 +1583,7 @@ function createFolderSync(deps = {}) {
       totals.conflicts += outcome.conflicts;
       totals.identical += planned.identical.length;
       totals.kopien += outcome.neueKopien.length;
+      totals.unentschieden += outcome.unentschieden || 0;
       for (const k of outcome.neueKopien) emit('kopplung.zweiFassungen', { titel: k.titel, kopieId: k.kopieId, partner: remoteId });
       collectResults(outcome.results);
       report({ phase: 'apply', done: totals.fetched });
@@ -1558,7 +1600,15 @@ function createFolderSync(deps = {}) {
       // Eine Gabelung beim Partner: sein Verlauf kennt die Generation nicht,
       // die ich zuletzt von ihm gelesen habe (Zwilling, alte Sicherung).
       if (gabelung(kopf.verlauf, kopf.verlaufVoll === true, gesehen.generation, gesehen.inhalt)) {
-        throw new Uebergangen('gabelung');
+        if (!verworfenEnthaelt(kopf.verworfen, gesehen.generation, gesehen.inhalt)) throw new Uebergangen('gabelung');
+        // Was ich zuletzt las, stammte von einem Zwilling, den der Partner
+        // inzwischen verworfen hat. Die Basen, die ich mit ihm vereinbarte,
+        // sind damit nichts wert; es zählt die mitgereiste des Partners
+        // (seine Geschichte): Nichts wird still zurückgedreht, doppelt
+        // Geändertes bleibt zweimal da.
+        for (const id of Object.keys(bases)) delete bases[id];
+        entry.bases = {};
+        neuAnfang = true;
       }
       // Umgekehrt: Der Partner hat eine Generation von MIR gesehen, die ich
       // nie geschrieben habe. Dann gibt es mich zweimal.
@@ -1566,16 +1616,22 @@ function createFolderSync(deps = {}) {
       const quittInhalt = kopf.gesehenInhalt && typeof kopf.gesehenInhalt[ich] === 'string' ? kopf.gesehenInhalt[ich] : null;
       if (quittung > 0) {
         const stand = pf.stand();
-        if (quittung > (stand.generation || 0) || gabelung(stand.verlauf, stand.voll === true, quittung, quittInhalt)) {
-          throw new Uebergangen('zwilling');
+        const verworfen = verworfenEnthaelt(stand.verworfen, quittung, quittInhalt);
+        if (!verworfen && (quittung > (stand.generation || 0) || gabelung(stand.verlauf, stand.voll === true, quittung, quittInhalt))) {
+          throw new Uebergangen('zwilling', { generation: quittung, inhalt: quittInhalt });
         }
       }
       // Die mitgereiste Basis: was der Partner mit mir vereinbart hat. Beide
       // Basen zählen (merge.classify): Eine Seite, die noch auf einer von
       // beiden steht, hat nichts geändert (p2c, Prüfung Runde 1).
       const mitgereist = kopf.basen && typeof kopf.basen[ich] === 'object' && kopf.basen[ich] ? kopf.basen[ich] : {};
+      // Welche MEINER Generationen der Partner las, als er die Basis setzte.
+      const gelesenBei = kopf.basenVg && typeof kopf.basenVg[ich] === 'object' && kopf.basenVg[ich] ? kopf.basenVg[ich] : {};
       const sauber = {};
-      for (const [id, h] of Object.entries(mitgereist)) if (typeof h === 'string' && h) sauber[id] = { h };
+      for (const [id, h] of Object.entries(mitgereist)) {
+        if (typeof h !== 'string' || !h) continue;
+        sauber[id] = Number.isInteger(gelesenBei[id]) ? { h, vg: gelesenBei[id] } : { h };
+      }
       // Feste Start-IDs ohne jede Basis: Beide hatten einmal die Einführung
       // (app.js startBasen). Dann gewinnt, wer sie geändert hat, ohne Kopie.
       let saat = {};
@@ -1676,6 +1732,7 @@ function createFolderSync(deps = {}) {
           grund: err.grund,
           gabelung: err.grund === 'gabelung',
           zwilling: err.grund === 'zwilling',
+          ...(err.grund === 'zwilling' && err.info ? { fremdeQuittung: err.info } : {}),
         };
       }
       if (!angewendet) return { ...result, grund: 'unlesbar', problem: asNeuralError(err).message };
@@ -1695,7 +1752,7 @@ function createFolderSync(deps = {}) {
           log.warn(`Die Abgleich-Tabelle für ${remoteId} hat ${Object.keys(entry.bases).length} Einträge überschritten.`);
         }
       }
-      if (angewendet) {
+      if (angewendet || neuAnfang) {
         entry.lastPullAt = nowIso();
         entry.deviceName = nameFern;
         saveState();
@@ -1713,13 +1770,18 @@ function createFolderSync(deps = {}) {
       addWarning(`Es werden nur die ersten ${MAX_RESULTS} Einzelmeldungen aufgeführt; die Zahlen oben sind vollständig.`);
     }
 
+    // Blieb etwas wegen der Uhr unentschieden, gilt dieses Postfach als noch
+    // nicht gelesen: Beim nächsten Abgleich (die Uhrzeit des Postfachs liegt
+    // dann nicht mehr in der Zukunft) wird es neu bewertet.
+    const nochmal = totals.unentschieden > 0;
     pf.merkeGelesen(remoteId, {
-      generation: box.generation,
-      inhalt: typeof kopf.inhalt === 'string' ? kopf.inhalt : null,
+      generation: nochmal ? gesehen.generation : box.generation,
+      inhalt: nochmal ? (gesehen.inhalt || null) : (typeof kopf.inhalt === 'string' ? kopf.inhalt : null),
       quittung: kopf.gesehen && Number.isInteger(kopf.gesehen[ich]) ? kopf.gesehen[ich] : 0,
       partner: Array.isArray(kopf.partner) ? kopf.partner.filter((p) => p && typeof p.id === 'string').map((p) => ({ id: p.id, name: typeof p.name === 'string' ? p.name : null })) : [],
       name: nameFern,
       version: typeof kopf.version === 'string' ? kopf.version : null,
+      pin: typeof kopf.pin === 'boolean' ? kopf.pin : undefined,
       at: nowIso(),
     });
 
@@ -1970,6 +2032,16 @@ function createFolderSync(deps = {}) {
     return saveState();
   }
 
+  /**
+   * Der Zwilling ist verworfen (kopplung.js): Was in den Zielordnern als
+   * "fremdes" Postfach mit meiner Kennung liegt, darf überschrieben werden.
+   */
+  function zieleVergessen() {
+    const s = loadState();
+    s.ziele = {};
+    return saveState();
+  }
+
   /** Nach `identitaet.erneuern()`: sync-folder.json ist weg, der Speicherstand auch. */
   function vergessen() {
     state = null;
@@ -1990,6 +2062,7 @@ function createFolderSync(deps = {}) {
     fremdesPostfach,
     eigenesEntfernen,
     neuVersiegeln,
+    zieleVergessen,
     vergessen,
 
     /** Exposed for tests and the API layer; not part of the contract. */

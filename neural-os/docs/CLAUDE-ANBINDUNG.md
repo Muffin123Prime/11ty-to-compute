@@ -203,3 +203,94 @@ Chat über Claude mit Websuche. **Offline** = Schleuse zu, Chat über das
 lokale Modell, keine Websuche. Der Schalter zeigt immer den **tatsächlichen**
 Zustand; schlägt Online fehl (kein Schlüssel, kein Netz), springt er nicht
 stillschweigend um, sondern sagt, warum.
+
+## 9. Gemini (kostenlos)
+
+Der Nutzer will kein Geld ausgeben. Deshalb ist **Google Gemini** die erste
+Wahl und Claude die zweite (Einstellungen → KI). Stand der Recherche:
+24. September 2026. Umgesetzt in `src/models/providers/gemini.js`; der
+Verbund beider Anbieter steht in `src/models/ki.js`.
+
+**Kostenlose Stufe, ohne Karte.** Modelle u. a. `gemini-3.8-flash`
+(Voreinstellung), `gemini-3.7-flash`, `gemini-3.5-flash-lite`,
+`gemini-2.5-flash`. Eingabe, Ausgabe und Denken kosten nichts. Grounding mit
+Google-Suche: 5 000 Suchanfragen im Monat frei, danach 14 $ je 1 000. Auf
+der kostenlosen Stufe **darf Google Inhalte zur Verbesserung nutzen** — das
+steht in der Oberfläche in einem Satz. Limits etwa 10–15 Anfragen je Minute
+und niedrige Tausender je Tag; darüber antwortet die API mit 429
+`RESOURCE_EXHAUSTED` ("Google-Limit erreicht — morgen geht es kostenlos
+weiter, oder Claude wählen").
+
+**Schlüssel:** aistudio.google.com/apikey → "Create API key" (Google-Konto,
+keine Karte). Er liegt versiegelt in `vault/gemini-schluessel.json`, verlässt
+Neural OS nur als Kopf `x-goog-api-key` an
+`generativelanguage.googleapis.com` und wird beim Verbinden mit einem
+Probeaufruf (`maxOutputTokens: 8`, ohne Strom, ohne Werkzeuge) geprüft.
+
+**REST — bewusst `generateContent`, nicht die neue "Interactions API"
+(`/v1beta/interactions`), die Google inzwischen bewirbt:** `generateContent`
+ist weiter dokumentiert, stabil und nicht abgekündigt.
+
+```
+POST https://generativelanguage.googleapis.com/v1beta/models/{modell}:streamGenerateContent?alt=sse
+x-goog-api-key: <Schlüssel>
+content-type: application/json
+
+{ "systemInstruction": { "parts": [{ "text": "…" }] },
+  "contents": [{ "role": "user"|"model", "parts": [ {"text"} | {"functionCall":{"name","args"}}
+                 | {"functionResponse":{"name","response":{…}}} | {"text","thought":true} ] }],
+  "tools": [{ "functionDeclarations": [{ "name", "description", "parameters": <OpenAPI-Teilmenge> }] },
+            { "googleSearch": {} }],
+  "toolConfig": { "functionCallingConfig": { "mode": "AUTO" } },
+  "generationConfig": { "maxOutputTokens", "thinkingConfig": { "includeThoughts": true,
+                        "thinkingLevel": "low"|"medium"|"high" (Gemini 3.x) bzw. "thinkingBudget" (2.5) } } }
+```
+
+Antwort als SSE: Zeilen `data: {candidates:[{content:{role:'model',parts:[…]},
+finishReason:'STOP'|'MAX_TOKENS'|'SAFETY'|…, groundingMetadata:{webSearchQueries,
+groundingChunks:[{web:{uri,title}}], groundingSupports, searchEntryPoint}}],
+usageMetadata:{promptTokenCount, candidatesTokenCount, thoughtsTokenCount,
+totalTokenCount, cachedContentTokenCount}, promptFeedback:{blockReason}}`.
+
+**Übersetzung** (damit `src/models/chat.js` für beide Anbieter derselbe
+bleibt): text ↔ text, thinking ↔ thought-Teile, tool_use ↔ functionCall
+(id vergibt Neural OS), tool_result ↔ functionResponse (alle Ergebnisse eines
+Zuges in EINEM user-Content), Websuche = `googleSearch` statt
+web_search/web_fetch; groundingChunks → Ereignis `quelle`, webSearchQueries →
+Recherche-Karte "Sucht: …". Werkzeugschemata aus `werkzeuge.js` verlieren
+`strict`, `eager_input_streaming` und `additionalProperties`; `anyOf` mit
+`null` wird `nullable`; ein Ganzzahl-`enum` wird zu `integer` mit den Werten
+in der Beschreibung. Die strenge Prüfung bleibt `eingabePruefen()`.
+
+**Signaturen.** Gemini 3 hängt an functionCall-Teile (und an den letzten
+Teil einer Antwort) eine `thoughtSignature`. Beim Zurückschicken der
+Modellantwort gehen **alle Teile mit ihren Signaturen unverändert** zurück,
+sonst 400. Neural OS trägt sie am Block unter `block.gemini.thoughtSignature`;
+der Claude-Anbieter lässt genau das beim Anbieterwechsel weg.
+
+**Suche und Werkzeuge zugleich.** Gemini-3-Modelle nehmen `googleSearch` und
+eigene `functionDeclarations` zusammen. Lehnt die API das für ein Modell mit
+400 ab, geht dieselbe Anfrage ohne `googleSearch` noch einmal — und der Chat
+sagt ehrlich "Ohne Internetsuche".
+
+**Fehler** (`{error:{code,message,status}}`), als deutsche Sätze:
+
+| HTTP / status | Code | Satz |
+|---|---|---|
+| 400/401/403 mit "API key", `UNAUTHENTICATED` | `GEMINI_SCHLUESSEL_FALSCH` | "Der Google-Schlüssel stimmt nicht." |
+| 429 `RESOURCE_EXHAUSTED` | `GEMINI_LIMIT` | "Google-Limit erreicht — … morgen geht es kostenlos weiter. Oder Claude wählen." |
+| 503 `UNAVAILABLE` | `GEMINI_UEBERLASTET` | "Gemini ist gerade überlastet." |
+| 404 `NOT_FOUND` | `GEMINI_MODELL_UNBEKANNT` | "Dieses Modell gibt es bei Google nicht (mehr)." |
+| 413 / Token-Grenze | `GEMINI_ZU_GROSS` | "Das Gespräch ist zu lang für eine einzelne Anfrage." |
+| `finishReason: SAFETY`, `promptFeedback.blockReason` | `GEMINI_ABGELEHNT` | "Google hat die Antwort abgelehnt." |
+| anderes 400 `INVALID_ARGUMENT` | `GEMINI_ANFRAGE_ABGELEHNT` | "Google hat die Anfrage nicht angenommen." |
+
+**Verbrauch:** Tokens werden gezählt (`vault/gemini-verbrauch.json`), Kosten
+sind auf der kostenlosen Stufe 0 — die Oberfläche sagt "kostenlos" und nennt
+das Google-Limit. **Anbieterwahl:** `config.ki.anbieter` (`gemini` | `claude`);
+nach dem ersten erfolgreichen Verbinden ist der verbundene Anbieter die
+Einstellung, sind beide verbunden, gilt die Einstellung. Routen: `GET /api/ki`,
+`POST/DELETE /api/ki/:anbieter/schluessel`, `PATCH /api/ki {anbieter, modell}`;
+`/api/claude` bleibt als Alias. Geprüft gegen den Statisten
+`test/gemini-statist.js` (`test/gemini.test.js`, `npm run check` Abschnitt 6b)
+— **nicht** gegen die echte Google-API: einen echten Schlüssel gab es beim Bau nicht.

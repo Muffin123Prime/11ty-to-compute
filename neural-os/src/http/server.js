@@ -347,6 +347,7 @@ async function createServer(ctx = {}) {
     require('./api/chat'),
     require('./api/models'),
     require('./api/claude'),
+    require('./api/ki'),
     require('./api/network'),
     require('./api/agents'),
     require('./api/vault'),

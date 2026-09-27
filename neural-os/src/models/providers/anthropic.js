@@ -43,6 +43,9 @@ const {
 /* ------------------------------------------------------------- Konstanten */
 
 const KIND = 'anthropic';
+/** Wie der Anbieter in Nachrichten (`model.provider`), Konfiguration und Routen heißt. */
+const ANBIETER_ID = 'claude';
+const NAME = 'Claude';
 const API_BASIS = 'https://api.anthropic.com';
 const API_HOST = 'api.anthropic.com';
 const API_VERSION = '2023-06-01';
@@ -58,7 +61,6 @@ const VERBINDEN_MS = 60000;
  * drei Minuten ohne ein einziges Byte heißt: die Verbindung ist tot.
  */
 const LEERLAUF_MS = 180000;
-const MAX_ZEILE = 16 * 1024 * 1024;
 
 const STANDARD_MODELL = 'claude-opus-5';
 
@@ -111,6 +113,12 @@ const MODELLE = Object.freeze({
 const PREIS_JE_SUCHE = 0.01;
 
 const EFFORTS = new Set(['low', 'medium', 'high']);
+
+/** Wie eine abgelehnte Antwort im Chat heißt (chat.js liest das je Anbieter). */
+const ABLEHNUNG = Object.freeze({
+  code: 'CLAUDE_ABGELEHNT',
+  satz: 'Claude hat diese Anfrage abgelehnt. Formuliere sie anders oder frag etwas anderes.',
+});
 
 function modellInfo(id) {
   return MODELLE[id] || MODELLE[STANDARD_MODELL];
@@ -225,186 +233,19 @@ function transportFehler(err, waechter, teilInhalt) {
   );
 }
 
-/* --------------------------------------------------------- SSE zerlegen */
+/* --------------------------------------------------------- Strom lesen */
 
-/**
- * Zerlegt einen Byte-Strom in ganze Zeilen über Paketgrenzen hinweg. Der
- * TextDecoder überlebt zwischen den Stücken, damit ein halbiertes
- * UTF-8-Zeichen wieder zusammengesetzt statt zu U+FFFD wird.
- */
-class Zeilen {
-  constructor() {
-    this.decoder = new TextDecoder('utf-8');
-    this.rest = '';
-  }
+const strom = require('./strom');
 
-  push(stueck) {
-    this.rest += typeof stueck === 'string' ? stueck : this.decoder.decode(stueck, { stream: true });
-    if (this.rest.length > MAX_ZEILE) {
-      throw new ClaudeFehler('CLAUDE_FEHLER', 'Claude hat eine unplausibel lange Zeile gesendet.');
-    }
-    if (this.rest.indexOf('\n') === -1) return [];
-    const teile = this.rest.split('\n');
-    this.rest = teile.pop();
-    return teile.map(ohneCr);
-  }
-
-  ende() {
-    this.rest += this.decoder.decode();
-    const letzte = ohneCr(this.rest);
-    this.rest = '';
-    return letzte ? [letzte] : [];
-  }
-}
-
-function ohneCr(zeile) {
-  return zeile.endsWith('\r') ? zeile.slice(0, -1) : zeile;
-}
-
-/**
- * Server-Sent Events nach den Regeln, die hier zählen: Leerzeile schickt ab,
- * `:` ist ein Kommentar, mehrere `data:`-Zeilen werden mit "\n" verbunden,
- * ein einzelnes Leerzeichen nach dem Doppelpunkt fällt weg.
- */
-class SseLeser {
-  constructor() {
-    this.zeilen = new Zeilen();
-    this.daten = [];
-    this.name = null;
-  }
-
-  push(stueck) {
-    const aus = [];
-    for (const zeile of this.zeilen.push(stueck)) this.zeile(zeile, aus);
-    return aus;
-  }
-
-  ende() {
-    const aus = [];
-    for (const zeile of this.zeilen.ende()) this.zeile(zeile, aus);
-    this.abschicken(aus);
-    return aus;
-  }
-
-  zeile(zeile, aus) {
-    if (zeile === '') {
-      this.abschicken(aus);
-      return;
-    }
-    if (zeile.charCodeAt(0) === 58 /* ':' */) return;
-    const i = zeile.indexOf(':');
-    const feld = i === -1 ? zeile : zeile.slice(0, i);
-    let wert = i === -1 ? '' : zeile.slice(i + 1);
-    if (wert.charCodeAt(0) === 32) wert = wert.slice(1);
-    if (feld === 'data') this.daten.push(wert);
-    else if (feld === 'event') this.name = wert;
-  }
-
-  abschicken(aus) {
-    if (!this.daten.length) {
-      this.name = null;
-      return;
-    }
-    aus.push({ event: this.name || 'message', data: this.daten.join('\n') });
-    this.daten = [];
-    this.name = null;
-  }
-}
-
-/* -------------------------------------------------------- Zeitwächter */
-
-/** Verbindet das Abbruchsignal des Aufrufers mit eigenen Fristen und merkt sich, WARUM abgebrochen wurde. */
-class Waechter {
-  constructor(aussen) {
-    this.controller = new AbortController();
-    this.grund = null; // 'aufrufer' | 'verbinden' | 'leerlauf'
-    this.timer = null;
-    this.aussen = aussen || null;
-    this.beiAussen = () => this.ausloesen('aufrufer');
-    if (this.aussen) {
-      if (this.aussen.aborted) this.ausloesen('aufrufer');
-      else this.aussen.addEventListener('abort', this.beiAussen, { once: true });
-    }
-  }
-
-  get signal() {
-    return this.controller.signal;
-  }
-
-  ausloesen(grund) {
-    if (!this.grund) this.grund = grund;
-    this.stoppen();
-    try { this.controller.abort(); } catch { /* schon abgebrochen */ }
-  }
-
-  stellen(ms, grund) {
-    this.stoppen();
-    if (!Number.isFinite(ms) || ms <= 0) return;
-    this.timer = setTimeout(() => this.ausloesen(grund), ms);
-    if (typeof this.timer.unref === 'function') this.timer.unref();
-  }
-
-  stoppen() {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
-  }
-
-  aufraeumen() {
-    this.stoppen();
-    if (this.aussen) {
-      try { this.aussen.removeEventListener('abort', this.beiAussen); } catch { /* egal */ }
-    }
-  }
-}
-
-async function* koerper(res) {
-  const body = res && res.body;
-  if (!body) {
-    if (res && typeof res.text === 'function') {
-      const t = await res.text();
-      if (t) yield t;
-    }
-    return;
-  }
-  if (typeof body === 'string' || ArrayBuffer.isView(body)) {
-    if (body.length) yield body;
-    return;
-  }
-  if (typeof body.getReader === 'function') {
-    const reader = body.getReader();
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) yield value;
-      }
-    } finally {
-      try { reader.cancel().catch(() => {}); } catch { /* schon zu */ }
-    }
-    return;
-  }
-  if (typeof body[Symbol.asyncIterator] === 'function') {
-    for await (const stueck of body) if (stueck) yield stueck;
-    return;
-  }
-  throw new ClaudeFehler('CLAUDE_FEHLER', 'Die Antwort von Claude ließ sich nicht lesen.');
-}
-
-async function auszug(res, max = 4000) {
-  try {
-    const decoder = new TextDecoder('utf-8');
-    let out = '';
-    for await (const s of koerper(res)) {
-      out += typeof s === 'string' ? s : decoder.decode(s, { stream: true });
-      if (out.length >= max) break;
-    }
-    return out.slice(0, max);
-  } catch {
-    return '';
-  }
-}
+// Die gemeinsamen Helfer (Zeilen, SSE, Zeitwächter) mit den Sätzen dieses Anbieters.
+const stromOpts = {
+  zuLang: () => new ClaudeFehler('CLAUDE_FEHLER', 'Claude hat eine unplausibel lange Zeile gesendet.'),
+  unlesbar: () => new ClaudeFehler('CLAUDE_FEHLER', 'Die Antwort von Claude ließ sich nicht lesen.'),
+};
+const { Waechter, auszug, kopfWert } = strom;
+const koerper = (res) => strom.koerper(res, stromOpts);
+const SseLeser = class extends strom.SseLeser { constructor() { super(stromOpts); } };
+const Zeilen = class extends strom.Zeilen { constructor() { super(stromOpts); } };
 
 function fehlerTypAus(text) {
   try {
@@ -412,12 +253,6 @@ function fehlerTypAus(text) {
     if (j && j.error && typeof j.error.type === 'string') return { typ: j.error.type, nachricht: j.error.message || '' };
   } catch { /* kein JSON */ }
   return { typ: null, nachricht: text };
-}
-
-function kopfWert(headers, name) {
-  if (!headers) return null;
-  if (typeof headers.get === 'function') return headers.get(name);
-  return headers[name] || null;
 }
 
 /* ---------------------------------------------------------- Anfrage */
@@ -815,7 +650,13 @@ function bloeckeZurueck(inhalt, { offeneSuche = false } = {}) {
     if (b.type === 'fallback') return;
     if (i < grenze && (DENKBLOECKE.has(b.type) || b.type === 'tool_use')) return;
     if (b.type === 'server_tool_use' && !ergebnisse.has(b.id) && !offeneSuche) return;
-    out.push(JSON.parse(JSON.stringify(b)));
+    // Nach einem Anbieterwechsel: Geminis Denkblöcke haben keine Anthropic-
+    // Signatur und fallen weg; an Text und Werkzeugaufrufen fällt nur das
+    // Gemini-Eigene (`gemini`, die thoughtSignature) weg, der Inhalt bleibt.
+    if (b.gemini && DENKBLOECKE.has(b.type)) return;
+    const { gemini, ...rest } = b;
+    void gemini;
+    out.push(JSON.parse(JSON.stringify(rest)));
   });
   return out;
 }
@@ -1017,6 +858,9 @@ async function chat({
 
 module.exports = {
   kind: KIND,
+  anbieterId: ANBIETER_ID,
+  NAME,
+  ABLEHNUNG,
   API_BASIS,
   API_HOST,
   API_VERSION,

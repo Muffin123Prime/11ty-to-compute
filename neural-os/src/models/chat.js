@@ -53,7 +53,11 @@
  *    "Rückgängig" (`wirkung` am Agenten-Ereignis), kein Teil des Textes.
  */
 
-const anbieter = require('./providers/anthropic');
+// Die Blockform des Verlaufs ist die von Claude; Gemini übersetzt sie in
+// beide Richtungen (src/models/providers/gemini.js). Welcher Anbieter gerade
+// baut und liest, sagt der Verbund (`ki.anbieterModul()`); ohne Verbund
+// (Tests mit einem handgeschriebenen Gegenüber) ist es Claude.
+const anthropic = require('./providers/anthropic');
 const { createWerkzeuge, DEFINITIONEN, istEigenesWerkzeug, ungueltigErgebnis } = require('./werkzeuge');
 const wdh = require('../kalender/wiederholung');
 const {
@@ -212,7 +216,7 @@ function ersatzErgebnis(id) {
  * - Antworten, die nur aus Denkblöcken bestehen, fallen weg;
  * - die erste Nachricht ist vom Nutzer.
  */
-function verlaufHerrichten(nachrichten) {
+function verlaufHerrichten(nachrichten, modul = anthropic) {
   const roh = [];
   for (const n of nachrichten) {
     if (!n || (n.role !== 'user' && n.role !== 'assistant')) continue;
@@ -226,7 +230,7 @@ function verlaufHerrichten(nachrichten) {
     if (n.role !== 'assistant') return;
     // Eine Antwort am ENDE gibt es nur nach pause_turn: dort muss der offene
     // Suchaufruf stehen bleiben, damit der Server weiß, wo er weitermacht.
-    n.content = anbieter.bloeckeZurueck(n.content, { offeneSuche: i === roh.length - 1 });
+    n.content = modul.bloeckeZurueck(n.content, { offeneSuche: i === roh.length - 1 });
   });
   const ohneLeere = roh.filter((n) => n.role !== 'assistant' || n.content.some((b) => !DENKEN.has(b.type)));
   // Nach dem Entfernen können wieder gleiche Rollen nebeneinander stehen.
@@ -288,7 +292,7 @@ function mitCachePunkt(nachrichten) {
 /**
  * @param {object} deps
  * @param {object} deps.store
- * @param {object} deps.claude      src/models/claude.js
+ * @param {object} deps.claude      der KI-Verbund (src/models/ki.js) oder ein einzelner Anbieter-Dienst
  * @param {object} [deps.gate]
  * @param {object} [deps.bus]
  * @param {object} [deps.graph]
@@ -305,6 +309,9 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
   }
   const log = typeof logger === 'function' ? logger('chat') : (logger || nullLogger());
   const cfg = config || {};
+  /** Das Anbieter-Modul, das gerade Anfragen baut und Blöcke liest. */
+  const modulVon = () => (typeof claude.anbieterModul === 'function' ? claude.anbieterModul() : anthropic);
+  const anbieterId = () => modulVon().anbieterId || 'claude';
   const tools = werkzeuge || createWerkzeuge({ store, bus, logger });
 
   /** chatId -> {controller, messageId, startedAt} */
@@ -477,7 +484,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
   function modellFuer(chat) {
     const m = chat.data && chat.data.model;
     const id = m && typeof m === 'object' ? m.model : m;
-    return anbieter.istModell(id) ? id : claude.modell();
+    // Ein Modell des anderen Anbieters zählt nicht: es antwortet der aktive.
+    return modulVon().istModell(id) ? id : claude.modell();
   }
 
   function effortVon(wert, rueckfall) {
@@ -520,6 +528,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
 
     const d0 = assistant.data || {};
     const c0 = d0.claude || {};
+    const anbieter = modulVon();
     const modell = c0.modell && anbieter.istModell(c0.modell) ? c0.modell : modellFuer(chat);
     const t = {
       verlauf: Array.isArray(c0.verlauf) ? klon(c0.verlauf) : [],
@@ -552,6 +561,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     };
 
     const claudeDaten = (extra = {}) => ({
+      anbieter: anbieter.anbieterId,
       modell,
       effort,
       verlauf: t.verlauf,
@@ -622,6 +632,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       }
       if (e.art === 'text') {
         textDazu(e.delta);
+      } else if (e.art === 'hinweis' && e.satz) {
+        emit(onEvent, { type: 'hinweis', satz: e.satz });
       } else if (e.art === 'denken') {
         t.denken += e.delta;
         emit(onEvent, { type: 'denken', delta: e.delta });
@@ -698,11 +710,11 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
           hinweis = 'Diese Antwort brauchte zu viele Schritte; ich habe hier angehalten. Schreib „weiter“, dann mache ich weiter.';
           break;
         }
-        const { nachrichten, weg } = kuerzen(verlaufHerrichten([...basis, ...t.verlauf]));
+        const { nachrichten, weg } = kuerzen(verlaufHerrichten([...basis, ...t.verlauf], anbieter));
         if (weg && t.runden === 1) {
           emit(onEvent, { type: 'hinweis', satz: `${weg} ältere Nachricht(en) passen nicht mehr in den Kontext und wurden diesmal weggelassen (nicht zusammengefasst).` });
         }
-        const { body, betas } = anbieter.anfrageBauen({
+        const gebaut = anbieter.anfrageBauen({
           modell,
           system,
           werkzeuge: DEFINITIONEN,
@@ -710,8 +722,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
           effort,
         });
         const r = await claude.senden({
-          body,
-          betas,
+          ...gebaut,
           gate,
           scope,
           purpose: `Antwort im Chat „${(chat.data && chat.data.title) || chat.id}“`,
@@ -837,13 +848,11 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
         rueckfrageOffen: wartet,
         status: abgelehnt ? 'failed' : 'complete',
         stats: t.stats,
-        model: { provider: 'claude', model: t.modellAntwort || modell },
+        model: { provider: anbieter.anbieterId, model: t.modellAntwort || modell },
         usedNetwork: egress.state.usedNetwork || !!(final.data && final.data.usedNetwork),
         networkTargets: [...new Set([...(final.data && final.data.networkTargets) || [], ...egress.state.targets.keys()])],
         abgeschnitten: stopReason === 'max_tokens',
-        error: abgelehnt
-          ? { code: 'CLAUDE_ABGELEHNT', message: 'Claude hat diese Anfrage abgelehnt. Formuliere sie anders oder frag etwas anderes.' }
-          : null,
+        error: abgelehnt ? { code: anbieter.ABLEHNUNG.code, message: anbieter.ABLEHNUNG.satz } : null,
         claude: claudeDaten({
           stopReason,
           abgelehnt,
@@ -851,9 +860,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
           stopDetails: null,
         }),
       });
-      if (abgelehnt) {
-        emit(onEvent, { type: 'fehler', code: 'CLAUDE_ABGELEHNT', satz: 'Claude hat diese Anfrage abgelehnt. Formuliere sie anders oder frag etwas anderes.' });
-      }
+      if (abgelehnt) emit(onEvent, { type: 'fehler', code: anbieter.ABLEHNUNG.code, satz: anbieter.ABLEHNUNG.satz });
       emit(onEvent, { type: 'fertig', stopReason, record: final });
       publish('chat.message', { chatId: chat.id, record: final });
       ableiten(final, chat);
@@ -874,7 +881,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
         rueckfrageOffen: false,
         status: aborted ? 'aborted' : 'failed',
         stats: t.stats,
-        model: { provider: 'claude', model: t.modellAntwort || modell },
+        model: { provider: anbieter.anbieterId, model: t.modellAntwort || modell },
         usedNetwork: egress.state.usedNetwork,
         networkTargets: [...egress.state.targets.keys()],
         error: { code: e.code, message: e.message },
@@ -1105,14 +1112,14 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       role: 'assistant',
       content: '',
       status: 'streaming',
-      model: { provider: 'claude', model: modell },
+      model: { provider: anbieterId(), model: modell },
       ordinal,
       denken: '',
       quellen: [],
       agenten: [],
       rueckfragen: [],
       rueckfrageOffen: false,
-      claude: { modell, effort, verlauf: [], textImVerlauf: 0 },
+      claude: { anbieter: anbieterId(), modell, effort, verlauf: [], textImVerlauf: 0 },
     });
     emit(onEvent, { type: 'antwort', record: assistant });
     publish('chat.message', { chatId: chat.id, record: assistant });
@@ -1389,7 +1396,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       const z = claude.zustand();
       return {
         scope: `chat:${chat.id}`,
-        claude: { verbunden: z.verbunden, modell: modellFuer(chat), grund: z.grund, grundCode: z.grundCode },
+        anbieter: z.aktiv || anbieterId(),
+        claude: { verbunden: z.verbunden, modell: modellFuer(chat), grund: z.grund, grundCode: z.grundCode, anbieter: z.aktiv || anbieterId() },
         netz: z.netz,
         internet: z.netz.erlaubt,
       };
@@ -1402,12 +1410,13 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     preview(chatId) {
       const chat = getChat(chatId);
       const history = historyOf(chat.id);
-      const { nachrichten, weg } = kuerzen(verlaufHerrichten(verlaufAus(history)));
+      const { nachrichten, weg } = kuerzen(verlaufHerrichten(verlaufAus(history), modulVon()));
       return {
         system: systemBloecke(chat),
         nachrichten,
         weggelassen: weg,
         werkzeuge: DEFINITIONEN.map((w) => w.name),
+        anbieter: anbieterId(),
         modell: modellFuer(chat),
       };
     },

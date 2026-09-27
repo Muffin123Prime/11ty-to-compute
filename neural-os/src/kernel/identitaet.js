@@ -180,6 +180,27 @@ function createIdentitaet({ config, paths, portable = null, speichern, publish, 
     return info;
   }
 
+  /**
+   * Ein Marker ohne `kiId` neben einer Konfiguration, die ÄLTER ist als der
+   * Marker: Der Datenbestand wurde beim Vorbereiten mitgebracht ("Stick
+   * vorbereiten" mit Datenbestand kopiert erst data/ und schreibt dann den
+   * Marker) und trägt die Kennung der Quelle (Befund 11, Prüfung Runde 2).
+   * Ein alter Stick, der hier gewachsen ist, hat seine Konfiguration erst
+   * NACH dem Marker bekommen. `createdAt` bleibt beim Erneuern des Programms
+   * stehen. Endgültig beseitigt das erst Paket R (keine Rohkopie mehr).
+   */
+  function mitgebracht(marker) {
+    const angelegt = Date.parse(marker && marker.createdAt);
+    if (!Number.isFinite(angelegt)) return false;
+    let st;
+    try {
+      st = fs.statSync(paths.config || path.join(paths.home, 'config.json'));
+    } catch {
+      return false;
+    }
+    return st.mtimeMs <= angelegt;
+  }
+
   const identitaet = {
     get id() {
       return config.sync && typeof config.sync === 'object' ? config.sync.deviceId : undefined;
@@ -223,7 +244,8 @@ function createIdentitaet({ config, paths, portable = null, speichern, publish, 
      * Passen Marker und Konfiguration zusammen? Nur portabel; die
      * Heim-Installation hat keinen Marker.
      *  - Marker ohne `kiId`: ein Stick von vor diesem Umbau. Er bekommt die
-     *    Kennung eingetragen, mehr nicht.
+     *    Kennung eingetragen, mehr nicht -- es sei denn, die Konfiguration
+     *    ist älter als der Marker (mitgebrachter Datenbestand) -> neue Identität.
      *  - Marker mit anderer `kiId`: `data/` wurde von einem anderen Stick
      *    hierher kopiert -> neue Identität.
      * @returns {{aktion:'keine'|'eingetragen'|'erneuert', id:string}}
@@ -234,6 +256,10 @@ function createIdentitaet({ config, paths, portable = null, speichern, publish, 
       if (typeof identitaet.id !== 'string' || !KI_ID_RE.test(identitaet.id)) identitaet.sicherstellen();
       const marker = leseMarker();
       if (typeof marker.kiId !== 'string' || !marker.kiId) {
+        if (mitgebracht(marker)) {
+          const neu = identitaet.erneuern('daten-kopiert');
+          return { aktion: 'erneuert', id: neu.id };
+        }
         schreibeMarker();
         return { aktion: 'eingetragen', id: identitaet.id };
       }

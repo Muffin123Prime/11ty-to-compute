@@ -498,14 +498,14 @@ function baueAnsicht(container, ctx) {
   let chatId = route.params && route.params.id ? String(route.params.id) : null;
   let s = chatId ? sitzungFuer(chatId) : null;
   let lebt = true;
-  let claude = null; // {verbunden, grundCode, grund, …} oder null (unbekannt)
+  let claude = null; // Zustand der KI aus GET /api/ki: {aktiv, name, verbunden, grundCode, grund, netz, …} oder null (unbekannt)
   let claudeGeprueft = false;
   let wartet = null; // Text, der nach dem Verbinden gesendet wird
   // Die Verbinden-Karte wird neu gebaut, sobald sich der Claude-Zustand
   // aendert (Netzmodus, Tresor ...). Schluessel und Fehlersatz ueberleben das
   // hier -- nur im Speicher dieses Tabs, nie im Browser-Speicher.
-  let schluesselEntwurf = '';
-  let verbindenFehler = '';
+  const schluesselEntwurf = { gemini: '', claude: '' };
+  let verbindenFehler = null; // {anbieter, satz}
   let verbindet = false;
   let folgen = true;
   let anhaenge = [];
@@ -546,7 +546,7 @@ function baueAnsicht(container, ctx) {
   const feld = h('textarea.cv-composer__feld', {
     rows: 1,
     placeholder: 'Nachricht eingeben …',
-    'aria-label': 'Nachricht an Claude. Enter sendet, Umschalt+Enter macht eine neue Zeile.',
+    'aria-label': 'Nachricht an die KI. Enter sendet, Umschalt+Enter macht eine neue Zeile.',
     enterkeyhint: 'send',
     autocomplete: 'off',
     spellcheck: 'true',
@@ -736,13 +736,29 @@ function baueAnsicht(container, ctx) {
   }
 
   /**
-   * Die ruhige Karte, wenn Claude nicht antworten kann. Genau ein Feld, ein
-   * Satz, wo es den Schluessel gibt -- und danach geht es sofort weiter.
-   * Ist Neural OS offline, ist das derselbe eine Schritt: der Knopf sagt
-   * "Online gehen und verbinden", und genau das tut der Klick.
+   * Die ruhige Karte, wenn die KI nicht antworten kann. Ohne Schluessel:
+   * "Verbinde eine KI" -- oben gross Google (kostenlos), darunter klein
+   * aufklappbar Claude (kostet). Ein Feld je Anbieter, ein Satz, wo es den
+   * Schluessel gibt -- und danach geht es sofort weiter. Ist Neural OS
+   * offline, ist das derselbe eine Schritt: der Knopf sagt "Online gehen und
+   * verbinden", und genau das tut der Klick.
    */
+  const ANBIETER = {
+    gemini: {
+      name: 'Gemini', titel: 'Kostenlos mit Google', platzhalter: 'AIza…', label: 'Google-Schlüssel',
+      link: 'https://aistudio.google.com/apikey', linkText: 'aistudio.google.com/apikey',
+      satz: ' → Create API key. Kostenlos; Google darf Inhalte zur Verbesserung nutzen.',
+    },
+    claude: {
+      name: 'Claude', titel: 'Oder Claude (kostet pro Nutzung)', platzhalter: 'sk-ant-…', label: 'Claude-Schlüssel',
+      link: 'https://console.anthropic.com/settings/keys', linkText: 'console.anthropic.com',
+      satz: ' → API Keys. Kostet pro Nutzung; die Rechnung stellt Anthropic.',
+    },
+  };
+
   function baueVerbinden(kompakt) {
     const code = claude && claude.grundCode;
+    const name = (claude && claude.name) || 'Die KI';
     const karte = h('section.cv-verbinden', { class: kompakt ? 'cv-verbinden--kompakt' : '', 'data-grund': code || 'unbekannt' });
     const kopf = (titel) => h('div.cv-verbinden__kopf', null,
       h('span.avatar', { 'aria-hidden': 'true' }, icon(I.brand)),
@@ -772,7 +788,7 @@ function baueAnsicht(container, ctx) {
         },
       }, icon(I.cloud), h('span', null, text('Online schalten')));
       karte.append(kopf('Die KI braucht Internet'),
-        h('p.cv-verbinden__text', null, text('Neural OS ist gerade offline. Claude antwortet nur, wenn Neural OS ins Internet darf.')),
+        h('p.cv-verbinden__text', null, text(`Neural OS ist gerade offline. ${name} antwortet nur, wenn Neural OS ins Internet darf.`)),
         h('div.cv-verbinden__form', null, schalter),
         fehler);
       return karte;
@@ -780,116 +796,136 @@ function baueAnsicht(container, ctx) {
     if (code === 'gesperrt') {
       const ziel = claude && typeof claude.ziel === 'string' && claude.ziel.startsWith('#/') ? claude.ziel : '#/settings';
       karte.append(kopf('Erst die PIN'),
-        h('p.cv-verbinden__text', null, text((claude && claude.grund) || 'Der Tresor ist gesperrt. Entsperre ihn mit deiner PIN, dann kann Claude antworten.')),
+        h('p.cv-verbinden__text', null, text((claude && claude.grund) || 'Der Tresor ist gesperrt. Entsperre ihn mit deiner PIN, dann kann die KI antworten.')),
         h('div.cv-verbinden__form', null, h('a.btn.btn--primary', { href: ziel }, icon(I.unlock), h('span', null, text('PIN eingeben')))));
       return karte;
     }
     if (code === 'schleuse') {
-      karte.append(kopf('Claude ist gesperrt'),
-        h('p.cv-verbinden__text', null, text(claude.grund || 'Die Netzschleuse lässt api.anthropic.com gerade nicht durch.')),
+      karte.append(kopf(`${name} ist gesperrt`),
+        h('p.cv-verbinden__text', null, text(claude.grund || 'Die Netzschleuse lässt den Anbieter gerade nicht durch.')),
         h('div.cv-verbinden__form', null, h('a.btn', { href: '#/network' }, icon(I.network), h('span', null, text('Netzwerk öffnen')))));
       return karte;
     }
     if (code !== 'kein-schluessel' && code !== 'schluessel-falsch' && claude && claude.grund && !code) {
-      karte.append(kopf('Claude ist nicht erreichbar'), h('p.cv-verbinden__text', null, text(claude.grund)));
+      karte.append(kopf(`${name} ist nicht erreichbar`), h('p.cv-verbinden__text', null, text(claude.grund)));
       return karte;
     }
 
-    // Kein oder ein falscher Schluessel: das eine Feld.
+    // Kein oder ein falscher Schluessel: ein Feld je Anbieter, Google zuerst.
     const online = mussOnline();
     const knopfText = online ? 'Online gehen und verbinden' : 'Verbinden';
-    const eingabeFeld = h('input.input', {
-      type: 'password',
-      name: 'claude-schluessel',
-      autocomplete: 'off',
-      spellcheck: 'false',
-      placeholder: 'sk-ant-…',
-      'aria-label': 'Claude-Schlüssel',
-      onInput: (e) => { schluesselEntwurf = e.target.value; },
-    });
-    eingabeFeld.value = schluesselEntwurf;
-    if (verbindenFehler) zeigeFehler(verbindenFehler);
-    const knopf = h('button.btn.btn--primary', { type: 'submit' }, h('span', null, text(knopfText)));
-    const form = h('form.cv-verbinden__form', {
-      onSubmit: async (e) => {
-        e.preventDefault();
-        const wert = eingabeFeld.value.trim();
-        if (!wert) {
-          eingabeFeld.focus();
-          return;
-        }
-        schluesselEntwurf = eingabeFeld.value;
-        verbindenFehler = '';
-        verbindet = true;
-        knopf.disabled = true;
-        eingabeFeld.disabled = true;
-        clear(knopf);
-        knopf.append(h('span.spinner.cv-spinner', { 'aria-hidden': 'true' }), h('span', null, text(online ? 'Gehe online …' : 'Prüfe …')));
-        fehler.hidden = true;
-        // Die Zustimmung ist der Klick auf "Online gehen und verbinden".
-        // Scheitert danach die Pruefung, geht der Netzmodus zurueck -- der
-        // Klick galt beidem zusammen.
-        const vorher = online ? claude.netz.modus : null;
-        let umgeschaltet = false;
-        try {
-          if (online) {
-            await api.put('/network', { mode: 'online' });
-            umgeschaltet = true;
+
+    const formFuer = (anbieter) => {
+      const A = ANBIETER[anbieter];
+      const eingabeFeld = h('input.input', {
+        type: 'password',
+        name: `${anbieter}-schluessel`,
+        autocomplete: 'off',
+        spellcheck: 'false',
+        placeholder: A.platzhalter,
+        'aria-label': A.label,
+        onInput: (e) => { schluesselEntwurf[anbieter] = e.target.value; },
+      });
+      eingabeFeld.value = schluesselEntwurf[anbieter] || '';
+      const eigenerFehler = h('p.cv-verbinden__fehler', { role: 'alert', hidden: true });
+      const zeige = (satz) => {
+        clear(eigenerFehler);
+        eigenerFehler.appendChild(text(satz));
+        eigenerFehler.hidden = false;
+      };
+      if (verbindenFehler && verbindenFehler.anbieter === anbieter) zeige(verbindenFehler.satz);
+      const knopf = h('button.btn.btn--primary', { type: 'submit' }, h('span', null, text(knopfText)));
+      const form = h('form.cv-verbinden__form', {
+        onSubmit: async (e) => {
+          e.preventDefault();
+          const wert = eingabeFeld.value.trim();
+          if (!wert) {
+            eingabeFeld.focus();
+            return;
           }
-          const z = await api.post('/claude/schluessel', { schluessel: wert }, { timeoutMs: 45000 });
-          claude = { ...z };
-          schluesselEntwurf = '';
-          eingabeFeld.value = '';
-          ctx.toast('Claude ist verbunden.', 'success');
-          verbindet = false;
-          obenKey = null;
-          plane();
-          if (wartet) {
-            const t = wartet;
-            wartet = null;
-            senden(t);
-          } else {
-            feld.focus();
+          schluesselEntwurf[anbieter] = eingabeFeld.value;
+          verbindenFehler = null;
+          verbindet = true;
+          knopf.disabled = true;
+          eingabeFeld.disabled = true;
+          clear(knopf);
+          knopf.append(h('span.spinner.cv-spinner', { 'aria-hidden': 'true' }), h('span', null, text(online ? 'Gehe online …' : 'Prüfe …')));
+          eigenerFehler.hidden = true;
+          // Die Zustimmung ist der Klick auf "Online gehen und verbinden".
+          // Scheitert danach die Pruefung, geht der Netzmodus zurueck -- der
+          // Klick galt beidem zusammen.
+          const vorher = online ? claude.netz.modus : null;
+          let umgeschaltet = false;
+          try {
+            if (online) {
+              await api.put('/network', { mode: 'online' });
+              umgeschaltet = true;
+            }
+            const z = await api.post(`/ki/${anbieter}/schluessel`, { schluessel: wert }, { timeoutMs: 45000 });
+            claude = { ...z };
+            schluesselEntwurf[anbieter] = '';
+            eingabeFeld.value = '';
+            ctx.toast(`${A.name} ist verbunden.`, 'success');
+            verbindet = false;
+            obenKey = null;
+            plane();
+            if (wartet) {
+              const t = wartet;
+              wartet = null;
+              senden(t);
+            } else {
+              feld.focus();
+            }
+          } catch (err) {
+            if (umgeschaltet && vorher) {
+              try { await api.put('/network', { mode: vorher }); } catch { /* der Status unten links zeigt, was gilt */ }
+            }
+            if (online && !umgeschaltet) {
+              verbindenFehler = { anbieter, satz: err && err.status === 403
+                ? 'Online schalten geht nur am Gerät selbst, auf dem Neural OS läuft.'
+                : `Nicht umgeschaltet: ${(err && err.message) || 'unbekannter Fehler'}` };
+            } else if (!/_OFFLINE$/.test(String(err && err.code))) {
+              // *_OFFLINE ohne Umschalten: der Zustand war veraltet; die neu
+              // gebaute Karte bietet "Online gehen und verbinden" an.
+              verbindenFehler = { anbieter, satz: (err && err.message) || 'Der Schlüssel ließ sich nicht prüfen.' };
+            }
+            verbindet = false;
+            await claudeLaden();
+            if (!lebt) return;
+            obenKey = null;
+            plane();
+          } finally {
+            verbindet = false;
+            if (knopf.isConnected) {
+              knopf.disabled = false;
+              eingabeFeld.disabled = false;
+              clear(knopf);
+              knopf.appendChild(h('span', null, text(knopfText)));
+            }
           }
-        } catch (err) {
-          if (umgeschaltet && vorher) {
-            try { await api.put('/network', { mode: vorher }); } catch { /* der Status unten links zeigt, was gilt */ }
-          }
-          if (online && !umgeschaltet) {
-            verbindenFehler = err && err.status === 403
-              ? 'Online schalten geht nur am Gerät selbst, auf dem Neural OS läuft.'
-              : `Nicht umgeschaltet: ${(err && err.message) || 'unbekannter Fehler'}`;
-          } else if (!(err && err.code === 'CLAUDE_OFFLINE')) {
-            // CLAUDE_OFFLINE ohne Umschalten: der Zustand war veraltet; die
-            // neu gebaute Karte bietet "Online gehen und verbinden" an.
-            verbindenFehler = (err && err.message) || 'Der Schlüssel ließ sich nicht prüfen.';
-          }
-          verbindet = false;
-          await claudeLaden();
-          if (!lebt) return;
-          obenKey = null;
-          plane();
-        } finally {
-          verbindet = false;
-          if (knopf.isConnected) {
-            knopf.disabled = false;
-            eingabeFeld.disabled = false;
-            clear(knopf);
-            knopf.appendChild(h('span', null, text(knopfText)));
-          }
-        }
-      },
-    }, eingabeFeld, knopf);
-    karte.append(kopf('Verbinde Claude'),
-      h('p.cv-verbinden__text', null, text(code === 'schluessel-falsch'
-        ? 'Der gespeicherte Schlüssel wird nicht mehr angenommen. Füge einen neuen ein – danach geht es sofort weiter.'
-        : 'Neural OS denkt mit Claude von Anthropic. Füge einmal deinen Schlüssel ein – danach geht es sofort los.')),
-      form,
-      fehler,
-      h('p.cv-verbinden__hinweis', null,
-        text('Den Schlüssel bekommst du auf '),
-        h('a', { href: 'https://console.anthropic.com/settings/keys', target: '_blank', rel: 'noopener noreferrer' }, text('console.anthropic.com')),
-        text(' unter „API Keys“. Er bleibt im Tresor auf deinem Stick.')));
+        },
+      }, eingabeFeld, knopf);
+      const hinweis = h('p.cv-verbinden__hinweis', null,
+        text('Schlüssel: '),
+        h('a', { href: A.link, target: '_blank', rel: 'noopener noreferrer' }, text(A.linkText)),
+        text(A.satz));
+      return { form, fehler: eigenerFehler, hinweis };
+    };
+
+    const g = formFuer('gemini');
+    const c = formFuer('claude');
+    // Ein abgelehnter Schluessel: das Feld des betroffenen Anbieters ist offen.
+    const falschBei = code === 'schluessel-falsch' && claude ? claude.aktiv : null;
+    karte.append(kopf('Verbinde eine KI'));
+    if (falschBei) {
+      karte.append(h('p.cv-verbinden__text', null, text(`Der gespeicherte ${ANBIETER[falschBei].name}-Schlüssel wird nicht mehr angenommen. Füge einen neuen ein – danach geht es sofort weiter.`)));
+    }
+    karte.append(
+      h('h3.cv-verbinden__unter', null, text(ANBIETER.gemini.titel)),
+      g.form, g.fehler, g.hinweis,
+      h('details.cv-verbinden__mehr', { open: falschBei === 'claude' ? '' : null },
+        h('summary', null, text(ANBIETER.claude.titel)),
+        c.form, c.fehler, c.hinweis));
     return karte;
   }
 
@@ -962,7 +998,7 @@ function baueAnsicht(container, ctx) {
     const fehler = u.fehler ? h('p.cv-status.cv-status--fehler', { role: 'alert' }, text(u.fehler)) : null;
     return h('div.cv-bearbeiten', null, t, fehler,
       h('div.cv-bearbeiten__fuss', null,
-        h('span.cv-bearbeiten__hinweis', null, text('Alles danach fällt weg, und Claude antwortet neu.')),
+        h('span.cv-bearbeiten__hinweis', null, text('Alles danach fällt weg, und die KI antwortet neu.')),
         h('button.btn.btn--ghost', {
           type: 'button',
           onClick: (e) => {
@@ -999,7 +1035,7 @@ function baueAnsicht(container, ctx) {
     } catch (err) {
       u.bearbeiten = true;
       u.fehler = fehlerSatz(err);
-      if (err && err.code === 'CLAUDE_NICHT_VERBUNDEN') claudeAus(err);
+      if (nichtVerbunden(err)) claudeAus(err);
       neuZeichnen(m.id);
     }
   }
@@ -1347,7 +1383,7 @@ function baueAnsicht(container, ctx) {
       fu.sendet = null;
       fu.fehler = fehlerSatz(err);
       if (err && err.code === 'RUECKFRAGE_ERLEDIGT') nachladen(s, api).catch(() => {});
-      if (err && err.code === 'CLAUDE_NICHT_VERBUNDEN') claudeAus(err);
+      if (nichtVerbunden(err)) claudeAus(err);
     }
     neuZeichnen(m.id);
   }
@@ -1481,6 +1517,11 @@ function baueAnsicht(container, ctx) {
     return err.message || 'Unbekannter Fehler.';
   }
 
+  /** CLAUDE_, GEMINI_ oder KI_NICHT_VERBUNDEN: die Verbinden-Karte uebernimmt. */
+  function nichtVerbunden(err) {
+    return !!(err && /_NICHT_VERBUNDEN$/.test(String(err.code || '')));
+  }
+
   function claudeAus(err) {
     // PIN_NOETIG: der Tresor ist offen, aber dieser Browser hat keine
     // PIN-Sitzung (src/http/auth.js) -- fuer den Nutzer dasselbe wie gesperrt.
@@ -1604,7 +1645,7 @@ function baueAnsicht(container, ctx) {
       await strom(s, api, `/chats/${encodeURIComponent(s.chatId)}/neu-antworten`, {});
       fokusNachAntwort();
     } catch (err) {
-      if (err && err.code === 'CLAUDE_NICHT_VERBUNDEN') claudeAus(err);
+      if (nichtVerbunden(err)) claudeAus(err);
       else ctx.toast(`Nicht neu geantwortet: ${fehlerSatz(err)}`, 'error');
     }
   }
@@ -1726,7 +1767,7 @@ function baueAnsicht(container, ctx) {
       }
     }
     if (abgelehnt.length) {
-      ctx.toast(`Nur Textdateien lassen sich anhängen. Bilder und PDFs schickt Neural OS noch nicht an Claude (${abgelehnt.join(', ')}).`, 'info', { timeout: 8000 });
+      ctx.toast(`Nur Textdateien lassen sich anhängen. Bilder und PDFs schickt Neural OS noch nicht an die KI (${abgelehnt.join(', ')}).`, 'info', { timeout: 8000 });
     }
     zeichneAnhaenge();
     feld.focus();
@@ -1796,7 +1837,7 @@ function baueAnsicht(container, ctx) {
 
   async function claudeLaden() {
     try {
-      const z = await api.get('/claude', { timeoutMs: 8000 });
+      const z = await api.get('/ki', { timeoutMs: 8000 });
       claude = z && typeof z === 'object' ? { ...z } : null;
     } catch (err) {
       if (err instanceof ApiError && err.code === 'PIN_NOETIG') {
@@ -1817,7 +1858,7 @@ function baueAnsicht(container, ctx) {
 
   offs.push(ctx.bus.on('*', (payload, event) => {
     const typ = (event && event.type) || '';
-    if (typ.startsWith('claude') || typ === 'network.mode' || typ.startsWith('vault.')) claudeBald();
+    if (typ.startsWith('claude') || typ.startsWith('gemini') || typ === 'ki.anbieter' || typ === 'network.mode' || typ.startsWith('vault.')) claudeBald();
     if (!s || s.lauf || !payload || payload.chatId !== s.chatId) return;
     // Ein anderes Geraet (oder ein anderer Tab) schreibt in diesen Chat.
     if (typ === 'chat.message' && payload.record) {
@@ -1961,6 +2002,14 @@ const STIL = `
 .cv-verbinden__hinweis { margin: 14px 0 0; font-size: var(--fs-sm); line-height: 1.5; color: var(--fg-subtle); }
 .cv-verbinden__hinweis a { color: var(--accent-text); }
 .cv-verbinden__fehler { margin: 10px 0 0; font-size: var(--fs-sm); color: var(--danger); }
+.cv-verbinden__unter { margin: 0 0 10px; font-size: var(--fs-lg); font-weight: 500; letter-spacing: -0.01em; }
+.cv-verbinden--kompakt .cv-verbinden__unter { font-size: var(--fs-md); }
+.cv-verbinden__mehr { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border); }
+.cv-verbinden__mehr > summary { cursor: pointer; list-style: none; font-size: var(--fs-sm); color: var(--fg-muted); user-select: none; }
+.cv-verbinden__mehr > summary::-webkit-details-marker { display: none; }
+.cv-verbinden__mehr > summary::before { content: '›'; display: inline-block; width: 1em; transition: transform 0.15s; }
+.cv-verbinden__mehr[open] > summary::before { transform: rotate(90deg); }
+.cv-verbinden__mehr[open] > summary { margin-bottom: 10px; }
 .cv-spinner { width: 14px; height: 14px; border-width: 2px; }
 
 /* -- Nachrichten -- */

@@ -1666,3 +1666,267 @@ test('kopplungen.json, deren Siegel zufällig mit „{“ beginnt, wird gelesen 
     assert.deepEqual(appA2.kopplung.status().partner.map((p) => p.name), ['Lena']);
   });
 });
+
+/* ------------------------------------------------ Prüfung Runde 2 (K1) */
+
+test('Rückgängig nach dem Abgleich (A ändert, B übernimmt, dann nimmt A bzw. B zurück): kein Konflikt, keine Kopie, die Rücknahme gilt', async () => {
+  for (const wer of ['A', 'B']) {
+    for (const [v1, v2] of [['Milch', 'Milch, Brot'], ['a', 'b'], ['Aepfel', 'Birnen']]) {
+      await welt(async (w) => {
+        const A = w.stick('a');
+        const B = w.stick('b');
+        w.welt.add(A.root);
+        w.welt.add(B.root);
+        const appA = await w.start(A, { name: 'Max' });
+        const appB = await w.start(B, { name: 'Lena' });
+        await koppeln(appA, appB, B);
+        const x = appA.store.create('note', { title: 'Einkaufsliste', body: v1 });
+        for (const a of [appA, appB, appA, appB]) await a.kopplung.abgleichen();
+        appA.store.update(x.id, { body: v2 });
+        await appA.kopplung.abgleichen();
+        await appB.kopplung.abgleichen();
+        assert.equal(notiz(appB, x.id), v2, 'Vorbedingung: Lena hat die Änderung');
+
+        const app = wer === 'A' ? appA : appB;
+        const schritt = app.history.list({ limit: 20 }).items.find((i) => i.id === x.id && i.op === 'update');
+        assert.ok(schritt, `${wer}: der Schritt steht im Verlauf`);
+        await app.history.undo(schritt.seq);
+        assert.equal(notiz(app, x.id), v1);
+
+        const erst = wer === 'A' ? appA : appB;
+        const dann = wer === 'A' ? appB : appA;
+        let konflikte = 0;
+        for (const a of [dann, erst, dann, erst, dann]) konflikte += (await a.kopplung.abgleichen()).konflikte;
+        const fall = `${wer} nimmt ${v2} -> ${v1} zurück`;
+        assert.equal(konflikte, 0, `${fall}: falscher Konflikt`);
+        assert.equal(notiz(appA, x.id), v1, `${fall}: A`);
+        assert.equal(notiz(appB, x.id), v1, `${fall}: B`);
+        assert.deepEqual(kopien(appA).concat(kopien(appB)).map((k) => k.data.title), [], `${fall}: zweite Fassung`);
+      });
+    }
+  }
+});
+
+test('merge.classify: stehen beide Seiten auf verschiedenen Basen, entscheidet die jüngere (g/vg); ohne Generationen bleibt es ein Konflikt', () => {
+  const satz = (body) => ({ id: 'note_x', type: 'note', data: { title: 'Einkaufsliste', body } });
+  const v1 = satz('Milch');
+  const v2 = satz('Milch, Brot');
+  const h1 = merge.fingerprint(v1);
+  const h2 = merge.fingerprint(v2);
+  // A ändert v1 -> v2 (Generation 2), B übernimmt (vg 2), A nimmt zurück: A hat v1, B schickt v2.
+  assert.equal(merge.classify(v1, v2, { h: h1, g: 1 }, { h: h2, vg: 2 }), 'local-newer');
+  // Dasselbe, aber B nimmt zurück: A hat v2, B schickt v1 (seine Basis v2, gelesen bei meiner Generation 2).
+  assert.equal(merge.classify(v2, v1, { h: h1, g: 1 }, { h: h2, vg: 2 }), 'remote-newer');
+  // B änderte, A übernahm (Basis v2 bei Generation 1) und nahm zurück; B schreibt, ohne A gelesen zu haben (vg 1).
+  assert.equal(merge.classify(v1, v2, { h: h2, g: 1 }, { h: h1, vg: 1 }), 'local-newer');
+  // Ohne Generationen (älteres Postfach): wie bisher ein Konflikt.
+  assert.equal(merge.classify(v1, v2, { h: h1 }, { h: h2 }), 'conflict');
+});
+
+test('Löschung aus einem Postfach 10 min in der Zukunft: B führt sie nicht aus, A behält sie; ohne Uhrproblem setzt sie sich auf beiden durch', async () => {
+  for (const weiter of ['zeit-vergeht', 'a-aendert']) {
+    await welt(async (w) => {
+      const A = w.stick('a');
+      const B = w.stick('b');
+      w.welt.add(A.root);
+      w.welt.add(B.root);
+      const appA = await w.start(A, { name: 'Max' });
+      const appB = await w.start(B, { name: 'Lena' });
+      await koppeln(appA, appB, B);
+      const x = appA.store.create('note', { title: 'Einkaufsliste', body: 'Milch' });
+      for (const a of [appA, appB, appA, appB]) await a.kopplung.abgleichen();
+      assert.equal(notiz(appB, x.id), 'Milch');
+
+      appA.store.remove(x.id);
+      await appA.kopplung.abgleichen();
+      const idA = appA.identitaet.id;
+      for (const box of [path.join(A.sync, idA), path.join(B.sync, idA)]) zurueckdatieren(box, -10 / 60);
+      const rb = await appB.kopplung.abgleichen();
+      assert.ok(rb.warnungen.some((t) => t.includes('Uhr')), 'die Uhr wird gemeldet');
+      assert.equal(notiz(appB, x.id), 'Milch', 'bei falscher Uhr keine Löschung');
+      await appA.kopplung.abgleichen();
+      assert.equal(notiz(appA, x.id), 'Milch (gelöscht)', 'A behält die eigene Löschung');
+
+      if (weiter === 'zeit-vergeht') {
+        for (const box of [path.join(A.sync, idA), path.join(B.sync, idA)]) zurueckdatieren(box, 0);
+      } else {
+        appA.store.create('note', { title: 'noch etwas', body: 'a' });
+      }
+      for (const a of [appB, appA, appB, appA, appB]) await a.kopplung.abgleichen();
+      assert.equal(notiz(appB, x.id), 'Milch (gelöscht)', `${weiter}: die Löschung kommt bei B an`);
+      assert.equal(notiz(appA, x.id), 'Milch (gelöscht)', `${weiter}: A bleibt dabei`);
+      assert.deepEqual(kopien(appA).concat(kopien(appB)), [], `${weiter}: keine zweite Fassung`);
+    });
+  }
+});
+
+test('kopplungen.json lässt sich einmal nicht schreiben: keine Generation, die nur im Speicher steht; nach dem Neustart kein Zwilling', async () => {
+  await welt(async (w) => {
+    const A = w.stick('a');
+    const B = w.stick('b');
+    w.welt.add(A.root);
+    w.welt.add(B.root);
+    let appA = await w.start(A, { name: 'Max' });
+    const appB = await w.start(B, { name: 'Lena' });
+    await koppeln(appA, appB, B);
+    const x = appA.store.create('note', { title: 'X', body: 'v1' });
+    for (const a of [appA, appB, appA, appB]) await a.kopplung.abgleichen();
+    const kdatei = path.join(A.data, 'kopplungen.json');
+    const aufDerPlatte = () => JSON.parse(fs.readFileSync(kdatei, 'utf8')).eigeneGeneration;
+
+    w.welt.delete(B.root);
+    appA.store.update(x.id, { body: 'v2' });
+    const echtesOpen = fs.openSync;
+    let einmal = true;
+    fs.openSync = function voll(p, ...rest) {
+      if (einmal && String(p).includes('kopplungen.json') && String(p).includes('.tmp')) {
+        einmal = false;
+        throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      }
+      return echtesOpen.call(this, p, ...rest);
+    };
+    try {
+      await appA.kopplung.abgleichen();
+    } finally {
+      fs.openSync = echtesOpen;
+    }
+    assert.equal(einmal, false, 'Vorbedingung: der Schreibfehler kam');
+    await appA.kopplung.abgleichen();
+    const idA = appA.identitaet.id;
+    const imPostfach = JSON.parse(fs.readFileSync(path.join(A.sync, idA, 'manifest.json'), 'utf8')).generation;
+    assert.equal(imPostfach, aufDerPlatte(), 'die Generation im Postfach steht auch in kopplungen.json');
+    await w.stop(appA);
+
+    // Lena liest Max' Stick, danach arbeitet Max weiter.
+    w.welt.add(A.root);
+    await appB.kopplung.abgleichen();
+    assert.equal(notiz(appB, x.id), 'v2');
+    appA = await w.start(A);
+    appA.store.update(x.id, { body: 'v3' });
+    const r = await appA.kopplung.abgleichen();
+    assert.equal(r.zwilling, false, 'A hält sich für einen Zwilling');
+    assert.equal(appA.kopplung.status().selbst.zwilling, false);
+    await appB.kopplung.abgleichen();
+    assert.equal(notiz(appB, x.id), 'v3', 'B bekommt v3');
+  });
+});
+
+test('Zweimal [Koppeln] (Doppelklick oder nacheinander), B läuft nicht: B hat beim nächsten Start alles von A', async () => {
+  for (const art of ['gleichzeitig', 'nacheinander']) {
+    await welt(async (w) => {
+      const A = w.stick('a');
+      const B = w.stick('b');
+      w.welt.add(A.root);
+      w.welt.add(B.root);
+      await kiAnlegen(B, 'Lena');
+      const appA = await w.start(A, { name: 'Max' });
+      appA.store.create('note', { title: 'Rezept', body: 'von Max' });
+      if (art === 'gleichzeitig') {
+        await Promise.all([appA.kopplung.koppeln({ root: B.root }), appA.kopplung.koppeln({ root: B.root })]);
+      } else {
+        await appA.kopplung.koppeln({ root: B.root });
+        await appA.kopplung.koppeln({ root: B.root });
+      }
+      const appB = await w.start(B);
+      await appB.kopplung.annehmen();
+      await appB.kopplung.abgleichen();
+      assert.ok(notizen(appB).includes('Rezept=von Max'), `${art}: B hat das Rezept nicht: ${JSON.stringify(notizen(appB))}`);
+    });
+  }
+});
+
+test('PIN nach dem Koppeln: an den Partner ohne PIN geht nichts mehr, Status "schutz"; hat er auch eine PIN, geht es weiter', async () => {
+  await welt(async (w) => {
+    const A = w.stick('a');
+    const B = w.stick('b');
+    w.welt.add(A.root);
+    w.welt.add(B.root);
+    const appA = await w.start(A, { name: 'Max' });
+    const appB = await w.start(B, { name: 'Lena' });
+    await koppeln(appA, appB, B);
+    for (const app of [appA, appB, appA]) await app.kopplung.abgleichen();
+
+    const serverA = await appA.listen();
+    const pin = await rufeAn(serverA.server.address().port, 'POST', '/api/vault/pin', { pin: '4711' });
+    assert.equal(pin.status, 200, pin.text);
+    const geheim = appA.store.create('note', { title: 'GEHEIM-NACH-PIN-4711', body: 'nur für PIN-Sticks' });
+    const r = await appA.kopplung.abgleichen();
+    assert.equal(r.zwilling, false);
+    assert.deepEqual(r.geschrieben.filter((g) => g.ordner === B.sync), [], 'A schreibt nicht mehr auf den Stick ohne PIN');
+    const lena = appA.kopplung.status().partner[0];
+    assert.equal(lena.zustand, 'schutz');
+    assert.equal(lena.pin, false);
+
+    await appB.kopplung.abgleichen();
+    assert.equal(appB.store.get(geheim.id), null, 'B hat den Satz nicht übernommen');
+    const imKlartext = alleDateien(B.root).filter((d) => fs.readFileSync(d).includes('GEHEIM-NACH-PIN-4711'));
+    assert.deepEqual(imKlartext.map((d) => path.relative(B.root, d)), [], 'auf dem Stick ohne PIN steht nichts davon');
+
+    // Lena legt auch eine PIN fest: dann läuft der Abgleich wieder.
+    const serverB = await appB.listen();
+    const pinB = await rufeAn(serverB.server.address().port, 'POST', '/api/vault/pin', { pin: '2580' });
+    assert.equal(pinB.status, 200, pinB.text);
+    await appA.kopplung.abgleichen();
+    assert.equal(appA.kopplung.status().partner[0].zustand, 'aktiv', 'gleiche Schutzstufe: wieder aktiv');
+    await appB.kopplung.abgleichen();
+    assert.equal(notiz(appB, geheim.id), 'nur für PIN-Sticks', 'jetzt kommt der Satz an');
+  });
+});
+
+test('Zwilling: lief die Kopie einmal mit dem Partner und wird dann formatiert, gleichen A und B wieder ab, ohne etwas zurückzudrehen', async () => {
+  await welt(async (w) => {
+    const A = w.stick('a');
+    const B = w.stick('b');
+    w.welt.add(A.root);
+    w.welt.add(B.root);
+    let appA = await w.start(A, { name: 'Max' });
+    const appB = await w.start(B, { name: 'Lena' });
+    await koppeln(appA, appB, B);
+    const x = appA.store.create('note', { title: 'X', body: 'v1' });
+    const y = appA.store.create('note', { title: 'Y', body: 'y1' });
+    const l = appA.store.create('note', { title: 'Lenas', body: 'l1' });
+    for (const a of [appA, appB, appA]) await a.kopplung.abgleichen();
+    await w.stop(appA);
+
+    // Die Kopie S (A läuft nicht) läuft einmal, während Lenas Stick steckt.
+    const S = w.stick('s');
+    fs.rmSync(S.data, { recursive: true, force: true });
+    fs.cpSync(A.data, S.data, { recursive: true, filter: (p) => path.basename(p) !== '.lock' });
+    fs.copyFileSync(path.join(A.root, pathsMod.PORTABLE_MARKER), path.join(S.root, pathsMod.PORTABLE_MARKER));
+    w.welt.delete(A.root);
+    w.welt.add(S.root);
+    const appS = await w.start(S);
+    const n = appS.store.create('note', { title: 'aus Versehen auf der Kopie', body: 's' });
+    appS.store.update(y.id, { body: 'y von der Kopie' });
+    await appS.kopplung.abgleichen();
+    await w.stop(appS);
+    await appB.kopplung.abgleichen();
+    assert.equal(notiz(appB, n.id), 's', 'Vorbedingung: B hat von der Kopie gelesen');
+    appB.store.update(l.id, { body: 'l2 von Lena' });
+
+    // Max formatiert S.
+    w.welt.delete(S.root);
+    fs.rmSync(S.root, { recursive: true, force: true });
+
+    w.welt.add(A.root);
+    appA = await w.start(A);
+    let zwilling = true;
+    for (let i = 0; i < 5; i++) {
+      appA.store.update(x.id, { body: `v${2 + i}` });
+      await appA.kopplung.finden();
+      await appA.kopplung.abgleichen();
+      await appB.kopplung.abgleichen();
+      zwilling = appA.kopplung.status().selbst.zwilling;
+    }
+    for (const a of [appA, appB, appA]) await a.kopplung.abgleichen();
+    assert.equal(zwilling, false, 'A bleibt für immer Zwilling');
+    assert.equal(appB.kopplung.status().partner[0].zustand, 'aktiv');
+    assert.equal(notiz(appB, x.id), 'v6', 'B bekommt die Änderungen von A');
+    assert.equal(notiz(appA, n.id), 's', 'was die Kopie bei B ablegte, bleibt und kommt zu A');
+    assert.equal(notiz(appB, y.id), 'y von der Kopie', 'B wird nicht zurückgedreht');
+    assert.equal(notiz(appA, y.id), 'y von der Kopie');
+    assert.equal(notiz(appA, l.id), 'l2 von Lena', 'Lenas eigene Änderung bleibt und kommt zu A');
+    assert.equal(notiz(appB, l.id), 'l2 von Lena');
+    assert.deepEqual(kopien(appA).concat(kopien(appB)).map((k) => k.data.title), []);
+  });
+});

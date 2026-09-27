@@ -198,7 +198,7 @@ async function lauschen(app, { port, tryPorts }) {
  *
  * @param {object} flags
  * @param {{dienst:boolean, erreichbar?:(url:string)=>any,
- *   beiStart?:(x:{lage:object, beenden:Function, portable:object|null})=>void}} o
+ *   beiStart?:(x:{lage:object, beenden:Function, portable:object|null, ki:{id:string|null}, paths:object})=>void}} o
  *   `erreichbar`: sobald ein Browser etwas sehen kann (der Vorraum);
  *   `beiStart`: gleich nach Laufzettel und Signalen (der Dienst startet dort den Wächter).
  * @returns {Promise<{app:object, url:string, seeded:boolean, extensions:object,
@@ -266,7 +266,7 @@ async function hochfahren(flags, { dienst, erreichbar = () => {}, beiStart = () 
 
   try {
     const { config, portable, ki, port, kiErneuert } = vorschau(paths, flags);
-    beiStart({ lage, beenden, portable });
+    beiStart({ lage, beenden, portable, ki, paths });
     const tryPorts = portWunsch(flags) !== undefined ? 1 : (portable ? 20 : 12);
 
     let passphrase = typeof flags.passphrase === 'string' && flags.passphrase
@@ -490,9 +490,12 @@ async function cmdDienst(flags) {
     r = await hochfahren(flags, {
       dienst: true,
       erreichbar: (url) => melde({ bereit: { url } }),
-      beiStart: ({ lage, beenden, portable }) => {
+      beiStart: ({ lage, beenden, portable, ki, paths }) => {
         lage.waechter = require('../src/kernel/waechter').starte({
           marker: portable && portable.marker ? portable.marker : null,
+          // Steckt am selben Pfad ein anderer Stick, ist unserer weg (s18).
+          kennung: () => (lage.app && lage.app.identitaet ? lage.app.identitaet.id : ki && ki.id) || null,
+          ordner: paths.home,
           aktivitaet: () => (lage.app && lage.app.server && typeof lage.app.server.aktivitaet === 'function'
             ? lage.app.server.aktivitaet()
             : { streams: 0, inFlight: 0, letzteAnfrage: start }),

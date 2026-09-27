@@ -330,3 +330,49 @@ test('Zwei Starts sehen denselben verwaisten Zettel: nur einer bekommt ihn, der 
     h.cleanup();
   }
 });
+
+test('Derselbe Stick unter einem zweiten Pfad (realpath löst ihn nicht auf): läuft, kein zweiter Dienst, vault/.lock bleibt; eine Kopie bleibt verwaist', async () => {
+  const h = heimAnlegen('nos-lz-zweitpfad');
+  const heimErsterPfad = 'aaaaaaaaaaaaaaaa';
+  const heimZweiterPfad = 'bbbbbbbbbbbbbbbb'; // was heimKennung für den Bind-Mount liefert
+  const srv = await fakeServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, instanz: 'erstinst0001', heim: heimErsterPfad }));
+  });
+  const kopie = tempHome('nos-lz-zweitpfad-kopie');
+  const vaultLock = path.join(h.paths.vault, '.lock');
+  try {
+    // Der laufende Dienst, gestartet über den ersten Pfad.
+    const erster = await lz().anlegen(h.paths, { instanz: 'erstinst0001', heim: heimErsterPfad, zustand: 'bereit', port: srv.port, url: `${srv.url}/` });
+    fs.writeFileSync(vaultLock, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), scope: 'store' }));
+
+    // Doppelklick über den zweiten Pfad.
+    const b = await lz().pruefen(h.paths, { heim: heimZweiterPfad, pauseMs: 0 });
+    assert.equal(b.zustand, 'laeuft', `derselbe Ordner: der Browser geht zum laufenden Dienst (${b.grund || ''})`);
+    await assert.rejects(
+      lz().anlegen(h.paths, { instanz: 'zweitinst001', heim: heimZweiterPfad }, { heim: heimZweiterPfad, pauseMs: 0 }),
+      (err) => err.code === 'LAEUFT_SCHON',
+    );
+    assert.equal(JSON.parse(fs.readFileSync(h.paths.lock, 'utf8')).instanz, 'erstinst0001', 'der Zettel des laufenden Dienstes bleibt');
+    assert.ok(fs.existsSync(vaultLock), 'die Tresor-Sperre des laufenden Dienstes bleibt');
+
+    // Gegenprobe: dieselben Dateien, KOPIERT (anderer Ordner) -> verwaist, die Kopie startet selbst.
+    fs.cpSync(h.home, kopie.home, { recursive: true });
+    const kPaths = pathsMod.ensureLayout(pathsMod.layout(kopie.home));
+    // Der Dienst des Originals ist ein anderer Prozess als dieser Test (sonst ließe das Wegräumen die eigene PID stehen).
+    const kz = JSON.parse(fs.readFileSync(kPaths.lock, 'utf8'));
+    fs.writeFileSync(kPaths.lock, JSON.stringify({ ...kz, pid: process.ppid }));
+    fs.writeFileSync(path.join(kPaths.vault, '.lock'), JSON.stringify({ pid: process.ppid, at: new Date().toISOString(), scope: 'store' }));
+    const k = await lz().pruefen(kPaths, { heim: heimZweiterPfad, pauseMs: 0 });
+    assert.equal(k.zustand, 'verwaist', 'die Kopie darf nicht das Original öffnen');
+    const eigen = await lz().anlegen(kPaths, { instanz: 'kopieinst002' }, { heim: heimZweiterPfad, pauseMs: 0 });
+    assert.ok(!fs.existsSync(path.join(kPaths.vault, '.lock')), 'die mitkopierte Tresor-Sperre der Kopie ist weg');
+    assert.ok(fs.existsSync(vaultLock), 'die des Originals nicht');
+    eigen.freigeben();
+    erster.freigeben();
+  } finally {
+    await srv.close();
+    kopie.cleanup();
+    h.cleanup();
+  }
+});

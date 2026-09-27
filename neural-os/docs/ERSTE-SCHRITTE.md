@@ -88,19 +88,26 @@ das Programm; deine Daten bleiben natürlich da.
 > **Mac:** Finder → Ordner → Rechtsklick → „Neues Terminal beim Ordner", dann
 > `npm start`. **Linux:** Terminal im Ordner öffnen, `npm start`.
 
-### 1.4 Claude verbinden (damit der Chat antwortet)
+### 1.4 Eine KI verbinden (damit der Chat antwortet)
 
-Neural OS erfindet keine Antworten. Ohne Claude sagt der Chat genau das —
+Neural OS erfindet keine Antworten. Ohne KI sagt der Chat genau das —
 Notizen, Kalender, Projekte und das Gehirn funktionieren trotzdem vollständig.
 
-Für Antworten:
+**Kostenlos mit Google (Gemini):** Auf <https://aistudio.google.com/apikey>
+mit dem Google-Konto anmelden und **Create API key** antippen — keine Karte
+nötig. Den Schlüssel im Chat in das Feld unter „Kostenlos mit Google“ einfügen
+und **Online gehen und verbinden** antippen; Neural OS prüft ihn sofort. Es
+kostet nichts; Google darf Inhalte zur Verbesserung nutzen, und Google
+begrenzt die Zahl der Anfragen je Tag.
+
+**Oder Claude (kostet pro Nutzung):**
 
 1. Auf <https://console.anthropic.com> ein Konto anlegen und unter
    **API Keys** einen Schlüssel erzeugen. Er beginnt mit `sk-ant-`.
-2. In Neural OS auf **Einstellungen → Claude verbinden**, den Schlüssel
-   einfügen, bestätigen. Neural OS probiert ihn einmal kurz aus und sagt,
+2. In Neural OS im Chat unter „Oder Claude“ oder unter **Einstellungen → KI**
+   den Schlüssel einfügen, bestätigen. Neural OS probiert ihn einmal kurz aus und sagt,
    ob er geht.
-3. Unten links steht danach **Online verbunden**.
+3. Unten links steht danach **Online verbunden · Claude** (bzw. **· Gemini**).
 
 Der Schlüssel liegt in deinem Tresor — also auch auf dem Stick, wenn du ihn
 vorbereitest. Er reist mit, du musst ihn an keinem anderen Rechner noch

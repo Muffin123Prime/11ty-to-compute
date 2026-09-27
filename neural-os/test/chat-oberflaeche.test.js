@@ -288,7 +288,9 @@ test('Neu antworten und Bearbeiten werden vor dem Strom abgewiesen, wenn nichts 
     app.store.create('message', { chatId, role: 'user', content: 'Hallo', ordinal: 0 });
     const r = await strom(base, `/api/chats/${chatId}/neu-antworten`, {});
     assert.equal(r.status, 409);
-    assert.equal(r.json.error.code, 'CLAUDE_NICHT_VERBUNDEN');
+    // Ohne irgendeinen Schlüssel heisst es "keine KI", nicht "Claude": Gemini
+    // waere die kostenlose erste Wahl (src/models/ki.js).
+    assert.equal(r.json.error.code, 'KI_NICHT_VERBUNDEN');
   }, { verbinden: false });
 });
 

@@ -606,8 +606,10 @@ test('Schlüssel: falscher wird abgelehnt und nicht gespeichert, richtiger liegt
     const vorher = app.store.count('message');
     const ohne = await strom(base, `/api/chats/${chat.json.record.id}/messages`, { inhalt: 'Hallo?' });
     assert.equal(ohne.status, 409);
-    assert.equal(ohne.json.error.code, 'CLAUDE_NICHT_VERBUNDEN');
-    assert.match(ohne.json.error.message, /Claude ist nicht verbunden/);
+    // Ohne irgendeinen Schlüssel heisst es "keine KI" (Gemini oder Claude),
+    // nicht "Claude": seit src/models/ki.js ist Gemini die kostenlose erste Wahl.
+    assert.equal(ohne.json.error.code, 'KI_NICHT_VERBUNDEN');
+    assert.match(ohne.json.error.message, /Keine KI verbunden/);
     assert.equal(app.store.count('message'), vorher, 'kein Scheinchat');
 
     const falsch = await anfrage(base, 'POST', '/api/claude/schluessel', { schluessel: 'sk-ant-falsch-0000000000000000' });
@@ -773,18 +775,26 @@ test('Die Registry spricht Claude: Werkzeugnamen mit Punkt, Denkblöcke reisen m
   });
 });
 
-test('Ohne Verbindung sagt die Registry "Claude ist nicht verbunden" mit Anleitung', async () => {
-  await mitClaude(async ({ app }) => {
+test('Ohne Verbindung sagt die Registry "Keine KI verbunden" mit Anleitung für beide Anbieter', async () => {
+  await mitClaude(async ({ app, base }) => {
+    // Ohne Schlüssel ist Gemini (kostenlos) die erste Wahl; die Anleitung
+    // nennt beide Wege. Nach dem Wechsel auf Claude sagt sie es für Claude.
     assert.throws(() => app.registry.resolve(null), (err) => {
       assert.equal(err.code, 'NO_MODEL_AVAILABLE');
-      assert.match(err.message, /Claude ist nicht verbunden/);
+      assert.match(err.message, /Keine KI verbunden/);
+      assert.match(err.message, /aistudio\.google\.com/);
       assert.match(err.message, /console\.anthropic\.com/);
       return true;
     });
     const snap = await app.registry.refresh();
     assert.equal(snap.providers.length, 1);
-    assert.equal(snap.providers[0].id, 'claude');
+    assert.equal(snap.providers[0].id, 'gemini');
     assert.equal(snap.providers[0].available, false);
+    const r = await anfrage(base, 'PATCH', '/api/ki', { anbieter: 'claude' });
+    assert.equal(r.status, 200, r.text);
+    assert.equal((await app.registry.refresh()).providers[0].id, 'claude');
+    // Ohne irgendeinen Schlüssel bleibt der Satz derselbe -- er lügt nicht "Claude fehlt", wenn alles fehlt.
+    assert.throws(() => app.registry.resolve(null), (err) => /Keine KI verbunden/.test(err.message));
   }, { verbinden: false });
 });
 

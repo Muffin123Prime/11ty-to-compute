@@ -5,9 +5,11 @@
  *  - "Alles per Knopfdruck, nichts einrichten, kein Schnickschnack." Jede
  *    Gruppe hat EINE Hauptaktion. Was nur Technik ist, liegt eingeklappt
  *    unter "Für Fortgeschrittene".
- *  - Claude ist die KI. Die Gruppe "Claude" verbindet mit einem Feld und
- *    einem Knopf (Vertrag 5), wählt das Modell und nennt den bisherigen
- *    Verbrauch -- als Schätzung, weil die Rechnung Anthropic stellt.
+ *  - Die KI ist Gemini (kostenlos) oder Claude (kostet). Die Gruppe "KI"
+ *    wählt, wer antwortet, und verbindet je Anbieter mit einem Feld und
+ *    einem Knopf, wählt das Modell und nennt den bisherigen Verbrauch --
+ *    bei Claude als Schätzung, weil die Rechnung Anthropic stellt; bei
+ *    Gemini als Zahl der Anfragen, weil Google zählt statt zu berechnen.
  *  - Schutz = PIN. 4-6 Ziffern, zweimal. "Dieses Gerät merken" legt den
  *    Schlüssel im Benutzerprofil dieses Rechners ab, nicht auf dem Stick.
  *    Was eine PIN kann und was nicht, steht in einem ehrlichen Satz mit der
@@ -58,7 +60,7 @@ export default {
       daten: {},
       fehler: {},
       ui: {
-        claudeFeldOffen: false,
+        feldOffen: { gemini: false, claude: false },
         pin: null,          // null | {schritt:'eins'|'zwei', erste:string}
         pinAendern: false,
         merkenFragen: false,
@@ -98,7 +100,7 @@ function abbauen() {
 
 const QUELLEN = {
   status: '/status',
-  claude: '/claude',
+  ki: '/ki',
   vault: '/vault',
   ipad: '/ipad',
   network: '/network',
@@ -139,14 +141,14 @@ function abonnieren(self) {
   const bus = self.ctx.bus;
   if (!bus || typeof bus.on !== 'function') return;
   const neu = {
-    claude: debounce(async () => { await laden(self, 'claude'); if (self.alive) zeichneClaude(self); }, 300),
+    ki: debounce(() => kiNeu(self), 300),
     schutz: debounce(async () => { await Promise.all([laden(self, 'vault'), laden(self, 'status')]); if (self.alive) { zeichneSchutz(self); zeichneSpeicher(self); } }, 300),
     ipad: debounce(async () => { await Promise.all([laden(self, 'ipad'), laden(self, 'tokens')]); if (self.alive) { zeichneIpad(self); zeichneNetz(self); zeichneFortgeschritten(self); } }, 200),
-    netz: debounce(async () => { await Promise.all([laden(self, 'network'), laden(self, 'claude'), laden(self, 'status')]); if (self.alive) { zeichneNetz(self); zeichneClaude(self); } }, 300),
+    netz: debounce(async () => { await Promise.all([laden(self, 'network'), laden(self, 'ki'), laden(self, 'status')]); if (self.alive) { zeichneNetz(self); zeichneKi(self); } }, 300),
   };
   self.cleanups.push(bus.on('*', (payload, event) => {
     const typ = (event && event.type) || '';
-    if (typ.startsWith('claude')) neu.claude();
+    if (typ.startsWith('claude') || typ.startsWith('gemini') || typ === 'ki.anbieter') neu.ki();
     else if (typ.startsWith('vault.')) neu.schutz();
     else if (typ === 'ipad.verbunden') {
       if (self.ui.ipad) self.ui.ipad.verbunden = (payload && payload.geraet) || 'iPad';
@@ -182,7 +184,7 @@ function geruestBauen(self) {
   self.dom.fortgeschritten = h('div.setv__body');
   self.container.appendChild(h('div.page.setv', null,
     self.dom.hinweis,
-    gruppe(self, 'claude', { titel: 'Claude', symbol: I.brand || I.cloud, satz: 'Die KI, die antwortet, googelt und mitdenkt.' }),
+    gruppe(self, 'ki', { titel: 'KI', symbol: I.brand || I.cloud, satz: 'Gemini (kostenlos) oder Claude. Antwortet, sucht im Internet, denkt mit.' }),
     gruppe(self, 'schutz', { titel: 'Schutz', symbol: I.lock, satz: 'Eine PIN, damit niemand liest, wer den Stick findet.' }),
     gruppe(self, 'ipad', { titel: 'iPad verbinden', symbol: SYMBOLE.ipad, satz: 'Das iPad als zweiter Bildschirm, im selben WLAN.' }),
     gruppe(self, 'darstellung', { titel: 'Darstellung', symbol: SYMBOLE.darstellung }),
@@ -197,7 +199,7 @@ function geruestBauen(self) {
 
 function allesZeichnen(self) {
   zeichneHinweis(self);
-  zeichneClaude(self);
+  zeichneKi(self);
   zeichneSchutz(self);
   zeichneIpad(self);
   zeichneDarstellung(self);
@@ -315,40 +317,107 @@ function zeichneHinweis(self) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Claude                                                              */
+/* KI: Gemini (kostenlos) oder Claude                                  */
 /* ------------------------------------------------------------------ */
 
-function zeichneClaude(self) {
-  const { body } = self.dom.claude;
+/** Was je Anbieter fest ist: Name, Preis in einem Wort, wo es den Schlüssel gibt. */
+const ANBIETER = {
+  gemini: {
+    name: 'Gemini', wahl: 'Gemini (kostenlos)', platzhalter: 'AIza…', label: 'Google-Schlüssel', host: 'generativelanguage.googleapis.com',
+    hinweis: 'Schlüssel: aistudio.google.com/apikey → Create API key. Kostenlos; Google darf Inhalte zur Verbesserung nutzen.',
+  },
+  claude: {
+    name: 'Claude', wahl: 'Claude (kostet)', platzhalter: 'sk-ant-…', label: 'Claude-Schlüssel', host: 'api.anthropic.com',
+    hinweis: 'Schlüssel: console.anthropic.com → API Keys. Kostet pro Nutzung; die Rechnung stellt Anthropic.',
+  },
+};
+
+async function kiNeu(self) {
+  await laden(self, 'ki');
+  if (self.alive) zeichneKi(self);
+}
+
+function zeichneKi(self) {
+  const { body } = self.dom.ki;
   clear(body);
-  const c = self.daten.claude;
-  if (!c) {
-    status(self, 'claude', null, '');
-    body.appendChild(nichtAbrufbar(self.fehler.claude, 'Der Zustand von Claude ist gerade nicht abrufbar'));
+  const k = self.daten.ki;
+  if (!k || !k.anbieter) {
+    status(self, 'ki', null, '');
+    body.appendChild(nichtAbrufbar(self.fehler.ki, 'Der Zustand der KI ist gerade nicht abrufbar'));
     return;
   }
-  const modellName = c.modellName || c.modell || 'Claude';
-  if (c.verbunden) status(self, 'claude', 'accent', `Verbunden · ${modellName}`);
-  else if (c.schluesselVorhanden) status(self, 'claude', 'warn', 'Nicht erreichbar');
-  else status(self, 'claude', null, 'Nicht verbunden');
+  const aktiv = k.aktiv === 'claude' ? 'claude' : 'gemini';
+  const a = k.anbieter[aktiv] || {};
+  const name = a.name || ANBIETER[aktiv].name;
+  if (k.verbunden) status(self, 'ki', 'accent', `Verbunden · ${a.modellName || name}`);
+  else if (k.irgendeinSchluessel) status(self, 'ki', 'warn', 'Nicht erreichbar');
+  else status(self, 'ki', null, 'Nicht verbunden');
 
   // Ein verbundenes iPad sieht, wie es steht -- ändern geht am Laptop.
   if (!besitzer(self)) {
-    body.appendChild(satz(c.verbunden
-      ? `${modellName} antwortet. Schlüssel und Modell werden am Laptop eingestellt.`
-      : `${c.grund || 'Claude ist nicht verbunden.'} Das geht am Laptop.`));
+    body.appendChild(satz(k.verbunden
+      ? `${name} antwortet. Schlüssel und Modell werden am Laptop eingestellt.`
+      : `${k.grund || 'Keine KI verbunden.'} Das geht am Laptop.`));
     return;
   }
 
-  // 1. Verbindung
+  // 1. Wer antwortet.
+  body.appendChild(h('div.setv__feld', null,
+    h('span.label', null, text('Es antwortet')),
+    h('div.segmented.setv__segmente', { role: 'radiogroup', 'aria-label': 'KI' },
+      ['gemini', 'claude'].map((id) => h('button.segmented__option', {
+        type: 'button',
+        role: 'radio',
+        'aria-checked': id === aktiv ? 'true' : 'false',
+        class: id === aktiv ? 'is-active' : null,
+        onClick: async () => {
+          if (id === aktiv) return;
+          try {
+            await self.api.patch('/ki', { anbieter: id });
+            if (!self.alive) return;
+            self.ctx.toast(`${ANBIETER[id].name} antwortet ab der nächsten Nachricht.`, 'success');
+          } catch (err) {
+            self.ctx.toast(`Nicht gewechselt: ${fehlerText(err)}`, 'error');
+          }
+          await kiNeu(self);
+        },
+      }, text(ANBIETER[id].wahl))))));
+
+  // 2. Warum der Gewählte gerade nicht antwortet -- mit dem Knopf, der es behebt.
+  if (!k.verbunden && a.schluesselVorhanden) {
+    const zeile = h('div.setv__zeile.setv__warnung', null, icon((self.ctx.icons || {}).alert), h('span', null, text(a.grund || `${name} ist gerade nicht erreichbar.`)));
+    if (a.grundCode === 'offline') {
+      zeile.appendChild(knopf(self, 'Online gehen', () => netzModus(self, 'online'), { art: '.btn--accent.btn--small', schluessel: 'netz' }));
+    } else if (a.grundCode === 'schleuse') {
+      zeile.appendChild(knopf(self, `${name} freigeben`, () => hostFreigeben(self, ANBIETER[aktiv].host), { art: '.btn--accent.btn--small', schluessel: 'freigabe' }));
+    } else if (a.grundCode === 'schluessel-falsch') {
+      zeile.appendChild(knopf(self, 'Neu eingeben', () => { self.ui.feldOffen[aktiv] = true; zeichneKi(self); }, { art: '.btn--accent.btn--small' }));
+    }
+    body.appendChild(zeile);
+  }
+
+  // 3. Je Anbieter: Schlüssel, Modell, Verbrauch.
+  for (const id of ['gemini', 'claude']) body.appendChild(anbieterBlock(self, id, k.anbieter[id] || {}, id === aktiv));
+}
+
+function anbieterBlock(self, id, c, istAktiv) {
+  const A = ANBIETER[id];
+  const block = h('section.setv__anbieter', { 'aria-label': A.name, dataset: { anbieter: id } });
+  const zustandWort = c.verbunden ? 'verbunden' : (c.schluesselVorhanden ? 'Schlüssel hinterlegt' : 'kein Schlüssel');
+  block.appendChild(h('div.setv__anbieter-kopf', null,
+    h('strong', null, text(A.name)),
+    h('span.setv__zustand', null,
+      c.verbunden ? h('span.dot.dot--accent', { 'aria-hidden': 'true' }) : null,
+      text(istAktiv ? `${zustandWort} · antwortet` : zustandWort))));
+
   const fehlt = !c.schluesselVorhanden;
-  if (fehlt || self.ui.claudeFeldOffen) {
+  if (fehlt || self.ui.feldOffen[id]) {
     const feld = h('input.input.setv__schluessel', {
       type: 'text',
       autocomplete: 'off',
       spellcheck: 'false',
-      placeholder: 'sk-ant-…',
-      'aria-label': 'Claude-Schlüssel',
+      placeholder: A.platzhalter,
+      'aria-label': A.label,
       attrs: { autocorrect: 'off', autocapitalize: 'off', 'data-1p-ignore': 'true', 'data-lpignore': 'true' },
       onKeydown: (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); verbinden(); } },
     });
@@ -363,105 +432,90 @@ function zeichneClaude(self) {
       meldung.textContent = 'Wird mit einem kleinen Probeaufruf geprüft …';
       meldung.className = 'setv__meldung';
       try {
-        await self.api.post('/claude/schluessel', { schluessel: wert }, { timeoutMs: 45000 });
+        await self.api.post(`/ki/${id}/schluessel`, { schluessel: wert }, { timeoutMs: 45000 });
         if (!self.alive) return;
         feld.value = '';
-        self.ui.claudeFeldOffen = false;
-        self.ctx.toast('Claude ist verbunden.', 'success');
-        await laden(self, 'claude');
-        if (self.alive) zeichneClaude(self);
+        self.ui.feldOffen[id] = false;
+        self.ctx.toast(`${A.name} ist verbunden.`, 'success');
+        await kiNeu(self);
       } catch (err) {
         if (!self.alive) return;
         meldung.textContent = fehlerText(err);
         meldung.className = 'setv__meldung is-danger';
       }
     };
-    body.appendChild(h('div.setv__zeile', null,
+    block.appendChild(h('div.setv__zeile', null,
       h('label.setv__feld.setv__feld--breit', null, h('span.label', null, text(fehlt ? 'Schlüssel einfügen' : 'Neuer Schlüssel')), feld),
-      knopf(self, fehlt ? 'Verbinden' : 'Ersetzen', verbinden, { art: '.btn--primary', schluessel: 'claude-verbinden' })));
-    body.appendChild(meldung);
-    body.appendChild(satz('Einen Schlüssel bekommst du auf console.anthropic.com unter „API Keys“. Er wird mit einem kleinen Probeaufruf geprüft und liegt danach nur im Tresor.', '.meta'));
+      knopf(self, fehlt ? 'Verbinden' : 'Ersetzen', verbinden, { art: '.btn--primary', schluessel: `${id}-verbinden` })));
+    block.appendChild(meldung);
+    block.appendChild(satz(A.hinweis, '.meta'));
   } else {
     const geprueft = c.geprueftAm ? `, geprüft ${timeAgo(c.geprueftAm)}` : '';
-    body.appendChild(h('div.setv__zeile', null,
+    block.appendChild(h('div.setv__zeile', null,
       satz(`Der Schlüssel ist hinterlegt${geprueft}`.replace(/\.?$/, '.')),
       h('span.spacer'),
-      knopf(self, 'Anderen Schlüssel', () => { self.ui.claudeFeldOffen = true; zeichneClaude(self); }, { art: '.btn--ghost.btn--small' }),
+      knopf(self, 'Anderen Schlüssel', () => { self.ui.feldOffen[id] = true; zeichneKi(self); }, { art: '.btn--ghost.btn--small' }),
       knopf(self, 'Entfernen', async () => {
         const ok = await self.ctx.confirm({
-          title: 'Claude-Schlüssel entfernen?',
-          message: 'Danach antwortet Claude nicht mehr, bis ein Schlüssel eingefügt wird. Deine Notizen, Termine und Chats bleiben.',
+          title: `${A.name}-Schlüssel entfernen?`,
+          message: `Danach antwortet ${A.name} nicht mehr, bis ein Schlüssel eingefügt wird. Deine Notizen, Termine und Chats bleiben.`,
           confirmLabel: 'Entfernen',
           danger: true,
         });
         if (!ok || !self.alive) return;
         try {
-          await self.api.del('/claude/schluessel');
+          await self.api.del(`/ki/${id}/schluessel`);
           self.ctx.toast('Der Schlüssel ist entfernt.', 'success');
         } catch (err) {
           self.ctx.toast(`Nicht entfernt: ${fehlerText(err)}`, 'error');
         }
-        await laden(self, 'claude');
-        if (self.alive) zeichneClaude(self);
+        await kiNeu(self);
       }, { art: '.btn--ghost.btn--small' })));
   }
 
-  // 2. Warum er gerade nicht antwortet -- mit dem Knopf, der es behebt.
-  if (!c.verbunden && c.schluesselVorhanden) {
-    const zeile = h('div.setv__zeile.setv__warnung', null, icon((self.ctx.icons || {}).alert), h('span', null, text(c.grund || 'Claude ist gerade nicht erreichbar.')));
-    if (c.grundCode === 'offline') {
-      zeile.appendChild(knopf(self, 'Online gehen', () => netzModus(self, 'online'), { art: '.btn--accent.btn--small', schluessel: 'netz' }));
-    } else if (c.grundCode === 'schleuse') {
-      zeile.appendChild(knopf(self, 'Claude freigeben', () => claudeFreigeben(self), { art: '.btn--accent.btn--small', schluessel: 'freigabe' }));
-    } else if (c.grundCode === 'schluessel-falsch') {
-      zeile.appendChild(knopf(self, 'Neu eingeben', () => { self.ui.claudeFeldOffen = true; zeichneClaude(self); }, { art: '.btn--accent.btn--small' }));
-    }
-    body.appendChild(zeile);
+  // Modell -- nur, wenn ein Schlüssel da ist; vorher gibt es nichts zu wählen.
+  const modelle = Array.isArray(c.modelle) ? c.modelle : [];
+  if (!fehlt && modelle.length) {
+    const gewaehlt = modelle.find((m) => m.id === c.modell) || modelle[0];
+    block.appendChild(h('div.setv__feld', null,
+      h('span.label', null, text('Modell')),
+      h('div.segmented.setv__segmente', { role: 'radiogroup', 'aria-label': `Modell ${A.name}` },
+        modelle.map((m) => h('button.segmented__option', {
+          type: 'button',
+          role: 'radio',
+          'aria-checked': m.id === c.modell ? 'true' : 'false',
+          class: m.id === c.modell ? 'is-active' : null,
+          onClick: async () => {
+            if (m.id === c.modell) return;
+            try {
+              // Das Modell gehört zu diesem Anbieter; PATCH /api/ki setzt es beim Aktiven.
+              await self.api.patch('/ki', { anbieter: id, modell: m.id });
+              if (!self.alive) return;
+              self.ctx.toast(`${m.name} antwortet ab der nächsten Nachricht.`, 'success');
+            } catch (err) {
+              self.ctx.toast(`Nicht gewechselt: ${fehlerText(err)}`, 'error');
+            }
+            await kiNeu(self);
+          },
+        }, text(m.name.replace(/^(Claude|Gemini) /, ''))))),
+      gewaehlt && gewaehlt.hinweis ? h('span.hint', null, text(gewaehlt.hinweis)) : null));
   }
 
-  // 3. Modell
-  const modelle = Array.isArray(c.modelle) && c.modelle.length ? c.modelle : [
-    { id: 'claude-opus-5', name: 'Claude Opus 5' },
-    { id: 'claude-sonnet-5', name: 'Claude Sonnet 5' },
-    { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5' },
-  ];
-  const gewaehlt = modelle.find((m) => m.id === c.modell) || modelle[0];
-  body.appendChild(h('div.setv__feld', null,
-    h('span.label', null, text('Modell')),
-    h('div.segmented.setv__segmente', { role: 'radiogroup', 'aria-label': 'Modell' },
-      modelle.map((m) => h('button.segmented__option', {
-        type: 'button',
-        role: 'radio',
-        'aria-checked': m.id === c.modell ? 'true' : 'false',
-        class: m.id === c.modell ? 'is-active' : null,
-        onClick: async () => {
-          if (m.id === c.modell) return;
-          try {
-            await self.api.patch('/claude', { modell: m.id });
-            if (!self.alive) return;
-            self.ctx.toast(`${m.name} antwortet ab der nächsten Nachricht.`, 'success');
-          } catch (err) {
-            self.ctx.toast(`Nicht gewechselt: ${fehlerText(err)}`, 'error');
-          }
-          await laden(self, 'claude');
-          if (self.alive) zeichneClaude(self);
-        },
-      }, text(m.name.replace(/^Claude /, ''))))),
-    gewaehlt && gewaehlt.hinweis ? h('span.hint', null, text(gewaehlt.hinweis)) : null));
-
-  // 4. Verbrauch (geschätzt)
+  // Verbrauch: Nullen sind keine Auskunft; er steht erst da, wenn es einen gibt.
   const v = c.verbrauch;
-  // Nullen sind keine Auskunft: der Verbrauch steht erst da, wenn es einen gibt.
   if (v && Number.isFinite(v.anfragen) && v.anfragen > 0) {
-    const kosten = Number.isFinite(v.kostenUsd)
-      ? `etwa ${v.kostenUsd.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $`
-      : 'unbekannt';
-    body.appendChild(h('div.setv__verbrauch', null,
+    const kosten = v.kostenlos
+      ? 'kostenlos'
+      : (Number.isFinite(v.kostenUsd)
+        ? `etwa ${v.kostenUsd.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $`
+        : 'unbekannt');
+    block.appendChild(h('div.setv__verbrauch', null,
       h('div', null, h('span.label', null, text('Bisheriger Verbrauch')), h('strong', null, text(kosten))),
       h('div', null, h('span.label', null, text('Anfragen')), h('strong', null, text(formatNumber(v.anfragen)))),
       h('div', null, h('span.label', null, text('Websuchen')), h('strong', null, text(formatNumber(v.suchen || 0)))),
-      h('p.meta', null, text(v.hinweis || 'Geschätzt aus den Token-Angaben und den Listenpreisen. Die Rechnung stellt Anthropic.'))));
+      h('p.meta', null, text(v.hinweis || ''))));
   }
+  return block;
 }
 
 async function netzModus(self, mode) {
@@ -472,23 +526,24 @@ async function netzModus(self, mode) {
   } catch (err) {
     self.ctx.toast(`Nicht umgeschaltet: ${fehlerText(err)}`, 'error');
   }
-  await Promise.all([laden(self, 'network'), laden(self, 'claude'), laden(self, 'status')]);
-  if (self.alive) { zeichneNetz(self); zeichneClaude(self); }
+  await Promise.all([laden(self, 'network'), laden(self, 'ki'), laden(self, 'status')]);
+  if (self.alive) { zeichneNetz(self); zeichneKi(self); }
 }
 
-async function claudeFreigeben(self) {
+/** Den Host eines Anbieters auf die Freigabeliste setzen (strenge Liste, Modus online). */
+async function hostFreigeben(self, host) {
   const netz = self.daten.network;
   const hosts = netz && Array.isArray(netz.allowHosts) ? netz.allowHosts.slice() : [];
-  if (!hosts.includes('api.anthropic.com')) hosts.push('api.anthropic.com');
+  if (!hosts.includes(host)) hosts.push(host);
   try {
     await self.api.put('/network', { allowHosts: hosts });
     if (!self.alive) return;
-    self.ctx.toast('api.anthropic.com ist freigegeben.', 'success');
+    self.ctx.toast(`${host} ist freigegeben.`, 'success');
   } catch (err) {
     self.ctx.toast(`Nicht freigegeben: ${fehlerText(err)}`, 'error');
   }
-  await Promise.all([laden(self, 'network'), laden(self, 'claude')]);
-  if (self.alive) { zeichneNetz(self); zeichneClaude(self); }
+  await Promise.all([laden(self, 'network'), laden(self, 'ki')]);
+  if (self.alive) { zeichneNetz(self); zeichneKi(self); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -529,7 +584,7 @@ function zeichneSchutz(self) {
   if (!s.eingerichtet) {
     status(self, 'schutz', 'warn', 'Keine PIN');
     if (!self.ui.pin) {
-      body.appendChild(satz('Ohne PIN kann jeder, der den Stick findet, alles lesen: Notizen, Chats, den Claude-Schlüssel.'));
+      body.appendChild(satz('Ohne PIN kann jeder, der den Stick findet, alles lesen: Notizen, Chats, die KI-Schlüssel.'));
       body.appendChild(h('div.setv__zeile', null,
         knopf(self, 'PIN einrichten', () => { self.ui.pin = { schritt: 'eins', erste: '' }; zeichneSchutz(self); }, { art: '.btn--accent', symbol: (self.ctx.icons || {}).lock })));
       body.appendChild(satz(ehrlicherSatz(), '.meta'));
@@ -995,9 +1050,9 @@ function zeichneDarstellung(self) {
 /* ------------------------------------------------------------------ */
 
 function netzSatz(mode) {
-  if (mode === 'online') return ['accent', 'Online', 'Claude und die Websuche dürfen ins Internet. Jede Verbindung steht im Netzwerk-Protokoll.'];
-  if (mode === 'lan') return ['warn', 'Nur lokales Netz', 'Kein Internet – Claude ist so nicht erreichbar.'];
-  if (mode === 'offline') return [null, 'Offline', 'Nichts verlässt diesen Rechner. Claude antwortet erst, wenn Neural OS online ist.'];
+  if (mode === 'online') return ['accent', 'Online', 'Die KI und die Websuche dürfen ins Internet. Jede Verbindung steht im Netzwerk-Protokoll.'];
+  if (mode === 'lan') return ['warn', 'Nur lokales Netz', 'Kein Internet – die KI ist so nicht erreichbar.'];
+  if (mode === 'offline') return [null, 'Offline', 'Nichts verlässt diesen Rechner. Die KI antwortet erst, wenn Neural OS online ist.'];
   return [null, 'Unbekannt', 'Der Netzzustand ist gerade nicht abrufbar.'];
 }
 
@@ -1281,6 +1336,15 @@ const CSS = `
 .setv__warnung > svg { color: var(--warn); flex: none; }
 .setv__warnung > span { flex: 1 1 220px; }
 .setv__segmente { align-self: flex-start; }
+.setv__anbieter {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.setv__anbieter-kopf { display: flex; align-items: baseline; gap: 10px; }
+.setv__anbieter-kopf strong { font-size: var(--fs-md); font-weight: 600; }
 .setv__verbrauch {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

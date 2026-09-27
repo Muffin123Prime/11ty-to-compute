@@ -4,7 +4,8 @@
  * POST /api/system/beenden -- [Beenden] (Stick-Bauplan 2.4 Nr. 5, Teil 1.4).
  *
  * Ohne Fenster gibt es kein Strg+C mehr; wer fertig ist, tippt in der App auf
- * [Beenden]. Der Tresor wird gesichert, BEVOR die Antwort rausgeht: Die
+ * [Beenden]. Der Tresor wird gesichert und der letzte Abgleich mit den
+ * gekoppelten Sticks geschrieben, BEVOR die Antwort rausgeht: Die
  * Seite sagt danach "Gespeichert. Stick kann raus." (Mac: "... im Finder
  * auswerfen."), und das muss dann schon stimmen. Geschlossen wird erst, wenn
  * die Antwort beim Betriebssystem liegt -- sonst sähe der Browser einen
@@ -41,6 +42,17 @@ function register(router) {
     rc.requireOwner('Neural OS zu beenden');
     const danach = process.platform === 'darwin' ? 'auswerfen' : 'abziehen';
 
+    // Der letzte Abgleich (Postfächer auf diesem und dem Partner-Stick,
+    // kopplungen.json, sync-folder.json) gehört VOR die Zusage: Wer auf
+    // "Stick kann raus." hin zieht, zöge sonst mitten in rename und fsync
+    // (Prüfung Runde 2). Ein zweiter Aufruf in app.close() tut nichts mehr.
+    if (rc.ctx.kopplung && typeof rc.ctx.kopplung.beenden === 'function') {
+      try {
+        await rc.ctx.kopplung.beenden();
+      } catch (err) {
+        if (rc.log && rc.log.warn) rc.log.warn(`Letzter Abgleich beim Beenden: ${err && err.message}`);
+      }
+    }
     if (rc.ctx.store && typeof rc.ctx.store.flush === 'function') await rc.ctx.store.flush();
     if (rc.ctx.audit && typeof rc.ctx.audit.write === 'function') rc.ctx.audit.write('app.beenden', { via: 'knopf' });
     if (rc.ctx.bus && typeof rc.ctx.bus.publish === 'function') rc.ctx.bus.publish('app.beendet', { via: 'knopf', danach });

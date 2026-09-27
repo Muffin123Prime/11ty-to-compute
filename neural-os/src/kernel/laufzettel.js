@@ -22,6 +22,7 @@ const { NeuralError, StorageError } = require('./errors');
  *   {"v":2, "pid":1234, "rechner":"<kennung>", "boot":1790000000, "seit":"ISO",
  *    "zustand":"startet|gesperrt|bereit", "port":21064, "url":"http://127.0.0.1:21064/",
  *    "instanz":"<12 Zeichen>", "heim":"<sha256(realpath(home))[0..15]>", "version":"0.1.0",
+ *    "ordner":"<dev>:<ino> von data/ (nicht unter Windows)",
  *    "stopp":"<zufällig, das Beenden-Recht von `neural-os stop`>"}
  *
  * `seit` ist der Zeitpunkt des letzten Zustandswechsels: "startet" gilt nur
@@ -58,6 +59,26 @@ function heimKennung(home) {
   // Windows und macOS unterscheiden in Pfaden nicht zwischen Groß und Klein.
   if (process.platform === 'win32' || process.platform === 'darwin') echt = echt.toLowerCase();
   return crypto.createHash('sha256').update(echt).digest('hex').slice(0, 16);
+}
+
+/**
+ * Welcher Ordner, unabhängig vom Pfad: Gerät und Dateinummer von `data/`.
+ * Derselbe Stick unter einem zweiten Einhängepunkt (Bind-Mount), den
+ * realpath nicht auflöst, hat ein anderes `heim`, aber denselben Ordner; eine
+ * Kopie von `data/` ist ein anderer Ordner (Prüfung Runde 2, s15). Unter
+ * Windows nicht: Dort ist `dev` die Seriennummer des Laufwerks, und die trägt
+ * auch ein Byte-für-Byte-Klon (wie `istSelbst` in src/sync/kopplung.js).
+ * @returns {string|null} "<dev>:<ino>" oder null
+ */
+function ordnerKennung(home, { plattform = process.platform } = {}) {
+  if (plattform === 'win32' || !home) return null;
+  try {
+    const st = fs.statSync(home, { bigint: true });
+    if (!st.ino) return null;
+    return `${st.dev}:${st.ino}`;
+  } catch {
+    return null;
+  }
 }
 
 /** 12 Zeichen, zufällig: diese eine Laufzeit dieses einen Prozesses. */
@@ -141,7 +162,8 @@ function zeitAus(iso) {
  *   1. fehlt -> frei
  *   2. unlesbar -> verwaist (jünger als 10 s: startet, er wird gerade geschrieben)
  *   3. anderer Rechner -> verwaist; ein anderes heim als das eigene
- *      (mitkopierter Zettel) -> verwaist
+ *      (mitkopierter Zettel) -> verwaist, außer `ordner` ist derselbe (ein
+ *      zweiter Pfad zum selben Stick: dann zählt das heim des Zettels)
  *   4./5. PID tot -> verwaist
  *   6. bereit/gesperrt und /api/health mit gleicher Instanz und dem EIGENEN
  *      heim -> läuft, auch bei anderer Bootzeit (die hängt an der Wanduhr,
@@ -188,9 +210,17 @@ async function pruefen(paths, opts = {}) {
   if (z.rechner !== kennung) return { zustand: 'verwaist', grund: 'Laufzettel von einem anderen Rechner', zettel: z };
   // Ein Zettel, der ein anderes heim nennt, wurde mitkopiert (Stick samt
   // data/ gesichert, während er lief): Er gehört dem Original, nicht uns.
-  const eigenesHeim = opts.heim || (paths.home ? heimKennung(paths.home) : null);
+  // Es sei denn, es ist derselbe Ordner unter einem zweiten Pfad: Dann läuft
+  // dort UNSER Neural OS, und ein zweites auf demselben Tresor darf nie
+  // entstehen (Prüfung Runde 2, s15).
+  let eigenesHeim = opts.heim || (paths.home ? heimKennung(paths.home) : null);
   if (eigenesHeim && z.heim !== eigenesHeim) {
-    return { zustand: 'verwaist', grund: 'Laufzettel eines anderen Datenordners (mitkopiert)', zettel: z };
+    const hier = opts.ordner !== undefined ? opts.ordner : ordnerKennung(paths.home);
+    if (hier && typeof z.ordner === 'string' && z.ordner === hier && typeof z.heim === 'string' && z.heim) {
+      eigenesHeim = z.heim;
+    } else {
+      return { zustand: 'verwaist', grund: 'Laufzettel eines anderen Datenordners (mitkopiert)', zettel: z };
+    }
   }
   const gleicherBoot = rechner.gleicherStart(z.boot, boot);
   if (!lebt(z.pid)) {
@@ -343,6 +373,8 @@ async function anlegen(paths, felder = {}, opts = {}) {
     heim: felder.heim || heimKennung(paths.home),
     version: felder.version || programmVersion,
   };
+  const ordner = ordnerKennung(paths.home);
+  if (ordner) zettel.ordner = ordner;
   // Das Beenden-Recht für `neural-os stop` (ohne PIN-Sitzung, etwa unter
   // Windows ohne SIGTERM). Steht nur hier, nie in /api/health.
   if (typeof felder.stopp === 'string' && felder.stopp) zettel.stopp = felder.stopp;
@@ -414,6 +446,7 @@ module.exports = {
   freigeben,
   lesen,
   heimKennung,
+  ordnerKennung,
   neueInstanz,
   gesundheit,
   pidLebt,

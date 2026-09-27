@@ -107,6 +107,12 @@ function spaeterGeaendert(store, id, fremd) {
     { status: 409, details: { id, seq: fremd.seq, von: actor.kind || null } });
 }
 
+/** Der Verbund (kiDienst) entscheidet, wer antwortet; ohne ihn der Claude-Dienst allein. */
+function zugangPruefen(rc) {
+  const k = rc.ctx.kiDienst || rc.ctx.claude;
+  if (k && typeof k.zugang === 'function') k.zugang();
+}
+
 function register(router) {
   router.get('/api/chats', (rc) => {
     rc.requireCapability('read');
@@ -238,7 +244,7 @@ function register(router) {
     }), (chat) => {
       if (typeof chat.send !== 'function') need(null, 'Das Senden von Nachrichten');
       // Nicht verbunden, gerade beschäftigt: als Statuscode, bevor der Strom öffnet.
-      if (rc.ctx.claude && typeof rc.ctx.claude.zugang === 'function') rc.ctx.claude.zugang();
+      zugangPruefen(rc);
       if (typeof chat.isStreaming === 'function' && chat.isStreaming(record.id)) {
         throw new ValidationError('Für diesen Chat läuft bereits eine Antwort. Brich sie ab, bevor du erneut sendest.');
       }
@@ -251,7 +257,7 @@ function register(router) {
 
   /** Vorab für neu antworten und bearbeiten: verbunden, nicht beschäftigt. */
   function bereit(rc, chat, record) {
-    if (rc.ctx.claude && typeof rc.ctx.claude.zugang === 'function') rc.ctx.claude.zugang();
+    zugangPruefen(rc);
     if (typeof chat.isStreaming === 'function' && chat.isStreaming(record.id)) {
       throw new ValidationError('Für diesen Chat läuft bereits eine Antwort. Brich sie ab, bevor du etwas änderst.');
     }
@@ -414,7 +420,7 @@ function register(router) {
       chatId: record.id, id, antwort, signal, onEvent,
       effort: typeof body.effort === 'string' ? body.effort : undefined,
     }), () => {
-      if (rc.ctx.claude && typeof rc.ctx.claude.zugang === 'function') rc.ctx.claude.zugang();
+      zugangPruefen(rc);
       if (typeof chat.isStreaming === 'function' && chat.isStreaming(record.id)) {
         throw new ValidationError('Für diesen Chat läuft bereits eine Antwort.');
       }

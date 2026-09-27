@@ -257,33 +257,39 @@ async function createApp(opts = {}) {
     }
   }
 
-  // --- Claude ---------------------------------------------------------------
+  // --- KI: Gemini oder Claude ------------------------------------------------
   //
-  // Die KI von Neural OS ist Claude (Anthropic); ein lokales Modell gibt es
-  // nicht mehr. Claude sitzt NACH der Schleuse, weil jeder Aufruf durch sie
-  // geht, und nach dem Tresor, weil der Schlüssel darin liegt.
-  // `konfigSpeichern` wird erst beim Aufruf aufgelöst: `app` gibt es hier
-  // noch nicht, gebraucht wird es erst, wenn jemand Claude verbindet.
-  // `opts.claudeBasis` ist allein für Tests (ein Statist auf 127.0.0.1).
-  const claudeMod = tryRequire('./models/claude');
-  const claude = claudeMod
-    ? optional(failures, 'claude', () => claudeMod.createClaude({
+  // Die KI von Neural OS ist ein Verbund aus zwei Anbietern (src/models/ki.js):
+  // Gemini (Google, kostenlos) als erste Wahl, Claude (Anthropic, kostet) als
+  // zweite. Ein lokales Modell gibt es nicht mehr. Der Verbund sitzt NACH der
+  // Schleuse, weil jeder Aufruf durch sie geht, und nach dem Tresor, weil die
+  // Schlüssel darin liegen. `konfigSpeichern` wird erst beim Aufruf
+  // aufgelöst: `app` gibt es hier noch nicht, gebraucht wird es erst, wenn
+  // jemand einen Anbieter verbindet. `opts.claudeBasis` / `opts.geminiBasis`
+  // sind allein für Tests (Statisten auf 127.0.0.1). `app.claude` bleibt der
+  // Claude-Dienst allein -- für /api/claude und die Werkzeuge, die ihn kennen.
+  const kiMod = tryRequire('./models/ki');
+  const kiDienst = kiMod
+    ? optional(failures, 'ki', () => kiMod.createKi({
       paths, config, gate, bus, vaultCrypto, logger,
-      basis: opts.claudeBasis,
+      claudeBasis: opts.claudeBasis,
+      geminiBasis: opts.geminiBasis,
       konfigSpeichern: (patch) => app.saveConfig(patch),
     }))
     : null;
+  const claude = kiDienst ? kiDienst.claude : null;
+  const gemini = kiDienst ? kiDienst.gemini : null;
 
   // Der kleine gemeinsame Vertrag für alle, die "ein Modell" brauchen
   // (Agenten, zweiter Blick, Vergleich, Erweiterungen) -- jetzt um Claude.
   const registryMod = tryRequire('./models/registry');
   const registry = registryMod
-    ? optional(failures, 'registry', () => registryMod.createRegistry({ config, gate, bus, logger, claude }))
+    ? optional(failures, 'registry', () => registryMod.createRegistry({ config, gate, bus, logger, claude: kiDienst }))
     : null;
 
   const chatMod = tryRequire('./models/chat');
-  const chat = chatMod && claude
-    ? optional(failures, 'chat', () => chatMod.createChatService({ store, claude, gate, bus, graph, config, logger }))
+  const chat = chatMod && kiDienst
+    ? optional(failures, 'chat', () => chatMod.createChatService({ store, claude: kiDienst, gate, bus, graph, config, logger }))
     : null;
 
   // --- Modellvergleich -------------------------------------------------------
@@ -530,7 +536,10 @@ async function createApp(opts = {}) {
     hardening,
     vaultCrypto,
     graph,
+    /** Der KI-Verbund (Gemini oder Claude); `claude` und `gemini` sind seine beiden Dienste. */
+    kiDienst,
     claude,
+    gemini,
     registry,
     chat,
     approvals,
@@ -658,6 +667,7 @@ async function createApp(opts = {}) {
         auth: !!auth,
         stick: !!stick,
         claude: !!claude,
+        gemini: !!gemini,
         extraction: !!extract,
         sync: !!sync,
         modules: !!modules,
@@ -673,6 +683,21 @@ async function createApp(opts = {}) {
           };
         } catch (err) {
           claudeZustand = { verbunden: false, grund: asNeuralError(err).message };
+        }
+      }
+      // Der aktive Anbieter, wie GET /api/ki ihn zeigt -- das liest die Schale
+      // für den Status unten links ("Online verbunden · Gemini").
+      let anbieterZustand = null;
+      if (kiDienst) {
+        try {
+          const z = kiDienst.zustand();
+          anbieterZustand = {
+            aktiv: z.aktiv, name: z.name, verbunden: z.verbunden, modell: z.modell, modellName: z.modellName,
+            schluesselVorhanden: z.schluesselVorhanden, irgendeinSchluessel: z.irgendeinSchluessel,
+            gesperrt: z.gesperrt, grund: z.grund, grundCode: z.grundCode, netz: z.netz,
+          };
+        } catch (err) {
+          anbieterZustand = { verbunden: false, grund: asNeuralError(err).message };
         }
       }
       let models = { available: false, providers: [], reason: 'model registry unavailable' };
@@ -699,6 +724,7 @@ async function createApp(opts = {}) {
         portable: pathsMod.describePortable(portable),
         ki: app.ki,
         claude: claudeZustand,
+        anbieter: anbieterZustand,
         network: { mode: config.network.mode, hardened: !!hardening, strictAllowlist: config.network.strictAllowlist },
         vault: { ...(store.stats ? store.stats() : {}), encryption: vaultCrypto ? vaultCrypto.state : 'unavailable' },
         subsystems,

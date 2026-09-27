@@ -149,13 +149,14 @@ function baseNote(base) {
  * Stand, den beide Seiten einmal hatten. Eine Seite, deren Fassung gleich
  * einer der beiden ist, hat seitdem nichts geändert; die andere schon (Prüfung
  * Runde 1: A ändert zweimal, bevor es das Echo liest, und die eigene Basis ist
- * dann veraltet). Zeigen beide Seiten auf eine Basis (verschiedene), lässt
- * sich nicht sagen, wer später war: Konflikt, beide behalten.
+ * dann veraltet). Zeigen beide Seiten auf eine Basis (verschiedene),
+ * entscheidet, welche Basis die jüngere ist (`g`/`vg`, siehe unten); ohne
+ * diese Angabe lässt sich nicht sagen, wer später war: Konflikt, beide behalten.
  *
  * @param {object|null} local  the record as this device holds it (tombstones included)
  * @param {object|null} remote the record as the peer sent it
- * @param {{h:string}|string|null} [base] the state both devices last agreed on
- * @param {{h:string}|string|null} [baseFern] die mitgereiste Basis des Partners
+ * @param {{h:string, g?:number}|string|null} [base] the state both devices last agreed on
+ * @param {{h:string, vg?:number}|string|null} [baseFern] die mitgereiste Basis des Partners
  * @returns {'identical'|'remote-newer'|'local-newer'|'conflict'|'remote-only'|'local-only'}
  */
 function classify(local, remote, base, baseFern) {
@@ -198,6 +199,21 @@ function classify(local, remote, base, baseFern) {
   const fernUnveraendert = vereinbart.includes(rh);
   if (lokalUnveraendert && !fernUnveraendert) return 'remote-newer';
   if (fernUnveraendert && !lokalUnveraendert) return 'local-newer';
+  if (lokalUnveraendert && fernUnveraendert) {
+    // Jede Seite steht auf einer ANDEREN Basis: Eine davon ist veraltet. Welche
+    // die jüngere ist, sagen die Generationen DIESES Geräts (Prüfung Runde 2,
+    // Rückgängig nach dem Abgleich: A ändert, B übernimmt, A nimmt zurück).
+    // `base.g`: meine Generation, als ich die Basis setzte; `baseFern.vg`:
+    // meine Generation, die der Partner las, als er seine setzte. Las er eine
+    // spätere, ist seine Basis die jüngere, sonst meine.
+    const g = base && typeof base === 'object' ? base.g : undefined;
+    const vg = baseFern && typeof baseFern === 'object' ? baseFern.vg : undefined;
+    if (baseHash(base) && fh && Number.isInteger(g) && Number.isInteger(vg)) {
+      const juenger = vg > g ? fh : baseHash(base);
+      if (lh === juenger) return 'remote-newer';
+      if (rh === juenger) return 'local-newer';
+    }
+  }
   return 'conflict';
 }
 
@@ -313,13 +329,19 @@ function plan(localRecords, remoteRecords, state = {}, opts = {}) {
     const base = bases[remote.id] || null;
     let classification = classify(local, remote, base, baseFern);
     const hash = fingerprint(remote);
+    let wegenUhr = false;
 
     if (skewed && classification === 'remote-newer' && remote.deletedAt && local && !local.deletedAt) {
       // Deliberate extra caution, not a correctness requirement: the base says
       // this deletion is safe, and it is. But a device with a wrong clock has
       // a wrong idea of its own history in other places too, and an incoming
       // deletion is the one operation whose damage is noticed late.
+      // Nur aufgeschoben, nicht entschieden (`uhr`): keine Basis, keine
+      // Kopie; das nächste Postfach ohne Uhrproblem entscheidet neu. Als
+      // "beide behalten" entschieden, gewänne die lebende Fassung, und die
+      // Löschung wäre auf beiden Sticks für immer zurückgenommen (Prüfung Runde 2).
       classification = 'conflict';
+      wegenUhr = true;
     }
 
     if (classification === 'identical') {
@@ -331,6 +353,7 @@ function plan(localRecords, remoteRecords, state = {}, opts = {}) {
       conflicts.push({
         recordId: remote.id,
         recordType: remote.type,
+        ...(wegenUhr ? { uhr: true } : {}),
         local: local || null,
         remote,
         base: baseHash(base || baseFern),

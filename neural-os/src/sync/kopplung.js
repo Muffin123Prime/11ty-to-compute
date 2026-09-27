@@ -114,10 +114,14 @@ function leerZustand() {
     verlauf: [],
     verlaufGekuerzt: false,
     zwilling: null,
+    // Generationen eines verschwundenen Zwillings, die diese KI verworfen hat
+    verworfen: [],
     partner: [],
     ausstehend: [],
   };
 }
+
+const VERWORFEN_MAX = 10;
 
 function normalisieren(roh) {
   const z = leerZustand();
@@ -129,6 +133,10 @@ function normalisieren(roh) {
     : [];
   z.verlaufGekuerzt = roh.verlaufGekuerzt === true;
   z.zwilling = roh.zwilling && typeof roh.zwilling === 'object' ? roh.zwilling : null;
+  z.verworfen = Array.isArray(roh.verworfen)
+    ? roh.verworfen.filter((v) => v && Number.isInteger(v.generation) && v.generation > 0)
+      .map((v) => ({ generation: v.generation, inhalt: typeof v.inhalt === 'string' ? v.inhalt : null })).slice(-VERWORFEN_MAX)
+    : [];
   z.partner = Array.isArray(roh.partner)
     ? roh.partner.filter((p) => p && DEVICE_ID_RE.test(p.id) && schluesselAus(p.schluessel)).map((p) => ({
       id: p.id,
@@ -143,6 +151,9 @@ function normalisieren(roh) {
       ueber: Array.isArray(p.ueber) ? p.ueber.filter((u) => u && typeof u.id === 'string') : [],
       version: typeof p.version === 'string' ? p.version : null,
       erster: p.erster === true,
+      // Hat der Partner eine PIN? null: unbekannt (vor Runde 2 gekoppelt; beim
+      // Koppeln waren beide gleich).
+      pin: typeof p.pin === 'boolean' ? p.pin : null,
     }))
     : [];
   z.ausstehend = Array.isArray(roh.ausstehend)
@@ -160,13 +171,18 @@ function normalisieren(roh) {
  *
  * @param {{zustand:()=>object, sichern:()=>void, ich:()=>string}} p
  */
-function createPostfach({ zustand, sichern, ich }) {
+function createPostfach({ zustand, sichern, ich, darfAn = () => true }) {
   const partnerVon = (id) => zustand().partner.find((p) => p.id === id) || null;
 
   return {
-    /** Für wen das eigene Postfach geschrieben wird. */
+    /**
+     * Für wen das eigene Postfach geschrieben wird. Nie für einen Partner
+     * ohne PIN, wenn diese KI eine hat (`darfAn`): Er legte meine Sätze im
+     * Klartext ab (Prüfung Runde 2, PIN nach dem Koppeln).
+     */
     empfaenger() {
       return zustand().partner
+        .filter((p) => darfAn(p))
         .map((p) => ({ id: p.id, name: p.name, schluessel: schluesselAus(p.schluessel) }))
         .filter((e) => e.schluessel);
     },
@@ -183,6 +199,7 @@ function createPostfach({ zustand, sichern, ich }) {
         generation: z.eigeneGeneration || 0,
         verlauf: z.verlauf.map((e) => [e[0], e[1]]),
         voll: z.verlaufGekuerzt !== true,
+        verworfen: (z.verworfen || []).map((v) => ({ ...v })),
       };
     },
     /**
@@ -193,10 +210,18 @@ function createPostfach({ zustand, sichern, ich }) {
      */
     vergeben(inhalt) {
       const z = zustand();
-      const quittung = Math.max(0, ...z.partner.map((p) => p.quittung || 0));
+      // Auch über jede verworfene Generation eines Zwillings hinweg: Der
+      // Partner, der sie las, nimmt nur eine höhere an.
+      const quittung = Math.max(0, ...z.partner.map((p) => p.quittung || 0), ...(z.verworfen || []).map((v) => v.generation));
       const bisher = z.eigeneGeneration || 0;
       if (bisher > 0 && z.letzterInhalt === inhalt && bisher >= quittung) return bisher;
       const generation = Math.max(bisher, quittung) + 1;
+      const vorher = {
+        eigeneGeneration: z.eigeneGeneration,
+        letzterInhalt: z.letzterInhalt,
+        verlauf: z.verlauf,
+        verlaufGekuerzt: z.verlaufGekuerzt,
+      };
       z.eigeneGeneration = generation;
       z.letzterInhalt = inhalt;
       z.verlauf = [...z.verlauf, [generation, inhalt]];
@@ -204,7 +229,16 @@ function createPostfach({ zustand, sichern, ich }) {
         z.verlauf = z.verlauf.slice(-VERLAUF_MAX);
         z.verlaufGekuerzt = true;
       }
-      sichern();
+      try {
+        sichern();
+      } catch (err) {
+        // Nicht gesichert heißt nicht vergeben: Sonst käme dieselbe Generation
+        // beim nächsten Mal ohne Sichern zurück, stünde im Postfach, aber nie
+        // auf der Platte, und nach dem Neustart hielte die Quittung des
+        // Partners die KI für einen Zwilling (Prüfung Runde 2).
+        Object.assign(z, vorher);
+        throw err;
+      }
       return generation;
     },
     gelesen(id) {
@@ -228,6 +262,7 @@ function createPostfach({ zustand, sichern, ich }) {
       const name = sauberName(info.name);
       if (name) p.name = name;
       if (typeof info.version === 'string') p.version = info.version;
+      if (typeof info.pin === 'boolean') p.pin = info.pin;
       p.zuletzt = typeof info.at === 'string' ? info.at : nowIso();
       p.zustand = 'aktiv';
       p.erster = false;
@@ -347,6 +382,7 @@ function createKopplung(deps = {}) {
       verlauf: z.verlauf,
       verlaufGekuerzt: z.verlaufGekuerzt,
       zwilling: z.zwilling,
+      verworfen: z.verworfen,
       partner: z.partner,
       ausstehend: z.ausstehend,
     }), 'utf8');
@@ -358,7 +394,10 @@ function createKopplung(deps = {}) {
     }
   }
 
-  const postfach = createPostfach({ zustand: laden, sichern, ich });
+  /** Ungleiche Schutzstufe: Nie an einen Partner ohne PIN schreiben, wenn ich eine habe. */
+  const schutzUngleich = (p) => typeof p.pin === 'boolean' && p.pin !== meinPin();
+  const darfAn = (p) => !(meinPin() && p.pin === false);
+  const postfach = createPostfach({ zustand: laden, sichern, ich, darfAn });
   const folder = createFolderSync({
     store, merge, bus, logger: deps.logger, config: deps.config, vaultCrypto, paths, identitaet, postfach,
     saatBasen: deps.saatBasen,
@@ -442,8 +481,12 @@ function createKopplung(deps = {}) {
   function neuVersiegeln() {
     if (!meinPin() || tresorGesperrt()) return;
     if (fs.existsSync(datei)) {
-      laden();
+      const z = laden();
       if (!unlesbar) {
+        // Bis eben hatte diese KI keine PIN, und gekoppelt wird nur bei
+        // gleicher Schutzstufe: Wer nicht schon als "mit PIN" bekannt ist, hat
+        // keine. An ihn wird ab jetzt nichts mehr geschrieben (Prüfung Runde 2).
+        for (const p of z.partner) if (p.pin !== true) p.pin = false;
         try { sichern(); } catch (err) { log.warn(err.message); }
       }
     }
@@ -485,7 +528,30 @@ function createKopplung(deps = {}) {
     melde('kopplung.zwilling', { vorbei: true });
   }
 
+  /** Siehe suchen(): die Gabelung auflösen, zugunsten dieses Sticks. */
+  function zwillingVerwerfen() {
+    const z = laden();
+    if (!z.zwilling) return;
+    const q = z.zwilling.quittung;
+    if (q && Number.isInteger(q.generation) && q.generation > 0) {
+      const inhalt = typeof q.inhalt === 'string' ? q.inhalt : null;
+      z.verworfen = z.verworfen.filter((v) => !(v.generation === q.generation && v.inhalt === inhalt))
+        .concat({ generation: q.generation, inhalt }).slice(-VERWORFEN_MAX);
+    }
+    try {
+      folder.zieleVergessen();
+    } catch (err) {
+      log.warn(`Der Abgleich-Stand ließ sich nicht zurücksetzen: ${asNeuralError(err).message}`);
+      return;
+    }
+    z.zwilling = null;
+    try { sichern(); } catch (err) { log.warn(err.message); }
+    log.info('Der Zwilling ist nicht mehr zu sehen; diese KI gleicht wieder ab.');
+    melde('kopplung.zwilling', { vorbei: true });
+  }
+
   function zustandVon(p) {
+    if (schutzUngleich(p)) return 'schutz';
     if (gabelungen.has(p.id)) return 'zwilling';
     if (neuer.has(p.id)) return 'neuer';
     const g = gefunden.find((x) => x.id === p.id);
@@ -502,6 +568,9 @@ function createKopplung(deps = {}) {
       seit: p.seit || null,
       zuletzt: p.zuletzt || null,
       steckt: steckt.has(p.id),
+      // Nur bei zustand 'schutz' von Belang: "Lena hat eine PIN, dieser Stick
+      // nicht." bzw. "Dieser Stick hat eine PIN, Lena nicht." (1.7 Punkt 3)
+      pin: typeof p.pin === 'boolean' ? p.pin : null,
       ueber: (p.ueber || []).filter((u) => u.id !== selbst).map((u) => u.name || kurzName(u.id)),
     };
   }
@@ -752,10 +821,20 @@ function createKopplung(deps = {}) {
     gefunden = liste;
     steckt.clear();
     const z = laden();
+    let pinGeaendert = false;
     for (const g of liste) {
       if (!g.id) continue;
       if (g.zustand === 'zwilling') alsZwilling('gefunden', { pfad: g.pfad });
       else if (z.partner.some((p) => p.id === g.id)) steckt.set(g.id, { pfad: g.pfad, sync: path.join(g.pfad, 'sync') });
+      // Die Schutzstufe des Partners steht auf seinem Stick (data/secrets.json).
+      const p = z.partner.find((x) => x.id === g.id);
+      if (p && typeof g.pin === 'boolean' && p.pin !== g.pin) {
+        p.pin = g.pin;
+        pinGeaendert = true;
+      }
+    }
+    if (pinGeaendert && !tresorGesperrt()) {
+      try { sichern(); } catch (err) { log.warn(err.message); }
     }
     // Die Kopie ist weg (Prüfung Runde 1): Am gemerkten Pfad steckt ein
     // Stick mit eigener Kennung oder ein Datenträger ohne diese KI
@@ -777,6 +856,18 @@ function createKopplung(deps = {}) {
       if (vorbei) {
         zwillingOhneFund = 0;
         zwillingVorbei();
+      }
+    } else if (z.zwilling && (z.zwilling.grund === 'gabelung' || z.zwilling.grund === 'fremdes-postfach')
+      && !liste.some((g) => g.zustand === 'zwilling')) {
+      // Der Zwilling hat mit einem Partner abgeglichen und ist seitdem nicht
+      // mehr zu sehen (formatiert, gelöscht, in der Schublade). Nach einigen
+      // Suchläufen ohne ihn verwirft diese KI, was er geschrieben hat, und
+      // gleicht wieder ab (Prüfung Runde 2). Taucht er doch wieder auf, merkt
+      // er selbst bzw. der Partner die Gabelung erneut.
+      zwillingOhneFund += 1;
+      if (zwillingOhneFund >= ZWILLING_WEG_NACH) {
+        zwillingOhneFund = 0;
+        zwillingVerwerfen();
       }
     } else {
       zwillingOhneFund = 0;
@@ -858,6 +949,7 @@ function createKopplung(deps = {}) {
       ueber: [],
       version: null,
       erster: true,
+      pin: b.pin,
     };
     const ausstehendVorher = z.ausstehend;
     try {
@@ -993,6 +1085,8 @@ function createKopplung(deps = {}) {
           ueber: [],
           version: null,
           erster: true,
+          // Das Angebot kam nur bei gleicher Schutzstufe (koppeln prüft es).
+          pin: meinPin(),
         });
         gabelungen.delete(von);
         // Eine eigene Entkoppel-Nachricht an ihn ist damit überholt.
@@ -1249,7 +1343,7 @@ function createKopplung(deps = {}) {
             if (r.gabelung && !r.gelesen) gabelungen.add(p.id);
             else if (r.gelesen) gabelungen.delete(p.id);
             if (r.zwilling) {
-              alsZwilling('gabelung');
+              alsZwilling('gabelung', r.fremdeQuittung ? { quittung: r.fremdeQuittung } : {});
               bericht.zwilling = true;
             }
             for (const w of r.warnings || []) warn(w);
@@ -1276,7 +1370,8 @@ function createKopplung(deps = {}) {
         if (eigenesSync) ziele.push({ eltern: portable.root, ordner: eigenesSync, ziel: selbst, partner: null });
         for (const p of laden().partner) {
           const s = steckt.get(p.id);
-          if (s) ziele.push({ eltern: s.pfad, ordner: s.sync, ziel: p.id, partner: p });
+          if (s && darfAn(p)) ziele.push({ eltern: s.pfad, ordner: s.sync, ziel: p.id, partner: p });
+          else if (s) warn(`Dieser Stick hat eine PIN, ${p.name} nicht.`);
         }
         const zw = laden().zwilling;
         if (zw && zw.grund === 'fremdes-postfach') {

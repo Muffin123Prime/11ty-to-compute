@@ -163,3 +163,96 @@ test('Leerlauf: ein Zeitsprung über 60 s (Ruhezustand) setzt den Zähler zurüc
     w.stoppe();
   }
 });
+
+/**
+ * Stick schnell getauscht (Prüfung Runde 2, s18): Am selben Pfad steckt ein
+ * anderer Stick mit eigenem Marker. Der Wächter sah bisher nur "Marker da"
+ * und ließ den Dienst weiterlaufen; der schrieb dann config.json und Marker
+ * des fremden Sticks um. Die Welt am Pfad ist hier eine Attrappe.
+ */
+function tauschWelt({ plattform = 'linux' } = {}) {
+  const welt = {
+    stick: { dev: 41, ordnerIno: 1001, kiId: 'dev_bbbbbbbbbbbbbbbbbbbbbbbb' },
+    eigene: 'dev_bbbbbbbbbbbbbbbbbbbbbbbb',
+    ende: [],
+  };
+  const optionen = {
+    marker: '/media/x/NEURAL-B/neural-os.portable',
+    ordner: '/media/x/NEURAL-B/data',
+    plattform,
+    kennung: () => welt.eigene,
+    aktivitaet: () => ({ streams: 1, inFlight: 0, letzteAnfrage: Date.now() }),
+    beenden: () => { throw new Error('beenden() darf hier nie kommen: es schriebe auf den fremden Stick'); },
+    ende: (code) => { welt.ende.push(code); },
+    setInterval: () => ({}),
+    clearInterval: () => {},
+    stat: async (p) => (p.endsWith('/data')
+      ? { dev: welt.stick.dev, ino: welt.stick.ordnerIno }
+      : { dev: welt.stick.dev, ino: 7 }),
+    lesen: async () => JSON.stringify({ neuralOsPortable: true, kiId: welt.stick.kiId, name: 'B' }),
+  };
+  return { welt, optionen };
+}
+
+test('Stick getauscht: ein anderer Stick am selben Pfad (andere kiId) beendet den Dienst sofort, ohne beenden()', async () => {
+  const { welt, optionen } = tauschWelt();
+  const w = waechter().starte(optionen);
+  try {
+    await w.pruefeStick();
+    await w.pruefeStick();
+    assert.deepEqual(welt.ende, [], 'der eigene Stick: nichts');
+    // Stick X, schon benutzt, mit eigener KI, gleich großer Stick am selben Pfad.
+    welt.stick = { dev: 41, ordnerIno: 1001, kiId: 'dev_eeeeeeeeeeeeeeeeeeeeeeee' };
+    await w.pruefeStick();
+    assert.deepEqual(welt.ende, [0], 'andere KI im Marker: sofort Ende mit 0');
+  } finally {
+    w.stoppe();
+  }
+});
+
+test('Stick getauscht: gleiche kiId (Klon), aber anderer Ordner data/ bzw. unter Windows anderes Laufwerk -> Ende', async () => {
+  const a = tauschWelt();
+  const w = waechter().starte(a.optionen);
+  try {
+    await w.pruefeStick();
+    a.welt.stick = { ...a.welt.stick, ordnerIno: 2002 };
+    await w.pruefeStick();
+    assert.deepEqual(a.welt.ende, [0], 'anderer Ordner data/: Ende');
+  } finally {
+    w.stoppe();
+  }
+
+  const b = tauschWelt({ plattform: 'win32' });
+  const w2 = waechter().starte(b.optionen);
+  try {
+    await w2.pruefeStick();
+    b.welt.stick = { ...b.welt.stick, ordnerIno: 2002 };
+    await w2.pruefeStick();
+    assert.deepEqual(b.welt.ende, [], 'unter Windows zählt die Dateinummer nicht');
+    b.welt.stick = { ...b.welt.stick, dev: 99 }; // andere Seriennummer, gleicher Buchstabe E:
+    await w2.pruefeStick();
+    assert.deepEqual(b.welt.ende, [0], 'anderes Laufwerk hinter E:: Ende');
+  } finally {
+    w2.stoppe();
+  }
+});
+
+test('Stick getauscht: die eigene KI erneuert sich (eigenständig) -> kein Ende, auch nicht zwischen Speicher und Marker', async () => {
+  const { welt, optionen } = tauschWelt();
+  const w = waechter().starte(optionen);
+  try {
+    await w.pruefeStick();
+    welt.eigene = 'dev_cccccccccccccccccccccccc'; // config schon neu, Marker noch alt
+    await w.pruefeStick();
+    welt.stick = { ...welt.stick, kiId: 'dev_cccccccccccccccccccccccc' }; // Marker nachgezogen
+    await w.pruefeStick();
+    await w.pruefeStick();
+    assert.deepEqual(welt.ende, []);
+    // Danach ist die alte Kennung fremd.
+    welt.stick = { ...welt.stick, kiId: 'dev_bbbbbbbbbbbbbbbbbbbbbbbb' };
+    await w.pruefeStick();
+    assert.deepEqual(welt.ende, [0]);
+  } finally {
+    w.stoppe();
+  }
+});

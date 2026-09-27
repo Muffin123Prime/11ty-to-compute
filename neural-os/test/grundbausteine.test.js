@@ -516,3 +516,34 @@ test('createIdentitaet verweigert fehlende Bausteine mit deutscher Meldung', () 
     (err) => err.code === 'VALIDATION_FAILED' && /paths\.home/.test(err.message),
   );
 });
+
+test('pruefeMarker: Marker ohne kiId, aber die Konfiguration ist älter als der Marker (Datenbestand mitgebracht) → neue ID, Abgleich-Dateien weg (Befund 11)', () => {
+  const angelegt = new Date(Date.now() - 1000);
+  const stick = tempStick({
+    marker: { createdAt: angelegt.toISOString(), preparedBy: 'linux-x64' },
+    config: { sync: { deviceId: DEV_B, deviceName: 'Max' }, server: { host: '127.0.0.1', port: kiPort(DEV_B) } },
+  });
+  try {
+    // Beim Vorbereiten kopiert: erst data/, dann der Marker.
+    const kopiert = new Date(angelegt.getTime() - 5000);
+    fs.utimesSync(stick.paths.config, kopiert, kopiert);
+    fs.writeFileSync(path.join(stick.paths.home, 'kopplungen.json'), '{"v":1,"partner":[]}');
+    fs.writeFileSync(path.join(stick.paths.home, 'sync-folder.json'), '{"v":1,"devices":{}}');
+    const { config, speichern } = ladeKonfig(stick.paths);
+    const ki = createIdentitaet({ config, paths: stick.paths, portable: stick.portable, speichern });
+    ki.sicherstellen();
+    const r = ki.pruefeMarker();
+    assert.equal(r.aktion, 'erneuert');
+    assert.notEqual(ki.id, DEV_B, 'die Kennung der Quelle darf nicht bleiben');
+    assert.equal(ki.name, 'Max', 'der Name bleibt');
+    assert.notEqual(ki.port, kiPort(DEV_B), 'eigener Port');
+    assert.equal(fs.existsSync(path.join(stick.paths.home, 'kopplungen.json')), false);
+    assert.equal(fs.existsSync(path.join(stick.paths.home, 'sync-folder.json')), false);
+    assert.equal(leseJson(stick.portable.marker).kiId, ki.id);
+    assert.equal(leseJson(stick.portable.marker).preparedBy, 'linux-x64');
+    // Beim nächsten Start passt alles: nichts mehr zu tun.
+    assert.equal(ki.pruefeMarker().aktion, 'keine');
+  } finally {
+    stick.cleanup();
+  }
+});
