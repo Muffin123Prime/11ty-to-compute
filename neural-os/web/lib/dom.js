@@ -20,6 +20,9 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const SVG_TAGS = new Set([
   'svg', 'g', 'path', 'circle', 'ellipse', 'rect', 'line', 'polyline',
   'polygon', 'defs', 'use', 'title', 'linearGradient', 'stop', 'clipPath',
+  // Beschriftungen in Diagrammen (web/lib/diagramm.js). HTML kennt kein
+  // <text>, ohne diesen Eintrag entstuende ein unsichtbares HTML-Element.
+  'text', 'tspan',
 ]);
 
 /**

@@ -230,7 +230,7 @@ test('„Rückgängig“ nimmt ein Projekt samt Aufgaben zurück und lässt die 
 
 /* ----------------------------------------------------- Neu antworten */
 
-test('Neu antworten verwirft die letzte Antwort und fragt Claude noch einmal dasselbe', async () => {
+test('Neu antworten legt eine neue Fassung an (statt zu verwerfen) und fragt Claude noch einmal dasselbe', async () => {
   await mitClaude(async ({ app, base, statist, chatId }) => {
     statist.weiter(antwort(B.start(), B.text(0, 'Erste Fassung.'), B.ende('end_turn')));
     await strom(base, `/api/chats/${chatId}/messages`, { inhalt: 'Schreib mir einen Satz' });
@@ -241,16 +241,21 @@ test('Neu antworten verwirft die letzte Antwort und fragt Claude noch einmal das
     const r = await strom(base, `/api/chats/${chatId}/neu-antworten`, {});
     assert.equal(r.status, 200);
     const n = arten(r.ereignisse);
-    assert.deepEqual(n.slice(0, 2), ['verworfen', 'antwort']);
+    // Früher: verworfen + neue Antwort. Jetzt (docs/ANTWORT-BAUSTEINE.md 4): eine
+    // Fassung derselben Antwort -- nichts landet im Papierkorb.
+    assert.deepEqual(n.slice(0, 2), ['fassung', 'antwort']);
     assert.equal(n[n.length - 1], 'fertig');
-    assert.deepEqual(r.ereignisse[0].data.ids, [alteAntwort.id]);
+    assert.ok(!n.includes('verworfen'));
+    assert.equal(r.ereignisse[1].data.record.id, alteAntwort.id);
     assert.equal(textVon(r.ereignisse), 'Zweite Fassung.');
 
     const danach = await nachrichten(base, chatId);
     assert.deepEqual(danach.map((m) => m.data.role), ['user', 'assistant']);
+    assert.equal(danach[1].id, alteAntwort.id);
     assert.equal(danach[1].data.content, 'Zweite Fassung.');
-    assert.ok(app.store.get(alteAntwort.id, { includeDeleted: true }).deletedAt, 'im Papierkorb, nicht spurlos');
-    // Claude bekam genau die Frage von damals, ohne die verworfene Antwort.
+    assert.deepEqual(danach[1].data.versionen.map((v) => v.inhalt), ['Erste Fassung.', 'Zweite Fassung.']);
+    assert.equal(app.store.get(alteAntwort.id).deletedAt, null, 'nicht im Papierkorb');
+    // Claude bekam genau die Frage von damals, ohne die bisherige Antwort.
     const zweite = statist.stromAnfragen()[1].body;
     assert.equal(zweite.messages.length, 1);
     assert.equal(zweite.messages[0].content[1].text, 'Schreib mir einen Satz');

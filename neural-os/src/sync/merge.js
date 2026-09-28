@@ -370,10 +370,13 @@ function plan(localRecords, remoteRecords, state = {}, opts = {}) {
       skip.push({
         id: remote.id,
         type: remote.type,
-        reason: local ? 'local-newer' : (note || 'purged'),
+        reason: local ? 'local-newer' : (note && WITHHELD_DETAIL[note] ? note : 'purged'),
         detail: local
           ? 'Die hiesige Fassung ist die neuere; der Partner erhält sie beim nächsten Senden.'
           : (WITHHELD_DETAIL[note] || WITHHELD_DETAIL.purged),
+        // Die Fassung des Partners, die hier überholt ist: Der Ordner-Abgleich
+        // merkt sie als Basis (wie bei einem Konflikt zu meinen Gunsten).
+        ...(local ? { hash } : {}),
       });
       continue;
     }

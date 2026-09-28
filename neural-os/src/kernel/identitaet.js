@@ -138,6 +138,23 @@ function createIdentitaet({ config, paths, portable = null, speichern, publish, 
     return config.sync;
   }
 
+  /**
+   * War diese Konfiguration schon einmal an einen Ort gebunden, BEVOR
+   * `sicherstellen()` hier etwas daran ändert? Dann schrieb derselbe Lauf
+   * auch die Kennung in SEINEN Marker (pruefeMarker folgt immer direkt).
+   * Ein Marker ohne `kiId` neben so einer Konfiguration heißt: `data/` kam
+   * von woanders (Prüfung von Welle 1: auf einen frisch vorbereiteten Stick
+   * kopiert, Konfiguration jünger als der Marker). Belege: die vermerkte
+   * Heimat, oder ein Port, der aus der eigenen Kennung errechnet ist (so
+   * setzt ihn nur `sicherstellen` auf einem Stick).
+   */
+  const schonGebunden = (() => {
+    const s = config.sync && typeof config.sync === 'object' ? config.sync : {};
+    if (typeof s.heimat === 'string' && s.heimat) return true;
+    const port = config.server && typeof config.server === 'object' ? config.server.port : undefined;
+    return typeof s.deviceId === 'string' && KI_ID_RE.test(s.deviceId) && port === kiPort(s.deviceId);
+  })();
+
   function melde(name, payload) {
     // Die Erneuerung ist dann schon gespeichert; eine kaputte Meldung darf
     // sie nicht nachträglich wie einen Fehlschlag aussehen lassen.
@@ -236,6 +253,13 @@ function createIdentitaet({ config, paths, portable = null, speichern, publish, 
         config.server.port = kiPort(s.deviceId);
         geaendert = true;
       }
+      // Woher diese Konfiguration stammt; reist sie mit data/ woandershin,
+      // erkennt pruefeMarker dort die Kopie (siehe schonGebunden).
+      const heimat = portable ? 'stick' : 'heim';
+      if (s.heimat !== heimat) {
+        s.heimat = heimat;
+        geaendert = true;
+      }
       if (geaendert) speichern(config);
       return { id: identitaet.id, name: identitaet.name, port: identitaet.port, geaendert };
     },
@@ -256,7 +280,7 @@ function createIdentitaet({ config, paths, portable = null, speichern, publish, 
       if (typeof identitaet.id !== 'string' || !KI_ID_RE.test(identitaet.id)) identitaet.sicherstellen();
       const marker = leseMarker();
       if (typeof marker.kiId !== 'string' || !marker.kiId) {
-        if (mitgebracht(marker)) {
+        if (schonGebunden || mitgebracht(marker)) {
           const neu = identitaet.erneuern('daten-kopiert');
           return { aktion: 'erneuert', id: neu.id };
         }

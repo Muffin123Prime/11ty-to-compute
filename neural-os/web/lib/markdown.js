@@ -815,6 +815,17 @@ function makeContext(options = {}) {
      */
     onTask: typeof options.onTask === 'function' ? options.onTask : null,
     taskIndex: 0,
+    /**
+     * Haken fuer Codebloecke je Sprache: `(block, standard) => Node|null`.
+     * `block` ist `{lang, info, code, closed}` -- `closed:false` heisst "noch
+     * offen" (der Zaun laeuft bis ans Textende, beim Streaming der wachsende
+     * Block). `standard(b?)` zeichnet den Block so, wie es ohne Haken
+     * geschaehe (wahlweise mit geaendertem Deskriptor, etwa erkannter
+     * Sprache). null heisst: normal zeichnen. Aufgerufen wird fuer JEDEN
+     * Codeblock in Textreihenfolge, auch in Listen und Zitaten -- so kann der
+     * Aufrufer sie zaehlen (der Chat: ```ui-Bausteine, Codeblock-Aktionen).
+     */
+    codeBlock: typeof options.codeBlock === 'function' ? options.codeBlock : null,
   };
 }
 
@@ -822,7 +833,7 @@ const CALLOUT_LABEL = {
   info: 'Info', hinweis: 'Hinweis', note: 'Notiz', tip: 'Tipp', tipp: 'Tipp', hint: 'Tipp',
   warning: 'Achtung', warn: 'Achtung', achtung: 'Achtung', caution: 'Vorsicht', attention: 'Achtung',
   danger: 'Gefahr', error: 'Fehler', fehler: 'Fehler', bug: 'Fehler', failure: 'Fehler',
-  success: 'Erledigt', done: 'Erledigt', check: 'Erledigt',
+  success: 'Erledigt', done: 'Erledigt', check: 'Erledigt', fertig: 'Fertig',
   question: 'Frage', frage: 'Frage', help: 'Frage', faq: 'Frage',
   quote: 'Zitat', zitat: 'Zitat', cite: 'Zitat',
   example: 'Beispiel', beispiel: 'Beispiel',
@@ -834,7 +845,8 @@ const CALLOUT_LABEL = {
 const CALLOUT_TONE = {
   warning: 'warn', warn: 'warn', achtung: 'warn', caution: 'warn', attention: 'warn', todo: 'warn',
   danger: 'danger', error: 'danger', fehler: 'danger', bug: 'danger', failure: 'danger',
-  success: 'ok', done: 'ok', check: 'ok',
+  // `fertig` ist der Name, den der Systemtext der KI nennt (docs/ANTWORT-BAUSTEINE.md 2).
+  success: 'ok', done: 'ok', check: 'ok', fertig: 'ok',
   quote: 'neutral', zitat: 'neutral', cite: 'neutral', example: 'neutral', beispiel: 'neutral',
   abstract: 'neutral', summary: 'neutral', tldr: 'neutral',
 };
@@ -883,9 +895,12 @@ function renderBlocks(blocks, ctx) {
       case 'paragraph':
         nodes.push(h('p.md-p', null, renderInlineNodes(parseInline(block.text, ctx), ctx)));
         break;
-      case 'code':
-        nodes.push(ctx.kopierKarten && kopierArt(block.lang) ? renderKopierKarte(block, kopierArt(block.lang)) : renderCode(block, ctx));
+      case 'code': {
+        const standard = (b = block) => (ctx.kopierKarten && kopierArt(b.lang) ? renderKopierKarte(b, kopierArt(b.lang)) : renderCode(b, ctx));
+        const eigen = ctx.codeBlock ? ctx.codeBlock(block, standard) : null;
+        nodes.push(eigen || standard());
         break;
+      }
       case 'quote':
         nodes.push(h('blockquote.md-quote', null, renderBlocks(block.blocks, ctx)));
         break;

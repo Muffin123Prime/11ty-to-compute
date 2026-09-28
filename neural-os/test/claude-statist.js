@@ -104,6 +104,51 @@ function antwort(...teile) {
   return { sse: teile.flat() };
 }
 
+/* ------------------------------------------------ Bilder und Dokumente */
+
+/** Bildarten, die Anthropic als base64-Bild annimmt. */
+const BILD_ARTEN = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+/** Blockarten, die in einer Nutzernachricht stehen dürfen. */
+const NUTZER_BLOECKE = new Set(['text', 'image', 'document', 'tool_result', 'search_result']);
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/**
+ * Prüft die Nutzerblöcke so, wie die Schnittstelle es tut (docs der
+ * Claude-API, Bild- und PDF-Eingabe): image/document mit
+ * source {type:'base64', media_type, data}, Bilder nur als JPEG/PNG/GIF/WEBP,
+ * Dokumente als application/pdf, Base64 ohne Zeilenumbrüche. Eine unbekannte
+ * Blockart (etwa ein vergessener Platzhalter) lehnt sie mit 400 ab.
+ * @returns {string|null} die Fehlermeldung oder null
+ */
+function medienPruefen(body) {
+  for (const [i, n] of (Array.isArray(body && body.messages) ? body.messages : []).entries()) {
+    if (!n || n.role !== 'user' || !Array.isArray(n.content)) continue;
+    for (const [j, b] of n.content.entries()) {
+      if (!b || !NUTZER_BLOECKE.has(b.type)) return `messages.${i}.content.${j}.type: unknown block type ${b && b.type}`;
+      if (b.type !== 'image' && b.type !== 'document') continue;
+      const q = b.source || {};
+      if (q.type !== 'base64') return `messages.${i}.content.${j}.source.type: expected base64`;
+      if (typeof q.data !== 'string' || !q.data.length || !BASE64.test(q.data)) return `messages.${i}.content.${j}.source.data: invalid base64`;
+      if (b.type === 'image' && !BILD_ARTEN.has(q.media_type)) return `messages.${i}.content.${j}.source.media_type: unsupported ${q.media_type}`;
+      if (b.type === 'document' && q.media_type !== 'application/pdf') return `messages.${i}.content.${j}.source.media_type: expected application/pdf`;
+    }
+  }
+  return null;
+}
+
+/** Was eine aufgezeichnete Anfrage an Bildern und Dokumenten mitschickte: [{art, mime, bytes, titel?}]. */
+function medienIn(body) {
+  const out = [];
+  for (const n of (Array.isArray(body && body.messages) ? body.messages : [])) {
+    if (!n || !Array.isArray(n.content)) continue;
+    for (const b of n.content) {
+      if (!b || (b.type !== 'image' && b.type !== 'document') || !b.source) continue;
+      out.push({ art: b.type, mime: b.source.media_type, bytes: Buffer.from(String(b.source.data || ''), 'base64').length, titel: b.title || null });
+    }
+  }
+  return out;
+}
+
 /**
  * Den Statisten starten.
  *
@@ -142,6 +187,12 @@ function starten({ schluessel = 'sk-ant-statist-0123456789abcdef' } = {}) {
       if (req.headers['anthropic-version'] !== '2023-06-01') {
         res.writeHead(400, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'anthropic-version fehlt' } }));
+        return;
+      }
+      const medienFehler = medienPruefen(body);
+      if (medienFehler) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: medienFehler } }));
         return;
       }
       // Der Probeaufruf: ohne Strom, eine kleine Antwort.
@@ -212,4 +263,4 @@ function starten({ schluessel = 'sk-ant-statist-0123456789abcdef' } = {}) {
   });
 }
 
-module.exports = { starten, B, antwort, sse };
+module.exports = { starten, B, antwort, sse, medienIn, medienPruefen };

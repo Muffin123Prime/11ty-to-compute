@@ -19,7 +19,7 @@
  *   GET  /api/graph/universum?tiefe=0            Themenbereiche (<= ~40)
  *   GET  /api/graph/universum?tiefe=1&thema=<id> ein Thema: Knoten, Kanten,
  *                                                Nachbarn ausserhalb
- *   POST /api/graph/verbinden    {from, to:[ids], kind?, reason?}
+ *   POST /api/graph/verbinden    {from, to:[ids], kind?, reason?, gruende?:{id:grund}}
  *                                -> {edges, neu, bereits, rueckgaengig}
  *   POST /api/graph/rueckgaengig {edges:[ids]}   nimmt genau diese zurueck
  *   POST /api/graph/ablehnen     {from, to:[ids]} merkt sich das Paar
@@ -62,7 +62,11 @@ function register(router) {
     const store = need(rc.ctx.store, 'Der Speicher');
     const t0 = Date.now();
     const tiefe = intParam(rc.query, 'tiefe', 0, 0, 1);
-    const thema = strParam(rc.query, 'thema', 200);
+    // Themen-IDs tragen den Schluessel ihres Schlagworts oder Begriffs
+    // ("thema:<schluessel>"), und ein Begriff darf 300 Zeichen lang sein, ein
+    // Schlagwort im Feld noch laenger. Mit 200 liess sich ein solcher Kreis
+    // sehen, aber nicht oeffnen (Pruefer, Runde 1).
+    const thema = strParam(rc.query, 'thema', 1200);
     const typen = listParam(rc.query, 'typen');
     if (typen) {
       for (const type of typen) {
@@ -88,7 +92,16 @@ function register(router) {
     const to = requireStringArray(body.to, 'to', { max: 80, maxItems: 100 });
     const kind = optionalString(body.kind, 'kind', { max: 40 }) || 'related';
     const reason = optionalString(body.reason, 'reason', { max: 500 }) || undefined;
-    return universum.verbinden(store, from, to, { kind, reason });
+    let gruende;
+    if (body.gruende !== undefined && body.gruende !== null) {
+      const roh = asObject(body.gruende, 'Das Feld "gruende"');
+      gruende = {};
+      for (const [id, grund] of Object.entries(roh)) {
+        if (!to.includes(id)) continue;
+        gruende[id] = optionalString(grund, `gruende.${id}`, { max: 500 }) || undefined;
+      }
+    }
+    return universum.verbinden(store, from, to, { kind, reason, gruende });
   });
 
   router.post('/api/graph/rueckgaengig', async (rc) => {
@@ -259,6 +272,11 @@ function verknuepfungenVon(store, id) {
     (raus ? ausgehend : eingehend).push({
       id: other.id,
       type: other.type,
+      // Die Art eines Begriffs (Person, Ort, Thema ...) -- `kind` ist die
+      // Art der KANTE; ohne diese Angabe hiess jede Person "Begriff".
+      entityKind: other.type === 'entity' ? ((other.data && other.data.kind) || 'topic') : null,
+      // Wohin eine Aufgabe fuehrt: ihr Projekt.
+      projectId: other.type === 'task' && other.data && typeof other.data.projectId === 'string' ? other.data.projectId : null,
       title: label(other),
       kind: d.kind,
       reason: d.reason || '',

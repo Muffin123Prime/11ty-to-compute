@@ -110,33 +110,76 @@ function schluessel(name) {
 
 /**
  * Farben sind Indizes 0-7 einer dezenten Palette, die die Oberflaeche aus
- * ihren CSS-Variablen ableitet. Vergeben nach Rang auf Ebene 0 (die groessten
- * Themen bekommen 0, 1, 2 ... modulo 7), Kinder erben die Farbe ihres
- * Elternteils, und 7 ist neutral: "Unverbunden" und alles, was zu keinem
- * Kreis gehoert. Nach Rang statt nach Namen gehasht, weil sieben Farben
- * fuer vierzig Themen ohnehin nicht reichen und benachbarte Geschwister in
- * derselben Farbe das Bild unlesbar machten; mit gleichen Daten ist der
- * Rang gleich, also auch die Farbe.
+ * ihren CSS-Variablen ableitet. 7 ist neutral: "Unverbunden" und der
+ * Behaelter "Weitere Themen" -- beides sind keine Wissensgebiete und sollen
+ * nicht wie eines aussehen.
+ *
+ * Ein Thema BEHAELT seine Farbe (Pruefer, Runde 1: nach Rang vergeben
+ * sprangen Biologie und Geschichte, sobald Geschichte zwei Notizen mehr
+ * hatte). Deshalb:
+ *   - Die erste Wahl haengt am Schluessel des Themas (djb2 ueber die ID), nicht
+ *     an seinem Platz; sie aendert sich nie.
+ *   - Ist sie auf der Karte schon vergeben, nimmt das neue Thema die am
+ *     wenigsten benutzte Farbe, von der ersten Wahl aus weitergezaehlt -- so
+ *     tragen benachbarte Themen verschiedene Toene, solange es sieben gibt.
+ *   - Einmal vergeben, merkt sich der Store die Farbe (FARB_GEDAECHTNIS):
+ *     wachsen andere Themen, kommen neue dazu oder verschwinden welche,
+ *     bleibt sie. Neu gebaut (anderer Store, gleiche Daten) entsteht in
+ *     derselben Reihenfolge dieselbe Karte.
+ * Kinder erben die Farbe ihres Elternteils; die Kinder von "Weitere Themen"
+ * sind echte Themen und bekommen ihre eigene.
  */
 const FARBE_NEUTRAL = FARBEN - 1;
+const FARB_GEDAECHTNIS = new WeakMap();
 
-function farbenVergeben(oben, themen) {
+function hashFarbe(id) {
+  let h = 5381;
+  for (let i = 0; i < id.length; i++) h = ((h * 33) ^ id.charCodeAt(i)) >>> 0;
+  return h % FARBE_NEUTRAL;
+}
+
+function farbenVergeben(oben, themen, gedaechtnis = new Map()) {
   const farben = new Map();
-  let rang = 0;
+  const belegt = new Array(FARBE_NEUTRAL).fill(0);
+  const neutral = (t) => t.id === UNVERBUNDEN || t.id === WEITERE;
+  const waehle = (t) => {
+    if (gedaechtnis.has(t.id)) return gedaechtnis.get(t.id);
+    const erste = hashFarbe(t.id);
+    let beste = erste;
+    for (let k = 0; k < FARBE_NEUTRAL; k++) {
+      const c = (erste + k) % FARBE_NEUTRAL;
+      if (belegt[c] < belegt[beste]) beste = c;
+    }
+    gedaechtnis.set(t.id, beste);
+    return beste;
+  };
+  // Erst, wer seine Farbe schon hat (damit sie als belegt zaehlt), dann die neuen.
   for (const t of oben) {
-    farben.set(t.id, t.id === UNVERBUNDEN ? FARBE_NEUTRAL : rang++ % FARBE_NEUTRAL);
+    if (neutral(t)) { farben.set(t.id, FARBE_NEUTRAL); continue; }
+    if (!gedaechtnis.has(t.id)) continue;
+    const c = gedaechtnis.get(t.id);
+    farben.set(t.id, c);
+    belegt[c]++;
+  }
+  for (const t of oben) {
+    if (farben.has(t.id)) continue;
+    const c = waehle(t);
+    farben.set(t.id, c);
+    belegt[c]++;
   }
   // Kinder erben -- in Runden, weil ein Kind selbst Kinder haben kann.
   for (let runde = 0; runde < 8; runde++) {
     let neu = 0;
     for (const t of themen.values()) {
       if (farben.has(t.id) || !t.eltern || !farben.has(t.eltern)) continue;
-      farben.set(t.id, farben.get(t.eltern));
+      farben.set(t.id, t.eltern === WEITERE ? waehle(t) : farben.get(t.eltern));
       neu++;
     }
     if (!neu) break;
   }
   for (const t of themen.values()) if (!farben.has(t.id)) farben.set(t.id, FARBE_NEUTRAL);
+  // Vergessen, was es nicht mehr gibt -- aber erst, wenn es viel wird.
+  if (gedaechtnis.size > 5000) for (const id of [...gedaechtnis.keys()]) if (!themen.has(id)) gedaechtnis.delete(id);
   return farben;
 }
 
@@ -165,10 +208,61 @@ function eindeutig(list) {
 
 /* -------------------------------------------------------------- Bauen */
 
-function verbinde(nachbarn, a, b) {
-  let m = nachbarn.get(a);
-  if (!m) nachbarn.set(a, (m = new Map()));
-  m.set(b, (m.get(b) || 0) + 1);
+/** Das, was ein Satz zum Universum beitraegt -- ohne Textkoerper. */
+function knotenAus(rec) {
+  const d = rec.data || {};
+  const type = rec.type;
+  return {
+    id: rec.id,
+    type,
+    label: view.label(rec),
+    tags: view.tagsOf(rec),
+    updatedAt: rec.updatedAt || '',
+    pinned: !!d.pinned,
+    grad: 0,
+    art: type === 'entity' ? (d.kind || 'topic') : null,
+    // Wohin "Oeffnen" eine Aufgabe fuehrt: in ihr Projekt.
+    projekt: type === 'task' && typeof d.projectId === 'string' && d.projectId ? d.projectId : null,
+    pid: typeof d.projectId === 'string' && d.projectId ? d.projectId : null,
+  };
+}
+
+function kanteAus(e) {
+  const d = e.data || {};
+  return { id: e.id, from: d.from, to: d.to, kind: d.kind || 'related', source: d.source || 'manual' };
+}
+
+/**
+ * Die Rohdaten je Store (Knoten ohne Text, Kanten ohne Grund), von `attach`
+ * Satz fuer Satz nachgefuehrt. Ohne sie las jeder Neubau alle 10 000 Saetze
+ * und 40 000 Kanten neu aus dem Speicher (jede eine Kopie) -- das war der
+ * groesste Teil der ~320 ms, die nach jedem Speichern in einem dichten
+ * Tresor faellig wurden (Pruefer, Runde 1, Vertrag F). Ohne Bus-Anbindung
+ * wird wie bisher jedes Mal frisch gelesen.
+ */
+const ROH = new WeakMap();
+
+function rohLesen(store, typen) {
+  const knoten = new Map();
+  for (const type of typen) {
+    let items;
+    try {
+      items = store.list(type, {}).items;
+    } catch {
+      continue; // ein Store ohne diese Art hat einfach keine
+    }
+    for (const rec of items) knoten.set(rec.id, knotenAus(rec));
+  }
+  const kanten = new Map();
+  let edgeItems = [];
+  try {
+    edgeItems = store.list('edge', {}).items;
+  } catch { /* kein Kantenspeicher */ }
+  for (const e of edgeItems) kanten.set(e.id, kanteAus(e));
+  // kv: Stand der Knoten-MENGE (anlegen/loeschen, nicht aendern). Solange
+  // sie und die Kanten gleich bleiben, bleibt auch das Netz (Nachbarn, Grad,
+  // Reihenfolge) gleich -- das Speichern einer Notiz aendert es nicht.
+  return { knoten, kanten, sortiert: null, kv: 0, netz: null, reihe: null };
 }
 
 /**
@@ -177,52 +271,129 @@ function verbinde(nachbarn, a, b) {
  * das der Unterschied zwischen 50 und 500 Millisekunden.
  */
 function sammeln(store, typen) {
+  const standard = typenGleich(typen, TYPEN);
+  let roh = standard && ANGEBUNDEN.has(store) ? ROH.get(store) : null;
+  if (!roh) {
+    roh = rohLesen(store, typen);
+    if (standard && ANGEBUNDEN.has(store)) ROH.set(store, roh);
+  }
+  // Nach ID sortiert: gleiche Daten, gleiche Reihenfolge. Einmal sortiert,
+  // danach fuehrt rohNachfuehren die Liste Kante fuer Kante nach.
+  if (!roh.sortiert) { roh.sortiert = [...roh.kanten.values()].sort((a, b) => idSort(a.id, b.id)); roh.netz = null; }
+  // Das Netz (Kanten zwischen Knoten, Nachbarn, Grad, Paare) haengt an der
+  // Knoten-MENGE und den Kanten. Speichern einer Notiz aendert die Menge
+  // nicht; eine Kante mehr oder weniger fuehrt rohNachfuehren einzeln nach.
+  // Nur wenn Knoten dazukommen oder gehen, wird es neu gezaehlt (Vertrag F,
+  // dichter Tresor: vorher je Speichern 40 000 Kanten neu sortiert und
+  // verknuepft). bauen() liest die Strukturen nur.
+  let netz = roh.netz && roh.netz.kv === roh.kv ? roh.netz : null;
+  if (!netz) {
+    netz = { kv: roh.kv, kanten: [], nachbarn: new Map(), grad: new Map(), paare: new Map() };
+    for (const e of roh.sortiert) {
+      if (!netzGilt(roh, e)) continue;
+      netz.kanten.push(e);
+      netzZaehlen(netz, e, 1);
+    }
+    roh.netz = netz;
+  }
   const knoten = new Map();
   const projektMitglieder = new Map();
-  for (const type of typen) {
-    let items;
-    try {
-      items = store.list(type, {}).items;
-    } catch {
-      continue; // ein Store ohne diese Art hat einfach keine
-    }
-    for (const rec of items) {
-      const d = rec.data || {};
-      knoten.set(rec.id, {
-        id: rec.id,
-        type,
-        label: view.label(rec),
-        tags: view.tagsOf(rec),
-        updatedAt: rec.updatedAt || '',
-        pinned: !!d.pinned,
-        grad: 0,
-        art: type === 'entity' ? (d.kind || 'topic') : null,
-      });
-      if (typeof d.projectId === 'string' && d.projectId) {
-        let list = projektMitglieder.get(d.projectId);
-        if (!list) projektMitglieder.set(d.projectId, (list = []));
-        list.push(rec.id);
-      }
+  for (const [id, k] of roh.knoten) {
+    // Dasselbe Objekt, nur der Grad frisch: 10 000 Kopien je Neubau waren
+    // ein Sechstel der Zeit. bauen() und die Ausgabe lesen Knoten nur.
+    k.grad = netz.grad.get(id) || 0;
+    knoten.set(id, k);
+    if (k.pid) {
+      let list = projektMitglieder.get(k.pid);
+      if (!list) projektMitglieder.set(k.pid, (list = []));
+      list.push(id);
     }
   }
+  if (!roh.reihe || roh.reihe.kv !== roh.kv) roh.reihe = { kv: roh.kv, ids: [...roh.knoten.keys()].sort(idSort) };
+  return { knoten, kanten: netz.kanten, nachbarn: netz.nachbarn, projektMitglieder, reiheIds: roh.reihe.ids, paare: netz.paare };
+}
 
-  const kanten = [];
-  const nachbarn = new Map();
-  let edgeItems = [];
-  try {
-    edgeItems = store.list('edge', {}).items;
-  } catch { /* kein Kantenspeicher */ }
-  edgeItems.sort((a, b) => idSort(a.id, b.id));
-  for (const e of edgeItems) {
-    const d = e.data || {};
-    if (!knoten.has(d.from) || !knoten.has(d.to) || d.from === d.to) continue;
-    kanten.push({ id: e.id, from: d.from, to: d.to, kind: d.kind || 'related', source: d.source || 'manual' });
-    verbinde(nachbarn, d.from, d.to);
-    verbinde(nachbarn, d.to, d.from);
-    knoten.get(d.from).grad++;
-    knoten.get(d.to).grad++;
+/** Zaehlt diese Kante im Netz mit (beide Enden bekannt, keine Schleife)? */
+function netzGilt(roh, e) {
+  return e.from !== e.to && roh.knoten.has(e.from) && roh.knoten.has(e.to);
+}
+
+/** Eine Kante im Netz zaehlen (+1) oder austragen (-1): Nachbarn, Grad, Paar. */
+function netzZaehlen(netz, e, d) {
+  const plus = (a, b) => {
+    let m = netz.nachbarn.get(a);
+    if (!m) netz.nachbarn.set(a, (m = new Map()));
+    const n = (m.get(b) || 0) + d;
+    if (n > 0) m.set(b, n);
+    else { m.delete(b); if (!m.size) netz.nachbarn.delete(a); }
+    const g = (netz.grad.get(a) || 0) + d;
+    if (g > 0) netz.grad.set(a, g); else netz.grad.delete(a);
+  };
+  plus(e.from, e.to);
+  plus(e.to, e.from);
+  // Ein Paar ist EINE Linie, egal wie viele Kanten es traegt.
+  const key = e.from < e.to ? `${e.from}\u0000${e.to}` : `${e.to}\u0000${e.from}`;
+  const p = netz.paare.get(key);
+  if (p) {
+    p.n += d;
+    if (p.n <= 0) netz.paare.delete(key);
+  } else if (d > 0) {
+    netz.paare.set(key, { von: e.from, zu: e.to, n: d });
   }
-  return { knoten, kanten, nachbarn, projektMitglieder };
+}
+
+/** Erste Stelle in einer nach ID sortierten Liste mit id >= gesucht. */
+function stelle(liste, id) {
+  let lo = 0;
+  let hi = liste.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (liste[mid].id < id) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
+function sortiertWeg(liste, e) {
+  const i = stelle(liste, e.id);
+  if (i < liste.length && liste[i].id === e.id) liste.splice(i, 1);
+}
+
+function sortiertDazu(liste, e) {
+  liste.splice(stelle(liste, e.id), 0, e);
+}
+
+/** Einen geschriebenen Satz in die Rohdaten uebernehmen (von attach). */
+function rohNachfuehren(store, evtName, p) {
+  const roh = ROH.get(store);
+  if (!roh || !p) return;
+  const rec = p.record || p.edge || null;
+  const id = p.id || (rec && rec.id);
+  const type = p.type || (rec && rec.type);
+  if (!id) return;
+  const weg = evtName === 'record.deleted' || evtName === 'edge.deleted' || !rec || rec.deletedAt;
+  if (type === 'edge') {
+    const netz = roh.netz && roh.netz.kv === roh.kv ? roh.netz : null;
+    const alt = roh.kanten.get(id);
+    if (alt) {
+      roh.kanten.delete(id);
+      if (roh.sortiert) sortiertWeg(roh.sortiert, alt);
+      if (netz && netzGilt(roh, alt)) { sortiertWeg(netz.kanten, alt); netzZaehlen(netz, alt, -1); }
+    }
+    if (!weg) {
+      const e = kanteAus(rec);
+      roh.kanten.set(id, e);
+      if (roh.sortiert) sortiertDazu(roh.sortiert, e);
+      if (netz && netzGilt(roh, e)) { sortiertDazu(netz.kanten, e); netzZaehlen(netz, e, 1); }
+    }
+    return;
+  }
+  if (!TYPEN.includes(type)) return;
+  if (weg) {
+    if (roh.knoten.delete(id)) roh.kv++;
+  } else {
+    if (!roh.knoten.has(id)) roh.kv++;
+    roh.knoten.set(id, knotenAus(rec));
+  }
 }
 
 /**
@@ -236,8 +407,8 @@ function bauen(store, opts = {}) {
     ? opts.typen.filter((t) => GRAPH_TYPES.includes(t))
     : TYPEN.slice();
 
-  const { knoten, kanten, nachbarn, projektMitglieder } = sammeln(store, typen);
-  const reihe = [...knoten.values()].sort((a, b) => idSort(a.id, b.id));
+  const { knoten, kanten, nachbarn, projektMitglieder, reiheIds, paare } = sammeln(store, typen);
+  const reihe = reiheIds.map((id) => knoten.get(id));
 
   const themen = new Map();
   const zugeordnet = new Map(); // Knoten-ID -> Set<Thema-ID>
@@ -252,15 +423,36 @@ function bauen(store, opts = {}) {
     return t;
   };
 
-  // 1. Schlagworte und Themenbegriffe -- ein Schluessel, ein Thema.
+  // 1. Schlagworte und Themenbegriffe -- ein Schluessel, ein Thema. Der
+  //    Name ist die haeufigste Schreibweise (mit grossem Anfang; bei
+  //    Gleichstand nicht die in Grossbuchstaben, dann alphabetisch) -- nicht
+  //    die des Knotens mit der kleinsten ID: "Genetik", "genetik", "GENETIK"
+  //    heisst "Genetik".
+  const schreibweisen = new Map(); // Thema-ID -> Map<Schreibweise, Anzahl>
+  // Dieselben Schlagworte stehen an Tausenden Knoten: Schluessel und Name je
+  // Schreibweise einmal ausrechnen, nicht je Vorkommen.
+  const tagInfo = new Map();
   for (const k of reihe) {
     for (const tag of k.tags) {
-      const key = schluessel(tag);
-      if (!key) continue;
-      const id = `thema:${key}`;
-      const t = themen.get(id) || neuesThema(id, schoen(tag), 'tag');
+      let info = tagInfo.get(tag);
+      if (!info) {
+        const key = schluessel(tag);
+        info = { id: key ? `thema:${key}` : null, name: schoen(tag) };
+        tagInfo.set(tag, info);
+      }
+      if (!info.id) continue;
+      const t = themen.get(info.id) || neuesThema(info.id, info.name, 'tag');
       t.mitglieder.add(k.id);
+      let sw = schreibweisen.get(info.id);
+      if (!sw) schreibweisen.set(info.id, (sw = new Map()));
+      sw.set(info.name, (sw.get(info.name) || 0) + 1);
     }
+  }
+  for (const [id, sw] of schreibweisen) {
+    // Gleichstand: lieber "Genetik" als "GENETIK", dann alphabetisch.
+    const laut = (w) => (w.length > 1 && w === w.toUpperCase() && w !== w.toLowerCase() ? 1 : 0);
+    const beste = [...sw.entries()].sort((a, b) => (b[1] - a[1]) || (laut(a[0]) - laut(b[0])) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))[0][0];
+    themen.get(id).name = beste;
   }
   for (const k of reihe) {
     if (k.type !== 'entity' || k.art !== 'topic') continue;
@@ -445,7 +637,9 @@ function bauen(store, opts = {}) {
     oben = [...bleiben, w];
   }
   if (themen.has(UNVERBUNDEN)) oben.push(themen.get(UNVERBUNDEN));
-  const farben = farbenVergeben(oben, themen);
+  let gedaechtnis = FARB_GEDAECHTNIS.get(store);
+  if (!gedaechtnis) FARB_GEDAECHTNIS.set(store, (gedaechtnis = new Map()));
+  const farben = farbenVergeben(oben, themen, gedaechtnis);
 
   // 7. Wurzel je Thema und Hauptthema je Knoten (fuer Farbe und Verbindungen).
   const wurzel = new Map();
@@ -469,25 +663,33 @@ function bauen(store, opts = {}) {
   }
 
   // 8. Kanten je Thema und Verbindungen zwischen den Kreisen -- ein Durchlauf.
+  //    Gezaehlt werden Paare, nicht Kanten: Wiki-Link und Schlagwort
+  //    zwischen denselben zwei Notizen sind im Bild EINE Linie, und die Zahl
+  //    im Kopf, in der Karte und hier soll dieselbe sein (Pruefer, Runde 1).
+  //    Die Paare selbst kommen fertig aus sammeln() (sie aendern sich nur
+  //    mit den Kanten), hier wird nur noch je Thema gezaehlt; die Summen
+  //    haengen nicht an der Reihenfolge.
   const innere = new Map();
-  const zwischen = new Map();
-  for (const e of kanten) {
-    const a = zugeordnet.get(e.from);
-    const b = zugeordnet.get(e.to);
+  const zwischen = new Map(); // kleinere Wurzel-ID -> Map<groessere, Anzahl>
+  for (const { von, zu } of paare.values()) {
+    const a = zugeordnet.get(von);
+    const b = zugeordnet.get(zu);
     if (a && b) {
       for (const tid of a) if (b.has(tid)) innere.set(tid, (innere.get(tid) || 0) + 1);
     }
-    const ra = haupt.get(e.from);
-    const rb = haupt.get(e.to);
+    const ra = haupt.get(von);
+    const rb = haupt.get(zu);
     if (ra && rb && ra !== rb) {
-      const key = idSort(ra, rb) < 0 ? `${ra}\u0000${rb}` : `${rb}\u0000${ra}`;
-      zwischen.set(key, (zwischen.get(key) || 0) + 1);
+      const [k1, k2] = idSort(ra, rb) < 0 ? [ra, rb] : [rb, ra];
+      let m = zwischen.get(k1);
+      if (!m) zwischen.set(k1, (m = new Map()));
+      m.set(k2, (m.get(k2) || 0) + 1);
     }
   }
-  const verbindungen = [...zwischen.entries()]
-    .map(([key, anzahl]) => { const [von, zu] = key.split('\u0000'); return { von, zu, anzahl }; })
-    .sort((a, b) => b.anzahl - a.anzahl || idSort(a.von, b.von) || idSort(a.zu, b.zu))
-    .slice(0, MAX_VERBINDUNGEN);
+  const verbindungen = [];
+  for (const [von, m] of zwischen) for (const [zu, anzahl] of m) verbindungen.push({ von, zu, anzahl });
+  verbindungen.sort((a, b) => b.anzahl - a.anzahl || idSort(a.von, b.von) || idSort(a.zu, b.zu));
+  verbindungen.length = Math.min(verbindungen.length, MAX_VERBINDUNGEN);
 
   return {
     at: new Date().toISOString(),
@@ -552,8 +754,7 @@ function verwerfen(store) {
  */
 function wichtigste(u, t) {
   if (t.wichtigste) return t.wichtigste;
-  const ids = [...t.mitglieder];
-  ids.sort((a, b) => {
+  const vor = (a, b) => {
     if (t.hub === a) return -1;
     if (t.hub === b) return 1;
     const ka = u.knoten.get(a);
@@ -561,8 +762,18 @@ function wichtigste(u, t) {
     if (ka.pinned !== kb.pinned) return ka.pinned ? -1 : 1;
     if (ka.grad !== kb.grad) return kb.grad - ka.grad;
     return idSort(a, b);
-  });
-  t.wichtigste = ids.slice(0, WICHTIGSTE);
+  };
+  // Nur die ersten WICHTIGSTE werden gebraucht: auslesen statt alles zu
+  // sortieren ("Weitere Themen" hat im dichten Tresor Tausende Mitglieder).
+  const beste = [];
+  for (const id of t.mitglieder) {
+    if (beste.length === WICHTIGSTE && vor(id, beste[beste.length - 1]) >= 0) continue;
+    let i = beste.length;
+    while (i > 0 && vor(id, beste[i - 1]) < 0) i--;
+    beste.splice(i, 0, id);
+    if (beste.length > WICHTIGSTE) beste.pop();
+  }
+  t.wichtigste = beste;
   return t.wichtigste;
 }
 
@@ -588,6 +799,10 @@ function knotenKarte(u, k, ausserhalb) {
   return {
     id: k.id,
     type: k.type,
+    // Die Art eines Begriffs (Person, Ort, Thema ...): ohne sie hiess im
+    // Gehirn jede Person "Begriff" (Pruefer, Runde 1).
+    kind: k.art || null,
+    projectId: k.projekt || null,
     label: k.label,
     tags: k.tags,
     grad: k.grad,
@@ -690,6 +905,52 @@ function themenVon(store, recordId, opts = {}) {
 /* ------------------------------------------------------- Vorschlaege */
 
 /**
+ * Wie haeufig jede Stammform im Tresor vorkommt (in wie vielen Saetzen der
+ * Universum-Arten) -- fuer die Gewichtung der Vorschlaege (view.suggestLinks
+ * mit `df`): "Alles" steht in jedem zehnten Satz und verbindet nichts,
+ * "Chloroplasten" in zweien und verbindet genau die.
+ *
+ * Einmal je Store gebaut und danach von `attach` Satz fuer Satz
+ * nachgefuehrt (record.created/updated/deleted); ohne Bus-Anbindung wird bei
+ * jedem Aufruf neu gezaehlt -- langsamer, nie falsch (wie der Cache oben).
+ */
+const DF = new WeakMap();
+
+function dfNimm(tab, rec) {
+  if (!rec || rec.deletedAt || !TYPEN.includes(rec.type)) return;
+  const set = view.termSet(rec);
+  const liste = [...set];
+  tab.je.set(rec.id, liste);
+  tab.n++;
+  for (const t of liste) tab.df.set(t, (tab.df.get(t) || 0) + 1);
+}
+
+function dfWeg(tab, id) {
+  const alt = tab.je.get(id);
+  if (!alt) return;
+  tab.je.delete(id);
+  tab.n--;
+  for (const t of alt) {
+    const c = (tab.df.get(t) || 0) - 1;
+    if (c > 0) tab.df.set(t, c);
+    else tab.df.delete(t);
+  }
+}
+
+function dfTabelle(store) {
+  const da = DF.get(store);
+  if (da && ANGEBUNDEN.has(store)) return da;
+  const tab = { n: 0, df: new Map(), je: new Map() };
+  for (const type of TYPEN) {
+    let items = [];
+    try { items = store.list(type, {}).items; } catch { continue; }
+    for (const rec of items) dfNimm(tab, rec);
+  }
+  DF.set(store, tab);
+  return tab;
+}
+
+/**
  * Abgelehnte Vorschlaege fuer einen Satz: die Gegenseite jedes Paares.
  * @returns {Set<string>}
  */
@@ -749,11 +1010,14 @@ function vorschlaegeFuer(store, recordId, opts = {}) {
     }
   }
 
+  const tab = dfTabelle(store);
   const out = view.suggestLinks(store, record.id, {
     limit,
     minScore,
     types: TYPEN,
     exclude,
+    df: tab.df,
+    dfN: tab.n,
     ...(candidates ? { candidates } : { pool: 500 }),
   });
   return out.map((v) => ({
@@ -773,6 +1037,11 @@ function vorschlaegeFuer(store, recordId, opts = {}) {
 function mussLeben(store, id, was) {
   const rec = typeof id === 'string' && id ? store.get(id) : null;
   if (!rec) throw new NotFoundError(`${was} ${String(id)}`);
+  // Verbunden wird Wissen mit Wissen -- keine Kante mit einer Kante, kein
+  // Merkzettel mit einer Notiz (Pruefer, Runde 1: to:[edge_…] ging durch).
+  if (!TYPEN.includes(rec.type)) {
+    throw new ValidationError(`„${view.label(rec)}“ ist kein Eintrag, der sich verbinden lässt (Art ${rec.type}). Möglich: ${TYPEN.join(', ')}.`);
+  }
   return rec;
 }
 
@@ -792,6 +1061,10 @@ function verbinden(store, from, to, opts = {}) {
   if (!ziele.length) throw new ValidationError('"to" muss mindestens einen anderen Eintrag nennen.');
   for (const id of ziele) mussLeben(store, id, 'Eintrag');
   const reason = typeof opts.reason === 'string' && opts.reason.trim() ? opts.reason.trim() : 'Im Gehirn verbunden';
+  // Je Ziel ein eigener Grund (Runde 1): "Alle verbinden" mit drei
+  // Vorschlaegen schrieb sonst dreimal denselben Allgemeinsatz an die Kanten.
+  const gruende = opts.gruende && typeof opts.gruende === 'object' ? opts.gruende : {};
+  const grundFuer = (id) => (typeof gruende[id] === 'string' && gruende[id].trim() ? gruende[id].trim().slice(0, 500) : reason);
 
   const vorhanden = new Set();
   try {
@@ -802,7 +1075,7 @@ function verbinden(store, from, to, opts = {}) {
   const neu = [];
   const bereits = [];
   for (const ziel of ziele) {
-    const edge = store.edges.add({ from: quelle.id, to: ziel, kind, source: 'manual', reason, weight: 1 });
+    const edge = store.edges.add({ from: quelle.id, to: ziel, kind, source: 'manual', reason: grundFuer(ziel), weight: 1 });
     edges.push(edge);
     if (vorhanden.has(`${ziel}\u0000${kind}`)) bereits.push(edge.id);
     else neu.push(edge.id);
@@ -873,35 +1146,67 @@ function ablehnen(store, from, to) {
 
 /* ----------------------------------------------------------- Anbinden */
 
-/** Was das Universum veraendert: seine Arten und die Kanten. */
-const VERFALL_TYPEN = new Set([...TYPEN, 'edge']);
+/** Was das Universum veraendert: seine Arten und die Kanten zwischen ihnen. */
+const VERFALL_TYPEN = new Set(TYPEN);
+/** Hoechstens so viele Saetze warten auf ihre Vorschlaege; aeltere fallen heraus. */
+const MAX_WARTESCHLANGE = 50;
+/** So viel Rechenzeit je Durchgang, dann kommt die Ereignisschleife wieder dran. */
+const BUDGET_MS = 15;
+
+/** Liegen beide Enden einer Kante im Universum? Sonst geht sie es nichts an. */
+function kanteImUniversum(store, edge) {
+  const d = edge && edge.data;
+  if (!d) return false;
+  const a = typeof d.from === 'string' ? store.get(d.from) : null;
+  const b = typeof d.to === 'string' ? store.get(d.to) : null;
+  return !!(a && b && TYPEN.includes(a.type) && TYPEN.includes(b.type));
+}
 
 /**
  * An den Bus haengen (Vertrag D, E, F):
- *   - record.*      -> Cache verfaellt; fuer Notizen u. ae. werden nach einer
- *                      kurzen Verzoegerung Vorschlaege gerechnet und als
- *                      'graph.vorschlaege' {recordId, type, anzahl, vorschlaege}
- *                      geschickt -- nur, wenn es welche gibt.
+ *   - record.*      -> Cache verfaellt (nur fuer Arten des Universums und
+ *                      Kanten zwischen ihnen -- eine Chat-Nachricht nicht);
+ *                      die Worthaeufigkeiten werden nachgefuehrt; Links, die
+ *                      am Titel des Satzes haengen, werden nachgezogen
+ *                      (derive.nachziehen); fuer Notizen u. ae. werden nach
+ *                      einer kurzen Verzoegerung Vorschlaege gerechnet und
+ *                      als 'graph.vorschlaege' {recordId, type, anzahl,
+ *                      vorschlaege} geschickt -- nur, wenn es welche gibt.
  *   - edge.created  -> 'graph.kante' {edge, neu:true, von, zu}
  *   - edge.deleted  -> 'graph.kante' {edge, entfernt:true, von, zu}
+ *   Gemeldet werden nur Kanten zwischen Wissen: eine Nachricht, die an ihrem
+ *   Chat haengt, erschien sonst kurz als Knoten im Netz (Pruefer, Runde 1).
+ *
+ * Die Vorschlaege laufen ueber EINE Warteschlange mit EINEM Zeitgeber und
+ * einem Zeitbudget je Durchgang. Frueher bekam jeder Satz seinen eigenen
+ * Zeitgeber: 3 000 einzeln geschriebene Saetze (Abgleich, ein Agent)
+ * blockierten den Server 23 s, 10 000 rund 97 s. Jetzt warten hoechstens
+ * MAX_WARTESCHLANGE Saetze (die juengsten -- um die kuemmert sich gerade
+ * jemand), und nach BUDGET_MS kommt die Ereignisschleife wieder dran.
  *
  * Einmal je Bus; ein zweiter Aufruf gibt dieselbe Anbindung zurueck.
- * `istAusgesetzt()` (aus app.js) haelt die Vorschlaege waehrend eines
- * Massenimports an -- dort waere jede Notiz ein Ereignis.
+ * `istAusgesetzt()` (aus app.js) haelt Vorschlaege und Nachziehen waehrend
+ * eines Massenimports an -- danach leitet bulkWrite ohnehin alles neu ab.
  */
 function attach({ store, bus, logger, istAusgesetzt, verzoegerungMs } = {}) {
   if (!store || !bus || typeof bus.on !== 'function' || typeof bus.publish !== 'function') {
     throw new ValidationError('attach benoetigt store und bus.');
   }
   if (store.__universum) return store.__universum;
+  DF.delete(store); // eine Zaehlung von vor der Anbindung koennte schon veraltet sein
+  ROH.delete(store);
   const log = logger && typeof logger.warn === 'function' ? logger : NOOP_LOGGER;
   const ausgesetzt = typeof istAusgesetzt === 'function' ? istAusgesetzt : () => false;
   const warten = {
     neu: Number.isInteger(verzoegerungMs && verzoegerungMs.neu) ? verzoegerungMs.neu : VERZOEGERUNG_NEU_MS,
     aenderung: Number.isInteger(verzoegerungMs && verzoegerungMs.aenderung) ? verzoegerungMs.aenderung : VERZOEGERUNG_AENDERUNG_MS,
   };
-  const timer = new Map();
+  /** id -> {type, faellig} in der Reihenfolge des Eintreffens (Map haelt sie). */
+  const warteschlange = new Map();
+  let zeitgeber = null;
+  let verworfen = 0;
   let offen = true;
+  const derive = require('./derive');
 
   const publish = (name, payload) => {
     try { bus.publish(name, payload); } catch (err) { log.warn(`bus.publish(${name}) fehlgeschlagen: ${err && err.message}`); }
@@ -911,39 +1216,127 @@ function attach({ store, bus, logger, istAusgesetzt, verzoegerungMs } = {}) {
     return rec ? { id: rec.id, type: rec.type, label: view.label(rec) } : null;
   };
 
+  const rechne = (id, type) => {
+    let vorschlaege;
+    try {
+      if (!store.get(id)) return; // inzwischen geloescht
+      vorschlaege = vorschlaegeFuer(store, id, { limit: MAX_VORSCHLAEGE });
+    } catch (err) {
+      log.warn(`Verbindungsvorschlaege fuer ${id} fehlgeschlagen: ${err && err.message}`);
+      return;
+    }
+    if (!vorschlaege.length) return;
+    publish('graph.vorschlaege', { recordId: id, type, anzahl: vorschlaege.length, vorschlaege });
+  };
+
+  const wecken = () => {
+    if (zeitgeber || !offen || !warteschlange.size) return;
+    let naechst = Infinity;
+    for (const e of warteschlange.values()) if (e.faellig < naechst) naechst = e.faellig;
+    zeitgeber = setTimeout(abarbeiten, Math.max(0, naechst - Date.now()));
+    if (zeitgeber && typeof zeitgeber.unref === 'function') zeitgeber.unref();
+  };
+
+  function abarbeiten() {
+    zeitgeber = null;
+    if (!offen) return;
+    if (ausgesetzt()) { warteschlange.clear(); return; }
+    const start = Date.now();
+    for (const [id, e] of warteschlange) {
+      if (e.faellig > Date.now()) continue;
+      warteschlange.delete(id);
+      rechne(id, e.type);
+      if (Date.now() - start >= BUDGET_MS) break;
+    }
+    wecken();
+  }
+
   const planen = (record, ms) => {
     if (!offen || ausgesetzt()) return;
-    const alt = timer.get(record.id);
-    if (alt) clearTimeout(alt);
-    const t = setTimeout(() => {
-      timer.delete(record.id);
-      if (!offen || ausgesetzt()) return;
-      let vorschlaege;
-      try {
-        if (!store.get(record.id)) return; // inzwischen geloescht
-        vorschlaege = vorschlaegeFuer(store, record.id, { limit: MAX_VORSCHLAEGE });
-      } catch (err) {
-        log.warn(`Verbindungsvorschlaege fuer ${record.id} fehlgeschlagen: ${err && err.message}`);
-        return;
+    // Nach hinten: wer zuletzt geschrieben wurde, kommt zuletzt dran und
+    // wird zuletzt verdraengt. Schnelle Aenderungen ergeben EIN Ereignis.
+    warteschlange.delete(record.id);
+    while (warteschlange.size >= MAX_WARTESCHLANGE) {
+      warteschlange.delete(warteschlange.keys().next().value);
+      verworfen++;
+    }
+    warteschlange.set(record.id, { type: record.type, faellig: Date.now() + ms });
+    wecken();
+  };
+
+  // Nachziehen laeuft gesammelt NACH dem laufenden Schreibvorgang (naechster
+  // Durchgang der Ereignisschleife), nicht mitten darin: Wer mehrere Saetze
+  // in einem Zug schreibt, legt die Kanten dazu oft selbst an -- die
+  // Startinhalte (feste Kanten-IDs, src/app.js seedIfEmpty), der Abgleich
+  // und POST /api/notizen/anlegen, das die neue Kante in seiner Antwort
+  // nennt. Nachziehen mittendrin haette dieselbe Kante vorher mit zufaelliger
+  // ID gezogen: eine Dublette, und zwei Sticks mit verschiedenen Kanten.
+  // Danach findet deriveFor die Kante schon vor und aendert nichts.
+  const nachziehListe = new Map(); // id -> umbenannt
+  let nachziehGeplant = null;
+  // Mit demselben Zeitbudget wie die Vorschlaege: 1 500 Saetze aus einem
+  // Abgleich sind 1 500 Suchen -- in Portionen, damit die Ereignisschleife
+  // dazwischen frei wird. Verworfen wird hier nichts (sonst blieben Links
+  // unaufgeloest); die Portionen laufen einfach nacheinander.
+  const nachziehenJetzt = () => {
+    nachziehGeplant = null;
+    if (!offen || ausgesetzt()) { nachziehListe.clear(); return; }
+    const start = Date.now();
+    for (const [id, umbenannt] of nachziehListe) {
+      nachziehListe.delete(id);
+      let rec = null;
+      try { rec = store.get(id); } catch { rec = null; }
+      if (rec && !rec.deletedAt) {
+        try {
+          derive.nachziehen(store, rec, { umbenannt });
+        } catch (err) {
+          log.warn(`Links nachziehen fuer ${id} fehlgeschlagen: ${err && err.message}`);
+        }
       }
-      if (!vorschlaege.length) return;
-      publish('graph.vorschlaege', { recordId: record.id, type: record.type, anzahl: vorschlaege.length, vorschlaege });
-    }, ms);
-    timer.set(record.id, t);
+      if (Date.now() - start >= BUDGET_MS) break;
+    }
+    if (nachziehListe.size && !nachziehGeplant) {
+      nachziehGeplant = setImmediate(nachziehenJetzt);
+      if (typeof nachziehGeplant.unref === 'function') nachziehGeplant.unref();
+    }
+  };
+  const nachziehen = (record, umbenannt) => {
+    if (ausgesetzt()) return;
+    nachziehListe.set(record.id, !!(nachziehListe.get(record.id) || umbenannt));
+    if (nachziehGeplant) return;
+    nachziehGeplant = setImmediate(nachziehenJetzt);
+    if (nachziehGeplant && typeof nachziehGeplant.unref === 'function') nachziehGeplant.unref();
   };
 
   const onRecord = (evt) => {
     const p = evt && evt.payload;
     if (!p) return;
     const type = p.type || (p.record && p.record.type);
-    if (VERFALL_TYPEN.has(type)) verwerfen(store);
-    if (evt.name === 'record.deleted' || !p.record || p.record.deletedAt) return;
+    const rec = p.record || null;
+    rohNachfuehren(store, evt.name, p);
+    if (type === 'edge') {
+      if (rec && kanteImUniversum(store, rec)) verwerfen(store);
+      return;
+    }
+    if (!VERFALL_TYPEN.has(type)) return;
+    verwerfen(store);
+    const tab = DF.get(store);
+    if (tab) {
+      dfWeg(tab, p.id || (rec && rec.id));
+      if (evt.name !== 'record.deleted' && rec && !rec.deletedAt) dfNimm(tab, rec);
+    }
+    if (evt.name === 'record.deleted' || !rec || rec.deletedAt) return;
+    // Links, die an diesem Titel haengen: neu angelegt, umbenannt, wiederhergestellt.
+    const titelNeu = evt.name === 'record.created' || p.restored
+      || (p.patch && ['title', 'name', 'aliases'].some((f) => Object.prototype.hasOwnProperty.call(p.patch, f)
+        && JSON.stringify(p.patch[f]) !== JSON.stringify(p.before && p.before[f])));
+    if (titelNeu) nachziehen(rec, evt.name === 'record.updated' && !p.restored);
     if (!VORSCHLAG_TYPEN.has(type)) return;
-    planen(p.record, evt.name === 'record.created' ? warten.neu : warten.aenderung);
+    planen(rec, evt.name === 'record.created' ? warten.neu : warten.aenderung);
   };
   const onEdgeCreated = (evt) => {
     const edge = evt && evt.payload && evt.payload.edge;
-    if (!edge || !edge.data) return;
+    if (!edge || !edge.data || !kanteImUniversum(store, edge)) return;
     publish('graph.kante', {
       edge, neu: true, wiederhergestellt: !!evt.payload.restored,
       von: leicht(edge.data.from), zu: leicht(edge.data.to),
@@ -951,7 +1344,10 @@ function attach({ store, bus, logger, istAusgesetzt, verzoegerungMs } = {}) {
   };
   const onEdgeDeleted = (evt) => {
     const edge = evt && evt.payload && evt.payload.edge;
-    if (!edge || !edge.data) return;
+    // Beim endgueltigen Loeschen eines Knotens gehen seine Kanten ohne eigenes
+    // record.deleted -- nur mit edge.deleted (cascaded).
+    if (edge && evt.payload.cascaded) rohNachfuehren(store, 'edge.deleted', { id: edge.id, type: 'edge', edge });
+    if (!edge || !edge.data || !kanteImUniversum(store, edge)) return;
     publish('graph.kante', { edge, entfernt: true, von: leicht(edge.data.from), zu: leicht(edge.data.to) });
   };
 
@@ -964,20 +1360,35 @@ function attach({ store, bus, logger, istAusgesetzt, verzoegerungMs } = {}) {
   ];
   for (const [name, fn] of abos) bus.on(name, fn);
   ANGEBUNDEN.add(store);
+  // Die Worthaeufigkeiten einmal im Hintergrund zaehlen (bei 10 000 Notizen
+  // ~150 ms), damit nicht der erste Vorschlag nach dem Start darauf wartet.
+  const vorzaehlen = setTimeout(() => {
+    if (offen && !DF.has(store)) { try { dfTabelle(store); } catch { /* dann beim ersten Vorschlag */ } }
+  }, 3000);
+  if (typeof vorzaehlen.unref === 'function') vorzaehlen.unref();
 
   const anbindung = {
     detach() {
       if (!offen) return;
       offen = false;
       for (const [name, fn] of abos) { try { bus.off(name, fn); } catch { /* schon weg */ } }
-      for (const t of timer.values()) clearTimeout(t);
-      timer.clear();
+      if (zeitgeber) clearTimeout(zeitgeber);
+      clearTimeout(vorzaehlen);
+      if (nachziehGeplant) clearImmediate(nachziehGeplant);
+      nachziehGeplant = null;
+      nachziehListe.clear();
+      zeitgeber = null;
+      warteschlange.clear();
       ANGEBUNDEN.delete(store);
       verwerfen(store);
+      DF.delete(store);
+      ROH.delete(store);
       if (store.__universum === anbindung) delete store.__universum;
     },
-    /** Fuer Tests: wartet nichts mehr auf einen Zeitgeber? */
-    get ausstehend() { return timer.size; },
+    /** Fuer Tests: wie viele Saetze warten noch auf ihre Vorschlaege? */
+    get ausstehend() { return warteschlange.size; },
+    /** Fuer Tests: wie viele wurden verdraengt, weil zu viele auf einmal kamen? */
+    get verworfen() { return verworfen; },
   };
   try {
     Object.defineProperty(store, '__universum', { value: anbindung, configurable: true, enumerable: false, writable: true });
@@ -1008,4 +1419,5 @@ module.exports = {
   MAX_VORSCHLAEGE,
   UNVERBUNDEN,
   WEITERE,
+  MAX_WARTESCHLANGE,
 };

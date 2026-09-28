@@ -60,6 +60,7 @@ export function mount(el, ctx) {
   let alive = true;
   let token = 0;
   let graph = null;
+  let letzteMitte = null;
   const offs = [];
 
   const body = h('div.tile__body');
@@ -74,7 +75,12 @@ export function mount(el, ctx) {
     body.appendChild(h('p.tile__empty', null, text(satz)));
   }
 
-  /** Die Mitte: siehe Kopfkommentar. */
+  /**
+   * Die Mitte: siehe Kopfkommentar. Gezaehlt werden nur Verbindungen, die im
+   * Bild sind (`degree` im Umfeld) -- `totalDegree` zaehlte die Kanten der
+   * Chat-Nachrichten mit, und so wurde ein Chat ohne Wissen drumherum zur
+   * Mitte eines Bildes aus einem einzigen Punkt (Pruefer, Runde 1).
+   */
   async function mitteFinden(my) {
     const recent = (state && state.get('recentChats')) || [];
     const chatId = (state && state.get('activeChatId')) || (recent[0] && recent[0].id) || null;
@@ -82,12 +88,21 @@ export function mount(el, ctx) {
       try {
         const nb = await api.get('/graph', { query: { focus: chatId, depth: 1, limit: 60 }, timeoutMs: 10000 });
         if (my !== token) return null;
-        const kandidaten = (nb.nodes || []).filter((node) => !NIE_MITTE.has(node.type));
+        const kandidaten = (nb.nodes || []).filter((node) => !NIE_MITTE.has(node.type) && !NIE_IM_BILD.has(node.type) && (node.degree || 0) > 0);
         if (kandidaten.length > 1) {
-          kandidaten.sort((a, b) => ((b.totalDegree || 0) - (a.totalDegree || 0))
-            || (a.id === chatId ? -1 : b.id === chatId ? 1 : 0));
+          // Das Thema, nicht der Chat: wer im Umfeld die meisten Linien hat,
+          // dann wer im ganzen Tresor mehr hat.
+          kandidaten.sort((a, b) => ((b.degree || 0) - (a.degree || 0))
+            || ((b.totalDegree || 0) - (a.totalDegree || 0))
+            || (a.id === chatId ? 1 : b.id === chatId ? -1 : 0));
           return kandidaten[0].id;
         }
+        // Nichts Verbundenes am Chat -- aber er gehoert zu einem Projekt: das
+        // Projekt ist das Thema des Gespraechs.
+        const rec = await api.get(`/records/${encodeURIComponent(chatId)}`, { timeoutMs: 8000 }).catch(() => null);
+        if (my !== token) return null;
+        const projektId = rec && rec.record && rec.record.data ? rec.record.data.projectId : null;
+        if (typeof projektId === 'string' && projektId) return projektId;
       } catch (err) {
         // Ein geloeschter Chat ist kein Fehler der Kachel: weiter mit Schritt 2.
         if (!(err && err.status === 404)) throw err;
@@ -95,7 +110,16 @@ export function mount(el, ctx) {
     }
     const jung = await api.get('/graph', { query: { limit: 80, includeOrphans: true }, timeoutMs: 10000 });
     if (my !== token) return null;
-    const treffer = (jung.nodes || []).find((node) => (node.totalDegree || 0) > 0 && !NIE_MITTE.has(node.type));
+    // Zuerst, wer im juengsten Ausschnitt schon Nachbarn hat (dann ist das
+    // Bild ein Netz), sonst wer ueberhaupt verbunden ist -- aber kein Chat,
+    // dessen einzige Kanten die seiner Nachrichten sind.
+    const nodes = (jung.nodes || []).filter((node) => !NIE_MITTE.has(node.type) && !NIE_IM_BILD.has(node.type));
+    // Unter den zehn juengsten Verbundenen der mit den meisten Linien: ein
+    // Netz-Ausschnitt, kein einzelner Strich zwischen zwei Punkten.
+    const verbunden = nodes.filter((node) => (node.degree || 0) > 0).slice(0, 10);
+    verbunden.sort((a, c) => ((c.degree || 0) - (a.degree || 0)) || ((c.totalDegree || 0) - (a.totalDegree || 0)));
+    const treffer = verbunden[0]
+      || nodes.find((node) => node.type !== 'chat' && (node.totalDegree || 0) > 0);
     return treffer ? treffer.id : null;
   }
 
@@ -213,6 +237,14 @@ export function mount(el, ctx) {
 
     let link = body.querySelector('a.ghk');
     let canvas = link && link.querySelector('canvas');
+    // Eine neue Mitte heisst ein neues Bild: der Zeichner behielte sonst die
+    // alten Positionen, und neue und alte Mitte laegen uebereinander, bis
+    // man neu laedt (Pruefer, Runde 1).
+    if (graph && letzteMitte !== mitte) {
+      graph.destroy();
+      graph = null;
+    }
+    letzteMitte = mitte;
     if (!link || !graph) {
       clear(body);
       canvas = h('canvas.ghk__canvas', { 'aria-hidden': 'true' });

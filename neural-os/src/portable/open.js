@@ -15,7 +15,9 @@
  *    to launch arbitrary things.
  *  - It is opt-in (`--open`), never automatic. A server started on purpose --
  *    as a background service, over ssh -- must not pop a window open.
- *  - A failure is a shrug, not an error. The address is printed anyway.
+ *  - A failure is not an error, but it is reported: the caller shows the
+ *    address instead (a browser that did not open is the one case where the
+ *    user needs it).
  *
  * Unter Windows läuft der Öffner als `cmd /c start "" <url>`: Ein `&` (oder
  * `|`, `<`, `>`, `^`, `%`, `"`) in der Adresse wäre für cmd ein zweiter
@@ -48,7 +50,7 @@ function isLocalUrl(value) {
 
 /**
  * @param {string} url
- * @param {{timeoutMs?:number}} [opts]
+ * @param {{wartenMs?:number}} [opts] so lange wird auf das Ende des Öffners gewartet
  * @returns {Promise<{opened:boolean, reason?:string}>} never rejects
  */
 function openInBrowser(url, opts = {}) {
@@ -99,16 +101,23 @@ function openInBrowser(url, opts = {}) {
       return;
     }
 
-    // Aufgelöst wird, sobald der Öffner gestartet ist ('spawn') oder nicht
-    // startet ('error'). Der Zeitgeber ist nur Rückfall und hält Node bewusst
-    // am Leben: Mit unref endete der Starter, bevor „Fertig. Dieses Fenster
-    // kann zu.“ geschrieben war (Prüfung Runde 1).
-    const timer = setTimeout(() => done({ opened: true }), opts.timeoutMs || 300);
+    // Der Öffner (xdg-open, open, cmd start) übergibt und endet gleich; endet
+    // er mit einem Fehler (kein Browser eingerichtet, Richtlinie), ist nichts
+    // offen, und der Starter muss die Adresse zeigen (Prüfung von Welle 1).
+    // Ein Öffner, der nach `wartenMs` noch läuft, hat an einen Browser
+    // übergeben, der gerade startet: Das gilt als offen. Der Zeitgeber hält
+    // Node bewusst am Leben: Mit unref endete der Starter, bevor „Fertig.
+    // Dieses Fenster kann zu.“ geschrieben war (Prüfung Runde 1).
+    const wartenMs = Number.isFinite(opts.wartenMs) ? opts.wartenMs : 3000;
+    let gestartet = false;
+    const timer = setTimeout(() => done(gestartet ? { opened: true } : { opened: false, reason: 'Der Öffner startet nicht.' }), wartenMs);
     const fertig = (result) => { clearTimeout(timer); done(result); };
-    child.once('spawn', () => fertig({ opened: true }));
+    child.once('spawn', () => { gestartet = true; });
     child.on('error', (err) => fertig({ opened: false, reason: err && err.message }));
-    // The opener returns immediately on every platform; waiting for exit would
-    // hang on the ones that hand off to a long-lived process.
+    child.once('exit', (code, signal) => {
+      if (code === 0) fertig({ opened: true });
+      else fertig({ opened: false, reason: signal ? `Der Öffner wurde beendet (${signal}).` : `Der Öffner endete mit Code ${code}.` });
+    });
     child.unref();
   });
 }

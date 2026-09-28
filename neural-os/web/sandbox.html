@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Sandkasten</title>
+<!--
+  Der Sandkasten fuer HTML, SVG und JavaScript aus KI-Antworten
+  (docs/ANTWORT-BAUSTEINE.md, Abschnitt 7).
+
+  Warum eine eigene Seite: Code aus einer Antwort ist fremder Code. Er laeuft
+  hier in einem <iframe sandbox="allow-scripts"> OHNE allow-same-origin --
+  also mit undurchsichtigem Ursprung: kein Zugriff auf Cookies, Speicher,
+  /api oder das Dokument der App. Der Server liefert diese Seite mit eigener
+  CSP (default-src 'none'; connect-src 'none' ...): nichts darin kann ins Netz,
+  nichts kann nachladen.
+
+  Die Bruecke unten nimmt Auftraege NUR vom Elternfenster an, und nur, wenn
+  dessen Ursprung der Ursprung der App ist (aus der eigenen Adresse gelesen,
+  denn der Sandkasten selbst hat keinen). Antworten gehen mit genau diesem
+  Ursprung als Ziel zurueck.
+
+  - html / svg: Das Dokument wird durch den Inhalt ersetzt (document.write).
+    Das ist hier -- und nur hier -- richtig: dieser Rahmen IST die Vorschau,
+    und er ist vom Rest der App getrennt. Die Bruecke endet damit.
+  - js: Der Code laeuft in einem Worker (eigener Faden), damit eine
+    Endlosschleife weder diese Seite noch die App einfriert. Nach der
+    Zeitgrenze (Standard 3 s) wird der Worker beendet. console.* und Fehler
+    kommen als Nachrichten zurueck.
+-->
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; }
+</style>
+</head>
+<body>
+<script>
+(() => {
+  'use strict';
+
+  const APP = new URL(location.href).origin;
+  const RAHMEN = String(location.hash || '').slice(1, 65);
+  const KANAL = 'nos-sandkasten';
+  const ZEIT_MAX = 10000;
+
+  const senden = (daten) => {
+    try {
+      parent.postMessage(Object.assign({ kanal: KANAL, rahmen: RAHMEN }, daten), APP);
+    } catch (_) { /* Elternfenster weg */ }
+  };
+
+  /* ---------------------------------------------------------------- Worker */
+
+  // Der Worker-Quelltext als Funktion: so bleibt er lesbar und wird als
+  // Text (toString) in eine blob:-Adresse gelegt.
+  function arbeiter() {
+    const post = (d) => postMessage(d);
+    const MAX_ZEILEN = 1000;
+    const MAX_ZEICHEN = 100000;
+    let zeilen = 0;
+    let zeichen = 0;
+    let gekappt = false;
+
+    function darstellen(wert, tiefe, gesehen) {
+      if (typeof wert === 'string') return tiefe === 0 ? wert : JSON.stringify(wert);
+      if (typeof wert === 'function') return 'ƒ ' + (wert.name || 'anonym') + '()';
+      if (typeof wert === 'bigint') return String(wert) + 'n';
+      if (typeof wert === 'symbol') return String(wert);
+      if (wert === null || typeof wert !== 'object') return String(wert);
+      if (wert instanceof Error) return (wert.name || 'Error') + ': ' + wert.message;
+      if (wert instanceof Date) return isNaN(wert) ? 'Invalid Date' : wert.toISOString();
+      if (wert instanceof RegExp) return String(wert);
+      if (gesehen.has(wert)) return '[zirkulär]';
+      if (tiefe > 3) return Array.isArray(wert) ? '[…]' : '{…}';
+      gesehen.add(wert);
+      try {
+        if (Array.isArray(wert)) {
+          const teile = wert.slice(0, 100).map((x) => darstellen(x, tiefe + 1, gesehen));
+          if (wert.length > 100) teile.push('… ' + (wert.length - 100) + ' weitere');
+          return '[' + teile.join(', ') + ']';
+        }
+        if (wert instanceof Map) {
+          const teile = [...wert].slice(0, 50).map(([k, v]) => darstellen(k, tiefe + 1, gesehen) + ' => ' + darstellen(v, tiefe + 1, gesehen));
+          return 'Map(' + wert.size + ') {' + teile.join(', ') + '}';
+        }
+        if (wert instanceof Set) {
+          const teile = [...wert].slice(0, 50).map((v) => darstellen(v, tiefe + 1, gesehen));
+          return 'Set(' + wert.size + ') {' + teile.join(', ') + '}';
+        }
+        const schluessel = Object.keys(wert);
+        const teile = schluessel.slice(0, 50).map((k) => (/^[A-Za-z_$][\w$]*$/.test(k) ? k : JSON.stringify(k)) + ': ' + darstellen(wert[k], tiefe + 1, gesehen));
+        if (schluessel.length > 50) teile.push('…');
+        const name = wert.constructor && wert.constructor.name && wert.constructor.name !== 'Object' ? wert.constructor.name + ' ' : '';
+        return name + '{' + teile.join(', ') + '}';
+      } finally {
+        gesehen.delete(wert);
+      }
+    }
+
+    function ausgabe(stufe, args) {
+      if (gekappt) return;
+      let t = args.map((a) => darstellen(a, 0, new Set())).join(' ');
+      if (t.length > 10000) t = t.slice(0, 10000) + ' …';
+      zeilen += 1;
+      zeichen += t.length;
+      if (zeilen > MAX_ZEILEN || zeichen > MAX_ZEICHEN) {
+        gekappt = true;
+        post({ typ: 'ausgabe', stufe: 'warn', text: '… Ausgabe gekürzt (zu viel).' });
+        return;
+      }
+      post({ typ: 'ausgabe', stufe, text: t });
+    }
+
+    const konsole = {};
+    for (const s of ['log', 'info', 'debug']) konsole[s] = (...a) => ausgabe('log', a);
+    konsole.warn = (...a) => ausgabe('warn', a);
+    konsole.error = (...a) => ausgabe('error', a);
+    konsole.table = (d) => ausgabe('log', [d]);
+    konsole.dir = (d) => ausgabe('log', [d]);
+    konsole.clear = () => {};
+    konsole.assert = (ok, ...a) => { if (!ok) ausgabe('error', ['Assertion failed:', ...a]); };
+    const zaehler = {};
+    konsole.count = (l = 'default') => { zaehler[l] = (zaehler[l] || 0) + 1; ausgabe('log', [l + ': ' + zaehler[l]]); };
+    const uhren = {};
+    konsole.time = (l = 'default') => { uhren[l] = performance.now(); };
+    konsole.timeEnd = (l = 'default') => { if (uhren[l] !== undefined) ausgabe('log', [l + ': ' + (performance.now() - uhren[l]).toFixed(1) + ' ms']); delete uhren[l]; };
+    self.console = konsole;
+
+    // Offene Zeitgeber zaehlen: fertig ist der Lauf erst, wenn keiner mehr wartet.
+    const echtTimeout = self.setTimeout.bind(self);
+    const echtClearTimeout = self.clearTimeout.bind(self);
+    const echtInterval = self.setInterval.bind(self);
+    const echtClearInterval = self.clearInterval.bind(self);
+    const offen = new Set();
+    let hauptFertig = false;
+    let gemeldet = false;
+    const t0 = performance.now();
+    const pruefeEnde = () => {
+      echtTimeout(() => {
+        if (hauptFertig && !gemeldet && offen.size === 0) {
+          gemeldet = true;
+          post({ typ: 'fertig', grund: 'ende', ms: Math.round(performance.now() - t0) });
+        }
+      }, 0);
+    };
+    self.setTimeout = (fn, ms, ...rest) => {
+      const id = echtTimeout(() => {
+        offen.delete(id);
+        try { if (typeof fn === 'function') fn(...rest); } catch (e) { fehler(e); } finally { pruefeEnde(); }
+      }, ms);
+      offen.add(id);
+      return id;
+    };
+    self.clearTimeout = (id) => { offen.delete(id); echtClearTimeout(id); pruefeEnde(); };
+    self.setInterval = (fn, ms, ...rest) => {
+      const id = echtInterval(() => { try { if (typeof fn === 'function') fn(...rest); } catch (e) { fehler(e); } }, ms);
+      offen.add(id);
+      return id;
+    };
+    self.clearInterval = (id) => { offen.delete(id); echtClearInterval(id); pruefeEnde(); };
+
+    function zeile(e) {
+      const m = /<anonymous>:(\d+):(\d+)/.exec(String((e && e.stack) || ''));
+      // Die Hülle (async function) steht zwei Zeilen vor dem Code.
+      return m ? Math.max(1, Number(m[1]) - 2) : null;
+    }
+    function fehler(e) {
+      const text = e && typeof e === 'object' && 'message' in e ? (e.name || 'Error') + ': ' + e.message : 'Fehler: ' + darstellen(e, 1, new Set());
+      post({ typ: 'fehler', text, zeile: zeile(e) });
+    }
+    self.addEventListener('unhandledrejection', (ev) => { ev.preventDefault(); fehler(ev.reason); pruefeEnde(); });
+    self.addEventListener('error', (ev) => { ev.preventDefault(); fehler(ev.error || ev.message); pruefeEnde(); });
+
+    self.onmessage = async (ev) => {
+      const code = String((ev.data && ev.data.code) || '');
+      const Async = Object.getPrototypeOf(async function () {}).constructor;
+      let fn;
+      try {
+        fn = new Async(code);
+      } catch (e) {
+        fehler(e);
+        post({ typ: 'fertig', grund: 'fehler', ms: Math.round(performance.now() - t0) });
+        gemeldet = true;
+        return;
+      }
+      try {
+        const r = await fn();
+        if (r !== undefined) post({ typ: 'ergebnis', text: darstellen(r, 0, new Set()) });
+      } catch (e) {
+        fehler(e);
+      }
+      hauptFertig = true;
+      pruefeEnde();
+    };
+  }
+
+  let worker = null;
+  let wache = null;
+  let laufend = null;
+
+  function stoppen(grund) {
+    if (wache) clearTimeout(wache);
+    wache = null;
+    if (worker) worker.terminate();
+    worker = null;
+    if (laufend && grund) senden({ typ: 'fertig', auftrag: laufend.auftrag, grund, ms: Math.round(performance.now() - laufend.t0) });
+    laufend = null;
+  }
+
+  function ausfuehren(code, auftrag, zeitMs) {
+    stoppen('gestoppt');
+    const grenze = Math.max(100, Math.min(ZEIT_MAX, Number(zeitMs) || 3000));
+    let url;
+    try {
+      url = URL.createObjectURL(new Blob(['(' + arbeiter.toString() + ')();'], { type: 'text/javascript' }));
+      worker = new Worker(url);
+    } catch (e) {
+      senden({ typ: 'fehler', auftrag, text: 'Dieser Browser kann hier keinen Code ausführen (' + (e && e.message ? e.message : e) + ').' });
+      senden({ typ: 'fertig', auftrag, grund: 'fehler', ms: 0 });
+      return;
+    }
+    laufend = { auftrag, t0: performance.now() };
+    worker.onmessage = (ev) => {
+      if (url) { URL.revokeObjectURL(url); url = null; }
+      const d = ev.data || {};
+      if (!laufend || laufend.auftrag !== auftrag) return;
+      if (d.typ === 'fertig') {
+        senden({ typ: 'fertig', auftrag, grund: d.grund, ms: d.ms });
+        laufend = null;
+        stoppen(null);
+        return;
+      }
+      senden(Object.assign({}, d, { auftrag }));
+    };
+    worker.onerror = (ev) => {
+      ev.preventDefault();
+      senden({ typ: 'fehler', auftrag, text: ev.message || 'Fehler im Code.' });
+      stoppen('fehler');
+    };
+    wache = setTimeout(() => stoppen('zeit'), grenze);
+    worker.postMessage({ code: String(code || '') });
+  }
+
+  /* ------------------------------------------------------------- Anzeige */
+
+  function zeigen(art, inhalt, auftrag) {
+    stoppen(null);
+    const text = String(inhalt || '');
+    const html = art === 'svg'
+      ? '<!doctype html><meta charset="utf-8"><style>html,body{margin:0;height:100%}body{display:grid;place-items:center;background:#fff;overflow:hidden}svg{display:block;width:100vw;height:100vh}</style>' + text
+      : text;
+    // Vorher melden: nach document.open gibt es diese Bruecke nicht mehr.
+    senden({ typ: 'angezeigt', auftrag });
+    document.open();
+    document.write(html);
+    document.close();
+  }
+
+  window.addEventListener('message', (ev) => {
+    if (ev.source !== parent || ev.origin !== APP) return;
+    const d = ev.data;
+    if (!d || typeof d !== 'object' || d.kanal !== KANAL || d.rahmen !== RAHMEN) return;
+    if (d.typ === 'js') ausfuehren(d.code, d.auftrag, d.zeitMs);
+    else if (d.typ === 'html' || d.typ === 'svg') zeigen(d.typ, d.inhalt, d.auftrag);
+    else if (d.typ === 'stopp') stoppen('gestoppt');
+  });
+
+  senden({ typ: 'bereit' });
+})();
+</script>
+</body>
+</html>

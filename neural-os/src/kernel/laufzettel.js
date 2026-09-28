@@ -52,10 +52,18 @@ try {
 function heimKennung(home) {
   let echt;
   try {
-    echt = fs.realpathSync(home);
+    // Unter Windows löst erst der native Aufruf (GetFinalPathNameByHandle)
+    // einen zweiten Laufwerksbuchstaben (subst) oder einen als Ordner
+    // eingehängten Datenträger auf; der JavaScript-Weg kennt nur Verknüpfungen.
+    echt = process.platform === 'win32' ? fs.realpathSync.native(home) : fs.realpathSync(home);
   } catch {
-    echt = path.resolve(String(home || ''));
+    try {
+      echt = fs.realpathSync(home);
+    } catch {
+      echt = path.resolve(String(home || ''));
+    }
   }
+  if (process.platform === 'win32') echt = echt.replace(/^\\\\\?\\/, '');
   // Windows und macOS unterscheiden in Pfaden nicht zwischen Groß und Klein.
   if (process.platform === 'win32' || process.platform === 'darwin') echt = echt.toLowerCase();
   return crypto.createHash('sha256').update(echt).digest('hex').slice(0, 16);
@@ -97,19 +105,109 @@ function pidLebt(pid) {
 }
 
 /**
+ * Wer steckt hinter einer PID? Startzeit (ms, Wanduhr) und Befehlszeile, so
+ * weit das Betriebssystem es ohne Admin sagt; sonst null bzw. einzelne
+ * Felder null. Linux: /proc; macOS: /bin/ps; Windows: PowerShell (CIM),
+ * sonst wenigstens der Programmname aus tasklist. Nie länger als 4 s.
+ * @param {number} pid
+ * @param {{plattform?:string}} [opts]
+ * @returns {Promise<{start:number|null, befehl:string|null, name:string|null}|null>}
+ */
+async function prozessInfo(pid, { plattform = process.platform } = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const { execFile } = require('node:child_process');
+  const aufruf = (datei, args) => new Promise((resolve) => {
+    try {
+      execFile(datei, args, { timeout: 4000, windowsHide: true, maxBuffer: 256 * 1024, encoding: 'utf8' }, (err, out) => {
+        resolve(err ? null : String(out || ''));
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+  if (plattform === 'linux') {
+    let befehl = null;
+    let start = null;
+    try {
+      befehl = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean).join(' ') || null;
+    } catch { /* weg oder nicht lesbar */ }
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const felder = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      const ticks = Number(felder[19]); // Feld 22: Startzeit in Ticks seit dem Hochfahren
+      const btime = Number((/^btime (\d+)$/m.exec(fs.readFileSync('/proc/stat', 'utf8')) || [])[1]);
+      // USER_HZ ist unter Linux für Programme im Benutzerraum immer 100.
+      if (Number.isFinite(ticks) && Number.isFinite(btime) && btime > 0) start = (btime + ticks / 100) * 1000;
+    } catch { /* bleibt null */ }
+    return befehl === null && start === null ? null : { start, befehl, name: null };
+  }
+  if (plattform === 'darwin') {
+    const out = await aufruf('/bin/ps', ['-o', 'etime=', '-o', 'command=', '-p', String(pid)]);
+    const m = out && /^\s*(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)\s+(.+?)\s*$/.exec(out.split('\n').find((z) => z.trim()) || '');
+    if (!m) return null;
+    const sek = (Number(m[1] || 0) * 86400) + (Number(m[2] || 0) * 3600) + (Number(m[3]) * 60) + Number(m[4]);
+    return { start: Date.now() - (sek * 1000), befehl: m[5], name: null };
+  }
+  if (plattform === 'win32') {
+    const ps = await aufruf('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' | Select-Object CommandLine,CreationDate | ConvertTo-Json -Compress`]);
+    if (ps && ps.trim()) {
+      try {
+        const j = JSON.parse(ps);
+        const d = j && j.CreationDate && typeof j.CreationDate === 'object' ? j.CreationDate.value : j && j.CreationDate;
+        const ms = /Date\((\d+)/.exec(String(d || ''));
+        const start = ms ? Number(ms[1]) : (Number.isFinite(Date.parse(d)) ? Date.parse(d) : null);
+        const befehl = j && typeof j.CommandLine === 'string' && j.CommandLine ? j.CommandLine : null;
+        if (befehl || start !== null) return { start, befehl, name: null };
+      } catch { /* dann tasklist */ }
+    }
+    const liste = await aufruf('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']);
+    const zeile = liste && liste.split(/\r?\n/).map((z) => z.trim()).find((z) => z.startsWith('"'));
+    const teile = zeile ? zeile.split('","').map((t) => t.replace(/^"|"$/g, '')) : [];
+    if (teile.length > 1 && Number(teile[1]) === pid) return { start: null, befehl: null, name: teile[0] };
+    return null;
+  }
+  return null;
+}
+
+/** So weit darf die Sperre einer älteren Version vor bzw. nach dem Start ihres Prozesses liegen. */
+const ALT_VOR_START_MS = 60 * 1000;
+const ALT_NACH_START_MS = 30 * 60 * 1000;
+
+/**
+ * Ist der Prozess hinter einer alten Sperre {pid, at} wirklich das Neural OS,
+ * das sie schrieb? Die Sperre kann von einem anderen Rechner stammen, und
+ * die PID gehört hier einem beliebigen Programm (Prüfung von Welle 1).
+ *   'neural' – Befehlszeile ".../neural-os(.js) …" und gestartet kurz vor `at`
+ *   'fremd'  – anderes Programm, oder gestartet lange vor bzw. nach `at`
+ *   'unklar' – das Betriebssystem sagt es nicht
+ * @returns {'neural'|'fremd'|'unklar'}
+ */
+function aelterePruefen(info, at) {
+  if (!info) return 'unklar';
+  if (typeof info.name === 'string' && info.name && !/^node(\.exe)?$/i.test(info.name)) return 'fremd';
+  const befehl = typeof info.befehl === 'string' && info.befehl ? info.befehl : null;
+  if (befehl && !/(^|[\\/"\s])neural-os(\.js)?("|\s|$)/i.test(befehl)) return 'fremd';
+  const start = Number.isFinite(info.start) ? info.start : null;
+  if (start !== null && Number.isFinite(at) && (start > at + ALT_VOR_START_MS || at - start > ALT_NACH_START_MS)) return 'fremd';
+  return befehl && start !== null ? 'neural' : 'unklar';
+}
+
+/**
  * GET http://127.0.0.1:<port>/api/health, höchstens 1,5 s. Nur Loopback:
  * das Ziel wird mit der Klassifizierung der Schleuse (src/net/gate.js)
  * geprüft, nie ein anderer Rechner gefragt.
  * @returns {Promise<object|null>} die Antwort oder null
  */
-function gesundheit(port, { ms = GESUNDHEIT_MS, host = '127.0.0.1' } = {}) {
+function gesundheit(port, { ms = GESUNDHEIT_MS, host = '127.0.0.1', probe = null } = {}) {
   return new Promise((resolve) => {
     if (!Number.isInteger(port) || port <= 0 || port > 65535) { resolve(null); return; }
     const { classify } = require('../net/gate');
     if (classify(host) !== 'loopback') { resolve(null); return; }
     let fertig = false;
     const ende = (wert) => { if (!fertig) { fertig = true; resolve(wert); } };
-    const req = http.get({ host, port, path: '/api/health', agent: false, timeout: ms, headers: { host: `${host}:${port}` } }, (res) => {
+    const pfad = typeof probe === 'string' && PROBE_RE.test(probe) ? `/api/health?probe=${probe}` : '/api/health';
+    const req = http.get({ host, port, path: pfad, agent: false, timeout: ms, headers: { host: `${host}:${port}` } }, (res) => {
       if (res.statusCode !== 200) { res.resume(); ende(null); return; }
       const teile = [];
       let groesse = 0;
@@ -199,12 +297,19 @@ async function pruefen(paths, opts = {}) {
     return { zustand: 'verwaist', grund: 'Laufzettel unlesbar', zettel: null };
   }
 
-  // Die Sperre von vor Paket S: {pid, at}.
+  // Die Sperre von vor Paket S: {pid, at}. Sie nennt keinen Rechner: Die PID
+  // kann hier einem ganz anderen Programm gehören. `sicher` nur, wenn das
+  // Betriebssystem bestätigt, dass dort ein Neural OS läuft, das kurz vor
+  // `at` startete -- nur dann darf der Starter es beenden.
   if (z.v === undefined || Number(z.v) < VERSION_ZETTEL) {
     if (!lebt(z.pid)) return { zustand: 'verwaist', grund: `Prozess ${z.pid} läuft nicht mehr`, zettel: z };
     const at = zeitAus(z.at);
     if (at === null || at / 1000 < boot) return { zustand: 'verwaist', grund: 'Sperre von einem früheren Start', zettel: z };
-    return { zustand: 'aeltere', pid: z.pid, zettel: z };
+    let info = null;
+    try { info = await (opts.prozess || prozessInfo)(z.pid); } catch { info = null; }
+    const urteil = aelterePruefen(info, at);
+    if (urteil === 'fremd') return { zustand: 'verwaist', grund: `Prozess ${z.pid} ist kein Neural OS`, zettel: z };
+    return { zustand: 'aeltere', pid: z.pid, zettel: z, sicher: urteil === 'neural' };
   }
 
   if (z.rechner !== kennung) return { zustand: 'verwaist', grund: 'Laufzettel von einem anderen Rechner', zettel: z };
@@ -216,8 +321,16 @@ async function pruefen(paths, opts = {}) {
   let eigenesHeim = opts.heim || (paths.home ? heimKennung(paths.home) : null);
   if (eigenesHeim && z.heim !== eigenesHeim) {
     const hier = opts.ordner !== undefined ? opts.ordner : ordnerKennung(paths.home);
-    if (hier && typeof z.ordner === 'string' && z.ordner === hier && typeof z.heim === 'string' && z.heim) {
-      eigenesHeim = z.heim;
+    const zettelHeim = typeof z.heim === 'string' && z.heim ? z.heim : null;
+    if (hier && typeof z.ordner === 'string' && z.ordner === hier && zettelHeim) {
+      eigenesHeim = zettelHeim;
+    } else if ((!hier || typeof z.ordner !== 'string') && zettelHeim && paths.home
+      && (z.zustand === 'bereit' || z.zustand === 'gesperrt') && lebt(z.pid)
+      && await derselbeOrdner(paths.home, z, frag)) {
+      // Gerät und Dateinummer sagen hier nichts (Windows) oder fehlen im
+      // Zettel: Der laufende Dienst hat die Probe-Datei in SEINEM
+      // Datenordner gesehen, also ist es derselbe (Prüfung von Welle 1).
+      eigenesHeim = zettelHeim;
     } else {
       return { zustand: 'verwaist', grund: 'Laufzettel eines anderen Datenordners (mitkopiert)', zettel: z };
     }
@@ -257,6 +370,35 @@ async function pruefen(paths, opts = {}) {
     return { zustand: 'verwaist', grund: 'Start hängt seit über 120 s', zettel: z };
   }
   return { zustand: 'verwaist', grund: `unbekannter Zustand "${z.zustand}"`, zettel: z };
+}
+
+/** Name der Probe-Datei: `.heimprobe-<probe>` im Datenordner. */
+const PROBE_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const PROBE_PRAEFIX = '.heimprobe-';
+
+/**
+ * Ist `home` derselbe Ordner wie der des Dienstes hinter dem Zettel? Eine
+ * zufällig benannte Datei hier anlegen und fragen, ob der Dienst sie in
+ * seinem Datenordner sieht (/api/health?probe=). Eine Kopie sieht sie nicht,
+ * derselbe Stick unter einem zweiten Pfad schon. Ein Dienst, der die Frage
+ * nicht kennt (ältere Version, Vorraum), antwortet ohne `probe`: dann nein.
+ */
+async function derselbeOrdner(home, z, frag) {
+  const probe = crypto.randomBytes(18).toString('base64url');
+  const datei = path.join(home, `${PROBE_PRAEFIX}${probe}`);
+  try {
+    fs.closeSync(fs.openSync(datei, 'wx', 0o600));
+  } catch {
+    return false;
+  }
+  try {
+    const antwort = await frag(z.port, { probe });
+    return !!(antwort && antwort.probe === true && antwort.instanz === z.instanz && antwort.heim === z.heim);
+  } catch {
+    return false;
+  } finally {
+    try { fs.unlinkSync(datei); } catch { /* weg */ }
+  }
 }
 
 /** Datei exklusiv anlegen ('wx') und haltbar schreiben. */
@@ -450,6 +592,10 @@ module.exports = {
   neueInstanz,
   gesundheit,
   pidLebt,
+  PROBE_RE,
+  PROBE_PRAEFIX,
+  prozessInfo,
+  aelterePruefen,
   VERSION_ZETTEL,
   STARTET_MAX_MS,
 };

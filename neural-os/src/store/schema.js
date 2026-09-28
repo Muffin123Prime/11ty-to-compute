@@ -76,6 +76,12 @@ const FIELDS = {
     network: { type: 'string', default: 'offline', enum: ['offline', 'inherit', 'lan', 'online'] },
     pinned: { type: 'boolean', default: false },
     contextNodeIds: { type: 'string[]', default: [] }, // graph nodes pinned into context
+    /**
+     * Antwortstil des Chats (docs/ANTWORT-BAUSTEINE.md 3): {laenge, fachlich,
+     * kreativ}, je 0-100, oder null = nicht gesetzt. Ohne Vorgabe, damit
+     * alte Chats unveraendert bleiben; geprueft wird im Chat-Dienst.
+     */
+    stil: { type: 'object', nullable: true },
   },
   message: {
     chatId: { type: 'string', required: true },
@@ -90,6 +96,19 @@ const FIELDS = {
     error: { type: 'object', nullable: true, default: null },
     stats: { type: 'object', default: {} }, // {promptTokens, completionTokens, ms}
     status: { type: 'string', default: 'complete', enum: ['streaming', 'complete', 'failed', 'aborted'] },
+    /*
+     * Antwort-Bausteine (docs/ANTWORT-BAUSTEINE.md 4-6), alle ohne Vorgabe:
+     * eine Nachricht von vor diesem Plan hat sie nicht und bleibt gueltig --
+     * der Chat-Dienst liest sie als "eine Fassung" (Migration beim Lesen).
+     *   versionen  [{inhalt, at, art, anweisung?, modell?, ...}] Fassungen einer Antwort
+     *   version    Index der aktiven Fassung; `content` ist immer sie
+     *   ui         {"<fassung>": {"<schluessel>": zustand}} Zustand der Bausteine
+     *   anhaenge   [{id, name, mime, size}] Bilder/PDF (nur die Kennung, nie Base64)
+     */
+    versionen: { type: 'object[]' },
+    version: { type: 'number' },
+    ui: { type: 'object' },
+    anhaenge: { type: 'object[]' },
   },
   project: {
     name: { type: 'string', required: true, max: 500 },
@@ -374,7 +393,17 @@ const FIELDS = {
    * waere ein Einfallstor.
    */
   watch: {
+    /** Absolut, so wie gewählt: für die Anzeige und für Sätze von vor Paket O. */
     path: { type: 'string', required: true, max: 1000 },
+    /*
+     * Wo der Ordner liegt (docs/STICK-BAUPLAN.md 2.7, src/kernel/ortspfad.js):
+     *   ort 'stick'    rel = POSIX-relativ zur Stick-Wurzel; gilt an jedem Rechner
+     *   ort 'rechner'  rechner = rechner.profil(); gilt nur an diesem Rechner und Konto
+     * null = Altbestand; die Ordnerbeobachtung ordnet ihn beim Start einmal zu.
+     */
+    ort: { type: 'string', nullable: true, default: null, enum: ['stick', 'rechner'] },
+    rel: { type: 'string', nullable: true, default: null, max: 1000 },
+    rechner: { type: 'string', nullable: true, default: null, max: 64 },
     label: { type: 'string', default: '', max: 200 },
     enabled: { type: 'boolean', default: false },
     recursive: { type: 'boolean', default: true },

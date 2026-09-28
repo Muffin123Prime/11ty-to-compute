@@ -20,7 +20,7 @@
  */
 
 const schema = require('../../store/schema');
-const { NoModelError, ValidationError } = require('../../kernel/errors');
+const { NoModelError, ValidationError, NeuralError } = require('../../kernel/errors');
 const {
   need,
   asObject,
@@ -72,6 +72,31 @@ function patchFrom(body) {
   }
   const { id, type, createdAt, updatedAt, deletedAt, rev, ...rest } = body;
   return rest;
+}
+
+/**
+ * Gleichzeitiges Bearbeiten ohne stillen Verlust (Pruefer, Runde 1).
+ *
+ * Wer mitschickt, welchen Stand er bearbeitet hat (`rev` im Body oder der
+ * Kopf `If-Match: <rev>`), bekommt 409 KONFLIKT, wenn inzwischen jemand
+ * anderes geschrieben hat -- mit dem aktuellen Satz in `details.record`,
+ * damit die Oberflaeche beide Fassungen zeigen kann. Wer nichts mitschickt,
+ * schreibt wie bisher (Agenten, Werkzeuge, alte Oberflaechen). Die Pruefung
+ * und das Schreiben liegen im selben Durchlauf der Ereignisschleife: dazwischen
+ * kann niemand schreiben.
+ */
+function pruefeStand(existing, body, rc) {
+  let erwartet = null;
+  if (Object.prototype.hasOwnProperty.call(body, 'rev') && body.rev !== null && body.rev !== undefined) erwartet = body.rev;
+  const kopf = rc && rc.req && rc.req.headers ? rc.req.headers['if-match'] : undefined;
+  if (erwartet === null && typeof kopf === 'string' && kopf.trim()) erwartet = kopf.trim().replace(/^W\//, '').replace(/"/g, '');
+  if (erwartet === null) return;
+  const rev = Number(erwartet);
+  if (!Number.isInteger(rev) || rev < 1) throw new ValidationError('"rev" muss eine ganze Zahl ab 1 sein.');
+  if (rev === existing.rev) return;
+  throw new NeuralError('KONFLIKT',
+    'Dieser Eintrag wurde inzwischen anderswo geändert. Deine Fassung ist nicht gespeichert.',
+    { status: 409, details: { erwartet: rev, aktuell: existing.rev, record: existing } });
 }
 
 function register(router) {
@@ -149,8 +174,10 @@ function register(router) {
         `Agenten werden hier nicht geändert. ${ROUTE_HINT.agent}`,
       );
     }
-    const patch = patchFrom(asObject(await rc.body()));
+    const body = asObject(await rc.body());
+    const patch = patchFrom(body);
     if (!Object.keys(patch).length) throw new ValidationError('Es wurden keine Felder zum Ändern übergeben.');
+    pruefeStand(existing, body, rc);
     // Ein Termin wird geprueft wie ueber PATCH /api/events/:id (Wiederholung,
     // Ende nach Beginn, 31. Februar). Ungeprueft kam hier eine Serie mit
     // interval -1 durch, und danach hing jede Anfrage an den Kalender.

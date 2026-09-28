@@ -439,7 +439,7 @@ test('pruefeMarker: Marker ohne kiId bekommt kiId und Namen, gleicher Marker ble
 test('umbenennen der KI: 1..60 Zeichen, landet in config und Marker', () => {
   const stick = tempStick({
     marker: { kiId: DEV_B },
-    config: { sync: { deviceId: DEV_B, deviceName: 'Max' }, server: { host: '127.0.0.1', port: kiPort(DEV_B) } },
+    config: { sync: { deviceId: DEV_B, deviceName: 'Max', heimat: 'stick' }, server: { host: '127.0.0.1', port: kiPort(DEV_B) } },
   });
   try {
     const { config, speichern, gespeichert } = ladeKonfig(stick.paths);
@@ -545,5 +545,54 @@ test('pruefeMarker: Marker ohne kiId, aber die Konfiguration ist älter als der 
     assert.equal(ki.pruefeMarker().aktion, 'keine');
   } finally {
     stick.cleanup();
+  }
+});
+
+test('pruefeMarker: data/ eines benutzten Sticks auf einen frisch vorbereiteten kopiert (Marker ohne kiId, Konfiguration jünger als der Marker) → neue ID, kein stiller Zwilling', () => {
+  // Frisch vorbereitet: gestern, noch ohne kiId im Marker.
+  const gestern = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  for (const quelle of ['stick', 'heim']) {
+    const config = quelle === 'stick'
+      // Ein Stick, auf dem diese KI schon lief: eigener Port aus ihrer Kennung.
+      ? { sync: { deviceId: DEV_A, deviceName: 'Max' }, server: { host: '127.0.0.1', port: kiPort(DEV_A) } }
+      // Eine Heim-Installation, auf der diese KI schon lief (7777, Heimat vermerkt).
+      : { sync: { deviceId: DEV_A, deviceName: 'Max', heimat: 'heim' }, server: { host: '127.0.0.1', port: 7777 } };
+    const stick = tempStick({ marker: { createdAt: gestern }, config });
+    try {
+      // Heute kopiert (cp ohne -p): die Konfiguration ist jünger als der Marker.
+      fs.writeFileSync(path.join(stick.paths.home, 'kopplungen.json'), '{"v":1,"partner":[]}');
+      const { config: geladen, speichern } = ladeKonfig(stick.paths);
+      const ki = createIdentitaet({ config: geladen, paths: stick.paths, portable: stick.portable, speichern });
+      ki.sicherstellen();
+      const r = ki.pruefeMarker();
+      assert.equal(r.aktion, 'erneuert', `${quelle}: die Kopie behält die Kennung der Quelle`);
+      assert.notEqual(ki.id, DEV_A);
+      assert.equal(ki.name, 'Max');
+      assert.equal(fs.existsSync(path.join(stick.paths.home, 'kopplungen.json')), false);
+      assert.equal(leseJson(stick.portable.marker).kiId, ki.id);
+      assert.equal(ki.pruefeMarker().aktion, 'keine', `${quelle}: beim nächsten Start ist alles ruhig`);
+    } finally {
+      stick.cleanup();
+    }
+  }
+});
+
+test('sicherstellen vermerkt die Heimat der Konfiguration (Stick oder Heim), einmal', () => {
+  const stick = tempStick({ config: null });
+  const { home, cleanup } = tempHome('grund-heimat');
+  try {
+    const s = ladeKonfig(stick.paths);
+    createIdentitaet({ config: s.config, paths: stick.paths, portable: stick.portable, speichern: s.speichern }).sicherstellen();
+    assert.equal(leseJson(stick.paths.config).sync.heimat, 'stick');
+    const paths = pathsMod.layout(home);
+    const h = ladeKonfig(paths);
+    const ki = createIdentitaet({ config: h.config, paths, portable: null, speichern: h.speichern });
+    ki.sicherstellen();
+    ki.sicherstellen();
+    assert.equal(leseJson(paths.config).sync.heimat, 'heim');
+    assert.equal(h.gespeichert.length, 1);
+  } finally {
+    stick.cleanup();
+    cleanup();
   }
 });

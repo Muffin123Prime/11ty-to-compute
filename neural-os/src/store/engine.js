@@ -5,6 +5,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const { layout } = require('../kernel/paths');
+const rechner = require('../kernel/rechner');
+const dateien = require('../kernel/dateien');
 const schema = require('./schema');
 // Wer gerade schreibt -- getragen durch die asynchrone Aufrufkette, damit der
 // Speicher die Frage beantworten kann, ohne die Aufrufer zu kennen.
@@ -39,6 +41,10 @@ const {
  *     so a process crash loses nothing. fsync is NOT done per write (that costs
  *     ~1-10 ms on real hardware and would make bulk import unusable); `flush()`
  *     is where the caller asks for power-loss durability.
+ *   - Entprelltes Sichern (Stick-Bauplan 2.3): Das erste ungesicherte
+ *     Schreiben plant `flush()` 2 s später; weitere Schreibvorgänge schieben
+ *     es nicht hinaus. Ein gezogener Stick verliert so höchstens die letzten
+ *     ~2 s, auch unter Dauerlast, bei einem fsync je 2 s statt je Zeile.
  *   - Inside `transaction()` the lines are buffered and written in one go. If
  *     the callback throws, the in-memory changes are rolled back and nothing is
  *     written -- memory and disk can never disagree.
@@ -52,6 +58,8 @@ const {
 
 /** Log segments roll at 8 MB (contract). */
 const SEGMENT_MAX_BYTES = 8 * 1024 * 1024;
+/** Spätestens so lange nach dem ersten ungesicherten Schreiben folgt `flush()`. */
+const SICHERN_NACH_MS = 2000;
 /** Snapshot after this many operations, so startup stays fast. */
 const SNAPSHOT_EVERY_OPS = 2000;
 const LOG_VERSION = 1;
@@ -219,7 +227,9 @@ function listSegments(logDir) {
 
 /**
  * @param {{paths:object|string, bus?:object, logger?:object, vaultCrypto?:object,
- *          lock?:boolean, snapshotEveryOps?:number, segmentMaxBytes?:number}} options
+ *          lock?:boolean, snapshotEveryOps?:number, segmentMaxBytes?:number,
+ *          uhr?:{setTimeout:Function, clearTimeout:Function}}} options
+ *   `uhr` ist eine Attrappe für das entprellte Sichern (Tests).
  * @returns {Promise<object>} Store
  */
 async function openStore(options = {}) {
@@ -227,6 +237,9 @@ async function openStore(options = {}) {
   const bus = options.bus || null;
   const log = options.logger || NOOP_LOGGER;
   const vault = normaliseCrypto(options.vaultCrypto);
+  const uhr = options.uhr && typeof options.uhr.setTimeout === 'function' && typeof options.uhr.clearTimeout === 'function'
+    ? options.uhr
+    : { setTimeout, clearTimeout };
   const useLock = options.lock !== false;
   const snapshotEveryOps = Number.isInteger(options.snapshotEveryOps) ? options.snapshotEveryOps : SNAPSHOT_EVERY_OPS;
   const segmentMaxBytes = Number.isInteger(options.segmentMaxBytes) ? options.segmentMaxBytes : SEGMENT_MAX_BYTES;
@@ -245,8 +258,42 @@ async function openStore(options = {}) {
   let ownsLock = false;
   if (useLock) ownsLock = acquireLock();
 
+  /**
+   * Wie steht es um eine vorgefundene Sperre (Stick-Bauplan 2.3)?
+   *   'unlesbar' -- ohne PID; wer sie hinterließ, ist unbekannt
+   *   'eigen'    -- dieser Prozess hält sie schon
+   *   'fremd'    -- ein lebender Prozess dieses Rechners, dieses Starts
+   *   'verwaist' -- anderer Rechner, früherer Start oder tote PID
+   * Eine Sperre mit `rechner` oder `boot` ist verwaist, wenn `rechner` fehlt
+   * oder abweicht, wenn die Bootzeit nicht passt oder die PID tot ist. Eine
+   * alte Sperre ohne beides wird wie bisher nur nach der PID beurteilt.
+   * @returns {{zustand:string, grund?:string}}
+   */
+  function sperreBeurteilen(holder) {
+    if (!holder || typeof holder !== 'object' || !Number.isInteger(holder.pid)) return { zustand: 'unlesbar' };
+    const neueForm = Object.prototype.hasOwnProperty.call(holder, 'rechner')
+      || Object.prototype.hasOwnProperty.call(holder, 'boot');
+    if (neueForm) {
+      if (typeof holder.rechner !== 'string' || !holder.rechner || holder.rechner !== rechner.kennung()) {
+        return { zustand: 'verwaist', grund: 'von einem anderen Rechner' };
+      }
+      if (!rechner.gleicherStart(holder.boot, rechner.bootZeit())) {
+        return { zustand: 'verwaist', grund: 'von einem früheren Start' };
+      }
+    }
+    if (holder.pid === process.pid) return { zustand: 'eigen' };
+    if (pidAlive(holder.pid)) return { zustand: 'fremd' };
+    return { zustand: 'verwaist', grund: 'Prozess läuft nicht mehr' };
+  }
+
   function acquireLock() {
-    const payload = JSON.stringify({ pid: process.pid, at: nowIso(), scope: 'store' });
+    const payload = JSON.stringify({
+      pid: process.pid,
+      rechner: rechner.kennung(),
+      boot: rechner.bootZeit(),
+      at: nowIso(),
+      scope: 'store',
+    });
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         fs.writeFileSync(lockFile, payload, { flag: 'wx', mode: 0o600 });
@@ -257,26 +304,27 @@ async function openStore(options = {}) {
         }
         let holder = null;
         try { holder = JSON.parse(fs.readFileSync(lockFile, 'utf8')); } catch { holder = null; }
-        if (holder && holder.pid === process.pid) {
+        const befund = sperreBeurteilen(holder);
+        if (befund.zustand === 'eigen') {
           // Same process opening the same vault twice (server + a maintenance
           // task). Not a data hazard: both share this process's write path.
           log.debug('vault lock already held by this process');
           return false;
         }
-        if (holder && pidAlive(holder.pid)) {
+        if (befund.zustand === 'fremd') {
           throw new StorageError(
             `Der Vault wird bereits von Prozess ${holder.pid} verwendet. Bitte zuerst die andere Instanz beenden.`,
             { pid: holder.pid },
           );
         }
-        if (!holder || !Number.isInteger(holder.pid)) {
+        if (befund.zustand === 'unlesbar') {
           // We cannot tell who left this behind, so we do not get to delete it.
           // Opening unlocked is the lesser risk: destroying someone else's
           // lock would be the very failure the lock exists to prevent.
           log.warn('Unlesbare Sperrdatei im Vault gefunden; oeffne ohne eigene Sperre.');
           return false;
         }
-        log.warn(`stale vault lock from pid ${holder.pid} removed`);
+        log.warn(`Verwaiste Tresor-Sperre von Prozess ${holder.pid} entfernt (${befund.grund}).`);
         try { fs.unlinkSync(lockFile); } catch { /* raced with another taker */ }
       }
     }
@@ -313,6 +361,11 @@ async function openStore(options = {}) {
   let txJournal = null;
   let opsSinceSnapshot = 0;
   let snapshotDue = false;
+  /** Geplantes Sichern (Zeitgeber-Griff) und ob es geplant ist. */
+  let sicherGriff = null;
+  let sicherGeplant = false;
+  /** Ein neu angelegtes Segment: Sein Ordnereintrag muss beim nächsten flush mit auf den Stick. */
+  let ordnerUngesichert = false;
 
   function openSegment() {
     if (fd !== null) return;
@@ -322,10 +375,38 @@ async function openStore(options = {}) {
     } catch (err) {
       throw new StorageError(`Log-Segment ${path.basename(currentFile)} nicht beschreibbar: ${err.message}`, { cause: String(err) });
     }
+    if (currentBytes === 0) ordnerUngesichert = true;
+  }
+
+  /**
+   * `flush()` spätestens SICHERN_NACH_MS nach dem ersten ungesicherten
+   * Schreiben. Der Zeitgeber ist `unref`: Er hält den Prozess nicht wach.
+   */
+  function sichernPlanen() {
+    if (sicherGeplant || closed) return;
+    sicherGeplant = true;
+    sicherGriff = uhr.setTimeout(() => {
+      sicherGeplant = false;
+      sicherGriff = null;
+      flush().catch((err) => log.warn(`Entprelltes Sichern fehlgeschlagen: ${err.message}`));
+    }, SICHERN_NACH_MS);
+    if (sicherGriff && typeof sicherGriff.unref === 'function') sicherGriff.unref();
+  }
+
+  function sichernAbraeumen() {
+    if (!sicherGeplant) return;
+    sicherGeplant = false;
+    try { uhr.clearTimeout(sicherGriff); } catch { /* Attrappe ohne Griff */ }
+    sicherGriff = null;
   }
 
   function rotateIfNeeded() {
     if (currentBytes < segmentMaxBytes) return;
+    // Das alte Segment wird gleich geschlossen; ein späteres flush() erreicht
+    // es nicht mehr. Also jetzt sichern.
+    try { fs.fsyncSync(fd); } catch (err) {
+      log.warn(`Log-Segment ${path.basename(currentFile)} vor dem Wechsel nicht gesichert: ${err.message}`);
+    }
     closeFd();
     currentSegment += 1;
     currentFile = path.join(paths.log, segmentName(currentSegment));
@@ -360,6 +441,7 @@ async function openStore(options = {}) {
     currentBytes += Buffer.byteLength(payload);
     lastWrite = nowIso();
     rotateIfNeeded();
+    sichernPlanen();
   }
 
   /** Append one operation. Inside a transaction it is only staged. */
@@ -1199,9 +1281,9 @@ async function openStore(options = {}) {
         const dir = path.dirname(target);
         try {
           fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-          const tmp = path.join(dir, `.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`);
-          fs.writeFileSync(tmp, payload, { mode: 0o600 });
-          fs.renameSync(tmp, target); // atomic: a reader never sees a half blob
+          // tmp + fsync + umbenennen + fsync des Ordners: Ein Leser sieht nie
+          // einen halben Blob, und ein gezogener Stick hinterlässt keinen.
+          dateien.schreibeDauerhaft(target, payload, { modus: 0o600 });
         } catch (err) {
           throw new StorageError(`Datei konnte nicht gespeichert werden: ${err.message}`, { cause: String(err) });
         }
@@ -1300,11 +1382,19 @@ async function openStore(options = {}) {
   }
 
   async function flush() {
+    // Was jetzt gesichert wird, braucht keinen geplanten Durchgang mehr.
+    sichernAbraeumen();
     if (fd === null) return;
     try {
       fs.fsyncSync(fd);
     } catch (err) {
       throw new StorageError(`fsync auf dem Vault-Log fehlgeschlagen: ${err.message}`, { cause: String(err) });
+    }
+    if (ordnerUngesichert) {
+      // Ein neu angelegtes Segment ist erst da, wenn auch sein Ordnereintrag
+      // auf dem Stick ist.
+      dateien.fsyncOrdner(paths.log);
+      ordnerUngesichert = false;
     }
   }
 
@@ -1320,12 +1410,16 @@ async function openStore(options = {}) {
     const payload = snapshotPayload();
     const json = JSON.stringify(payload);
     const body = vault.enabled ? vault.encryptLine(json) : json;
-    const tmp = `${paths.snapshot}.tmp-${process.pid}`;
+    // Snapshot first, log second -- und zwar haltbar (Stick-Bauplan 2.3, p1c):
+    //   1. Momentaufnahme: tmp + fsync + umbenennen + fsync des Ordners;
+    //   2. dann das Segment schließen;
+    //   3. dann die Segmente löschen;
+    //   4. dann den Log-Ordner sichern.
+    // Ohne 1. kann ein gezogener Stick die Löschung behalten, aber nicht die
+    // Momentaufnahme: Dann ist der ganze Tresor weg.
     try {
-      fs.writeFileSync(tmp, body, { mode: 0o600 });
-      fs.renameSync(tmp, paths.snapshot); // snapshot first, log second
+      dateien.schreibeDauerhaft(paths.snapshot, body, { modus: 0o600 });
     } catch (err) {
-      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
       throw new StorageError(`Snapshot konnte nicht geschrieben werden: ${err.message}`, { cause: String(err) });
     }
 
@@ -1335,6 +1429,7 @@ async function openStore(options = {}) {
         if (err.code !== 'ENOENT') log.warn(`Altes Log-Segment ${segment.name} blieb liegen: ${err.message}`);
       }
     }
+    dateien.fsyncOrdner(paths.log);
     currentSegment = 1;
     currentFile = path.join(paths.log, segmentName(currentSegment));
     currentBytes = 0;
@@ -1383,8 +1478,10 @@ async function openStore(options = {}) {
   async function close() {
     if (closed) return;
     try {
+      // flush() räumt auch den geplanten Durchgang ab.
       await flush();
     } finally {
+      sichernAbraeumen();
       closed = true;
       closeFd();
       if (ownsLock) {

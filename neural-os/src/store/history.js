@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { layout } = require('../kernel/paths');
+const { schreibeDauerhaft } = require('../kernel/dateien');
 const schema = require('./schema');
 const {
   NeuralError,
@@ -449,13 +450,12 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
   function rewrite() {
     const lines = carried.concat(entries.map((entry) => encodeLine(toLine(entry))));
     const body = lines.length ? `${lines.join('\n')}\n` : '';
-    const tmp = `${journalFile}.tmp-${process.pid}`;
     try {
       fs.mkdirSync(resolvedPaths.vault, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(tmp, body, { mode: 0o600 });
-      fs.renameSync(tmp, journalFile);
+      // tmp + fsync + umbenennen + fsync des Ordners (Stick-Bauplan 2.3):
+      // Ohne fsync kann das Umbenennen vor dem Inhalt auf dem Stick landen.
+      schreibeDauerhaft(journalFile, body, { modus: 0o600 });
     } catch (err) {
-      try { fs.unlinkSync(tmp); } catch { /* never existed */ }
       throw new StorageError(`Der Aenderungsverlauf konnte nicht gekuerzt werden: ${err.message}`, { cause: String(err) });
     }
     linesOnDisk = lines.length;
@@ -553,6 +553,16 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
         kind: 'agent',
         runId: typeof eventActor.runId === 'string' ? eventActor.runId : null,
         agentId: typeof eventActor.agentId === 'string' ? eventActor.agentId : null,
+        via: 'kontext',
+      };
+    }
+    // Der Abgleich mit einem gekoppelten Stick (src/sync/kopplung.js,
+    // folder.js) schreibt unter {kind:'sync', label}: Das war nicht der
+    // Nutzer an diesem Stick, sondern der Partner.
+    if (isPlainObject(eventActor) && eventActor.kind === 'sync') {
+      return {
+        kind: 'sync',
+        label: typeof eventActor.label === 'string' ? eventActor.label : null,
         via: 'kontext',
       };
     }
@@ -748,7 +758,8 @@ function createHistory({ store, bus, paths, config, logger, vaultCrypto, now } =
   function geaendertGrund(entry) {
     const danach = spaeterer(entry);
     if (!danach) return 'Der Eintrag wurde seitdem auf anderem Weg erneut geändert. Das lässt sich nicht mehr gefahrlos zurücknehmen.';
-    const wer = danach.actor && danach.actor.kind === 'agent' ? 'von der KI' : 'von dir';
+    const art = danach.actor && danach.actor.kind;
+    const wer = art === 'agent' ? 'von der KI' : (art === 'sync' ? 'beim Abgleich' : 'von dir');
     return `Der Eintrag wurde danach ${wer} erneut geändert („${danach.label}“). Nimm zuerst diese spätere Änderung zurück.`;
   }
 

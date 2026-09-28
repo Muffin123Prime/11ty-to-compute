@@ -35,12 +35,35 @@
  *   Neural OS offline, steht dort ein Satz und der Schalter.
  * - **Keine zweite Chatliste.** Die Chats stehen in der Seitenleiste der
  *   Schale ("Zuletzt"); hier gibt es nur diesen einen.
+ * - **Die Antwort baut ihre eigene Oberflaeche** (docs/ANTWORT-BAUSTEINE.md):
+ *   ```ui-Bloecke werden Bausteine (web/lib/bausteine), Tabellen sortier-
+ *   und filterbar (web/lib/tabelle.js), Codebloecke bekommen Bearbeiten,
+ *   Ausfuehren (Sandkasten), Erklaeren und Fehler suchen. Eine Antwort hat
+ *   Fassungen (‹ 2/3 ›, Vergleichen, Wiederherstellen); Neu erstellen und
+ *   Umwandeln legen neue an, statt etwas zu verwerfen. Markierter Text
+ *   bekommt ein kleines Menue (web/lib/auswahl-menue.js).
+ * - **Bausteine sind Inseln.** Eine Nachricht wird bei jeder Aenderung ihrer
+ *   Signatur neu gebaut, beim Streaming in jedem Bild. Ein Baustein darf
+ *   dabei nicht neu entstehen (er flackerte, verloere Fokus und Ziehen, und
+ *   eine Vorschau im Sandkasten luede jedes Mal neu). Er wird einmal gebaut
+ *   und in jeden Neubau hinuebergetragen (`moveBefore`, wo der Browser es
+ *   kann: dann bleibt sogar ein Rahmen samt Inhalt stehen).
  */
 
 import { h, text, clear, on, icon, cx, debounce } from '../lib/dom.js';
 import { api as defaultApi, ApiError } from '../lib/api.js';
 import { renderMarkdown, extractPlain, kopieren } from '../lib/markdown.js';
 import { rolle, wirkungZeilen, uhrzeit, dauerText } from '../lib/agenten.js';
+import {
+  renderCodeBlock, auswahlKarte, nachrichtenZustand, markdownOhneUi, tasteBehandeln, letzteNachricht, istUi,
+} from '../lib/bausteine/index.js';
+import { tabellenVerbessern } from '../lib/tabelle.js';
+import { laufAnzeige } from '../lib/sandkasten.js';
+import { menue, menueSchliessen, auswahlMenue } from '../lib/auswahl-menue.js';
+import {
+  schnittSicher, codebloecke, spracheErkennen, ausfuehrbar, wortUnterschied, geaenderteStelle, lesbar, zitat,
+  codeFrage, stellenFrage, abschnittFrage, NEU_VARIANTEN, UMWANDELN, STELLEN_AKTIONEN, SPRACHEN, fassungsName,
+} from '../lib/antwort-hilfen.js';
 
 /* ------------------------------------------------------------------ */
 /* Konstanten                                                          */
@@ -76,6 +99,27 @@ const SYMBOL_KOPIEREN = '<rect x="7" y="7" width="9.6" height="9.6" rx="2.2"/><p
 const SYMBOL_LAUT = '<path d="M3.6 7.8h2.8L10 4.6v10.8l-3.6-3.2H3.6z"/><path d="M13 7.4a3.6 3.6 0 0 1 0 5.2M15.2 5.2a6.8 6.8 0 0 1 0 9.6"/>';
 const SYMBOL_PFEIL = '<path d="m7.6 5.4 4.6 4.6-4.6 4.6"/>';
 const SYMBOL_SCHLIESSEN = '<path d="m5.2 5.2 9.6 9.6M14.8 5.2l-9.6 9.6"/>';
+const SYMBOL_ZURUECK = '<path d="m12.2 5.4-4.6 4.6 4.6 4.6"/>';
+const SYMBOL_RUNTER = '<path d="m6.2 8.4 3.8 3.8 3.8-3.8"/>';
+const SYMBOL_NEU = '<path d="M15.6 9.2A5.8 5.8 0 0 0 5 6.4M4.4 10.8A5.8 5.8 0 0 0 15 13.6"/><path d="M4.8 3.6v3.2H8M15.2 16.4v-3.2H12"/>';
+const SYMBOL_ZAUBER = '<path d="M9 3.6 10.3 7l3.4 1.3-3.4 1.3L9 13l-1.3-3.4-3.4-1.3L7.7 7z"/><path d="M14.6 11.6l.7 1.7 1.7.7-1.7.7-.7 1.7-.7-1.7-1.7-.7 1.7-.7z"/>';
+const SYMBOL_VERGLEICH = '<path d="M7 3.6v12.8M13 3.6v12.8"/><path d="M3.6 7h3.4M3.6 10h3.4M13 7h3.4M13 13h3.4"/>';
+const SYMBOL_START = '<path d="M6.8 4.6v10.8l8.4-5.4z"/>';
+const SYMBOL_STIFT = '<path d="M12.8 4.2 15.8 7.2 7.4 15.6H4.4v-3z"/><path d="m11.2 5.8 3 3"/>';
+const SYMBOL_ERKLAEREN = '<circle cx="10" cy="10" r="7.2"/><path d="M8 8a2.1 2.1 0 1 1 3 1.9c-.6.3-1 .8-1 1.5v.4M10 14.1h.01"/>';
+const SYMBOL_FEHLER = '<path d="M7.4 6.6a2.6 2.6 0 0 1 5.2 0M6.6 8.4h6.8v3.4a3.4 3.4 0 0 1-6.8 0z"/><path d="M10 8.4v6.6M6.6 10.6H4M16 10.6h-2.6M6.8 13.8l-2.2 1.6M13.2 13.8l2.2 1.6M6.8 7.4 5 5.8M13.2 7.4 15 5.8"/>';
+const SYMBOL_FRAGE_DAZU = '<path d="M4 5.6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-3.4 2.8v-2.8H6a2 2 0 0 1-2-2z"/>';
+
+/** Schnelle, kurze Pruefsumme eines Texts (Schluessel fuer Inseln und Tabellen). */
+function pruefsumme(wert) {
+  const s = String(wert || '');
+  let x = 2166136261;
+  for (let i = 0; i < s.length; i += 1) {
+    x ^= s.charCodeAt(i);
+    x = Math.imul(x, 16777619);
+  }
+  return `${(x >>> 0).toString(36)}${s.length.toString(36)}`;
+}
 
 /* ------------------------------------------------------------------ */
 /* Sitzungen: der Zustand eines Chats, unabhaengig von der Ansicht     */
@@ -183,8 +227,17 @@ function ereignis(s, typ, p) {
       if (m && s.lauf) s.lauf.antwortId = m.id;
       break;
     }
+    case 'fassung':
+      // Die neue Fassung selbst kommt gleich danach als `antwort` (derselbe
+      // Satz, andere Felder). Hier nur merken, dass der Strom eine Fassung ist.
+      if (s.lauf) s.lauf.fassung = { messageId: p.messageId, version: p.version, anzahl: p.anzahl, art: p.art };
+      break;
     case 'text':
       if (aktiv && typeof p.delta === 'string') aktiv.data.content = `${aktiv.data.content || ''}${p.delta}`;
+      break;
+    case 'inhalt':
+      // Umwandeln einer markierten Stelle: der ganze Text mit der neuen Stelle.
+      if (aktiv && typeof p.content === 'string') aktiv.data.content = p.content;
       break;
     case 'denken':
       if (aktiv && typeof p.delta === 'string') aktiv.data.denken = `${aktiv.data.denken || ''}${p.delta}`;
@@ -278,7 +331,7 @@ async function strom(s, api, pfad, body) {
       onEvent: (ev) => {
         if (ev.type === 'fertig') fertig = true;
         ereignis(s, ev.type, ev.payload || {});
-        melden(s, ev.type === 'text' || ev.type === 'denken' ? 'text' : 'daten');
+        melden(s, ev.type === 'text' || ev.type === 'denken' || ev.type === 'inhalt' ? 'text' : 'daten');
       },
     });
   } catch (err) {
@@ -384,38 +437,45 @@ function groesse(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1).replace('.', ',')} MB`;
 }
 
-/**
- * Bis zu drei Vorschlaege fuer den naechsten Schritt, aus der Antwort
- * abgeleitet -- ohne weiteren (bezahlten) Aufruf. Bewusst schlicht: eine
- * lange Antwort bekommt "Kürzer", eine Aufzaehlung "Als Tabelle", ein Plan
- * "Nächste Schritte". Lieber drei treffende als fuenf beliebige.
- */
-export function vorschlaegeFuer(m) {
-  const t = String((m && m.data && m.data.content) || '');
-  if (!t.trim()) return [];
-  const out = [];
-  const dazu = (label, sende, symbol) => {
-    if (out.length < 3 && !out.some((v) => v.label === label)) out.push({ label, sende, symbol });
-  };
-  const karte = /```(?:prompt|text|e-?mail|nachricht)\b/i.test(t);
-  const code = !karte && /```/.test(t);
-  const punkte = (t.match(/^\s*(?:[-*+]|\d{1,2}[.)])\s+\S/gm) || []).length;
-  const tabelle = /^\s*\|.*\|\s*$/m.test(t);
-  const agenten = Array.isArray(m.data.agenten) ? m.data.agenten : [];
-  const termin = agenten.some((a) => !a.zurueckgenommen && Array.isArray(a.wirkung) && a.wirkung.some((w) => w.typ === 'event' && w.aktion === 'angelegt'));
+/* ------------------------------------------------------------------ */
+/* Zustand der Bausteine                                               */
+/* ------------------------------------------------------------------ */
 
-  if (karte) {
-    dazu('Noch besser', 'Mach den Text noch besser: genauer, klarer, mit allem, was fehlt.', 'pen');
-    dazu('Kürzere Fassung', 'Schreib eine kürzere Fassung davon.', 'list');
+/**
+ * Je Antwort und Fassung ein Speicher fuer den Zustand ihrer Bausteine
+ * (abgehakt, gewaehlt, Reihenfolge, Timer …). Er lebt auf Modulebene wie die
+ * Sitzungen: Wer kurz in den Kalender schaut, findet beim Zurueckkommen die
+ * Checkliste so, wie er sie verlassen hat -- auch wenn das Speichern auf dem
+ * Server (PUT …/ui, entprellt) noch unterwegs war.
+ * Schluessel: `${chatId}|${messageId}|${version}`.
+ */
+const zustaende = new Map();
+
+/**
+ * Den Speicher einer Fassung holen oder anlegen. `start` ist, was der Server
+ * mitgeschickt hat (`data.ui[version]`).
+ */
+function zustandsSpeicher(api, chatId, m, version, beiFehler) {
+  const key = `${chatId}|${m.id}|${version}`;
+  let z = zustaende.get(key);
+  if (!z) {
+    const ui = m.data && m.data.ui && typeof m.data.ui === 'object' ? m.data.ui : {};
+    z = nachrichtenZustand({
+      start: ui[String(version)] || {},
+      speichern: async (schluessel, zustand) => {
+        const r = await api.put(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(m.id)}/ui`, { version, schluessel, zustand });
+        // Was der Server jetzt hat, steht auch am Satz -- ein spaeterer
+        // Neubau des Speichers (anderes Geraet, Fassung zurueck) faengt dort an.
+        const satz = m.data || {};
+        satz.ui = { ...(satz.ui || {}), [String(version)]: (r && r.ui) || {} };
+        return r;
+      },
+      beiFehler,
+    });
+    zustaende.set(key, z);
+    if (zustaende.size > 400) zustaende.delete(zustaende.keys().next().value);
   }
-  if (code) dazu('Erklär den Code', 'Erklär mir den Code Schritt für Schritt.', 'info');
-  if (termin) dazu('Erinnere mich', 'Erinnere mich an den Termin eine Stunde vorher.', 'clock');
-  if (/\b(plan|planung|schritte?|vorgehen|ablauf|fahrplan)\b/i.test(t)) dazu('Nächste Schritte', 'Was sind die nächsten konkreten Schritte?', 'list');
-  if (punkte >= 3 && !tabelle) dazu('Als Tabelle', 'Stell das bitte als Tabelle dar.', 'clipboard');
-  if (t.length > 1400) dazu('Kürzer', 'Fass das bitte kürzer zusammen.', 'clipboard');
-  else if (t.length < 450 && !termin) dazu('Mehr Details', 'Erklär das bitte ausführlicher.', 'info');
-  dazu('Ein Beispiel', 'Gib mir ein konkretes Beispiel dazu.', 'question');
-  return out;
+  return z;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1115,20 +1175,8 @@ function baueAnsicht(container, ctx) {
 
     const spalteN = h('div.cv-msg__spalte', null, blase);
     if (!laeuft && inhalt.trim()) spalteN.appendChild(antwortAktionen(m, letzte));
-    if (letzte && !laeuft && d.status === 'complete' && !d.rueckfrageOffen && !d.abgeschnitten && !(s && s.lauf)) {
-      const vs = vorschlaegeFuer(m);
-      if (vs.length) {
-        spalteN.appendChild(h('div.cv-vorschlaege', { role: 'group', 'aria-label': 'Vorschläge für den nächsten Schritt' },
-          vs.map((v) => h('button.btn.btn--accent.cv-knopf', {
-            type: 'button',
-            title: v.sende,
-            onClick: (e) => {
-              e.stopPropagation();
-              senden(v.sende);
-            },
-          }, icon(I[v.symbol] || I.arrow), h('span', null, text(v.label))))));
-      }
-    }
+    // Geratene Vorschlags-Chips gibt es nicht mehr: Naechste Schritte bietet die
+    // KI selbst ueber den Baustein "aktionen" an (docs/ANTWORT-BAUSTEINE.md, 6.).
     zeile.append(h('span.avatar.cv-avatar', { 'aria-hidden': 'true' }, icon(I.brand)), spalteN);
     return zeile;
   }
@@ -2147,7 +2195,7 @@ details[open] > summary > .cv-pfeil { transform: rotate(90deg); }
   .cv-aktionen { display: none; opacity: 1; }
   .cv-msg.is-zeige .cv-aktionen, .cv-msg--bot.is-letzte .cv-aktionen { display: flex; }
 }
-.cv-vorschlaege { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+
 
 /* -- Bearbeiten -- */
 .cv-bearbeiten { display: flex; flex-direction: column; gap: 8px; width: min(580px, 100%); }

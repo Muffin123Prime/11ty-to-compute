@@ -174,4 +174,17 @@ test('Eine neue Fassung übernimmt sofort: voller Cache, dann skipWaiting; alte 
   assert.deepEqual([...sw.ablage.keys()].sort(), ['etwas-anderes', eigener].sort());
 });
 
+test('Der Sandkasten (/sandbox.html) geht immer ans Netz: kein Cache, nie die gecachte App im Rahmen', async () => {
+  const sw = ladeSw();
+  await warteAuf({ handler: sw.handler.install });
+  sw.log.length = 0;
+  for (const mode of ['navigate', 'cors']) {
+    const { antwortet } = await hole(sw, { pfad: '/sandbox.html', mode, accept: 'text/html' });
+    assert.equal(antwortet, false, `${mode}: der Worker hält sich heraus, der Server liefert die Seite mit ihrer eigenen CSP`);
+  }
+  assert.ok(!sw.log.some(([art]) => art === 'match' || art === 'put'), 'nichts gelesen, nichts abgelegt');
+  const app = await hole(sw, { pfad: '/', mode: 'navigate', accept: 'text/html' });
+  assert.equal(app.antwortet, true, 'andere Navigationen bedient der Worker weiter');
+});
+
 module.exports = { name: 'service-worker', tests: drain() };

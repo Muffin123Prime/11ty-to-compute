@@ -14,8 +14,8 @@
  */
 
 import { h, text, clear, icon, formatNumber, timeAgo } from '../lib/dom.js';
-import { THEME_HUES } from '../lib/graph-canvas.js';
-import { WURZEL_NAME, artVon, brotkrumen } from '../lib/universum.js';
+import { themaFarbeCss } from '../lib/graph-canvas.js';
+import { WURZEL_NAME, artVon, brotkrumen, anzahlText, themenZahl, verbindungenImThema } from '../lib/universum.js';
 
 const STYLE_ID = 'nos-wissenskarte-style';
 const CSS = `
@@ -82,12 +82,13 @@ function ensureStyle() {
 const MAX_ZEILEN = 120;
 
 function farbeCss(index) {
-  return `color-mix(in srgb, ${THEME_HUES[index] || THEME_HUES[0]} 55%, var(--fg-muted))`;
+  return themaFarbeCss(index);
 }
 
 export function createWissenskarte(el, hooks) {
   ensureStyle();
   const { ladeUniversum, ladeThema, onThema, onKnoten, onOeffnen } = hooks;
+  const onOrt = typeof hooks.onOrt === 'function' ? hooks.onOrt : () => {};
   let alive = true;
   let token = 0;
   let themaId = null; // null = die Wurzel
@@ -101,7 +102,7 @@ export function createWissenskarte(el, hooks) {
       h('span.wk__tile-dot', { style: { background: farbeCss(t.farbe) } }),
       h('span.wk__tile-name', null, text(t.name)),
       t.kinder && t.kinder.length ? h('span.wk__tile-kinder', null, text(t.kinder.slice(0, 3).map((k) => k.name).join(' · ') + (t.kinder.length > 3 ? ' …' : ''))) : null,
-      h('span.wk__tile-n', null, text(`${formatNumber(t.anzahl)} ${t.anzahl === 1 ? 'Eintrag' : 'Einträge'}`)));
+      h('span.wk__tile-n', null, text(anzahlText(t.anzahl, 'Eintrag', 'Einträge'))));
   }
 
   function krumen(liste) {
@@ -146,7 +147,7 @@ export function createWissenskarte(el, hooks) {
       h('header.wk__head', null,
         h('div.wk__head-main', null,
           h('h2.wk__title', null, text(WURZEL_NAME)),
-          h('p.wk__sub', null, text(`${formatNumber(u.gesamt.themen)} Themen · ${formatNumber(u.gesamt.knoten)} Einträge · ${formatNumber(u.gesamt.kanten)} Verbindungen`))),
+          h('p.wk__sub', null, text(`${anzahlText(themenZahl(u.themen), 'Thema', 'Themen')} · ${anzahlText(u.gesamt.knoten, 'Eintrag', 'Einträge')}`))),
         h('button.btn.btn--ghost', { type: 'button', onClick: () => onThema(null) }, text('Im Universum zeigen'))),
       h('p.wk__label', null, text('Themen')),
       h('div.wk__grid', null, ...u.themen.map((t) => kachel(t, { onClick: () => zeige(t.id) }))));
@@ -160,6 +161,7 @@ export function createWissenskarte(el, hooks) {
       if (!alive || my !== token) return;
       if (err && err.status === 404) {
         themaId = null;
+        onOrt(null);
         renderWurzel(my);
         return;
       }
@@ -177,9 +179,10 @@ export function createWissenskarte(el, hooks) {
         h('div.wk__head-main', null,
           h('h2.wk__title', null, text(t.name)),
           h('p.wk__sub', null, text([
-            `${formatNumber(innen.length)} ${innen.length === 1 ? 'Eintrag' : 'Einträge'}`,
-            t.kinder.length ? `${formatNumber(t.kinder.length)} Unterthemen` : null,
-            `${formatNumber(e1.edges.length)} Verbindungen`,
+            anzahlText(Math.max(t.anzahl || 0, innen.length), 'Eintrag', 'Einträge'),
+            t.kinder.length ? anzahlText(t.kinder.length, 'Unterthema', 'Unterthemen') : null,
+            // Dieselbe Zaehlung wie im Universum: Paare zwischen Eintraegen des Themas.
+            anzahlText(verbindungenImThema(e1.nodes, e1.edges), 'Verbindung', 'Verbindungen'),
           ].filter(Boolean).join(' · ')))),
         h('button.btn.btn--ghost', { type: 'button', onClick: () => onThema(t.id) }, text('Im Universum zeigen'))));
     if (t.kinder.length) {
@@ -213,6 +216,7 @@ export function createWissenskarte(el, hooks) {
     if (!alive) return;
     themaId = id || null;
     zeigeAlle = false;
+    onOrt(themaId);
     const my = ++token;
     root.scrollTop = 0;
     if (el.scrollTop) el.scrollTop = 0;

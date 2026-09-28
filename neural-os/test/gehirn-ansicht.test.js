@@ -248,3 +248,74 @@ test('layoutThemen: deterministisch, Kreise ueberlappen nicht, Groesse nach Anza
   assert.equal(canvas.layoutThemen([]).size, 0);
   assert.equal(canvas.THEME_HUES.length, 8, 'acht Themen-Toene, Index 0-7 wie der Server');
 });
+
+/* ------------------------------------------------------ Runde 1 */
+
+test('Runde 1: Oeffnen-Ziele, Faltung mit NFD, Zaehlungen, Bereiche und neutrale Farbe', async () => {
+  const { universum, canvas } = await laden();
+  // Oeffnen: ein Begriff hat keinen Bereich (Umfeld im Gehirn), eine Aufgabe ihr Projekt.
+  assert.equal(universum.oeffnenZiel({ id: 'entity_1', type: 'entity', kind: 'topic' }), null);
+  assert.equal(universum.oeffnenZiel({ id: 'task_1', type: 'task', projectId: 'project_2' }), '#/projects?id=project_2');
+  assert.equal(universum.oeffnenZiel({ id: 'task_1', type: 'task' }), '#/projects');
+  assert.equal(universum.oeffnenZiel({ id: 'note_1', type: 'note' }), '#/notes?id=note_1');
+  // Ein "ö" aus zwei Zeichen (NFD) faltet wie das eine.
+  assert.equal(universum.fold('Größe Zelle'.normalize('NFD')), universum.fold('Größe Zelle'));
+  assert.equal(universum.fold('Größe'.normalize('NFD')), 'groesse');
+  assert.deepEqual(universum.sucheKnoten([{ id: 'a', label: 'Größe der Zelle'.normalize('NFD') }], 'Größe').map((n) => n.id), ['a']);
+  // Grammatik und Zaehlungen.
+  assert.equal(universum.anzahlText(1, 'Unterthema', 'Unterthemen'), '1 Unterthema');
+  assert.equal(universum.anzahlText(1234, 'Eintrag', 'Einträge'), '1.234 Einträge');
+  const nodes = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'x', ausserhalb: true }];
+  const edges = [
+    { from: 'a', to: 'b', kind: 'links-to' }, { from: 'a', to: 'b', kind: 'tagged' }, { from: 'b', to: 'a', kind: 'related' },
+    { from: 'b', to: 'c' }, { from: 'c', to: 'x' },
+  ];
+  assert.equal(universum.verbindungenImThema(nodes, edges), 2, 'Paare im Thema, ohne Doppelte und ohne Nachbarn ausserhalb');
+  assert.equal(universum.themenZahl([
+    { id: 'thema:a' }, { id: 'thema:b' }, { id: 'unverbunden' }, { id: 'weitere', kinder: [{ id: 'k1' }, { id: 'k2' }, { id: 'k3' }] },
+  ]), 5, 'Unverbunden zaehlt nicht, die Kinder von "Weitere" schon');
+  // Bereiche: je Unterthema die Knoten, die es tragen.
+  const thema = { id: 'thema:schule', kinder: [{ id: 'thema:biologie', name: 'Biologie', anzahl: 2 }, { id: 'thema:leer', name: 'Leer', anzahl: 0 }] };
+  const b = universum.bereicheVon(thema, [
+    { id: 'n1', themen: ['thema:schule', 'thema:biologie'] }, { id: 'n2', themen: ['thema:biologie'] }, { id: 'n3', themen: ['thema:schule'] },
+    { id: 'n4', themen: ['thema:biologie'], ausserhalb: true },
+  ]);
+  assert.deepEqual(b.map((r) => [r.id, r.ids]), [['thema:biologie', ['n1', 'n2']]]);
+  // Index 7 ist neutral: grau, kein Ton.
+  assert.equal(canvas.FARBE_NEUTRAL, 7);
+  assert.equal(canvas.themaFarbeCss(7), 'var(--fg-subtle)');
+  assert.match(canvas.themaFarbeCss(2), /color-mix/);
+});
+
+test('layoutThemen, Runde 1: 40 dicht verbundene Themen ueberlappen nie; Behaelter liegen am Rand, Verbundene nah', async () => {
+  const { canvas } = await laden();
+  const themen = Array.from({ length: 40 }, (_, i) => ({ id: `t${String(i).padStart(2, '0')}`, anzahl: 400 - i * 9 }));
+  themen.push({ id: 'weitere', anzahl: 5000, groesse: 400, rand: true });
+  const links = [];
+  for (let i = 0; i < 40; i++) for (let j = i + 1; j < 40; j += 3) links.push({ from: themen[i].id, to: themen[j].id, anzahl: 1 + ((i + j) % 7) });
+  const lage = canvas.layoutThemen(themen, links);
+  const list = [...lage.entries()];
+  let ueber = 0;
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const [, a] = list[i];
+      const [, b] = list[j];
+      if (Math.hypot(a.x - b.x, a.y - b.y) < a.r + b.r - 0.5) ueber++;
+    }
+  }
+  assert.equal(ueber, 0, `${ueber} Paare ueberlappen`);
+  // "Weitere" ist nicht groesser als das groesste echte Thema und liegt aussen.
+  const w = lage.get('weitere');
+  assert.ok(w.r <= lage.get('t00').r + 0.01);
+  const mitte = list.reduce((acc, [, p]) => ({ x: acc.x + p.x / list.length, y: acc.y + p.y / list.length }), { x: 0, y: 0 });
+  const abstand = (p) => Math.hypot(p.x - mitte.x, p.y - mitte.y);
+  const weiter = list.filter(([id]) => id !== 'weitere').filter(([, p]) => abstand(p) > abstand(w)).length;
+  assert.ok(weiter < list.length * 0.35, `"Weitere" liegt zu weit innen (${weiter} Kreise weiter aussen)`);
+  // Zwei verbundene Themen liegen naeher beieinander als der Durchschnitt aller Paare.
+  const paar = (x, y) => Math.hypot(lage.get(x).x - lage.get(y).x, lage.get(x).y - lage.get(y).y);
+  let summe = 0;
+  let zahl = 0;
+  for (let i = 0; i < 40; i++) for (let j = i + 1; j < 40; j++) { summe += paar(themen[i].id, themen[j].id); zahl++; }
+  const verbundeneSchnitt = links.reduce((acc, l) => acc + paar(l.from, l.to), 0) / links.length;
+  assert.ok(verbundeneSchnitt < summe / zahl, `verbunden ${verbundeneSchnitt.toFixed(0)} vs. alle ${(summe / zahl).toFixed(0)}`);
+});

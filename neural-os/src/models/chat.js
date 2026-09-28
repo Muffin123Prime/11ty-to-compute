@@ -46,11 +46,22 @@
  *    werden aus den `network.attempt`-Ereignissen gesammelt, die die Schleuse
  *    während dieses Zuges für diesen Chat veröffentlicht.
  *
- * 7. **Neu antworten und Bearbeiten verwerfen, statt umzuschreiben.** Was
- *    überholt ist, wandert in den Papierkorb (Ereignis `verworfen {ids}`),
- *    und ein ganz normaler neuer Zug beginnt. Was die KI im verworfenen Zug
- *    angelegt hat, bleibt stehen: es ist eine eigene Handlung mit eigenem
- *    "Rückgängig" (`wirkung` am Agenten-Ereignis), kein Teil des Textes.
+ * 7. **Bearbeiten verwirft, statt umzuschreiben.** Was überholt ist, wandert
+ *    in den Papierkorb (Ereignis `verworfen {ids}`), und ein ganz normaler
+ *    neuer Zug beginnt. Was die KI im verworfenen Zug angelegt hat, bleibt
+ *    stehen: es ist eine eigene Handlung mit eigenem "Rückgängig" (`wirkung`
+ *    am Agenten-Ereignis), kein Teil des Textes.
+ *
+ * 8. **Neu erstellen, Umwandeln und Block bearbeiten legen Fassungen an**
+ *    (docs/ANTWORT-BAUSTEINE.md 4, src/models/fassungen.js). Die Antwort
+ *    bleibt derselbe Satz; die Felder oben sind die aktive Fassung, die
+ *    übrigen stehen als Abbild in `versionen`. Nichts geht verloren, und
+ *    "‹ 2/3 ›" schaltet zurück. Umwandeln läuft ohne Werkzeuge und ohne
+ *    Suche; scheitert es, bleibt die vorige Fassung aktiv.
+ *
+ * 9. **Anhänge (Bilder, PDF) stehen nur als Kennung in der Nachricht**
+ *    (`{type:'anhang', id}` im Verlauf) und werden erst beim Bauen jeder
+ *    Anfrage aufgelöst (src/models/anhaenge.js).
  */
 
 // Die Blockform des Verlaufs ist die von Claude; Gemini übersetzt sie in
@@ -60,6 +71,8 @@
 const anthropic = require('./providers/anthropic');
 const { createWerkzeuge, DEFINITIONEN, istEigenesWerkzeug, ungueltigErgebnis } = require('./werkzeuge');
 const wdh = require('../kalender/wiederholung');
+const fassungen = require('./fassungen');
+const anhaengeMod = require('./anhaenge');
 const {
   NeuralError,
   ValidationError,
@@ -96,6 +109,48 @@ const EFFORTS = new Set(['low', 'medium', 'high']);
 const CACHEBAR = new Set(['text', 'tool_result', 'image', 'document']);
 
 /**
+ * Absatz "Darstellung" (docs/ANTWORT-BAUSTEINE.md 3): wann welche Form, und
+ * der Katalog der Bausteine mit einer Zeile je typ. Er steht im festen Teil
+ * (gecacht) und wird beim Umwandeln wiederverwendet, damit "Als Checkliste"
+ * dieselbe Form erzeugt wie eine Antwort, die gleich so geschrieben wurde.
+ * Byte-stabil: kein Datum, keine Zahl, die sich ändert.
+ */
+const DARSTELLUNG = [
+  'Darstellung:',
+  '- Wähle für jede Antwort die einfachste Form, die der Aufgabe dient. Eine einfache Frage bekommt einen kurzen Absatz ohne Überschriften und ohne Bausteine.',
+  '- Bausteine nur, wenn sie wirklich helfen: höchstens zwei pro Antwort, dazu höchstens ein aktionen am Ende. Nie zur Dekoration.',
+  '- Vergleich → Markdown-Tabelle · Zahlenreihen → diagramm · Auswahl → auswahl · mehrere Angaben nötig → formular · Aufgabe/To-do → checkliste · Anleitung → schritte · langer Stoff → abschnitte oder mehr · Lernen/Üben → quiz, lernkarten, lueckentext, zuordnung · Zeit → timer oder countdown · Terminvorschlag → termin · erzeugte Datei → datei · Webseite, Design, Präsentation → vorschau. Hinweise stehen als > [!info], > [!tipp], > [!achtung], > [!fehler] oder > [!fertig].',
+  '- Brauchst du eine Entscheidung, um weiterzuarbeiten (etwa die Uhrzeit für einen Termin oder die erste Frage einer Planung), nimm das Werkzeug rueckfrage, nicht auswahl. auswahl und aktionen sind für das, was in und nach deiner fertigen Antwort bleibt; die Wahl kommt als neue Nachricht. Angebote für nächste Schritte: aktionen (höchstens 4, passend zum Inhalt).',
+  '- Ein Text zum Kopieren (Prompt, Nachricht, E-Mail) steht in ```prompt bzw. ```text; eine Datei zum Herunterladen, mit Dateinamen, ist ein Baustein datei.',
+  '- Ein Baustein ist ein eigener Codeblock ```ui mit genau einem JSON-Objekt mit "typ", z. B. {"typ":"auswahl","frage":"Wie genau?","optionen":["Kurz","Ausführlich"]}. Gültiges JSON: doppelte Anführungszeichen, keine Kommentare, kein abschließendes Komma; die Texte darin kurz. Kurze Textfelder erlauben Inline-Markdown; Felder "inhalt" sind Markdown und dürfen in tabs, abschnitte, schritte und mehr noch eine Ebene ```ui enthalten. "id" (optional) ist ein fester Schlüssel für den gespeicherten Zustand.',
+  '- Bausteine (? = optional):',
+  '  auswahl: frage?, optionen [text | {text, beschreibung?, senden?}], mehrfach?, eigene?, stil? knoepfe|liste|umfrage|bestaetigung, knopf?, senden? (Vorlage mit {auswahl})',
+  '  aktionen: frage?, aktionen [text | {text, symbol?, senden?}] (höchstens 4)',
+  '  formular: titel?, felder [{name, label, art text|textfeld|zahl|datum|uhrzeit|auswahl|mehrfach|schalter|regler, optionen?, wert?, min?, max?, schritt?, pflicht?, platzhalter?}], knopf?',
+  '  regler: titel?, regler [{name, label, links, rechts, wert 0–100}], anwenden? stil|senden (stil mit den Namen laenge, fachlich, kreativ setzt den Antwortstil)',
+  '  karten: layout? raster|karussell, karten [{titel, symbol?, text?, zeilen? [text], aktion? {text, senden? | link?}}]; symbol: buch, uhr, stern, ziel, idee, datei, kalender, ort, person, haken, blitz, herz, lernen, code, bild, musik, geld, frage oder ein Emoji',
+  '  diagramm: art balken|saeulen|linie|flaeche|kreis|ring|vergleich|fortschritt, titel?, einheit?, x? [text], reihen? [{name, werte [zahl]}], teile? [{name, wert}], wert?, ziel?, quelle?; Zeitverläufe sind linie mit Datumsbeschriftungen',
+  '  checkliste: titel?, punkte [text | {text, erledigt?}], sortierbar?',
+  '  schritte: titel?, schritte [{titel, inhalt}]',
+  '  abschnitte: abschnitte [{titel, inhalt, offen?}]',
+  '  mehr: inhalt, knopf?',
+  '  tabs: tabs [{titel, inhalt}]',
+  '  liste: titel?, punkte [text], sortierbar, knopf?',
+  '  quiz: titel?, fragen [{frage, optionen [text], richtig zahl | [zahl], erklaerung?}], einzeln?',
+  '  lernkarten: titel?, karten [{vorne, hinten}]',
+  '  lueckentext: titel?, text mit {{Lösung}} oder {{Lösung|Alternative}}',
+  '  zuordnung: titel?, paare [{links, rechts}]',
+  '  timer: titel?, dauer "mm:ss" | "hh:mm:ss" | Sekunden',
+  '  countdown: titel?, ziel "YYYY-MM-DDTHH:MM"',
+  '  termin: titel, start, ende?, ort?, notiz? (Wandzeit ohne Zone) – nur ein Vorschlag; soll er eingetragen werden, benutze termin_anlegen',
+  '  datei: name (mit Endung), inhalt (Text), art?',
+  '  vorschau: art html|svg|dokument|folien, titel?, inhalt – HTML ist eigenständig: kein CDN, keine externen Dateien, alles inline; folien trennt mit ---',
+  '  fortschritt: titel?, wert, ziel?, einheit?',
+  '- Bittet er um eine andere Form („Als Tabelle“, „Mach ein Diagramm“, „Nur die wichtigsten Punkte“, „Als Checkliste“, „Schritt für Schritt“, „Nur Text“): derselbe Inhalt in der neuen Form, nichts dazuerfinden.',
+  '- Steht in seiner Nachricht [Antwortstil: …], richte Länge, Fachsprache und Kreativität danach.',
+].join('\n');
+
+/**
  * Der feste Systemtext. Knapp und für ein starkes Modell geschrieben: WAS
  * zu tun ist und WANN, keine Überbelehrung. Kein Datum, keine Uhrzeit, keine
  * Zufallszahl -- sonst ist der Cache bei jeder Anfrage ungültig.
@@ -128,6 +183,19 @@ const SYSTEM_FEST = [
   // "Kopieren" (web/lib/markdown.js, kopierKarten). Ohne diesen Satz landet
   // die Einleitung ("Hier ist dein Prompt:") mit in der Zwischenablage.
   'Will der Nutzer einen Prompt, eine Nachricht, eine E-Mail oder einen anderen Text zum Weiterverwenden, steht genau dieser Text allein in einem Block ```prompt (bzw. ```text) – ohne Einleitung im Block –, damit er ihn mit einem Tipp kopieren kann. Rückfragen stellst du über das Werkzeug rueckfrage mit 2–5 kurzen Optionen.',
+  '',
+  DARSTELLUNG,
+].join('\n');
+
+/**
+ * Der Systemtext fürs Umwandeln (docs 4): keine Werkzeuge, keine Suche --
+ * nur eine vorhandene Antwort in eine andere Form bringen.
+ */
+const SYSTEM_UMWANDELN = [
+  'Du bist die persönliche KI von Neural OS. Du formst eine Antwort, die du dem Nutzer schon gegeben hast, auf seinen Wunsch um.',
+  'Gib nur das Ergebnis aus – ohne Einleitung, ohne Nachsatz, ohne Anführungszeichen oder <<< >>> drumherum. Erfinde nichts dazu, außer die Aufgabe verlangt ausdrücklich mehr. Sprache wie in der Vorlage, außer die Aufgabe nennt eine andere.',
+  '',
+  DARSTELLUNG,
 ].join('\n');
 
 /* --------------------------------------------------------------- Helfer */
@@ -416,7 +484,10 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       if (d.role !== 'assistant') continue;
       const c = d.claude || null;
       if (c && c.abgelehnt) continue;
-      const verlauf = c && Array.isArray(c.verlauf) ? c.verlauf : null;
+      // Die rohen Blöcke gehören zur Fassung 0 (src/models/fassungen.js).
+      // Ist eine spätere aktiv, geht nur ihr Text mit -- das, was der Nutzer liest.
+      const spaetere = Number.isInteger(d.version) && d.version > 0;
+      const verlauf = !spaetere && c && Array.isArray(c.verlauf) ? c.verlauf : null;
       if (verlauf) {
         for (const n of verlauf) out.push(klon(n));
         // Was nach dem letzten vollständigen Schritt noch ankam (Abbruch,
@@ -560,6 +631,12 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       return final;
     };
 
+    // Hat die Antwort Fassungen, zieht der Kopf der aktiven mit (Text, Zustand, Modell).
+    const mitKopf = (patch) => {
+      const jetzt = store.get(assistant.id) || final;
+      return jetzt ? fassungen.kopfAngleichen(jetzt, patch) : patch;
+    };
+
     const claudeDaten = (extra = {}) => ({
       anbieter: anbieter.anbieterId,
       modell,
@@ -700,6 +777,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     const egress = watchEgress(scope);
     let stopReason = null;
     let hinweis = null;
+    // Base64 der Anhänge einmal je Zug lesen, nicht in jeder Werkzeugrunde.
+    const anhangCache = new Map();
 
     try {
       const system = systemBloecke(chat);
@@ -714,11 +793,18 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
         if (weg && t.runden === 1) {
           emit(onEvent, { type: 'hinweis', satz: `${weg} ältere Nachricht(en) passen nicht mehr in den Kontext und wurden diesmal weggelassen (nicht zusammengefasst).` });
         }
+        const mitAnhaengen = anhaengeMod.aufloesen(nachrichten, {
+          anbieter: anbieter.anbieterId || 'claude',
+          lesen: anhangLesen,
+          cache: anhangCache,
+          // Der Rest der Anfrage (Verlauf, Systemtext, Werkzeuge) zählt zur Größengrenze.
+          reserve: JSON.stringify(nachrichten).length + JSON.stringify(system).length + 60000,
+        });
         const gebaut = anbieter.anfrageBauen({
           modell,
           system,
           werkzeuge: DEFINITIONEN,
-          nachrichten: mitCachePunkt(nachrichten),
+          nachrichten: mitCachePunkt(mitAnhaengen.nachrichten),
           effort,
         });
         const r = await claude.senden({
@@ -839,7 +925,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       const abgelehnt = stopReason === 'refusal';
       const wartet = stopReason === 'rueckfrage';
       if (hinweis) emit(onEvent, { type: 'hinweis', satz: hinweis });
-      final = speichern({
+      final = speichern(mitKopf({
         content: t.text,
         denken: t.denken,
         quellen: t.quellen,
@@ -859,10 +945,10 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
           offen: wartet ? t.offen : null,
           stopDetails: null,
         }),
-      });
+      }));
       if (abgelehnt) emit(onEvent, { type: 'fehler', code: anbieter.ABLEHNUNG.code, satz: anbieter.ABLEHNUNG.satz });
       emit(onEvent, { type: 'fertig', stopReason, record: final });
-      publish('chat.message', { chatId: chat.id, record: final });
+      publish('chat.message', { chatId: chat.id, record: fuerAussen(final) });
       ableiten(final, chat);
       return { chat, message: final, stopReason };
     } catch (err) {
@@ -872,7 +958,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       settled = true;
       const aborted = controller.signal.aborted || (err && err.code === 'ABORTED');
       const e = aborted ? new AbortedError('Die Antwort wurde abgebrochen.') : asNeuralError(err);
-      final = speichern({
+      final = speichern(mitKopf({
         content: t.text,
         denken: t.denken,
         quellen: t.quellen,
@@ -886,10 +972,10 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
         networkTargets: [...egress.state.targets.keys()],
         error: { code: e.code, message: e.message },
         claude: claudeDaten({ stopReason: aborted ? 'abgebrochen' : 'fehler', offen: null }),
-      });
+      }));
       if (!aborted) emit(onEvent, { type: 'fehler', code: e.code, satz: e.message });
       emit(onEvent, { type: 'fertig', stopReason: aborted ? 'abgebrochen' : 'fehler', record: final });
-      publish('chat.message', { chatId: chat.id, record: final });
+      publish('chat.message', { chatId: chat.id, record: fuerAussen(final) });
       if (t.text) ableiten(final, chat);
       throw e;
     } finally {
@@ -1016,7 +1102,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
    * Eine offene Rückfrage als übergangen abschließen, weil der Nutzer
    * stattdessen etwas Neues geschrieben hat.
    */
-  function rueckfrageUebergehen(antwort) {
+  function rueckfrageUebergehen(antwort, { ergebnis = 'Übergangen – du hast weitergeschrieben', onEvent = null } = {}) {
     const d = antwort.data || {};
     if (!d.rueckfrageOffen) return antwort;
     const c = d.claude || {};
@@ -1031,10 +1117,11 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
         tool_use_id: f.id,
         content: 'Keine Auswahl – der Nutzer hat nicht auf die Rückfrage geantwortet, sondern weitergeschrieben.',
       });
-      const e = tools.laufAbschliessen(f.runId, { zustand: 'fertig', ergebnis: 'Übergangen – du hast weitergeschrieben' });
+      const e = tools.laufAbschliessen(f.runId, { zustand: 'fertig', ergebnis });
       if (e) {
         const i = (d.agenten || []).findIndex((a) => a.id === e.id);
         if (i >= 0) d.agenten[i] = { ...d.agenten[i], zustand: 'fertig', ergebnis: e.ergebnis };
+        emit(onEvent, { type: 'agent', ...e });
       }
     }
     const verlauf = Array.isArray(c.verlauf) ? klon(c.verlauf) : [];
@@ -1056,11 +1143,18 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
    * geworfen (code CLAUDE_NICHT_VERBUNDEN) -- der Nutzer behält seinen Text
    * im Eingabefeld, und es entsteht kein Scheinchat mit einer leeren Antwort.
    *
-   * @param {{chatId:string, content:string, signal?:AbortSignal, onEvent?:Function, effort?:string}} opts
+   * `anhaenge` sind Kennungen von Dateien, die vorher über
+   * `anhangAblegen` für DIESEN Chat hochgeladen wurden (Bilder, PDF). Mit
+   * Anhang darf der Text leer sein.
+   *
+   * @param {{chatId:string, content:string, anhaenge?:string[], signal?:AbortSignal, onEvent?:Function, effort?:string}} opts
    */
   async function send(opts = {}) {
-    const { chatId, content, signal, onEvent } = opts;
-    if (typeof content !== 'string' || !content.trim()) throw new ValidationError('Die Nachricht ist leer.');
+    const { chatId, signal, onEvent } = opts;
+    const content = typeof opts.content === 'string' ? opts.content : '';
+    const ids = opts.anhaenge === undefined || opts.anhaenge === null ? [] : opts.anhaenge;
+    if (!Array.isArray(ids)) throw new ValidationError('"anhaenge" muss eine Liste von Kennungen sein.');
+    if (!content.trim() && !ids.length) throw new ValidationError('Die Nachricht ist leer.');
     if (content.length > MAX_CONTENT_CHARS) {
       throw new ValidationError(`Die Nachricht ist zu lang (${content.length} Zeichen, erlaubt sind ${MAX_CONTENT_CHARS}).`);
     }
@@ -1068,6 +1162,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     if (inflight.has(chat.id)) {
       throw new ValidationError('Für diesen Chat läuft bereits eine Antwort. Brich sie ab, bevor du erneut sendest.');
     }
+    const anhaenge = anhaengeFuer(chat, ids);
     claude.zugang(); // wirft CLAUDE_NICHT_VERBUNDEN mit dem Satz für die Oberfläche
 
     let history = historyOf(chat.id);
@@ -1084,14 +1179,15 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       content,
       status: 'complete',
       ordinal: ordinal++,
-      claude: { inhalt: [{ type: 'text', text: heuteSatz() }, { type: 'text', text: content }] },
+      ...(anhaenge.length ? { anhaenge } : {}),
+      claude: { inhalt: nutzerInhalt(content, chat, anhaenge) },
     });
     emit(onEvent, { type: 'nutzer', record: userMessage });
-    publish('chat.message', { chatId: chat.id, record: userMessage });
+    publish('chat.message', { chatId: chat.id, record: fuerAussen(userMessage) });
 
     const titel = String((chat.data && chat.data.title) || '').trim();
     if (!history.some((m) => m.data.role === 'user') && (!titel || titel === 'Neuer Chat')) {
-      const neu = firstLine(content, 60);
+      const neu = firstLine(content, 60) || (anhaenge[0] && firstLine(anhaenge[0].name, 60));
       if (neu) {
         try { chat = store.update(chat.id, { title: neu }); } catch (err) { log.warn(`Chat-Titel: ${err && err.message}`); }
       }
@@ -1122,8 +1218,91 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       claude: { anbieter: anbieterId(), modell, effort, verlauf: [], textImVerlauf: 0 },
     });
     emit(onEvent, { type: 'antwort', record: assistant });
-    publish('chat.message', { chatId: chat.id, record: assistant });
+    publish('chat.message', { chatId: chat.id, record: fuerAussen(assistant) });
     return assistant;
+  }
+
+  /**
+   * Die Blöcke der Nutzernachricht, wie sie gespeichert und gesendet werden:
+   * Datumssatz, Antwortstil (wenn gesetzt), Anhänge als Kennung, Text. Einmal
+   * gebaut und dann unverändert wiederverwendet -- der Anfang jeder späteren
+   * Anfrage bleibt so byte-gleich (Caching).
+   */
+  function nutzerInhalt(content, chat, anhaenge, heute = heuteSatz()) {
+    const bloecke = [{ type: 'text', text: heute }];
+    const stil = fassungen.stilSatz(chat && chat.data && chat.data.stil);
+    if (stil) bloecke.push({ type: 'text', text: stil });
+    for (const a of anhaenge || []) bloecke.push({ type: 'anhang', id: a.id, name: a.name, mime: a.mime });
+    if (String(content || '').trim()) bloecke.push({ type: 'text', text: content });
+    return bloecke;
+  }
+
+  /* ------------------------------------------------------------ Anhänge */
+
+  /** Die Kennungen einer Nachricht prüfen: Dateien dieses Chats, Bild oder PDF. */
+  function anhaengeFuer(chat, ids) {
+    if (!ids.length) return [];
+    if (ids.length > anhaengeMod.MAX_ANHAENGE_JE_NACHRICHT) {
+      throw new ValidationError(`Höchstens ${anhaengeMod.MAX_ANHAENGE_JE_NACHRICHT} Anhänge je Nachricht.`);
+    }
+    const out = [];
+    for (const id of ids) {
+      if (typeof id !== 'string' || !id) throw new ValidationError('"anhaenge" enthält eine ungültige Kennung.');
+      if (out.some((a) => a.id === id)) continue;
+      const rec = store.get(id);
+      const d = (rec && rec.data) || {};
+      const passt = rec && rec.type === 'file' && d.chatId === chat.id
+        && (anhaengeMod.BILD_MIME.has(d.mime) || d.mime === anhaengeMod.PDF_MIME);
+      if (!passt) throw new NotFoundError(`Anhang ${id}`);
+      out.push({ id: rec.id, name: String(d.name || 'anhang'), mime: d.mime, size: Number(d.size) || 0 });
+    }
+    return out;
+  }
+
+  /** Die Bytes eines Anhangs (für die Anfrage an die KI) -- oder null. */
+  function anhangLesen(id) {
+    const rec = store.get(id);
+    if (!rec || rec.type !== 'file' || !rec.data || !rec.data.hash) return null;
+    if (!store.files || typeof store.files.read !== 'function') return null;
+    return { buf: store.files.read(rec.data.hash), mime: rec.data.mime, name: rec.data.name };
+  }
+
+  /**
+   * Eine Datei für den Chat ablegen (Bild oder PDF, Base64). Die Art wird
+   * am Inhalt geprüft; der Blob liegt in der Ablage, verschlüsselt, wenn
+   * der Tresor es ist. Gibt zurück, was die Oberfläche braucht.
+   */
+  function anhangAblegen({ chatId, name, mime, daten } = {}) {
+    const chat = getChat(chatId);
+    if (!store.files || typeof store.files.put !== 'function') {
+      throw new NeuralError('SUBSYSTEM_UNAVAILABLE', 'Dieser Speicher hat kein Ablagefach für Dateien.', { status: 503 });
+    }
+    let p;
+    try {
+      p = anhaengeMod.anhangPruefen({ name, mime, daten });
+    } catch (err) {
+      throw new NeuralError(err.code || 'VALIDATION_ERROR', err.satz || err.message, { status: err.status || 400 });
+    }
+    const abgelegt = store.files.put(p.buf, { name: p.name, mime: p.mime });
+    const record = store.create('file', {
+      name: p.name, hash: abgelegt.hash, mime: p.mime, size: p.buf.length, chatId: chat.id, quelle: 'chat',
+    });
+    return {
+      anhang: {
+        id: record.id, name: p.name, mime: p.mime, size: p.buf.length, art: p.art,
+        url: `/api/chats/${chat.id}/anhaenge/${record.id}`,
+      },
+    };
+  }
+
+  /** Eine abgelegte Datei dieses Chats lesen (für GET …/anhaenge/:id). */
+  function anhangDatei(chatId, id) {
+    const chat = getChat(chatId);
+    const rec = typeof id === 'string' ? store.get(id) : null;
+    if (!rec || rec.type !== 'file' || !rec.data || rec.data.chatId !== chat.id || !rec.data.hash) {
+      throw new NotFoundError(`Anhang ${id}`);
+    }
+    return { buf: store.files.read(rec.data.hash), mime: rec.data.mime, name: rec.data.name, size: rec.data.size };
   }
 
   /* ------------------------------------- neu antworten und bearbeiten */
@@ -1169,33 +1348,132 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
   }
 
   /**
-   * Die letzte Antwort neu erzeugen: alles nach der letzten Frage des
-   * Nutzers wird verworfen, und Claude antwortet noch einmal auf genau
-   * dieselbe Nachricht (mit ihrem damaligen Datumssatz -- der Anfang bleibt
-   * gleich, der Cache greift).
+   * Die letzte Antwort neu erstellen -- als NEUE FASSUNG derselben Antwort
+   * (docs/ANTWORT-BAUSTEINE.md 4). Die bisherige bleibt als Fassung
+   * erhalten und lässt sich wieder wählen. Claude antwortet noch einmal auf
+   * genau dieselbe Nachricht (mit ihrem damaligen Datumssatz -- der Anfang
+   * bleibt gleich, der Cache greift); eine `variante` hängt für diesen einen
+   * Aufruf einen Satz an (kürzer, einfacher, …, mit der bisherigen Antwort).
    *
-   * @param {{chatId:string, signal?:AbortSignal, onEvent?:Function, effort?:string}} opts
+   * Nur die letzte Antwort: ein Zug mit Werkzeugen mitten im Verlauf hätte
+   * einen Verlauf danach, der nicht mehr zu ihm passt. Ältere Antworten
+   * lassen sich umwandeln (ohne Werkzeuge).
+   *
+   * @param {{chatId:string, messageId?:string, variante?:string, stil?:object, signal?:AbortSignal, onEvent?:Function, effort?:string}} opts
    */
   async function neuAntworten(opts = {}) {
     const { chatId, signal, onEvent } = opts;
-    const chat = getChat(chatId);
+    let chat = getChat(chatId);
     if (inflight.has(chat.id)) {
       throw new ValidationError('Für diesen Chat läuft bereits eine Antwort. Brich sie ab, bevor du neu antworten lässt.');
     }
+    const variante = opts.variante === undefined || opts.variante === null || opts.variante === '' ? null : opts.variante;
+    if (variante !== null && (typeof variante !== 'string' || !Object.prototype.hasOwnProperty.call(fassungen.VARIANTEN, variante))) {
+      throw new ValidationError(`Unbekannte Variante „${String(variante).slice(0, 40)}“. Möglich: ${Object.keys(fassungen.VARIANTEN).join(', ')}.`);
+    }
+    const stilNeu = opts.stil === undefined ? undefined : stilLesen(opts.stil);
     claude.zugang();
+    if (stilNeu !== undefined) chat = store.update(chat.id, { stil: stilNeu });
     const history = historyOf(chat.id);
     let letzte = -1;
     for (let i = history.length - 1; i >= 0; i--) {
       if (history[i].data && history[i].data.role === 'user') { letzte = i; break; }
     }
     if (letzte < 0) throw new ValidationError('Hier gibt es noch keine Frage, auf die ich neu antworten könnte.');
-    const weg = history.slice(letzte + 1);
-    const effort = effortDer(weg, opts.effort);
-    verwerfen(weg, onEvent, chat.id);
-    const behalten = history.slice(0, letzte + 1);
-    const assistant = antwortAnlegen(chat, nextOrdinal(history), effort, onEvent);
-    const r = await zug({ chat, assistant, basis: verlaufAus(behalten), onEvent, signal, effort });
+    const danach = history.slice(letzte + 1);
+    const antwortSatz = danach.find((m) => m.data && m.data.role === 'assistant') || null;
+    if (opts.messageId && (!antwortSatz || antwortSatz.id !== opts.messageId)) {
+      throw new NeuralError('NUR_LETZTE_ANTWORT', 'Neu erstellen geht bei der letzten Antwort. Eine ältere lässt sich umwandeln.', { status: 409 });
+    }
+    const effort = effortDer(danach, opts.effort);
+    // Was sonst noch nach der Frage steht (eine zweite, abgebrochene Antwort), ist überholt.
+    verwerfen(danach.filter((m) => !antwortSatz || m.id !== antwortSatz.id), onEvent, chat.id);
+    const frage = stilAngleichen(history[letzte], chat);
+    const bisher = antwortSatz ? String(antwortSatz.data.content || '') : '';
+    const assistant = antwortSatz
+      ? fassungFuerNeu(chat, antwortSatz, effort, variante, onEvent)
+      : antwortAnlegen(chat, nextOrdinal(history), effort, onEvent);
+    const basis = verlaufAus([...history.slice(0, letzte), frage]);
+    const zusatz = variantenSatz(variante, bisher);
+    const letzteNachricht = basis[basis.length - 1];
+    if (zusatz && letzteNachricht && letzteNachricht.role === 'user') {
+      letzteNachricht.content = [...letzteNachricht.content, { type: 'text', text: zusatz }];
+    }
+    const r = await zug({ chat, assistant, basis, onEvent, signal, effort });
     return { chat, message: r.message, stopReason: r.stopReason };
+  }
+
+  /** Den Antwortstil prüfen (für PATCH /api/chats/:id und neu-antworten). */
+  function stilLesen(roh) {
+    try {
+      return fassungen.stilPruefen(roh);
+    } catch (err) {
+      throw new ValidationError(err.satz || err.message);
+    }
+  }
+
+  /**
+   * Der Stil-Satz in der Frage folgt dem jetzigen Stil des Chats, wenn neu
+   * erstellt wird (Regler "stil": dieselbe Frage, neuer Stil). Gespeichert,
+   * damit der Verlauf danach genau das zeigt, was gesendet wurde.
+   */
+  function stilAngleichen(frage, chat) {
+    const c = frage.data && frage.data.claude;
+    if (!c || !Array.isArray(c.inhalt) || !c.inhalt.length) return frage;
+    const ohne = c.inhalt.filter((b) => !(b && b.type === 'text' && String(b.text || '').startsWith(fassungen.STIL_PRAEFIX)));
+    const soll = fassungen.stilSatz(chat.data && chat.data.stil);
+    const neu = soll ? [ohne[0], { type: 'text', text: soll }, ...ohne.slice(1)] : ohne;
+    if (JSON.stringify(neu) === JSON.stringify(c.inhalt)) return frage;
+    return store.update(frage.id, { claude: { ...c, inhalt: neu } });
+  }
+
+  /** Der Satz für eine Variante, samt der bisherigen Antwort ("kürzer als was?"). */
+  function variantenSatz(variante, bisher) {
+    const satz = variante ? fassungen.VARIANTEN[variante] : null;
+    if (!satz) return null;
+    const alt = String(bisher || '').trim();
+    if (!alt) return `[Neu erstellen: ${satz}]`;
+    const gekuerzt = alt.length > 12000 ? `${alt.slice(0, 12000)} …` : alt;
+    return `[Neu erstellen: ${satz}]\n\nDie bisherige Antwort:\n<<<\n${gekuerzt}\n>>>`;
+  }
+
+  /**
+   * Die bisherige Fassung sichern und eine leere, laufende neue Fassung
+   * derselben Antwort anlegen. Eine offene Rückfrage der bisherigen ist damit
+   * erledigt (sonst stünde ihr Planungs-Agent ewig auf "läuft").
+   */
+  function fassungFuerNeu(chat, antwortSatz, effort, variante, onEvent) {
+    const satz = rueckfrageUebergehen(antwortSatz, { ergebnis: 'Verworfen – die Antwort wurde neu erstellt', onEvent });
+    const modell = modellFuer(chat);
+    const { patch } = fassungen.neueFassung(satz, { art: 'neu', anweisung: variante, modell }, {
+      content: '',
+      status: 'streaming',
+      denken: '',
+      quellen: [],
+      agenten: [],
+      rueckfragen: [],
+      rueckfrageOffen: false,
+      error: null,
+      abgeschnitten: false,
+      stats: {},
+      usedNetwork: false,
+      networkTargets: [],
+      model: { provider: anbieterId(), model: modell },
+      claude: { anbieter: anbieterId(), modell, effort, verlauf: [], textImVerlauf: 0 },
+    });
+    const neu = store.update(satz.id, patch);
+    fassungMelden(chat, neu, onEvent);
+    return neu;
+  }
+
+  /** Eine neue (oder gewählte) Fassung melden: `fassung` plus der Satz als `antwort`. */
+  function fassungMelden(chat, rec, onEvent) {
+    const f = fassungen.fuerOberflaeche(rec);
+    emit(onEvent, {
+      type: 'fassung', messageId: rec.id, version: f.version, anzahl: f.versionen.length, art: f.versionen[f.version].art,
+    });
+    emit(onEvent, { type: 'antwort', record: rec });
+    publish('chat.message', { chatId: chat.id, record: fuerAussen(rec) });
   }
 
   /**
@@ -1206,8 +1484,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
    * @param {{chatId:string, messageId:string, content:string, signal?:AbortSignal, onEvent?:Function, effort?:string}} opts
    */
   async function bearbeiten(opts = {}) {
-    const { chatId, messageId, content, signal, onEvent } = opts;
-    if (typeof content !== 'string' || !content.trim()) throw new ValidationError('Die Nachricht ist leer.');
+    const { chatId, messageId, signal, onEvent } = opts;
+    const content = typeof opts.content === 'string' ? opts.content : '';
     if (content.length > MAX_CONTENT_CHARS) {
       throw new ValidationError(`Die Nachricht ist zu lang (${content.length} Zeichen, erlaubt sind ${MAX_CONTENT_CHARS}).`);
     }
@@ -1220,8 +1498,11 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     if (index < 0 || !history[index].data || history[index].data.role !== 'user') {
       throw new NotFoundError(`Nachricht ${messageId}`);
     }
-    claude.zugang();
     const alt = history[index];
+    // Die Anhänge bleiben an der Nachricht; mit ihnen darf der Text leer sein.
+    const anhaenge = Array.isArray(alt.data.anhaenge) ? alt.data.anhaenge : [];
+    if (!content.trim() && !anhaenge.length) throw new ValidationError('Die Nachricht ist leer.');
+    claude.zugang();
     const weg = history.slice(index + 1);
     const effort = effortDer(weg, opts.effort);
     verwerfen(weg, onEvent, chat.id);
@@ -1229,10 +1510,10 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     const userMessage = store.update(alt.id, {
       content,
       bearbeitetAm: new Date().toISOString(),
-      claude: { inhalt: [{ type: 'text', text: heuteSatz() }, { type: 'text', text: content }] },
+      claude: { inhalt: nutzerInhalt(content, chat, anhaenge) },
     });
     emit(onEvent, { type: 'nutzer', record: userMessage });
-    publish('chat.message', { chatId: chat.id, record: userMessage });
+    publish('chat.message', { chatId: chat.id, record: fuerAussen(userMessage) });
 
     // Hiess der Chat nach der ersten Nachricht, heisst er jetzt nach der neuen.
     const ersteFrage = !history.slice(0, index).some((m) => m.data.role === 'user');
@@ -1332,6 +1613,398 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     return antwort.trim();
   }
 
+  /* --------------------------------------------- Fassungen einer Antwort */
+
+  /** Eine Antwort (role assistant) dieses Chats -- oder 404. */
+  function antwortVon(chat, messageId) {
+    const rec = typeof messageId === 'string' && messageId ? store.get(messageId) : null;
+    if (!rec || rec.type !== 'message' || !rec.data || rec.data.chatId !== chat.id || rec.data.role !== 'assistant') {
+      throw new NotFoundError(`Antwort ${messageId}`);
+    }
+    return rec;
+  }
+
+  function nichtBeschaeftigt(chat) {
+    if (inflight.has(chat.id)) {
+      throw new ValidationError('Für diesen Chat läuft gerade eine Antwort. Warte, bis sie fertig ist, oder brich sie ab.');
+    }
+  }
+
+  /** Der Text der Frage, auf die eine Antwort antwortet (für Umwandeln). */
+  function frageVor(chat, satz) {
+    const history = historyOf(chat.id);
+    const i = history.findIndex((m) => m.id === satz.id);
+    for (let j = i - 1; j >= 0; j--) {
+      if (history[j].data && history[j].data.role === 'user') return String(history[j].data.content || '');
+    }
+    return '';
+  }
+
+  /**
+   * Eine einfache Anfrage an die aktive KI: ohne Werkzeuge, ohne Websuche,
+   * mit wenig Aufwand (effort low). Für Umwandeln und Zusammenfassen.
+   * Liefert den sichtbaren Text; eine Ablehnung oder ein abgeschnittenes
+   * Ergebnis ist ein Fehler, keine halbe Fassung.
+   */
+  async function einfacherAufruf({ chat, system, nachrichten, signal, beiText, purpose, maxTokens = 32000 }) {
+    const anbieter = modulVon();
+    const modell = chat ? modellFuer(chat) : claude.modell();
+    const gebaut = anbieter.anfrageBauen({
+      modell,
+      system: [{ type: 'text', text: system }],
+      werkzeuge: [],
+      nachrichten,
+      effort: 'low',
+      websuche: false,
+      maxTokens,
+    });
+    const r = await claude.senden({
+      ...gebaut,
+      gate,
+      scope: chat ? `chat:${chat.id}` : 'global',
+      purpose,
+      signal,
+      beiEreignis: (e) => {
+        if (e && e.art === 'text' && e.delta && typeof beiText === 'function') beiText(e.delta);
+      },
+    });
+    if (r.stopReason === 'refusal') {
+      throw new NeuralError(anbieter.ABLEHNUNG.code, anbieter.ABLEHNUNG.satz, { status: 422 });
+    }
+    if (r.stopReason === 'max_tokens') {
+      throw new NeuralError('ZU_LANG', 'Das Ergebnis wurde zu lang und wäre abgeschnitten. Die bisherige Fassung bleibt.', { status: 422 });
+    }
+    const text = (r.inhalt || []).filter((b) => b && b.type === 'text').map((b) => b.text).join('');
+    return { text, modell: r.modell || modell, usage: r.usage };
+  }
+
+  /**
+   * Umwandeln vorbereiten und prüfen -- ALLES, was abgelehnt werden kann,
+   * bevor ein Strom öffnet (die Route antwortet dann mit Statuscode):
+   * unbekannte Antwort, leere Antwort, offene Rückfrage, ungültige
+   * Anweisung, eine markierte Stelle, die sich nicht eindeutig finden lässt
+   * (409 AUSWAHL_NICHT_GEFUNDEN).
+   */
+  function umwandelnPruefen(opts = {}) {
+    const chat = getChat(opts.chatId);
+    const satz = antwortVon(chat, opts.messageId);
+    nichtBeschaeftigt(chat);
+    const text = String(satz.data.content || '');
+    if (!text.trim()) {
+      throw new NeuralError('NICHTS_ZUM_UMWANDELN', 'Diese Antwort hat noch keinen Text, den ich umwandeln könnte.', { status: 409 });
+    }
+    if (satz.data.rueckfrageOffen) {
+      throw new NeuralError('RUECKFRAGE_OFFEN', 'Diese Antwort wartet noch auf deine Antwort auf die Rückfrage. Beantworte sie zuerst.', { status: 409 });
+    }
+    const roh = opts.auswahl;
+    const mitAuswahl = roh !== undefined && roh !== null && roh !== '';
+    if (mitAuswahl && (typeof roh !== 'string' || roh.length > 20000)) {
+      throw new ValidationError('"auswahl" muss der markierte Text sein (höchstens 20 000 Zeichen).');
+    }
+    let anweisung;
+    try {
+      anweisung = fassungen.anweisungSatz(opts.anweisung, { sprache: opts.sprache, stelle: mitAuswahl });
+    } catch (err) {
+      throw new ValidationError(err.satz || err.message);
+    }
+    let stelle = null;
+    if (mitAuswahl) {
+      const vorkommen = Number.isInteger(opts.vorkommen) ? opts.vorkommen : undefined;
+      try {
+        stelle = fassungen.stelleFinden(text, roh, vorkommen);
+      } catch (err) {
+        throw new NeuralError('AUSWAHL_NICHT_GEFUNDEN', err.satz || err.message, { status: 409, details: err.details || null });
+      }
+    }
+    return { chat, satz, anweisung, stelle };
+  }
+
+  /**
+   * Eine Antwort umwandeln (docs 4): die aktive Fassung in eine neue Form
+   * bringen -- ganz oder nur die markierte Stelle. Ergebnis ist eine neue
+   * Fassung `umgewandelt`. Ereignisse: fassung, antwort (der Satz mit der
+   * neuen, laufenden Fassung), text {delta} (ganze Antwort) bzw. inhalt
+   * {content} (markierte Stelle, der ganze Text mit der neuen Stelle),
+   * fehler, fertig. Scheitert es oder wird abgebrochen, ist wieder die
+   * vorige Fassung aktiv -- eine halbe Umwandlung wird keine Fassung.
+   *
+   * @param {{chatId, messageId, anweisung, sprache?, auswahl?, vorkommen?, signal?, onEvent?}} opts
+   */
+  async function umwandeln(opts = {}) {
+    const { signal, onEvent } = opts;
+    const plan = umwandelnPruefen(opts);
+    const { chat, anweisung, stelle } = plan;
+    let satz = plan.satz;
+    claude.zugang();
+    const quelle = String(satz.data.content || '');
+    const frage = frageVor(chat, satz);
+    const anbieter = modulVon();
+    const modell = modellFuer(chat);
+    // Was die KI im Tresor angelegt hat, bleibt sichtbar (mit Rückgängig) -- am Ende der neuen Fassung.
+    const wirkungen = (Array.isArray(satz.data.agenten) ? satz.data.agenten : [])
+      .filter((a) => a && a.zustand === 'fertig' && Array.isArray(a.wirkung) && a.wirkung.length);
+    const { patch, vorige } = fassungen.neueFassung(satz, {
+      art: 'umgewandelt',
+      anweisung: anweisung.schluessel || String(opts.anweisung).trim().slice(0, 200),
+      sprache: anweisung.schluessel === 'uebersetzen' ? String(opts.sprache).trim() : undefined,
+      auswahl: stelle ? true : undefined,
+      modell,
+    }, {
+      content: stelle ? quelle : '',
+      status: 'streaming',
+      denken: '',
+      quellen: klon(satz.data.quellen || []),
+      agenten: [],
+      rueckfragen: [],
+      rueckfrageOffen: false,
+      error: null,
+      abgeschnitten: false,
+      stats: {},
+      usedNetwork: false,
+      networkTargets: [],
+      model: { provider: anbieter.anbieterId || anbieterId(), model: modell },
+      claude: null,
+    });
+    satz = store.update(satz.id, patch);
+    fassungMelden(chat, satz, onEvent);
+
+    const controller = new AbortController();
+    const beiAussen = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener('abort', beiAussen, { once: true });
+    }
+    inflight.set(chat.id, { controller, messageId: satz.id, startedAt: Date.now() });
+    const egress = watchEgress(`chat:${chat.id}`);
+
+    let text = '';
+    let zuletzt = 0;
+    const mitStelle = (t) => `${quelle.slice(0, stelle.start)}${t}${quelle.slice(stelle.ende)}`;
+    const beiText = (delta) => {
+      text += delta;
+      if (!stelle) emit(onEvent, { type: 'text', delta });
+      const jetzt = Date.now();
+      if (jetzt - zuletzt < (stelle ? 150 : FLUSH_INTERVAL_MS)) return;
+      zuletzt = jetzt;
+      if (stelle) emit(onEvent, { type: 'inhalt', content: mitStelle(fassungen.antwortSaeubern(text)) });
+      try { store.update(satz.id, { content: stelle ? mitStelle(text) : text }); } catch { /* der Endstand zählt */ }
+    };
+
+    const bloecke = [];
+    if (frage.trim()) bloecke.push({ type: 'text', text: `Die Frage des Nutzers war:\n<<<\n${frage.slice(0, 8000)}\n>>>` });
+    if (stelle) {
+      bloecke.push({ type: 'text', text: `Deine Antwort (nur zum Zusammenhang):\n<<<\n${quelle}\n>>>` });
+      bloecke.push({ type: 'text', text: `Die markierte Stelle (Markdown):\n<<<\n${stelle.stelle}\n>>>` });
+      bloecke.push({ type: 'text', text: `Aufgabe: ${anweisung.satz}\nGib nur den neuen Text für die markierte Stelle aus – nicht den Rest der Antwort. Behalte die Markdown-Auszeichnung der Stelle bei, soweit sie passt.` });
+    } else {
+      bloecke.push({ type: 'text', text: `Deine bisherige Antwort:\n<<<\n${quelle}\n>>>` });
+      bloecke.push({ type: 'text', text: `Aufgabe: ${anweisung.satz}\nGib nur die neue Fassung der ganzen Antwort aus.` });
+    }
+
+    try {
+      const r = await einfacherAufruf({
+        chat,
+        system: SYSTEM_UMWANDELN,
+        nachrichten: [{ role: 'user', content: bloecke }],
+        signal: controller.signal,
+        beiText,
+        purpose: `Antwort umwandeln im Chat „${(chat.data && chat.data.title) || chat.id}“`,
+      });
+      if (controller.signal.aborted) throw new AbortedError('Das Umwandeln wurde abgebrochen.');
+      const ergebnis = fassungen.antwortSaeubern(r.text);
+      if (!ergebnis) {
+        throw new NeuralError('KEINE_ANTWORT', 'Die KI hat keine neue Fassung geliefert. Die bisherige bleibt.', { status: 502 });
+      }
+      const neuerText = stelle ? mitStelle(ergebnis) : ergebnis;
+      const agenten = wirkungen.map((a) => ({ ...klon(a), beiZeichen: neuerText.length }));
+      egress.stop();
+      const jetzt = store.get(satz.id) || satz;
+      const final = store.update(satz.id, fassungen.kopfAngleichen(jetzt, {
+        content: neuerText,
+        status: 'complete',
+        agenten,
+        stats: statsAddieren({}, r.usage),
+        model: { provider: anbieter.anbieterId || anbieterId(), model: r.modell || modell },
+        usedNetwork: egress.state.usedNetwork,
+        networkTargets: [...egress.state.targets.keys()],
+      }));
+      if (stelle) emit(onEvent, { type: 'inhalt', content: neuerText });
+      emit(onEvent, { type: 'fertig', stopReason: 'end_turn', record: final });
+      publish('chat.message', { chatId: chat.id, record: fuerAussen(final) });
+      ableiten(final, chat);
+      return { chat, message: final, stopReason: 'end_turn' };
+    } catch (err) {
+      egress.stop();
+      const abgebrochen = controller.signal.aborted || (err && err.code === 'ABORTED');
+      const e = abgebrochen ? new AbortedError('Das Umwandeln wurde abgebrochen. Die bisherige Fassung bleibt.') : asNeuralError(err);
+      let final = store.get(satz.id) || satz;
+      try {
+        const zurueck = fassungen.fassungZuruecknehmen(final, vorige);
+        if (zurueck) final = store.update(satz.id, zurueck);
+      } catch (inner) {
+        log.warn(`Fassung von ${satz.id} nicht zurückgenommen: ${inner && inner.message}`);
+      }
+      if (!abgebrochen) emit(onEvent, { type: 'fehler', code: e.code, satz: e.message });
+      emit(onEvent, { type: 'fertig', stopReason: abgebrochen ? 'abgebrochen' : 'fehler', record: final });
+      publish('chat.message', { chatId: chat.id, record: fuerAussen(final) });
+      throw e;
+    } finally {
+      inflight.delete(chat.id);
+      if (signal) {
+        try { signal.removeEventListener('abort', beiAussen); } catch { /* egal */ }
+      }
+    }
+  }
+
+  /**
+   * Eine andere Fassung aktiv machen (PATCH …/version). Eine offene
+   * Rückfrage der bisherigen gilt dann als übergangen.
+   */
+  function fassungWaehlen({ chatId, messageId, version } = {}) {
+    const chat = getChat(chatId);
+    let satz = antwortVon(chat, messageId);
+    nichtBeschaeftigt(chat);
+    if (!Number.isInteger(version)) throw new ValidationError('"version" muss eine ganze Zahl sein (0 = das Original).');
+    const { versionen } = fassungen.fassungenLesen(satz);
+    if (version < 0 || version >= versionen.length) throw new NotFoundError(`Fassung ${version}`);
+    if (satz.data.rueckfrageOffen) {
+      satz = rueckfrageUebergehen(satz, { ergebnis: 'Übergangen – du hast eine andere Fassung gewählt' });
+    }
+    const patch = fassungen.fassungWaehlen(satz, version);
+    if (!patch) return satz;
+    const neu = store.update(satz.id, patch);
+    publish('chat.message', { chatId: chat.id, record: fuerAussen(neu) });
+    // Suche und Gehirn sehen nur die aktive Fassung: die Verknüpfungen folgen ihr.
+    ableiten(neu, chat);
+    return neu;
+  }
+
+  /**
+   * Einen Codeblock der aktiven Fassung bearbeiten (PATCH …/block): Code,
+   * Prompt, Text -- oder `inhalt` eines Bausteins datei/vorschau. Ergebnis
+   * ist eine neue Fassung `bearbeitet`.
+   */
+  function blockBearbeiten({ chatId, messageId, nr, inhalt, alt } = {}) {
+    const chat = getChat(chatId);
+    const satz = antwortVon(chat, messageId);
+    nichtBeschaeftigt(chat);
+    if (!Number.isInteger(nr) || nr < 0) throw new ValidationError('"nr" muss die Nummer des Blocks sein (0 = der erste).');
+    if (typeof inhalt !== 'string') throw new ValidationError('"inhalt" fehlt.');
+    if (inhalt.length > MAX_CONTENT_CHARS) throw new ValidationError(`Der Block ist zu lang (höchstens ${MAX_CONTENT_CHARS} Zeichen).`);
+    if (alt !== undefined && alt !== null && typeof alt !== 'string') throw new ValidationError('"alt" muss der bisherige Inhalt des Blocks sein.');
+    if (satz.data.rueckfrageOffen) {
+      throw new NeuralError('RUECKFRAGE_OFFEN', 'Diese Antwort wartet noch auf deine Antwort auf die Rückfrage. Beantworte sie zuerst.', { status: 409 });
+    }
+    const text = String(satz.data.content || '');
+    let r;
+    try {
+      r = fassungen.blockErsetzen(text, nr, inhalt, alt === null ? undefined : alt);
+    } catch (err) {
+      throw new NeuralError(err.code || 'BLOCK_NICHT_GEFUNDEN', err.satz || err.message, { status: 409 });
+    }
+    if (r.text === text) return satz;
+    const d = satz.data;
+    const agenten = (Array.isArray(d.agenten) ? klon(d.agenten) : [])
+      .map((a) => ({ ...a, beiZeichen: Math.min(Number(a.beiZeichen) || 0, r.text.length) }));
+    const { patch } = fassungen.neueFassung(satz, { art: 'bearbeitet', anweisung: 'block', nr: r.block.nr, modell: d.model && d.model.model }, {
+      content: r.text,
+      status: 'complete',
+      denken: String(d.denken || ''),
+      quellen: klon(d.quellen || []),
+      agenten,
+      rueckfragen: [],
+      rueckfrageOffen: false,
+      error: null,
+      abgeschnitten: false,
+      stats: {},
+      usedNetwork: d.usedNetwork === true,
+      networkTargets: klon(d.networkTargets || []),
+      model: klon(d.model || null),
+      claude: null,
+    });
+    const neu = store.update(satz.id, patch);
+    publish('chat.message', { chatId: chat.id, record: fuerAussen(neu) });
+    ableiten(neu, chat);
+    return neu;
+  }
+
+  /* ------------------------------------------------ Zustand der Bausteine */
+
+  const UI_JE_BAUSTEIN = 16 * 1024;
+  const UI_JE_NACHRICHT = 64 * 1024;
+
+  /**
+   * Den Zustand eines Bausteins speichern (PUT …/ui, docs 5): je Fassung und
+   * Schlüssel ein kleines Objekt. `zustand: null` löscht ihn. Inhaltliche
+   * Änderungen sind Fassungen, keine Zustände.
+   */
+  function uiSetzen({ chatId, messageId, version, schluessel, zustand } = {}) {
+    const chat = getChat(chatId);
+    const satz = antwortVon(chat, messageId);
+    const { versionen, version: aktiv } = fassungen.fassungenLesen(satz);
+    const v = version === undefined || version === null ? aktiv : version;
+    if (!Number.isInteger(v) || v < 0 || v >= versionen.length) throw new NotFoundError(`Fassung ${version}`);
+    if (typeof schluessel !== 'string' || !/^[\p{L}\p{N}_.:-]{1,100}$/u.test(schluessel)) {
+      throw new ValidationError('"schluessel" muss ein kurzer Name sein (Buchstaben, Ziffern, _ . : -; höchstens 100 Zeichen).');
+    }
+    if (zustand === undefined) throw new ValidationError('"zustand" fehlt (null löscht ihn).');
+    if (zustand !== null) {
+      const groesse = Buffer.byteLength(JSON.stringify(zustand), 'utf8');
+      if (groesse > UI_JE_BAUSTEIN) {
+        throw new NeuralError('UI_ZUSTAND_ZU_GROSS', `Der Zustand ist zu groß (${Math.ceil(groesse / 1024)} KB, höchstens 16 KB je Baustein).`, { status: 413 });
+      }
+    }
+    const ui = satz.data.ui && typeof satz.data.ui === 'object' ? klon(satz.data.ui) : {};
+    const fach = { ...(ui[String(v)] || {}) };
+    if (zustand === null) delete fach[schluessel];
+    else fach[schluessel] = klon(zustand);
+    if (Object.keys(fach).length) ui[String(v)] = fach;
+    else delete ui[String(v)];
+    const gesamt = Buffer.byteLength(JSON.stringify(ui), 'utf8');
+    if (gesamt > UI_JE_NACHRICHT) {
+      throw new NeuralError('UI_ZUSTAND_ZU_GROSS', 'Für diese Antwort ist zu viel Zustand gespeichert (höchstens 64 KB je Nachricht).', { status: 413 });
+    }
+    store.update(satz.id, { ui });
+    publish('chat.ui', { chatId: chat.id, messageId: satz.id, version: v, schluessel, zustand });
+    return { messageId: satz.id, version: v, schluessel, zustand, ui: ui[String(v)] || {} };
+  }
+
+  /* ------------------------------------------ Zusammenfassung fürs Gehirn */
+
+  /**
+   * Eine kurze Zusammenfassung eines Knotens für die Detailkarte im Gehirn
+   * (POST /api/graph/zusammenfassung). Ohne verbundene KI: `{text:null}` --
+   * die Route sagt dann ehrlich, dass keine da ist.
+   */
+  async function zusammenfassen({ record, verknuepft } = {}) {
+    let z = null;
+    try { z = claude.zustand(); } catch { z = null; }
+    if (!z || !z.verbunden || !record) return { text: null };
+    const d = record.data || {};
+    const titel = String(d.title || d.name || d.text || record.id).slice(0, 300);
+    const text = String(d.body || d.content || d.description || d.text || d.goal || d.result || '').slice(0, 30000);
+    const nachbarn = [];
+    for (const richtung of ['ausgehend', 'eingehend']) {
+      for (const v of ((verknuepft && verknuepft[richtung]) || []).slice(0, 25)) {
+        nachbarn.push(`- ${String(v.title || v.id).slice(0, 120)} (${v.type || 'Satz'}${v.kind ? `, ${v.kind}` : ''})`);
+      }
+    }
+    const bloecke = [
+      { type: 'text', text: `Art: ${record.type}\nTitel: ${titel}` },
+      { type: 'text', text: text.trim() ? `Inhalt:\n<<<\n${text}\n>>>` : 'Inhalt: (leer)' },
+    ];
+    if (nachbarn.length) bloecke.push({ type: 'text', text: `Verknüpft mit:\n${nachbarn.join('\n')}` });
+    bloecke.push({ type: 'text', text: 'Fasse das in zwei bis vier Sätzen zusammen: worum es geht und wie es mit dem Verknüpften zusammenhängt. Nur aus dem, was hier steht.' });
+    const r = await einfacherAufruf({
+      chat: null,
+      system: 'Du bist die persönliche KI von Neural OS und fasst einen Eintrag aus dem Wissen des Nutzers knapp zusammen. Deutsch, sachlich, ohne Einleitung, nichts erfinden.',
+      nachrichten: [{ role: 'user', content: bloecke }],
+      purpose: `Zusammenfassung von „${titel.slice(0, 60)}“ im Gehirn`,
+      maxTokens: 2000,
+    });
+    return { text: fassungen.antwortSaeubern(r.text), modell: r.modell };
+  }
+
   /* ----------------------------------------------------------- Dienst */
 
   return {
@@ -1340,6 +2013,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       for (const key of ['title', 'agentId', 'model', 'systemPrompt', 'network', 'contextNodeIds', 'pinned']) {
         if (data[key] !== undefined) payload[key] = data[key];
       }
+      if (data.stil !== undefined) payload.stil = stilLesen(data.stil);
       const chat = store.create('chat', payload);
       publish('chat.created', { chatId: chat.id, record: chat });
       return chat;
@@ -1351,6 +2025,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       for (const key of ['title', 'model', 'network', 'systemPrompt', 'contextNodeIds', 'agentId', 'pinned']) {
         if (patch[key] !== undefined) allowed[key] = patch[key];
       }
+      // Antwortstil (docs 3): {laenge, fachlich, kreativ} 0-100, null = keiner.
+      if (patch.stil !== undefined) allowed.stil = stilLesen(patch.stil);
       if (!Object.keys(allowed).length) return chat;
       return store.update(chat.id, allowed);
     },
@@ -1369,6 +2045,18 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     antworten,
     neuAntworten,
     bearbeiten,
+
+    // Antwort-Bausteine (docs/ANTWORT-BAUSTEINE.md 4-6)
+    umwandelnPruefen: (opts) => { umwandelnPruefen(opts); },
+    umwandeln,
+    fassungWaehlen,
+    blockBearbeiten,
+    uiSetzen,
+    anhangAblegen,
+    anhangDatei,
+    /** Vorab (vor dem Strom): gehören die Kennungen zu Dateien dieses Chats? */
+    anhaengePruefen: (chatId, ids) => { anhaengeFuer(getChat(chatId), Array.isArray(ids) ? ids : []); },
+    zusammenfassen,
 
     abort(chatId) {
       const entry = inflight.get(chatId);
@@ -1425,11 +2113,33 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
   };
 }
 
+/**
+ * Ein Nachrichtensatz so, wie er den Tresor verlässt (Routen, Bus): ohne
+ * `data.claude` -- den Mitschnitt für die NÄCHSTE Anfrage an die KI
+ * (Denkblöcke mit Signatur, verschlüsselte Suchergebnisse), den keine
+ * Oberfläche braucht --, und bei Antworten mit den Fassungen als Kopfdaten
+ * (auch für Nachrichten von vor den Fassungen: dann genau eine).
+ */
+function fuerAussen(record) {
+  if (!record || !record.data || typeof record.data !== 'object') return record;
+  const { claude, ...data } = record.data;
+  void claude;
+  const f = fassungen.fuerOberflaeche(record);
+  if (f) {
+    data.versionen = f.versionen;
+    data.version = f.version;
+  }
+  return { ...record, data };
+}
+
 module.exports = {
   createChatService,
   estimateTokens,
   sortMessages,
+  fuerAussen,
   SYSTEM_FEST,
+  SYSTEM_UMWANDELN,
+  DARSTELLUNG,
   MAX_CONTENT_CHARS,
   __internals: { verlaufHerrichten, mitCachePunkt, heuteSatz, firstLine, sortMessages },
 };

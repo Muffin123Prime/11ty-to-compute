@@ -27,7 +27,7 @@
  * sees no new worker and keeps the old cache.
  */
 
-const VERSION = 'v7';
+const VERSION = 'v8';
 const CACHE_NAME = `neural-os-shell-${VERSION}`;
 
 /**
@@ -100,6 +100,12 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(networkOnly(request));
     return;
   }
+
+  // Der Sandkasten fuer HTML/JS aus KI-Antworten (web/sandbox.html) kommt
+  // immer vom Server: nur dort traegt er seine eigene, strenge CSP. Und eine
+  // Navigation auf ihn -- die eines Rahmens -- darf nie die gecachte App
+  // bekommen, sonst liefe im Rahmen Neural OS statt der Vorschau.
+  if (url.pathname === '/sandbox.html') return;
 
   if (request.mode === 'navigate') {
     event.respondWith(navigation(request));

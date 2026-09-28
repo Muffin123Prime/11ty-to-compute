@@ -26,6 +26,9 @@
  *        (store.files, inhaltsadressiert, verschluesselt wie alles andere),
  *        dazu ein `file`-Satz, damit das Bild im Netz ein Knoten ist. Nur
  *        Bildarten, die ein Browser als Bild zeigt -- kein SVG (Skripte).
+ *   POST /api/notizen/import {dateien:[{name, text}]}
+ *        "Importieren": Markdown-Dateien oder ein Ordner (Obsidian) werden
+ *        Notizen; [[Links]] und #Schlagworte bleiben und verbinden danach.
  *   POST /api/notizen/link {url, titel?}
  *        "Link speichern": eine Notiz mit der Adresse. Der Seitentitel wird
  *        NUR geholt, wenn die Schleuse online ist und die Adresse freigibt;
@@ -38,6 +41,7 @@
  */
 
 const { fold } = require('../../store/search');
+const { tagsOf } = require('../../graph/view');
 const { ValidationError, NotFoundError } = require('../../kernel/errors');
 const {
   need,
@@ -52,8 +56,8 @@ const {
 
 /** Was "[[" vervollstaendigt, in der Reihenfolge, in der die Ableitung Titel aufloest. */
 const LINK_TYPEN = ['note', 'project', 'entity', 'task'];
-/** Wessen `tags` das "#" kennt. */
-const TAG_TYPEN = ['note', 'project', 'file'];
+/** Wessen Schlagworte das "#" kennt (Feld und Text, siehe view.tagsOf). */
+const TAG_TYPEN = ['note', 'project', 'file', 'task', 'event', 'entity'];
 
 const ART_LABEL = {
   note: 'Notiz',
@@ -137,7 +141,8 @@ function tagKandidaten(store, q, limit) {
     let items = [];
     try { items = store.all(type); } catch { continue; }
     for (const rec of items) {
-      const tags = Array.isArray(rec.data && rec.data.tags) ? rec.data.tags : [];
+      // Feld UND #worte im Text -- dieselbe Quelle wie Universum und Wand.
+      const tags = tagsOf(rec);
       for (const raw of tags) {
         const tag = String(raw || '').trim().replace(/^#/, '');
         if (!tag) continue;
@@ -191,6 +196,62 @@ function seitenTitel(html) {
 function titelAusUrl(url) {
   const pfad = url.pathname && url.pathname !== '/' ? url.pathname.replace(/\/+$/, '') : '';
   return `${url.hostname}${pfad}`.slice(0, 120);
+}
+
+/* --------------------------------------------------------------- Import */
+
+/** Was der Import annimmt: Markdown und reiner Text (Obsidian, Notizordner). */
+const IMPORT_ENDUNG_RE = /\.(md|markdown|txt)$/i;
+const MAX_IMPORT_DATEIEN = 500;
+const MAX_IMPORT_ZEICHEN = 1000000;
+
+/**
+ * Eine Markdown-Datei in {title, body, tags} zerlegen. Kopfdaten (YAML
+ * zwischen `---`) werden gelesen, soweit ein Notizprogramm sie schreibt:
+ * `title:` und `tags:` (als `[a, b]`, als Liste mit `- a` oder als
+ * `a, b`). Alles andere im Kopf bleibt weg -- es ist Verwaltung, kein Text.
+ * [[Links]] und #Schlagworte im Text bleiben, wie sie sind; die Ableitung
+ * macht daraus nach dem Import Kanten.
+ * @returns {{title:string, body:string, tags:string[]}}
+ */
+function markdownZuNotiz(name, text) {
+  let body = String(text || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  let title = '';
+  const tags = [];
+  const kopf = /^---\n([\s\S]*?)\n---\n?/.exec(body);
+  if (kopf) {
+    body = body.slice(kopf[0].length);
+    const zeilen = kopf[1].split('\n');
+    for (let i = 0; i < zeilen.length; i++) {
+      const m = /^([A-Za-z][\w-]*):\s*(.*)$/.exec(zeilen[i]);
+      if (!m) continue;
+      const key = m[1].toLowerCase();
+      const wert = m[2].trim();
+      if (key === 'title' && wert) title = wert.replace(/^["']|["']$/g, '').trim();
+      if (key === 'tags' || key === 'tag') {
+        if (wert.startsWith('[')) {
+          for (const t of wert.replace(/^\[|\]$/g, '').split(',')) tags.push(t);
+        } else if (wert) {
+          for (const t of wert.split(/[,\s]+/)) tags.push(t);
+        } else {
+          while (i + 1 < zeilen.length && /^\s*-\s+/.test(zeilen[i + 1])) tags.push(zeilen[++i].replace(/^\s*-\s+/, ''));
+        }
+      }
+    }
+  }
+  if (!title) {
+    const basis = String(name || '').split(/[\\/]/).pop().replace(IMPORT_ENDUNG_RE, '').trim();
+    title = basis || 'Importierte Notiz';
+  }
+  const sauber = [];
+  const seen = new Set();
+  for (const roh of tags) {
+    const t = String(roh || '').trim().replace(/^["'#]+|["']+$/g, '').trim();
+    if (!t || t.length > 100 || seen.has(fold(t))) continue;
+    seen.add(fold(t));
+    sauber.push(t);
+  }
+  return { title: title.slice(0, 500), body: body.replace(/^\n+/, '').replace(/\s+$/, ''), tags: sauber.slice(0, 50) };
 }
 
 /* --------------------------------------------------------------- Routen */
@@ -316,6 +377,52 @@ function register(router) {
     return undefined;
   });
 
+  /**
+   * "Importieren" im leeren Gehirn und auf der Notizwand: Markdown-Dateien
+   * oder ein ganzer Ordner (Obsidian, ein Notizordner) werden Notizen. Die
+   * Oberflaeche liest die Dateien im Browser und schickt ihren Text in
+   * Portionen; hier entsteht je Datei eine Notiz (source 'import'). Ein
+   * Titel, den es schon gibt, wird nicht doppelt angelegt, sondern mit Grund
+   * uebersprungen. Alles laeuft als EIN Massenschreibvorgang (bulkWrite):
+   * die Ableitung ruht waehrenddessen und zieht danach alle [[Links]] und
+   * #Schlagworte auf einmal -- auch die auf Notizen, die erst spaeter in
+   * derselben Portion kamen.
+   */
+  router.post('/api/notizen/import', async (rc) => {
+    rc.requireCapability('write');
+    const store = need(rc.ctx.store, 'Der Speicher');
+    const body = asObject(await rc.body());
+    if (!Array.isArray(body.dateien) || !body.dateien.length) throw new ValidationError('"dateien" muss mindestens eine Datei nennen.');
+    if (body.dateien.length > MAX_IMPORT_DATEIEN) {
+      throw new ValidationError(`Höchstens ${MAX_IMPORT_DATEIEN} Dateien je Anfrage (empfangen: ${body.dateien.length}).`);
+    }
+    const dateien = body.dateien.map((d, i) => {
+      const obj = asObject(d, `dateien[${i}]`);
+      const name = requireString(obj.name, `dateien[${i}].name`, { max: 1000 });
+      const text = typeof obj.text === 'string' ? obj.text : '';
+      return { name, text };
+    });
+    const byTitle = titelIndex(store, rc.ctx.graph);
+    const angelegt = [];
+    const uebersprungen = [];
+    const run = () => {
+      for (const { name, text } of dateien) {
+        if (!IMPORT_ENDUNG_RE.test(name)) { uebersprungen.push({ name, grund: 'Keine Markdown- oder Textdatei.' }); continue; }
+        if (text.length > MAX_IMPORT_ZEICHEN) { uebersprungen.push({ name, grund: 'Länger als 1 Million Zeichen.' }); continue; }
+        const n = markdownZuNotiz(name, text);
+        const key = fold(n.title);
+        if (byTitle.has(key)) { uebersprungen.push({ name, grund: `„${n.title}“ gibt es schon.` }); continue; }
+        const rec = store.create('note', { title: n.title, body: n.body, tags: n.tags, source: 'import' });
+        byTitle.set(key, rec.id);
+        angelegt.push(rec.id);
+      }
+    };
+    let graph = null;
+    if (typeof rc.ctx.bulkWrite === 'function') await rc.ctx.bulkWrite(run, { onRederive: (bericht) => { graph = bericht; } });
+    else run();
+    return { angelegt: angelegt.length, ids: angelegt, uebersprungen, graph };
+  });
+
   router.post('/api/notizen/link', async (rc) => {
     rc.requireCapability('write');
     const store = need(rc.ctx.store, 'Der Speicher');
@@ -377,6 +484,7 @@ module.exports = {
   tagKandidaten,
   seitenTitel,
   titelAusUrl,
+  markdownZuNotiz,
   BILD_MIME,
   MAX_BILD_BYTES,
 };

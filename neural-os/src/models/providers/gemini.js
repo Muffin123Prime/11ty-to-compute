@@ -276,6 +276,8 @@ function werkzeugeUebersetzen(defs) {
 /* ------------------------------------------------------ Blöcke <-> Teile */
 
 const WEGLASSEN = new Set(['fallback', 'server_tool_use', 'redacted_thinking']);
+/** Nutzerblöcke mit Base64-Daten, die als `inlineData` gehen. */
+const INLINE_ARTEN = new Set(['image', 'document', 'audio']);
 
 /** Welche Blöcke einer Antwort zurückgehen: alles Eigene, nichts von Claude, was Gemini nicht kennt. */
 function bloeckeZurueck(inhalt) {
@@ -328,7 +330,15 @@ function nachrichtenUebersetzen(nachrichten) {
       if (!b || typeof b !== 'object') continue;
       if (n.role === 'user') {
         if (b.type === 'text' && typeof b.text === 'string' && b.text.length) parts.push({ text: b.text });
-        else if (b.type === 'tool_result') {
+        else if (INLINE_ARTEN.has(b.type) && b.source && b.source.type === 'base64'
+          && typeof b.source.data === 'string' && b.source.data && typeof b.source.media_type === 'string') {
+          // Bilder und PDF in Claudes Form (image/document, base64) -- und die
+          // Sprachaufnahme fürs Umschreiben (audio, nur hier) -- sind bei
+          // Gemini ein Teil `inlineData` (docs: ai.google.dev, Bild- und
+          // Dokumentverständnis; höchstens 20 MB je Anfrage, das Budget hält
+          // src/models/anhaenge.js ein).
+          parts.push({ inlineData: { mimeType: b.source.media_type, data: b.source.data } });
+        } else if (b.type === 'tool_result') {
           const teil = { functionResponse: { name: namen.get(b.tool_use_id) || 'werkzeug', response: antwortObjekt(b.content, b.is_error === true) } };
           const g = namen.get(`id:${b.tool_use_id}`);
           if (g) teil.functionResponse.id = g;

@@ -60,7 +60,28 @@ const STOPWORDS = new Set([
   'dein', 'deine', 'seine', 'ihre', 'unsere', 'muss', 'sollte', 'koennen', 'koennte', 'wollen',
   'machen', 'macht', 'gibt', 'geht', 'kommt', 'steht', 'liegt', 'zwischen', 'seit', 'bis', 'beim',
   'ins', 'ans', 'aufs', 'eher', 'also', 'doch', 'mal', 'gut', 'viel', 'viele', 'wenig', 'zwei', 'drei',
+  // Runde 1 der Pruefer (28.09.2026): Woerter, die im Demo-Tresor und im
+  // Alltag Vorschlaege aus dem Nichts erzeugten ("1 gemeinsamer Begriff:
+  // Alles", "... morgen", "... Frau"). Zeitwoerter, Mengen, Ordnungszahlen,
+  // Anreden -- sie verbinden zwei Notizen nie inhaltlich.
+  'alles', 'nichts', 'etwas', 'mehr', 'weniger', 'rest', 'ganze', 'ganzen', 'andere', 'anderen', 'anderes',
+  'erste', 'erster', 'erstes', 'ersten', 'zweite', 'zweiten', 'dritte', 'dritten', 'letzte', 'letzten', 'naechste', 'naechsten',
+  'selbe', 'selben', 'gleich', 'gleiche', 'gleichen', 'offen', 'offene', 'offenen', 'gehoert', 'gehoeren',
+  'tag', 'tage', 'tages', 'tagen', 'heute', 'morgen', 'gestern', 'uebermorgen', 'jetzt', 'bald', 'spaeter',
+  'frueher', 'woche', 'wochen', 'monat', 'monate', 'jahr', 'jahre', 'jahren', 'uhr', 'stunde', 'stunden', 'minuten',
+  'frau', 'herr', 'herrn', 'bitte', 'danke', 'neu', 'neue', 'neuen', 'neues', 'alt', 'alte', 'alten', 'altes',
+  'einfach', 'genau', 'wichtig', 'wirklich', 'schnell', 'fertig', 'weiter', 'wegen', 'damit', 'dafuer', 'davon',
+  'darauf', 'daran', 'darin', 'dann', 'denn', 'weil', 'ob', 'nie', 'oft', 'manchmal', 'sonst', 'trotzdem',
+  'welche', 'welcher', 'welches', 'dieser', 'diese', 'dieses', 'diesen', 'jeden', 'jedem', 'einige', 'beide', 'beiden',
+  'waere', 'wuerde', 'hatten', 'bin', 'bist', 'seid', 'werde', 'wirst', 'wird', 'sollen', 'duerfen', 'darf', 'muessen',
+  'machen', 'gemacht', 'geben', 'nehmen', 'lassen', 'bleiben', 'sagen', 'sehen',
 ]);
+
+/**
+ * Nur Ziffern ("2027", "10") sind kein Begriff: eine Jahreszahl im Titel
+ * verbindet eine Beetplanung nicht mit einem Gartenjahr.
+ */
+const NUR_ZIFFERN_RE = /^\d+$/;
 
 /* ---------------------------------------------------------------- labels */
 
@@ -121,15 +142,65 @@ function snippetOf(record, override) {
   return '';
 }
 
+/**
+ * Die Schlagworte eines Satzes: das Feld `tags` UND die #worte im Text --
+ * EINE Quelle fuer alle, die fragen (Universum, Vorschlaege, Graph-Bild,
+ * Vervollstaendigung). Frueher las der Server nur das Feld; der Editor
+ * schreibt #biologie aber in den Text, und so entstand das Thema
+ * "Biologie" nie, waehrend die Notizwand denselben Chip zeigte (Pruefer,
+ * Runde 1). Welche Textfelder zaehlen, entscheidet dieselbe Liste wie bei
+ * der Ableitung der `tagged`-Kanten (derive.TEXT_FIELDS), damit Schlagwort
+ * und Kante nie auseinanderlaufen. Doppelte (Gross/Klein, Umlaute) fallen
+ * weg, die erste Schreibweise gewinnt -- das Feld vor dem Text.
+ *
+ * Zwischengespeichert je Satz, solange Text und Feld gleich sind: das
+ * Universum fragt bei jedem Neubau alle 10 000 Saetze, und den Text dafuer
+ * jedes Mal neu zu zerlegen kostete mehr als der ganze Bau.
+ */
+const TAG_CACHE = new Map();
+const TAG_CACHE_MAX = 200000;
+
 function tagsOf(record) {
   const d = (record && record.data) || {};
-  const out = [];
-  if (Array.isArray(d.tags)) {
-    for (const t of d.tags) {
-      if (typeof t === 'string' && t.trim()) out.push(t.trim().replace(/^#/, ''));
-    }
+  const feld = Array.isArray(d.tags) ? d.tags : [];
+  const felder = (derive().TEXT_FIELDS[record && record.type]) || [];
+  let text = '';
+  for (const f of felder) if (typeof d[f] === 'string' && d[f].includes('#')) text += `${d[f]}\n`;
+  const schluessel = feld.length ? feld.join('\u0000') : '';
+  const id = record && typeof record.id === 'string' ? record.id : null;
+  if (id) {
+    const hit = TAG_CACHE.get(id);
+    if (hit && hit.text === text && hit.feld === schluessel) return hit.out.slice();
   }
-  return out;
+  const out = [];
+  const seen = new Set();
+  const nimm = (raw) => {
+    if (typeof raw !== 'string') return;
+    const t = raw.trim().replace(/^#/, '');
+    if (!t) return;
+    const key = fold(t);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push(t);
+  };
+  for (const t of feld) nimm(t);
+  if (text) {
+    try {
+      for (const t of derive().extractLinks(text).tags) nimm(t);
+    } catch { /* ein Text, der sich nicht zerlegen laesst, hat eben keine Schlagworte */ }
+  }
+  if (id) {
+    if (TAG_CACHE.size >= TAG_CACHE_MAX) TAG_CACHE.clear();
+    TAG_CACHE.set(id, { text, feld: schluessel, out });
+  }
+  return out.slice();
+}
+
+/** derive.js erst beim ersten Gebrauch laden: es braucht view.js nicht, aber so bleibt die Reihenfolge egal. */
+let deriveMod = null;
+function derive() {
+  if (!deriveMod) deriveMod = require('./derive');
+  return deriveMod;
 }
 
 /* ------------------------------------------------------------ buildGraph */
@@ -540,12 +611,16 @@ function eigeneTags(record) {
   return new Set(tagsOf(record).map((t) => fold(t)));
 }
 
+function zaehlt(term, tags) {
+  return !STOPWORDS.has(term) && !tags.has(term) && !NUR_ZIFFERN_RE.test(term);
+}
+
 function termMap(record) {
   const text = textOf(record);
   const tags = eigeneTags(record);
   const map = new Map();
   for (const span of tokenSpans(text, 3)) {
-    if (STOPWORDS.has(span.term) || tags.has(span.term)) continue;
+    if (!zaehlt(span.term, tags)) continue;
     const key = stamm(span.term);
     if (!map.has(key)) map.set(key, text.slice(span.start, span.end));
   }
@@ -556,9 +631,44 @@ function termSet(record) {
   const set = new Set();
   const tags = eigeneTags(record);
   for (const term of tokenise(textOf(record), 3)) {
-    if (!STOPWORDS.has(term) && !tags.has(term)) set.add(stamm(term));
+    if (zaehlt(term, tags)) set.add(stamm(term));
   }
   return set;
+}
+
+/** Zeichen, nach denen ein Wort einen Satz (oder eine Zeile, eine Liste) anfaengt. */
+const SATZANFANG_RE = /[.!?:;\n\r#*>|(\[\-\u2013\u2014\u201e\u201c"'\u00bb\u00ab\u2026]/;
+
+/**
+ * Wie ein Wort im Text steht, je Stammform: `gross` -- mindestens einmal
+ * mitten im Satz gross geschrieben (im Deutschen: ein Hauptwort, ein Name),
+ * `klein` -- mindestens einmal klein geschrieben (ein Verb, ein Adjektiv,
+ * "drucken" neben "Druck"). Fuer die Regel, wann EIN gemeinsames Wort als
+ * Grund genuegt (suggestLinks): "Licht" ja, "bestellen" nein.
+ */
+function termInfo(record) {
+  const text = textOf(record);
+  const tags = eigeneTags(record);
+  const map = new Map();
+  for (const span of tokenSpans(text, 3)) {
+    if (!zaehlt(span.term, tags)) continue;
+    const key = stamm(span.term);
+    let info = map.get(key);
+    if (!info) map.set(key, (info = { gross: false, klein: false }));
+    const erstes = text[span.start];
+    const istGross = erstes !== erstes.toLowerCase();
+    if (!istGross) { info.klein = true; continue; }
+    let i = span.start - 1;
+    while (i >= 0 && (text[i] === ' ' || text[i] === '\t')) i--;
+    if (i >= 0 && !SATZANFANG_RE.test(text[i])) info.gross = true;
+  }
+  return map;
+}
+
+/** Die Stammform eines Titels aus genau einem Wort ("Jonas", "Crema"), sonst null. */
+function titelWort(record) {
+  const woerter = tokenise(label(record), 3);
+  return woerter.length === 1 ? stamm(woerter[0]) : null;
 }
 
 function jaccard(a, b) {
@@ -573,7 +683,7 @@ function jaccard(a, b) {
 /**
  * Propose records that look related to `recordId` -- and stop there.
  *
- * Score = 0.6 * tag overlap + 0.4 * vocabulary overlap, both Jaccard. Records
+ * Score = 0.6 * tag overlap + 0.4 * vocabulary overlap (Jaccard). Records
  * that are already connected (in either direction, by any edge) are excluded:
  * suggesting what already exists wastes the user's attention.
  *
@@ -583,10 +693,20 @@ function jaccard(a, b) {
  * aus der Volltextsuche vorgefiltert, siehe src/graph/universum.js); ohne sie
  * gilt wie bisher die juengste Scheibe des Tresors.
  *
+ * Seit Runde 1 der Pruefer (28.09.2026) gilt ausserdem:
+ *   - Ein gemeinsames Schlagwort allein ist kein Vorschlag; es braucht
+ *     mindestens ein gemeinsames Wort im Inhalt.
+ *   - EIN gemeinsames Wort genuegt nur, wenn es der Titel einer Seite ist
+ *     oder ein Hauptwort, das in beiden Texten nie klein steht (und, mit
+ *     `opts.df`, selten ist). "Licht" traegt, "bestellen" nicht.
+ *   - Mit `opts.df` (Stammform -> in wie vielen Saetzen, `opts.dfN` Saetze
+ *     gesamt) fallen Allerweltswoerter heraus (in mehr als 10 %, mindestens
+ *     5 Saetzen) und seltene Woerter wiegen schwerer (gewichtete Jaccard).
+ *
  * @param {object} store
  * @param {string} recordId
  * @param {{limit?:number, minScore?:number, types?:string[], pool?:number,
- *          candidates?:object[], exclude?:Set<string>}} [opts]
+ *          candidates?:object[], exclude?:Set<string>, df?:Map<string,number>, dfN?:number}} [opts]
  * @returns {Array<{id:string,type:string,label:string,score:number,tagScore:number,
  *                  termScore:number,sharedTags:string[],sharedTerms:string[],
  *                  gemeinsam:number,reason:string,grund:string}>}
@@ -620,7 +740,19 @@ function suggestLinks(store, recordId, opts = {}) {
   const ownTerms = new Set(ownWords.keys());
   const ownTags = new Set(tagsOf(record).map((t) => fold(t)));
   const ownTagLabels = new Map(tagsOf(record).map((t) => [fold(t), t]));
-  if (!ownTerms.size && !ownTags.size) return [];
+  if (!ownTerms.size) return [];
+  let ownInfo = null; // erst gebraucht, wenn ein Kandidat nur EIN Wort teilt
+  const ownTitel = titelWort(record);
+
+  // Wie haeufig ein Wort im Tresor ist (Vertrag E, Runde 1): wer es mitgibt
+  // (src/graph/universum.js), bekommt seltene Woerter hoeher gewichtet und
+  // Allerweltswoerter ganz heraus. Ohne Tabelle zaehlen alle gleich.
+  const df = opts.df && typeof opts.df.get === 'function' ? opts.df : null;
+  const n = df ? Math.max(1, Number(opts.dfN) || 1) : 0;
+  const gemeinAb = df ? Math.max(5, Math.ceil(n * 0.1)) : Infinity;
+  const seltenBis = df ? Math.max(3, Math.ceil(n * 0.03)) : Infinity;
+  const gewicht = (t) => (df ? Math.log(1 + n / Math.max(1, df.get(t) || 1)) : 1);
+  const informativ = (t) => !df || (df.get(t) || 0) <= gemeinAb;
 
   let candidates = [];
   const seen = new Set();
@@ -655,17 +787,49 @@ function suggestLinks(store, recordId, opts = {}) {
     const tagScore = jaccard(ownTags, otherTags);
 
     const otherTerms = termSet(other);
-    const termScore = jaccard(ownTerms, otherTerms);
+    const geteilt = [];
+    for (const term of ownTerms) if (otherTerms.has(term) && informativ(term)) geteilt.push(term);
+    // Ein gemeinsames Schlagwort allein ist kein Grund: beide haengen ueber
+    // #schule ohnehin im selben Thema. Verbunden wird, was INHALT teilt.
+    if (!geteilt.length) continue;
+    if (geteilt.length === 1) {
+      // EIN Wort genuegt nur, wenn es etwas traegt: der Titel einer der
+      // beiden Seiten ("Jonas" -> "Telefonat mit Jonas"), oder ein seltenes
+      // Hauptwort, das nirgends klein geschrieben steht ("Licht" ja,
+      // "bestellen" und "drucken" nein).
+      const t = geteilt[0];
+      const titel = t === ownTitel || t === titelWort(other);
+      if (!titel) {
+        if (!ownInfo) ownInfo = termInfo(record);
+        const a = ownInfo.get(t) || { gross: false, klein: true };
+        const b = termInfo(other).get(t) || { gross: false, klein: true };
+        const hauptwort = (a.gross || b.gross) && !a.klein && !b.klein;
+        const selten = !df || (df.get(t) || 0) <= seltenBis;
+        if (!hauptwort || !selten) continue;
+      }
+    }
+
+    // Die Zahl, die zaehlt (und die Schwelle), bleibt die einfache Jaccard-
+    // Aehnlichkeit -- nur ohne Allerweltswoerter im Schnitt. Fuer die
+    // Reihenfolge zaehlen seltene Woerter mehr (gewichtete Jaccard): wer
+    // "Chloroplasten" teilt, steht vor dem, der "Wasser" teilt.
+    let vereinigung = ownTerms.size;
+    for (const t of otherTerms) if (!ownTerms.has(t)) vereinigung++;
+    const termScore = vereinigung > 0 ? geteilt.length / vereinigung : 0;
     const score = 0.6 * tagScore + 0.4 * termScore;
     if (score < minScore) continue;
-
-    let gemeinsam = 0;
-    const sharedTerms = [];
-    for (const term of ownTerms) {
-      if (!otherTerms.has(term)) continue;
-      gemeinsam++;
-      if (sharedTerms.length < 5) sharedTerms.push(ownWords.get(term) || term);
+    let schnittW = 0;
+    let vereinigungW = 0;
+    for (const t of ownTerms) {
+      const w = gewicht(t);
+      vereinigungW += w;
+      if (otherTerms.has(t) && informativ(t)) schnittW += w;
     }
+    for (const t of otherTerms) if (!ownTerms.has(t)) vereinigungW += gewicht(t);
+    const rang = 0.6 * tagScore + 0.4 * (vereinigungW > 0 ? schnittW / vereinigungW : 0);
+
+    const gemeinsam = geteilt.length;
+    const sharedTerms = geteilt.slice(0, 5).map((term) => ownWords.get(term) || term);
 
     const reasons = [];
     if (sharedTags.length) reasons.push(`gemeinsame Schlagworte: ${sharedTags.slice(0, 3).map((t) => `#${t}`).join(', ')}`);
@@ -676,6 +840,7 @@ function suggestLinks(store, recordId, opts = {}) {
       type: other.type,
       label: label(other),
       score: Math.round(score * 1000) / 1000,
+      rang,
       tagScore: Math.round(tagScore * 1000) / 1000,
       termScore: Math.round(termScore * 1000) / 1000,
       sharedTags,
@@ -688,8 +853,8 @@ function suggestLinks(store, recordId, opts = {}) {
     });
   }
 
-  scored.sort((a, b) => (b.score === a.score ? (a.id < b.id ? -1 : 1) : b.score - a.score));
-  return scored.slice(0, limit);
+  scored.sort((a, b) => (b.rang - a.rang) || (b.score - a.score) || (a.id < b.id ? -1 : 1));
+  return scored.slice(0, limit).map(({ rang, ...rest }) => rest);
 }
 
 /**
@@ -722,5 +887,6 @@ module.exports = {
   stamm,
   termMap,
   termSet,
+  termInfo,
   STOPWORDS,
 };

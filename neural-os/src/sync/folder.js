@@ -38,6 +38,20 @@ const {
  *                                       versiegelt), Größe und SHA-256
  *   <ordner>/<deviceId>/records.enc     AES-256-GCM(Inhaltsschlüssel,
  *                                       gzip(Kopfzeile + ein Satz je Zeile))
+ *   <ordner>/<deviceId>/dateien/<hash>.enc
+ *                                       Inhalt eines Datei-Satzes (Paket K2),
+ *                                       einzeln versiegelt, AAD = Hash
+ *
+ * Dateien (Paket K2, Bauplan 2.9): Die Kopfzeile nennt die Hashes der Blobs,
+ * die der Schreiber hat (`hat`). Abgelegt wird nur, was einem Empfänger laut
+ * SEINER letzten Kopfzeile fehlt, höchstens 50 MB je Datei; was alle haben,
+ * verschwindet beim nächsten Schreiben wieder. Jeder Blob hat einen eigenen
+ * Schlüssel (aus einem Geheimnis in sync-folder.json und dem Hash); er reist
+ * in der versiegelten Kopfzeile (`dateien`). Mit dem Inhaltsschlüssel selbst
+ * geht das nicht: Der ist je Generation neu, und jeder Abgleich müsste sonst
+ * alle Blobs neu schreiben. Der Leser prüft den Hash, legt den Blob ab und
+ * erst dann den Satz an; ein Blob, der sich nicht öffnen lässt, steht in
+ * seiner nächsten Kopfzeile (`unlesbar`), und der Schreiber legt ihn neu ab.
  *
  * Immer verschlüsselt, auch ohne PIN: Wer den Paarschlüssel nicht hat, liest
  * nichts, und wer ihn hat, weiß, dass das Postfach vom Partner kommt. Die
@@ -99,6 +113,25 @@ const TMP_STALE_MS = 60 * 60 * 1000;
 const MAX_RESULTS = 2000;
 const MAX_WARNINGS = 50;
 
+/* Dateien im Postfach (Paket K2, Bauplan 2.9) */
+const DATEIEN_ORDNER = 'dateien';
+const DATEI_ENDUNG = '.enc';
+const DATEI_NAME_RE = /^[0-9a-f]{64}\.enc$/;
+/** Größer reist eine Datei nicht. */
+const MAX_DATEI_BYTES = 50 * 1024 * 1024;
+/** Was ein Siegel zum Inhalt hinzufügt: IV und Prüfwert. */
+const SIEGEL_BYTES = IV_BYTES + TAG_BYTES;
+/**
+ * So viel bleibt auf einem Stick immer frei, beim Ablegen im Postfach wie
+ * beim Übernehmen in den Tresor: Der Tresor des Sticks muss weiter schreiben
+ * können, auch wenn ein Partner viele Anhänge hat.
+ */
+const PLATZ_RESERVE = 16 * 1024 * 1024;
+/** So oft wird ein Blob, den ein Empfänger nicht lesen konnte, neu abgelegt; dann nicht mehr. */
+const MAX_NEU_ABLEGEN = 3;
+/** Wie ein Fehler beim Ablegen eines Dateiinhalts heißt (storageError). */
+const WAS_DATEI = Object.freeze({ platz: 'Der Dateiinhalt', sonst: 'Das Ablegen der Datei' });
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -117,8 +150,11 @@ function notFound(message) {
  * full, write-protected or simply gone far more often than a hard disk is,
  * and "EACCES" on a screen helps nobody.
  */
-function storageError(err, what) {
+function storageError(err, was) {
   const code = err && err.code;
+  // `was` darf je nach Fall anders heißen ({platz, sonst}): "Der Dateiinhalt
+  // wurde nicht geschrieben", aber "Das Ablegen der Datei ist fehlgeschlagen".
+  const what = was && typeof was === 'object' ? (code === 'ENOSPC' ? was.platz : was.sonst) : was;
   if (code === 'ENOSPC') {
     return new StorageError(
       `Auf dem Datenträger ist kein Platz mehr frei. ${what} wurde nicht geschrieben; `
@@ -141,6 +177,19 @@ function storageError(err, what) {
     );
   }
   return new StorageError(`${what} ist fehlgeschlagen: ${err && err.message ? err.message : String(err)}`);
+}
+
+/**
+ * Ein Fehler beim Ablegen eines Blobs im eigenen Tresor (store.files.put):
+ * dieselbe Meldung wie beim Schreiben, als Abbruch des ganzen Postfachs
+ * markiert. Der Speicher reicht den Code nur im Text weiter.
+ */
+function ablageFehler(err) {
+  const text = [err && err.message, err && err.details && err.details.cause, err && err.code].filter(Boolean).join(' ');
+  const m = /\b(ENOSPC|EROFS|EACCES|EPERM|EIO|EBUSY|ENOENT)\b/.exec(text);
+  const e = storageError(m ? { code: m[1] } : err, WAS_DATEI);
+  e.dateiAbbruch = true;
+  return e;
 }
 
 /** Directory fsync: best effort, unsupported on several filesystems. */
@@ -196,6 +245,33 @@ function oeffnen(schluessel, buf, aad) {
 
 const aadPostfach = (von, generation) => `nos-postfach|${von}|${generation}`;
 const aadPaar = (von, an, generation) => `nos-paar|${von}|${an}|${generation}`;
+
+/**
+ * Der Schlüssel eines Blobs im Postfach: aus dem Geheimnis dieser KI und dem
+ * Hash. Derselbe Blob hat in jedem Zielordner und in jeder Generation
+ * denselben Schlüssel, also muss er nur einmal geschrieben werden.
+ */
+function dateiSchluessel(geheimnis, hash) {
+  return crypto.createHmac('sha256', geheimnis).update(`nos-datei|${hash}`).digest();
+}
+
+/** Freier Platz (Bytes) dort, wo `dir` liegt, oder null, wenn das Dateisystem es nicht sagt. */
+function freierPlatz(dir) {
+  if (typeof fs.statfsSync !== 'function') return null;
+  let d = path.resolve(dir);
+  for (let i = 0; i < 64; i++) {
+    try {
+      const st = fs.statfsSync(d);
+      const frei = Number(st.bavail) * Number(st.bsize);
+      return Number.isFinite(frei) ? frei : null;
+    } catch (err) {
+      const oben = path.dirname(d);
+      if (!err || err.code !== 'ENOENT' || oben === d) return null;
+      d = oben;
+    }
+  }
+  return null;
+}
 
 /**
  * Ein Postfach bauen (rein, ohne Datei). Auch für Tests, die ein Postfach
@@ -318,6 +394,8 @@ function createFolderSync(deps = {}) {
 
   /** One folder operation at a time: two clicks must not write the same mailbox twice. */
   let running = null;
+  /** Welche zu großen Dateien zuletzt gemeldet wurden: einmal sagen, nicht bei jedem Abgleich. */
+  let zuGrossGemeldet = '';
 
   /** @type {{v:number, devices:object, ziele:object}|null} lazily loaded, kept in memory */
   let state = null;
@@ -487,8 +565,9 @@ function createFolderSync(deps = {}) {
         const parsed = JSON.parse(attempt());
         if (parsed && typeof parsed === 'object' && parsed.devices && typeof parsed.devices === 'object') {
           const ziele = parsed.ziele && typeof parsed.ziele === 'object' && !Array.isArray(parsed.ziele) ? parsed.ziele : {};
+          const dateien = parsed.dateien && typeof parsed.dateien === 'object' && !Array.isArray(parsed.dateien) ? parsed.dateien : null;
           if (klar) alsKlartext();
-          return { v: STATE_VERSION, devices: parsed.devices, ziele };
+          return { v: STATE_VERSION, devices: parsed.devices, ziele, ...(dateien ? { dateien } : {}) };
         }
       } catch {
         /* try the other encoding before giving up */
@@ -567,6 +646,269 @@ function createFolderSync(deps = {}) {
       bases[remote.id] = { h: merge.fingerprint(remote), at: at || nowIso(), note: 'resolved' };
     }
     return bases;
+  }
+
+  /* ------------------------------------------- Dateien im Postfach (K2) */
+
+  const hatAblage = () => !!(store.files && typeof store.files.has === 'function' && typeof store.files.read === 'function');
+
+  /**
+   * Der Stand der Blobs in sync-folder.json:
+   *   geheimnis  32 Bytes, daraus der Schlüssel je Blob (dateiSchluessel)
+   *   ziele      {<ziel>: {<hash>: bytes}} was in welchem Zielordner mit
+   *              DIESEM Geheimnis vollständig liegt
+   *   seit       {<hash>: generation} seit wann der Blob so im Postfach steht
+   *   neu        {<hash>: n} wie oft er neu abgelegt wurde (ein Empfänger
+   *              konnte ihn nicht lesen); zählt zum Inhalt des Postfachs
+   * Geht die Datei verloren, gehen Geheimnis und Liste zusammen verloren:
+   * Dann wird alles neu geschrieben, nie ein Blob mit fremdem Schlüssel
+   * weitergereicht.
+   */
+  function dateiStand() {
+    const s = loadState();
+    if (!s.dateien || typeof s.dateien !== 'object' || Array.isArray(s.dateien)) s.dateien = {};
+    const d = s.dateien;
+    let geheimnis = null;
+    try { geheimnis = typeof d.geheimnis === 'string' ? Buffer.from(d.geheimnis, 'base64') : null; } catch { geheimnis = null; }
+    if (!geheimnis || geheimnis.length !== KEY_BYTES) {
+      d.geheimnis = crypto.randomBytes(KEY_BYTES).toString('base64');
+      d.ziele = {};
+      d.seit = {};
+    }
+    for (const k of ['ziele', 'seit', 'neu']) {
+      if (!d[k] || typeof d[k] !== 'object' || Array.isArray(d[k])) d[k] = {};
+    }
+    return d;
+  }
+
+  function dateiZiel(zielKey) {
+    const d = dateiStand();
+    if (!d.ziele[zielKey] || typeof d.ziele[zielKey] !== 'object' || Array.isArray(d.ziele[zielKey])) d.ziele[zielKey] = {};
+    return d.ziele[zielKey];
+  }
+
+  /**
+   * Fehlt dem Empfänger dieser Blob? Laut seiner letzten Kopfzeile (`hat`).
+   * Eine Kopfzeile ohne `hat` stammt von einer Version vor K2: Die kann mit
+   * einem Blob nichts anfangen. Ohne jede Angabe (neu gekoppelt, oder seine
+   * Kopfzeile wurde vor K2 gelesen) fehlt ihm alles: lieber einmal zu viel
+   * ablegen als eine Datei nie; seine nächste Kopfzeile räumt es auf.
+   */
+  function fehltBei(id, s) {
+    const info = s.devices[id] && s.devices[id].dateien;
+    if (info && Array.isArray(info.hat)) {
+      const hat = new Set(info.hat);
+      return (h) => !hat.has(h);
+    }
+    if (info && info.alt === true) return () => false;
+    return () => true;
+  }
+
+  /** Größe des Inhalts (Bytes) oder null, wenn der Blob nicht da ist. Ein Tresor-Siegel ist nie kleiner als der Inhalt. */
+  function blobGroesse(hash) {
+    let st;
+    try {
+      st = fs.statSync(store.files.path(hash));
+    } catch {
+      return null;
+    }
+    if (!vault.enabled || st.size <= MAX_DATEI_BYTES || st.size > MAX_DATEI_BYTES + 4096) return st.size;
+    try {
+      return store.files.read(hash).length;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Ein Dateiname für einen Satz: ohne Steuerzeichen, kurz. */
+  function anzeigeName(name, hash) {
+    const n = typeof name === 'string' ? name.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 100) : '';
+    return n || hash.slice(0, 12);
+  }
+
+  /**
+   * Was ins Postfach kommt: die Blobs, die ich habe (`hat`), die ein
+   * Empfänger nicht hat (`box`), die zu groß sind, und was ich im Postfach
+   * eines Partners nicht lesen konnte (`unlesbar`, für meine Kopfzeile).
+   * Rein bis auf `neu`/`seit` (ein Empfänger meldet einen Blob, der seit dem
+   * letzten Ablegen unlesbar ist: dann neu ablegen).
+   */
+  function dateienPlanen(dateiSaetze, empfaenger, s) {
+    const leer = { hat: [], box: [], groesse: {}, zuGross: [], unlesbar: {}, geheimnis: null, stand: '' };
+    if (!hatAblage()) return leer;
+    const d = dateiStand();
+    const hatSet = new Set();
+    const lebend = new Map();
+    for (const r of dateiSaetze) {
+      const h = r && r.data ? r.data.hash : null;
+      if (!isHex64(h) || !store.files.has(h)) continue;
+      hatSet.add(h);
+      if (!r.deletedAt && !lebend.has(h)) lebend.set(h, anzeigeName(r.data.name, h));
+    }
+    const hat = [...hatSet].sort();
+
+    const fehlt = empfaenger.map((e) => fehltBei(e.id, s));
+    const box = [];
+    const groesse = {};
+    const zuGross = [];
+    for (const [h, name] of lebend) {
+      if (!fehlt.some((f) => f(h))) continue;
+      const n = blobGroesse(h);
+      if (n === null) continue;
+      if (n > MAX_DATEI_BYTES) {
+        zuGross.push({ hash: h, name });
+        continue;
+      }
+      groesse[h] = n;
+      box.push(h);
+    }
+    box.sort();
+
+    // Ein Empfänger konnte einen Blob nicht lesen, der seitdem nicht neu
+    // abgelegt wurde: in jedem Zielordner neu ablegen (höchstens ein paar Mal).
+    for (const h of box) {
+      const seit = d.seit[h];
+      if (!Number.isInteger(seit) || (d.neu[h] || 0) >= MAX_NEU_ABLEGEN) continue;
+      const kaputt = empfaenger.some((e) => {
+        const info = s.devices[e.id] && s.devices[e.id].dateien;
+        const g = info && info.kaputt && typeof info.kaputt === 'object' ? info.kaputt[h] : undefined;
+        return Number.isInteger(g) && g >= seit;
+      });
+      if (!kaputt) continue;
+      d.neu[h] = (Number.isInteger(d.neu[h]) ? d.neu[h] : 0) + 1;
+      delete d.seit[h];
+      for (const z of Object.values(d.ziele)) if (z && typeof z === 'object') delete z[h];
+      log.info(`Ein Empfänger konnte den Blob ${h.slice(0, 12)} nicht lesen; er wird neu abgelegt.`);
+    }
+
+    const unlesbar = {};
+    for (const e of [...empfaenger].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+      const u = s.devices[e.id] && s.devices[e.id].unlesbar;
+      if (!u || typeof u !== 'object') continue;
+      const offen = {};
+      for (const h of Object.keys(u).sort()) {
+        if (isHex64(h) && Number.isInteger(u[h]) && !store.files.has(h)) offen[h] = u[h];
+      }
+      if (Object.keys(offen).length) unlesbar[e.id] = offen;
+    }
+
+    // Zählt zum Inhalt des Postfachs, auch ohne jede Datei: Nach dem Update
+    // auf K2 schreibt so jede KI einmal neu, und ihr Partner erfährt aus der
+    // Kopfzeile, was sie hat. Sonst legte er ihr nie etwas ab.
+    const stand = sha256(JSON.stringify(['k2', hat, box.map((h) => [h, d.neu[h] || 0]), unlesbar]));
+    return { hat, box, groesse, zuGross, unlesbar, geheimnis: Buffer.from(d.geheimnis, 'base64'), stand };
+  }
+
+  /** Seit welcher Generation ein Blob im Postfach steht; was nicht mehr drin ist, vergessen. */
+  function dateienSeit(box, generation) {
+    if (!hatAblage()) return false;
+    const d = dateiStand();
+    const drin = new Set(box);
+    let geaendert = false;
+    for (const h of box) {
+      if (!Number.isInteger(d.seit[h])) { d.seit[h] = generation; geaendert = true; }
+    }
+    for (const h of Object.keys(d.seit)) {
+      if (!drin.has(h)) { delete d.seit[h]; geaendert = true; }
+    }
+    return geaendert;
+  }
+
+  /**
+   * Die Blobs aus `dp.box` in `<postfach>/dateien/` ablegen, soweit sie dort
+   * nicht schon vollständig liegen. Vor dem Postfach selbst: Bricht es ab
+   * (Stick voll), liegt dort weiter das alte, gültige Postfach; was schon
+   * abgelegt ist, zählt beim nächsten Mal.
+   * @returns {Promise<{abgelegt:number, liegt:Set<string>}>}
+   */
+  async function dateienAblegen(mine, zielKey, dp) {
+    const liegt = new Set();
+    if (!dp.box.length) return { abgelegt: 0, liegt };
+    const dz = dateiZiel(zielKey);
+    const ordner = path.join(mine, DATEIEN_ORDNER);
+    const fehlend = [];
+    for (const h of dp.box) {
+      let da = false;
+      if (Number.isInteger(dz[h])) {
+        try {
+          da = (await fs.promises.stat(path.join(ordner, `${h}${DATEI_ENDUNG}`))).size === dz[h] + SIEGEL_BYTES;
+        } catch {
+          da = false;
+        }
+      }
+      if (da) liegt.add(h);
+      else {
+        delete dz[h];
+        fehlend.push(h);
+      }
+    }
+    if (!fehlend.length) return { abgelegt: 0, liegt };
+
+    try {
+      await fs.promises.mkdir(ordner, { recursive: true });
+    } catch (err) {
+      throw storageError(err, WAS_DATEI);
+    }
+    await sweepTmp(ordner);
+    const bytes = fehlend.reduce((summe, h) => summe + (dp.groesse[h] || 0) + SIEGEL_BYTES, 0);
+    const frei = freierPlatz(ordner);
+    if (frei !== null && frei - bytes < PLATZ_RESERVE) throw storageError({ code: 'ENOSPC' }, WAS_DATEI);
+
+    let abgelegt = 0;
+    try {
+      for (const h of fehlend) {
+        let klar;
+        try {
+          klar = store.files.read(h);
+        } catch {
+          continue; // gerade nicht mehr da: dann steht er nicht in der Kopfzeile
+        }
+        if (!Buffer.isBuffer(klar) || klar.length > MAX_DATEI_BYTES || sha256(klar) !== h) continue;
+        const schluessel = dateiSchluessel(dp.geheimnis, h);
+        try {
+          await writeFileAtomic(path.join(ordner, `${h}${DATEI_ENDUNG}`), siegeln(schluessel, klar, h), WAS_DATEI);
+        } finally {
+          schluessel.fill(0);
+        }
+        dz[h] = klar.length;
+        liegt.add(h);
+        abgelegt++;
+      }
+    } catch (err) {
+      saveState(); // was schon liegt, muss beim nächsten Mal nicht noch einmal geschrieben werden
+      throw err;
+    }
+    return { abgelegt, liegt };
+  }
+
+  /** Nach dem Postfach: Blobs, die kein Empfänger mehr braucht, wegräumen (Platz auf dem Stick des Partners). */
+  async function dateienAufraeumen(mine, zielKey, box) {
+    const behalten = new Set(box);
+    const d = dateiStand();
+    const dz = d.ziele[zielKey];
+    if (dz && typeof dz === 'object') {
+      for (const h of Object.keys(dz)) if (!behalten.has(h)) delete dz[h];
+    }
+    const ordner = path.join(mine, DATEIEN_ORDNER);
+    let namen;
+    try {
+      namen = await fs.promises.readdir(ordner);
+    } catch {
+      return 0;
+    }
+    let weg = 0;
+    for (const name of namen) {
+      if (!DATEI_NAME_RE.test(name) || behalten.has(name.slice(0, 64))) continue;
+      try {
+        await fs.promises.unlink(path.join(ordner, name));
+        weg++;
+      } catch { /* beim nächsten Mal */ }
+    }
+    if (!behalten.size) {
+      await sweepTmp(ordner);
+      try { await fs.promises.rmdir(ordner); } catch { /* nicht leer oder schon weg */ }
+    }
+    return weg;
   }
 
   /* --------------------------------------------------------------- folder */
@@ -698,6 +1040,7 @@ function createFolderSync(deps = {}) {
    */
   function collectLocal(report) {
     const lines = [];
+    const dateiSaetze = [];
     let count = 0;
     for (const type of merge.SYNC_TYPES) {
       if (!merge.isSyncable(type)) continue;
@@ -706,11 +1049,12 @@ function createFolderSync(deps = {}) {
         .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       for (const record of items) {
         lines.push(JSON.stringify(record));
+        if (record.type === 'file') dateiSaetze.push(record);
         count++;
       }
       report({ phase: 'collect', type, done: count });
     }
-    return { lines, count };
+    return { lines, count, dateiSaetze };
   }
 
   function passt(manifest, stand) {
@@ -787,7 +1131,7 @@ function createFolderSync(deps = {}) {
     const zielKey = typeof opts.ziel === 'string' && opts.ziel ? opts.ziel : path.resolve(dir);
     const out = {
       written: 0, bytes: 0, deviceId: ich, at: null, encrypted: true, warnings: [], path: mine,
-      geschrieben: false, generation: null, grund: null, zwilling: false,
+      geschrieben: false, generation: null, grund: null, zwilling: false, dateien: 0,
     };
 
     const empfaenger = (pf.empfaenger() || []).filter((e) => e && e.id !== ich && DEVICE_ID_RE.test(e.id)
@@ -795,7 +1139,7 @@ function createFolderSync(deps = {}) {
     if (!empfaenger.length) return { ...out, grund: 'keine-partner' };
 
     report({ phase: 'collect', done: 0 });
-    const { lines, count } = collectLocal(report);
+    const { lines, count, dateiSaetze } = collectLocal(report);
     const partner = empfaenger.map((e) => ({ id: e.id, name: typeof e.name === 'string' ? e.name : null }))
       .sort((a, b) => (a.id < b.id ? -1 : 1));
     // Der eigene Name steht im Manifest: ein neuer Name ist ein neuer Stand.
@@ -803,9 +1147,44 @@ function createFolderSync(deps = {}) {
     // ist mit dem alten versiegelt, und das kann der Partner nicht mehr
     // öffnen (Prüfung Runde 2, zweimal [Koppeln]). Nur ein Hash davon.
     const schluesselStand = empfaenger.map((e) => `${e.id}:${sha256(e.schluessel).slice(0, 16)}`).sort();
-    const inhalt = sha256(`${lines.join('\n')}\n#${JSON.stringify(partner)}\n#${deviceName()}\n#${schluesselStand.join(',')}`).slice(0, 24);
-
     const s = loadState();
+    // Die Basen, die mitreisen (nur die Fingerabdrücke): Eine neue Basis ist
+    // ein neuer Stand, auch wenn sich kein Satz geändert hat (Konflikt zu
+    // meinen Gunsten entschieden). Sonst bekäme sie dieselbe Generation wie
+    // das Postfach davor, und merge.classify hielte sie beim Partner für die
+    // jüngere, obwohl er sie schon überholt hat (ABA: A löscht erneut, und
+    // die lebende Fassung kam zurück; Prüfung von Welle 1).
+    const basenJe = {};
+    const vgJe = {};
+    for (const e of empfaenger) {
+      const eigene = (s.devices[e.id] && s.devices[e.id].bases) || {};
+      const basen = {};
+      const vg = {};
+      for (const [id, b] of Object.entries(eigene)) {
+        const h = merge.baseHash(b);
+        // "blob-missing" (vor Paket K2): übersprungen, nie vereinbart.
+        if (!h || (b && b.note === 'blob-missing')) continue;
+        basen[id] = h;
+        if (b && Number.isInteger(b.vg)) vg[id] = b.vg;
+      }
+      basenJe[e.id] = basen;
+      vgJe[e.id] = vg;
+    }
+    const basenStand = sha256(JSON.stringify(empfaenger.map((e) => [e.id, Object.keys(basenJe[e.id]).sort()
+      .map((id) => `${id}=${basenJe[e.id][id]}`)]).sort((a, b) => (a[0] < b[0] ? -1 : 1))));
+    // Die Blobs: welche ich habe, welche ins Postfach kommen (Paket K2).
+    const dp = dateienPlanen(dateiSaetze, empfaenger, s);
+    const dateiWarnungen = dp.zuGross.map((z) => `„${z.name}“ ist größer als 50 MB und bleibt auf diesem Stick.`);
+    const zuGrossStand = dp.zuGross.map((z) => z.hash).sort().join(',');
+    if (zuGrossStand !== zuGrossGemeldet) {
+      zuGrossGemeldet = zuGrossStand;
+      dp.zuGross.forEach((z, i) => {
+        log.warn(dateiWarnungen[i]);
+        emit('sync.warning', { kind: 'datei-zu-gross', hash: z.hash, name: z.name, message: dateiWarnungen[i] });
+      });
+    }
+    const inhalt = sha256(`${lines.join('\n')}\n#${JSON.stringify(partner)}\n#${deviceName()}\n#${schluesselStand.join(',')}\n#${basenStand}${dp.stand ? `\n#${dp.stand}` : ''}`).slice(0, 24);
+
     const zielStand = s.ziele[zielKey] && typeof s.ziele[zielKey] === 'object' ? s.ziele[zielKey] : null;
     const vorhanden = await eigenesManifest(mine);
     const lesbar = !!(vorhanden && Number.isInteger(vorhanden.generation) && isHex64(vorhanden.sha256));
@@ -816,8 +1195,13 @@ function createFolderSync(deps = {}) {
     }
 
     const generation = pf.vergeben(inhalt);
+    const seitGeaendert = dateienSeit(dp.box, generation);
     if (vorhanden && zielStand && zielStand.generation === generation && passt(vorhanden, zielStand)) {
-      return { ...out, written: count, generation, grund: 'unveraendert' };
+      // Dieselbe Generation liegt dort schon. Fehlt dort ein Blob (weggeräumt,
+      // halb kopiert), wird er nachgelegt: gleicher Schlüssel, gleiche Kopfzeile.
+      const { abgelegt } = await dateienAblegen(mine, zielKey, dp);
+      if (abgelegt || seitGeaendert) saveState();
+      return { ...out, written: count, generation, grund: 'unveraendert', dateien: abgelegt, warnings: [...dateiWarnungen] };
     }
 
     try {
@@ -826,6 +1210,8 @@ function createFolderSync(deps = {}) {
       throw storageError(err, 'Das Anlegen des Postfachs');
     }
     const sweptTmp = await sweepTmp(mine);
+    // Erst die Blobs, dann das Postfach, das sie nennt.
+    const { abgelegt, liegt } = await dateienAblegen(mine, zielKey, dp);
 
     const stand = pf.stand();
     const kopf = {
@@ -843,7 +1229,21 @@ function createFolderSync(deps = {}) {
       // Die Schutzstufe reist mit: Der Partner schreibt nicht mehr an mich,
       // wenn er eine PIN hat und ich nicht (kopplung.js darfAn).
       pin: vault.enabled,
+      // Paket K2: welche Blobs ich habe (der Partner legt mir nur ab, was
+      // fehlt), welche in diesem Postfach liegen (mit ihrem Schlüssel), und
+      // welche aus dem Postfach eines Partners ich nicht lesen konnte.
+      hat: dp.hat,
+      dateien: {},
     };
+    if (dp.geheimnis) {
+      for (const h of dp.box) {
+        if (!liegt.has(h)) continue;
+        const schluessel = dateiSchluessel(dp.geheimnis, h);
+        kopf.dateien[h] = schluessel.toString('base64');
+        schluessel.fill(0);
+      }
+    }
+    if (Object.keys(dp.unlesbar).length) kopf.unlesbar = dp.unlesbar;
     // Generationen eines Zwillings, die diese KI nach seinem Verschwinden
     // verworfen hat (kopplung.js): Der Partner, der eine davon zuletzt las,
     // liest dieses Postfach trotzdem (Prüfung Runde 2).
@@ -852,17 +1252,8 @@ function createFolderSync(deps = {}) {
       const g = pf.gelesen(e.id) || {};
       kopf.gesehen[e.id] = Number.isInteger(g.generation) ? g.generation : 0;
       if (typeof g.inhalt === 'string') kopf.gesehenInhalt[e.id] = g.inhalt;
-      const eigene = (s.devices[e.id] && s.devices[e.id].bases) || {};
-      const basen = {};
-      const vg = {};
-      for (const [id, b] of Object.entries(eigene)) {
-        const h = merge.baseHash(b);
-        if (!h) continue;
-        basen[id] = h;
-        if (b && Number.isInteger(b.vg)) vg[id] = b.vg;
-      }
-      kopf.basen[e.id] = basen;
-      kopf.basenVg[e.id] = vg;
+      kopf.basen[e.id] = basenJe[e.id];
+      kopf.basenVg[e.id] = vgJe[e.id];
     }
 
     report({ phase: 'compress', done: count, total: count });
@@ -917,15 +1308,17 @@ function createFolderSync(deps = {}) {
     s.ziele[zielKey].bestaetigt = true;
     // Ein Postfach aus Protokoll 1 lag im Klartext; es hat hier nichts mehr zu suchen.
     try { await fs.promises.unlink(path.join(mine, ALT_RECORDS_NAME)); } catch { /* war nicht da */ }
+    // Was kein Empfänger mehr braucht, liegt nicht länger auf dem Stick.
+    if (hatAblage()) await dateienAufraeumen(mine, zielKey, [...liegt]);
     report({ phase: 'write', done: records.length, total: records.length });
 
-    const warnings = [];
+    const warnings = [...dateiWarnungen];
     if (sweptTmp) warnings.push(`${sweptTmp} Reste eines abgebrochenen Schreibvorgangs wurden entfernt.`);
     log.info(`${count} Einträge (Generation ${generation}) nach ${mine} geschrieben.`);
-    emit('sync.folder', { action: 'published', folder: dir, deviceId: ich, count, bytes: records.length, generation });
+    emit('sync.folder', { action: 'published', folder: dir, deviceId: ich, count, bytes: records.length, generation, dateien: abgelegt });
 
     return {
-      ...out, written: count, bytes: records.length, at, warnings, geschrieben: true, generation,
+      ...out, written: count, bytes: records.length, at, warnings, geschrieben: true, generation, dateien: abgelegt,
     };
   }
 
@@ -1188,15 +1581,12 @@ function createFolderSync(deps = {}) {
 
     if (remote.type === 'file' && (action === 'create' || action === 'restore' || action === 'update')) {
       const hash = remote.data && remote.data.hash;
-      // Dateiinhalte reisen erst mit Paket K2. Ein Satz ohne Inhalt sähe aus
-      // wie eine Datei und scheiterte beim ersten Öffnen.
-      if (typeof hash === 'string' && hash && !store.files.has(hash)) {
-        return {
-          status: 'skipped',
-          reason: 'blob-missing',
-          note: 'blob-missing',
-          detail: merge.WITHHELD_DETAIL['blob-missing'],
-        };
+      // Der Inhalt kam vorher (dateienHolen); ohne ihn wird kein Satz angelegt,
+      // der wie eine Datei aussähe und beim ersten Öffnen scheiterte. Keine
+      // Basis: Der Satz kommt nach, sobald der Inhalt da ist (zu groß, beim
+      // Partner selbst nicht da, im Postfach unlesbar).
+      if (typeof hash === 'string' && hash && !(hatAblage() && store.files.has(hash))) {
+        return { status: 'skipped', reason: 'blob-missing', detail: 'Der Inhalt dieser Datei ist nicht mitgekommen.' };
       }
     }
 
@@ -1274,6 +1664,15 @@ function createFolderSync(deps = {}) {
 
     for (const entry of planned.skip) {
       skipped++;
+      // Meine Fassung ist die neuere: Als vereinbart gilt ab jetzt die des
+      // Partners, mit der Generation von jetzt. Hat er sie beim nächsten Mal
+      // noch, bleibt meine; und er erfährt mit meinem nächsten Postfach, dass
+      // ich seine gesehen und überholt habe. Ohne das stand die alte Basis
+      // weiter da, und nach einem Hin und Zurück (ABA) auf beiden Seiten
+      // hielten sich beide für die neuere Seite und liefen still auseinander.
+      if (entry.reason === 'local-newer' && typeof entry.hash === 'string' && entry.hash) {
+        bases[entry.id] = { h: entry.hash, at, note: 'lokal' };
+      }
       push({ id: entry.id, type: entry.type, status: 'skipped', reason: entry.reason, detail: entry.detail });
     }
 
@@ -1528,11 +1927,77 @@ function createFolderSync(deps = {}) {
     if (box.stale) addWarning(`Das Postfach von "${box.deviceName || remoteId}" wurde zuletzt am ${box.at} geschrieben.`);
 
     const entry = deviceState(remoteId);
+    // Vor Paket K2 bekam ein Datei-Satz, dessen Inhalt nicht mitkam, eine
+    // Basis mit dem Vermerk "blob-missing" und kam danach nie mehr an. Das war
+    // keine Vereinbarung, nur ein Aufschub.
+    for (const [id, b] of Object.entries(entry.bases)) {
+      if (b && typeof b === 'object' && b.note === 'blob-missing') delete entry.bases[id];
+    }
     const eigeneBasen = basesFromResolvedConflicts(remoteId, { ...entry.bases });
     const bases = eigeneBasen;
     /** Die mitgereiste Basis (Kopfzeile), dahinter die Startinhalte. */
     let basenFern = {};
     let kopf = null;
+    /** Blobs dieses Postfachs, die sich nicht öffnen ließen: hash -> Generation (für meine Kopfzeile). */
+    const unlesbar = {};
+    let dateienGeholt = false;
+
+    /**
+     * Die Blobs, die dieses Postfach nennt und mir fehlen, VOR dem ersten
+     * Satz holen: Hash prüfen, ablegen (store.files.put), erst dann gibt es
+     * den Satz. Reicht der Platz nicht oder scheitert das Ablegen, wird aus
+     * diesem Postfach nichts übernommen (kein halber Stand) und die Meldung
+     * geht nach oben; beim nächsten Abgleich wird es noch einmal gelesen.
+     * Ein Blob, der sich nicht öffnen lässt, wird übergangen: Sein Satz kommt
+     * nicht (applyOne), und meine Kopfzeile sagt es dem Partner.
+     */
+    const dateienHolen = async () => {
+      dateienGeholt = true;
+      const liste = kopf.dateien && typeof kopf.dateien === 'object' && !Array.isArray(kopf.dateien) ? kopf.dateien : {};
+      if (!hatAblage()) return;
+      const fehlen = [];
+      for (const [h, k] of Object.entries(liste)) {
+        if (!isHex64(h) || store.files.has(h)) continue;
+        const schluessel = typeof k === 'string' ? Buffer.from(k, 'base64') : null;
+        const datei = path.join(box.path, DATEIEN_ORDNER, `${h}${DATEI_ENDUNG}`);
+        let groesse = -1;
+        try { groesse = (await fs.promises.stat(datei)).size; } catch { groesse = -1; }
+        if (!schluessel || schluessel.length !== KEY_BYTES || groesse < SIEGEL_BYTES || groesse > MAX_DATEI_BYTES + SIEGEL_BYTES) {
+          unlesbar[h] = box.generation;
+          continue;
+        }
+        fehlen.push({ h, schluessel, datei, groesse });
+      }
+      if (!fehlen.length) return;
+      const summe = fehlen.reduce((n, f) => n + f.groesse, 0);
+      const frei = freierPlatz(paths.files || paths.home);
+      if (frei !== null && frei - summe < PLATZ_RESERVE) {
+        const e = storageError({ code: 'ENOSPC' }, WAS_DATEI);
+        e.dateiAbbruch = true;
+        throw e;
+      }
+      for (const f of fehlen) {
+        let klar = null;
+        try {
+          klar = oeffnen(f.schluessel, await fs.promises.readFile(f.datei), f.h);
+        } catch {
+          klar = null;
+        } finally {
+          f.schluessel.fill(0);
+        }
+        if (!klar || sha256(klar) !== f.h) {
+          unlesbar[f.h] = box.generation;
+          continue;
+        }
+        let abgelegt;
+        try {
+          abgelegt = store.files.put(klar);
+        } catch (err) {
+          throw ablageFehler(err);
+        }
+        if (!abgelegt || abgelegt.hash !== f.h) unlesbar[f.h] = box.generation;
+      }
+    };
     const kopienImPostfach = await kopieIdsIn(gepackt);
     const nameLokal = deviceName();
     let nameFern = box.deviceName || null;
@@ -1627,9 +2092,19 @@ function createFolderSync(deps = {}) {
       const mitgereist = kopf.basen && typeof kopf.basen[ich] === 'object' && kopf.basen[ich] ? kopf.basen[ich] : {};
       // Welche MEINER Generationen der Partner las, als er die Basis setzte.
       const gelesenBei = kopf.basenVg && typeof kopf.basenVg[ich] === 'object' && kopf.basenVg[ich] ? kopf.basenVg[ich] : {};
+      // Eine Basis, die der Partner beim Lesen einer Generation gesetzt hat,
+      // die ICH nie geschrieben habe (ein verworfener Zwilling mit meiner
+      // Kennung), ist keine Vereinbarung mit mir: Sie zählt nicht. Sonst hielte
+      // ich das, was der Partner vom Zwilling übernahm, für schon überholt.
+      const meinStand = pf.stand();
+      const meineGenerationen = new Set((meinStand.verlauf || []).map((e) => e[0]));
+      const kleinste = meineGenerationen.size ? Math.min(...meineGenerationen) : Infinity;
+      // Nur innerhalb des bekannten Verlaufs: was davor liegt, ist unbekannt und zählt.
+      const nichtVonMir = (g) => Number.isInteger(g) && g >= kleinste && !meineGenerationen.has(g);
       const sauber = {};
       for (const [id, h] of Object.entries(mitgereist)) {
         if (typeof h !== 'string' || !h) continue;
+        if (nichtVonMir(gelesenBei[id])) continue;
         sauber[id] = Number.isInteger(gelesenBei[id]) ? { h, vg: gelesenBei[id] } : { h };
       }
       // Feste Start-IDs ohne jede Basis: Beide hatten einmal die Einführung
@@ -1708,6 +2183,8 @@ function createFolderSync(deps = {}) {
               pending = pending.slice(index + 1);
               if (discarding) discarding = false;
               else handleLine(line);
+              // Gleich nach der Kopfzeile, vor dem ersten Satz: die Blobs.
+              if (kopf && !dateienGeholt) await dateienHolen();
               index = pending.indexOf('\n');
             }
             if (pending.length > MAX_LINE_BYTES) {
@@ -1721,11 +2198,15 @@ function createFolderSync(deps = {}) {
         },
       );
       if (!kopf) throw new Uebergangen('unlesbar');
+      if (!dateienGeholt) await dateienHolen();
       flush(batch);
       batch = [];
       for (let i = 0; i < deferredEdges.length; i += BATCH_SIZE) flush(deferredEdges.slice(i, i + BATCH_SIZE));
       deferredEdges = [];
     } catch (err) {
+      // Stick voll oder Tresor nicht beschreibbar beim Ablegen eines Blobs:
+      // nichts übernommen, die Meldung geht nach oben (kopplung.js zeigt sie).
+      if (err && err.dateiAbbruch) throw err;
       if (err instanceof Uebergangen && !angewendet) {
         return {
           ...result,
@@ -1769,6 +2250,24 @@ function createFolderSync(deps = {}) {
     if (resultsTruncated) {
       addWarning(`Es werden nur die ersten ${MAX_RESULTS} Einzelmeldungen aufgeführt; die Zahlen oben sind vollständig.`);
     }
+
+    // Paket K2: Was der Partner an Blobs hat (ihm lege ich nur ab, was fehlt),
+    // welche meiner Blobs er nicht lesen konnte, und welche seiner ich nicht
+    // lesen konnte. Eine Kopfzeile ohne `hat` stammt von vor K2.
+    const dateienVorher = JSON.stringify([entry.dateien || null, entry.unlesbar || null]);
+    if (Array.isArray(kopf.hat)) {
+      const kaputt = {};
+      const gemeldet = kopf.unlesbar && typeof kopf.unlesbar === 'object' ? kopf.unlesbar[ich] : null;
+      if (gemeldet && typeof gemeldet === 'object' && !Array.isArray(gemeldet)) {
+        for (const [h, g] of Object.entries(gemeldet)) if (isHex64(h) && Number.isInteger(g)) kaputt[h] = g;
+      }
+      entry.dateien = { hat: kopf.hat.filter(isHex64), kaputt };
+    } else {
+      entry.dateien = { alt: true };
+    }
+    if (Object.keys(unlesbar).length) entry.unlesbar = unlesbar;
+    else delete entry.unlesbar;
+    if (JSON.stringify([entry.dateien, entry.unlesbar || null]) !== dateienVorher) saveState();
 
     // Blieb etwas wegen der Uhr unentschieden, gilt dieses Postfach als noch
     // nicht gelesen: Beim nächsten Abgleich (die Uhrzeit des Postfachs liegt
@@ -1972,6 +2471,10 @@ function createFolderSync(deps = {}) {
       return 0;
     }
     for (const item of entries) {
+      if (item.isDirectory() && item.name === DATEIEN_ORDNER) {
+        total += await dirBytes(path.join(dir, item.name));
+        continue;
+      }
       if (!item.isFile()) continue;
       try {
         total += (await fs.promises.stat(path.join(dir, item.name))).size;
@@ -2015,10 +2518,16 @@ function createFolderSync(deps = {}) {
     if (!vorhanden || !zielStand || !vonMir(vorhanden, zielStand)) return false;
     try {
       await fs.promises.rm(mine, { recursive: true, force: true });
-      return true;
     } catch {
       return false;
     }
+    // Die Blobs dort sind mit dem Postfach weg.
+    const s = loadState();
+    if (s.dateien && s.dateien.ziele && typeof s.dateien.ziele === 'object') {
+      delete s.dateien.ziele[zielKey];
+      saveState();
+    }
+    return true;
   }
 
   /**
@@ -2039,6 +2548,11 @@ function createFolderSync(deps = {}) {
   function zieleVergessen() {
     const s = loadState();
     s.ziele = {};
+    // Auch die Blobs dort können vom Zwilling stammen: neu ablegen.
+    if (s.dateien && typeof s.dateien === 'object') {
+      s.dateien.ziele = {};
+      s.dateien.seit = {};
+    }
     return saveState();
   }
 
@@ -2086,4 +2600,7 @@ module.exports = {
   DEVICE_ID_RE,
   BATCH_SIZE,
   STALE_AFTER_MS,
+  DATEIEN_ORDNER,
+  MAX_DATEI_BYTES,
+  PLATZ_RESERVE,
 };

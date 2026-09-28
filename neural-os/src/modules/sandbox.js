@@ -49,6 +49,7 @@ const {
   asNeuralError,
 } = require('../kernel/errors');
 const { safeJoin } = require('../kernel/paths');
+const ortspfad = require('../kernel/ortspfad');
 const schema = require('../store/schema');
 const capabilities = require('./capabilities');
 
@@ -365,6 +366,9 @@ function createSandbox(deps = {}) {
   const gate = deps.gate || null;
   const audit = deps.audit || null;
   const config = deps.config || {};
+  // Where the stick is: a module's shared folders resolve like an agent's
+  // (docs/STICK-BAUPLAN.md 2.7). Not given: the stick this program runs from.
+  const ortOpts = { portable: ortspfad.stickAus(deps) };
   const loggerDep = deps.logger;
   const log = makeLogger(loggerDep, 'modules');
 
@@ -974,7 +978,10 @@ function createSandbox(deps = {}) {
     const moduleId = record.id;
     const moduleName = (record.data && record.data.name) || moduleId;
     const configured = Array.isArray(record.data && record.data.fileRoots) ? record.data.fileRoots : [];
-    const roots = configured.filter((r) => typeof r === 'string' && r.trim() && path.isAbsolute(r));
+    // Only the folders that exist on THIS computer: one on the stick under
+    // whatever path it has here, one of another computer not at all, and an
+    // old plain path on a stick only if it lies on the stick.
+    const roots = ortspfad.aufloesenListe(configured, ortOpts);
 
     function noRoots() {
       return new PermissionError(

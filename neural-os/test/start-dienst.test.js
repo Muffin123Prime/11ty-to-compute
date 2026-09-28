@@ -535,6 +535,39 @@ test('/api/health: {ok, at, instanz, heim}; die Instanz ist je Server fest', asy
   }
 });
 
+test('/api/health?probe=: sagt, ob die Probe-Datei im eigenen Datenordner liegt; ein echter Dienst wird unter einem zweiten Pfad ohne Gerätekennung (Windows) erkannt', async () => {
+  const { createServer } = require('../src/http/server');
+  const lz = require('../src/kernel/laufzettel');
+  const pathsMod = require('../src/kernel/paths');
+  const u = tempHome('nos-s-health-probe');
+  const kopie = tempHome('nos-s-health-probe-kopie');
+  const paths = pathsMod.ensureLayout(pathsMod.layout(u.home));
+  const s = await createServer({ config: { server: { host: '127.0.0.1' } }, paths });
+  try {
+    await s.listen({ port: 0, host: '127.0.0.1' });
+    const probe = 'abcdefghijklmnopqrstuv';
+    assert.equal((await rufe(`${s.url}/api/health?probe=${probe}`)).json.probe, false);
+    fs.writeFileSync(path.join(u.home, `.heimprobe-${probe}`), '');
+    assert.equal((await rufe(`${s.url}/api/health?probe=${probe}`)).json.probe, true);
+    assert.equal((await rufe(`${s.url}/api/health?probe=${probe}`, { headers: { host: 'evil.example' } })).json.probe, undefined);
+    assert.equal((await rufe(`${s.url}/api/health?probe=../../etc`)).json.probe, undefined);
+    fs.unlinkSync(path.join(u.home, `.heimprobe-${probe}`));
+
+    // Der Laufzettel dieses Dienstes, und ein Doppelklick über einen zweiten Pfad ohne dev/ino.
+    const port = s.server.address().port;
+    const griff = await lz.anlegen(paths, { instanz: s.instanz, zustand: 'bereit', port, url: `${s.url}/` });
+    const zweiterPfad = { heim: 'eeeeeeeeeeeeeeee', ordner: null, pauseMs: 0 };
+    assert.equal((await lz.pruefen(paths, zweiterPfad)).zustand, 'laeuft');
+    fs.cpSync(u.home, kopie.home, { recursive: true });
+    assert.equal((await lz.pruefen(pathsMod.layout(kopie.home), zweiterPfad)).zustand, 'verwaist');
+    griff.freigeben();
+  } finally {
+    await s.close();
+    u.cleanup();
+    kopie.cleanup();
+  }
+});
+
 test('/api/health mit fremdem Host-Kopf (DNS-Rebinding): keine Instanz, kein heim', async () => {
   const { createServer } = require('../src/http/server');
   const u = tempHome('nos-s-health-host');
@@ -582,6 +615,46 @@ test('echter Öffner statt NEURAL_OS_OEFFNER: „Fertig. Dieses Fenster kann zu.
     assert.match(r.stdout, /Fertig\. Dieses Fenster kann zu\./, `Ausgabe war: ${JSON.stringify(r.stdout)}`);
     await bis(() => u.geoeffnet().length > 0, { ms: 5000, was: 'Öffner bekommt die Adresse' });
     assert.deepEqual(u.geoeffnet(), [url]);
+  } finally {
+    await srv.close();
+    await u.cleanup();
+  }
+});
+
+test('Browser lässt sich nicht öffnen (Öffner endet mit Fehler): die Adresse steht da, das Fenster bleibt offen', async () => {
+  if (process.platform !== 'linux') return;
+  const u = umgebung('nos-s-oeffner-kaputt');
+  const heim = require('../src/kernel/laufzettel').heimKennung(u.home);
+  const binOrdner = path.join(path.dirname(u.oeffner), 'bin');
+  fs.mkdirSync(binOrdner, { recursive: true });
+  // Wie xdg-open ohne eingerichteten Browser: "no method available", Code 3.
+  fs.writeFileSync(path.join(binOrdner, 'xdg-open'), '#!/bin/sh\necho "xdg-open: no method available" >&2\nexit 3\n', { mode: 0o755 });
+  const srv = await fakeServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, at: new Date().toISOString(), instanz: 'attrappe0003', heim }));
+  });
+  try {
+    const url = `${srv.url}/`;
+    fs.writeFileSync(path.join(u.home, '.lock'), JSON.stringify({
+      v: 2, pid: process.pid, rechner: rechner.kennung(), boot: rechner.bootZeit(), seit: new Date().toISOString(),
+      zustand: 'bereit', port: srv.port, url, instanz: 'attrappe0003', heim, version: '0.1.0',
+    }));
+    const r = await lauf(['start', '--hintergrund', '--open', '--home', u.home], {
+      env: { ...u.env, NEURAL_OS_OEFFNER: '', PATH: `${binOrdner}${path.delimiter}${process.env.PATH}` },
+    });
+    assert.ok(r.stdout.includes(url), `die Adresse steht nicht da: ${JSON.stringify(r.stdout)}`);
+    assert.doesNotMatch(r.stdout, /Fertig\. Dieses Fenster kann zu\./);
+    assert.notEqual(r.code, 0, 'das Fenster ginge zu');
+
+    const { openInBrowser } = require('../src/portable/open');
+    const vorher = process.env.PATH;
+    process.env.PATH = `${binOrdner}${path.delimiter}${vorher}`;
+    try {
+      const o = await openInBrowser(url);
+      assert.equal(o.opened, false);
+    } finally {
+      process.env.PATH = vorher;
+    }
   } finally {
     await srv.close();
     await u.cleanup();
@@ -703,7 +776,13 @@ test('Eine ältere Version (Sperre {pid, at}) läuft noch: der Starter beendet s
   // weiter, der neue Starter sagte "Bitte dort beenden" -- und in der alten
   // Oberfläche gibt es keinen Knopf dafür.
   const u = umgebung('nos-s-aeltere');
-  const alt = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  // Die alte Version: ein Node-Prozess mit ".../app/bin/neural-os.js start", wie ihn der alte Starter aufrief.
+  const altOrdner = tempHome('nos-s-aeltere-app');
+  const altSkript = path.join(altOrdner.home, 'app', 'bin', 'neural-os.js');
+  fs.mkdirSync(path.dirname(altSkript), { recursive: true });
+  fs.writeFileSync(altSkript, 'setInterval(() => {}, 1000);\n');
+  const alt = spawn(process.execPath, [altSkript, 'start'], { stdio: 'ignore' });
+  await warte(200);
   try {
     fs.mkdirSync(u.home, { recursive: true });
     fs.writeFileSync(path.join(u.home, '.lock'), JSON.stringify({ pid: alt.pid, at: new Date().toISOString() }));
@@ -725,6 +804,34 @@ test('Eine ältere Version (Sperre {pid, at}) läuft noch: der Starter beendet s
     await bis(() => !lebt(z.pid), { ms: 5000, was: 'Dienst endet nach [Beenden]' });
   } finally {
     try { alt.kill('SIGKILL'); } catch { /* schon weg */ }
+    await u.cleanup();
+    altOrdner.cleanup();
+  }
+});
+
+test('Alte Sperre {pid, at} von einem anderen Rechner, die PID gehört hier einem fremden Programm: es wird nie beendet, Neural OS startet', async () => {
+  const u = umgebung('nos-s-fremde-pid');
+  // Ein beliebiges Programm dieses Rechners, das zufällig die PID aus der Sperre trägt.
+  const fremd = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  await warte(200);
+  try {
+    fs.mkdirSync(path.join(u.home, 'vault'), { recursive: true });
+    // Die Sperre schrieb ein anderer Rechner, nachdem dieser hier hochfuhr.
+    const at = new Date().toISOString();
+    fs.writeFileSync(path.join(u.home, '.lock'), JSON.stringify({ pid: fremd.pid, at }));
+    fs.writeFileSync(path.join(u.home, 'vault', '.lock'), JSON.stringify({ pid: fremd.pid, at, scope: 'store' }));
+
+    const r = await lauf(['start', '--hintergrund', '--open', '--home', u.home, '--port', '0'], { env: u.env });
+    assert.ok(lebt(fremd.pid), `das fremde Programm wurde beendet: ${r.stdout}`);
+    assert.doesNotMatch(r.stdout, /ältere Version/);
+    assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`);
+    const z = leseZettel(u.home);
+    assert.ok(z && z.zustand === 'bereit' && z.pid !== fremd.pid, 'Neural OS läuft nicht');
+    const b = await rufe(`http://127.0.0.1:${z.port}/api/system/beenden`, { method: 'POST', body: {} });
+    assert.equal(b.status, 202, b.text);
+    await bis(() => !lebt(z.pid), { ms: 5000, was: 'Dienst endet nach [Beenden]' });
+  } finally {
+    try { fremd.kill('SIGKILL'); } catch { /* schon weg */ }
     await u.cleanup();
   }
 });

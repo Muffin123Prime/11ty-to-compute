@@ -95,6 +95,46 @@ function antwort(...teile) {
   return { sse: teile.flat() };
 }
 
+/* ------------------------------------------------ Bilder, PDF, Audio */
+
+/**
+ * Welche Inline-Arten Gemini annimmt (ai.google.dev: Bild-, Dokument- und
+ * Audioverständnis). GIF gehört NICHT dazu.
+ */
+const INLINE_ARTEN = new Set([
+  'image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif',
+  'application/pdf',
+  'audio/wav', 'audio/mp3', 'audio/aiff', 'audio/aac', 'audio/ogg', 'audio/flac',
+]);
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+/** Inline-Daten und Text zusammen höchstens 20 MB je Anfrage. */
+const MAX_ANFRAGE_BYTES = 20 * 1024 * 1024;
+
+/** Prüft inlineData-Teile wie die Schnittstelle; gibt die Fehlermeldung oder null. */
+function medienPruefen(body, roheLaenge) {
+  if (roheLaenge > MAX_ANFRAGE_BYTES) return 'Request payload size exceeds the limit: 20971520 bytes.';
+  for (const [i, c] of (Array.isArray(body && body.contents) ? body.contents : []).entries()) {
+    for (const [j, p] of (Array.isArray(c && c.parts) ? c.parts : []).entries()) {
+      if (!p || !p.inlineData) continue;
+      const d = p.inlineData;
+      if (typeof d.mimeType !== 'string' || !INLINE_ARTEN.has(d.mimeType)) return `contents[${i}].parts[${j}].inline_data.mime_type: Unsupported MIME type: ${d.mimeType}`;
+      if (typeof d.data !== 'string' || !d.data.length || !BASE64.test(d.data)) return `contents[${i}].parts[${j}].inline_data.data: Invalid value (base64)`;
+    }
+  }
+  return null;
+}
+
+/** Was eine aufgezeichnete Anfrage an Inline-Daten mitschickte: [{mime, bytes}]. */
+function medienIn(body) {
+  const out = [];
+  for (const c of (Array.isArray(body && body.contents) ? body.contents : [])) {
+    for (const p of (Array.isArray(c && c.parts) ? c.parts : [])) {
+      if (p && p.inlineData) out.push({ mime: p.inlineData.mimeType, bytes: Buffer.from(String(p.inlineData.data || ''), 'base64').length });
+    }
+  }
+  return out;
+}
+
 /** Eine HTTP-Fehlerantwort in Googles Form. */
 function httpFehler(code, status, message, koepfe = {}) {
   return { status: code, json: { error: { code, message, status } }, koepfe };
@@ -115,6 +155,9 @@ function httpFehler(code, status, message, koepfe = {}) {
 function starten({ schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schluesselFehlerStatus = 400 } = {}) {
   const anfragen = [];
   const schlange = [];
+  // Antworten für Aufrufe OHNE Strom (generateContent), z. B. das Umschreiben
+  // einer Sprachaufnahme. Leer: die kleine Antwort des Probeaufrufs.
+  const ohneStrom = [];
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
@@ -147,6 +190,21 @@ function starten({ schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schlu
       }
       if (!Object.prototype.hasOwnProperty.call(MODELLE_BEKANNT, eintrag.modell)) {
         json(404, { error: { code: 404, message: `models/${eintrag.modell} is not found for API version v1beta`, status: 'NOT_FOUND' } });
+        return;
+      }
+      const medienFehler = medienPruefen(body, Buffer.byteLength(text, 'utf8'));
+      if (medienFehler) {
+        json(400, { error: { code: 400, message: medienFehler, status: 'INVALID_ARGUMENT' } });
+        return;
+      }
+      if (!eintrag.stream && ohneStrom.length) {
+        const n = ohneStrom.shift();
+        if (n.status) { json(n.status, n.json || {}, n.koepfe || {}); return; }
+        json(200, {
+          candidates: [{ content: { role: 'model', parts: [{ text: n.text || '' }] }, finishReason: n.finishReason || 'STOP', index: 0 }],
+          usageMetadata: { promptTokenCount: 40, candidatesTokenCount: 12, totalTokenCount: 52 },
+          modelVersion: eintrag.modell, responseId: 'resp_ohne_strom',
+        });
         return;
       }
       // Der Probeaufruf: ohne Strom, eine kleine Antwort.
@@ -206,6 +264,8 @@ function starten({ schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schlu
         /** Nur die Anfragen mit Strom (also ohne den Probeaufruf). */
         stromAnfragen: () => anfragen.filter((a) => a.stream),
         weiter: (...antworten) => schlange.push(...antworten),
+        /** Nächste Antworten ohne Strom: {text, finishReason?} oder {status, json}. */
+        weiterOhneStrom: (...antworten) => ohneStrom.push(...antworten),
         offen: () => schlange.length,
         close: () => new Promise((r) => { server.closeAllConnections && server.closeAllConnections(); server.close(r); }),
       });
@@ -215,4 +275,4 @@ function starten({ schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schlu
 
 const MODELLE_BEKANNT = { 'gemini-3.8-flash': 1, 'gemini-3.7-flash': 1, 'gemini-3.5-flash-lite': 1, 'gemini-2.5-flash': 1 };
 
-module.exports = { starten, B, antwort, httpFehler, sse };
+module.exports = { starten, B, antwort, httpFehler, sse, medienIn, medienPruefen };

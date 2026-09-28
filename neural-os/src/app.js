@@ -336,7 +336,7 @@ async function createApp(opts = {}) {
 
   const toolsMod = tryRequire('./agents/tools');
   const toolbox = toolsMod
-    ? optional(failures, 'toolbox', () => toolsMod.createToolbox({ store, registry, gate, graph, paths, approvals, config, logger, audit }))
+    ? optional(failures, 'toolbox', () => toolsMod.createToolbox({ store, registry, gate, graph, paths, approvals, config, logger, audit, portable }))
     : null;
 
   const runtimeMod = tryRequire('./agents/runtime');
@@ -420,7 +420,8 @@ async function createApp(opts = {}) {
   const watchMod = tryRequire('./store/watch');
   const watcher = watchMod
     ? optional(failures, 'watcher', () => watchMod.createWatcher({
-      store, bus, paths, config, logger, extract,
+      // `portable`: wo der Stick hängt, fuer Ordner je Rechner (Bauplan 2.7).
+      store, bus, paths, config, logger, extract, portable,
       // Ein grosser Durchlauf nimmt viele Saetze auf einmal auf und wuerde
       // sonst den Rueckgaengig-Verlauf leerfegen. `app` gibt es an dieser
       // Stelle noch nicht -- der Abschluss greift erst beim Durchlauf darauf
@@ -472,7 +473,7 @@ async function createApp(opts = {}) {
   let modules = null;
   if (sandboxMod && registryModulesMod) {
     const sandbox = optional(failures, 'module-sandbox', () => sandboxMod.createSandbox({
-      store, gate, bus, config, logger, paths, audit,
+      store, gate, bus, config, logger, paths, audit, portable,
     }));
     // The model registry is handed over after construction: without it the
     // `model.use` capability would exist and then throw NoModelError, which

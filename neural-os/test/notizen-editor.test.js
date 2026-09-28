@@ -283,3 +283,17 @@ test('artInfo/kantenText/zielFuer/vorschlagsSatz: Symbole, Gruende und Ziele in 
   assert.equal(vorschlagsSatz(4), 'Ich habe 4 mögliche Verbindungen gefunden');
   assert.equal(vorschlagsSatz(undefined), 'Ich habe 0 mögliche Verbindungen gefunden');
 });
+
+/* ------------------------------------------------------ Runde 1 */
+
+test('zusammenfuehren: zwei Fassungen, nichts geht verloren (Konflikt beim gleichzeitigen Bearbeiten)', async () => {
+  const { zusammenfuehren, zielFuer } = (await laden()).notes;
+  assert.equal(zusammenfuehren('Milch\nBrot\nEier (vom iPad)', 'Milch\nBrot\nKaese'), 'Milch\nBrot\nEier (vom iPad)\nKaese');
+  assert.equal(zusammenfuehren('A\nB', 'A\nB'), 'A\nB', 'gleich bleibt gleich');
+  assert.equal(zusammenfuehren('', 'Nur meins'), 'Nur meins');
+  assert.equal(zusammenfuehren('Nur deren', ''), 'Nur deren');
+  assert.equal(zusammenfuehren('Eins\r\nZwei', 'Zwei\nDrei'), 'Eins\nZwei\nDrei', 'Zeilenenden egal, Reihenfolge der eigenen bleibt');
+  // Eine Aufgabe fuehrt in ihr Projekt, nicht in eine Projektseite, die es nicht gibt.
+  assert.equal(zielFuer({ id: 'task_1', type: 'task', projectId: 'project_9' }), '#/projects?id=project_9');
+  assert.equal(zielFuer({ id: 'task_1', type: 'task' }), '#/projects');
+});

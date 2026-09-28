@@ -21,16 +21,26 @@ async function laden() {
   if (geladen) return geladen;
   const web = path.join(__dirname, '..', 'web');
   const { home, cleanup } = tempHome('nos-chat-ansicht');
-  const alsModul = (src) => src.replace(/(from\s+')([^']+)\.js(')/g, (m, kopf, spec, ende) => `${kopf}./${path.basename(spec)}.mjs${ende}`);
-  const kopie = (von, nach) => fs.writeFileSync(path.join(home, nach), alsModul(fs.readFileSync(von, 'utf8')));
-  for (const datei of fs.readdirSync(path.join(web, 'lib'))) {
-    if (datei.endsWith('.js')) kopie(path.join(web, 'lib', datei), datei.replace(/\.js$/, '.mjs'));
-  }
-  kopie(path.join(web, 'views', 'chat.js'), 'chat.mjs');
+  // Die Ordnerstruktur bleibt erhalten (lib/, lib/bausteine/, views/), damit
+  // relative Importe wie '../lib/bausteine/index.js' unveraendert stimmen;
+  // nur die Endung wird .mjs, damit Node die Dateien als ESM liest.
+  const alsModul = (src) => src.replace(/(from\s+')(\.[^']+)\.js(')/g, (m, kopf, spec, ende) => `${kopf}${spec}.mjs${ende}`);
+  const kopieBaum = (von, nach) => {
+    fs.mkdirSync(nach, { recursive: true });
+    for (const eintrag of fs.readdirSync(von, { withFileTypes: true })) {
+      if (eintrag.isDirectory()) kopieBaum(path.join(von, eintrag.name), path.join(nach, eintrag.name));
+      else if (eintrag.name.endsWith('.js')) {
+        fs.writeFileSync(path.join(nach, eintrag.name.replace(/\.js$/, '.mjs')), alsModul(fs.readFileSync(path.join(von, eintrag.name), 'utf8')));
+      }
+    }
+  };
+  kopieBaum(path.join(web, 'lib'), path.join(home, 'lib'));
+  fs.mkdirSync(path.join(home, 'views'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'views', 'chat.mjs'), alsModul(fs.readFileSync(path.join(web, 'views', 'chat.js'), 'utf8')));
   try {
     geladen = {
-      chat: await import(pathToFileURL(path.join(home, 'chat.mjs')).href),
-      agenten: await import(pathToFileURL(path.join(home, 'agenten.mjs')).href),
+      chat: await import(pathToFileURL(path.join(home, 'views', 'chat.mjs')).href),
+      agenten: await import(pathToFileURL(path.join(home, 'lib', 'agenten.mjs')).href),
     };
   } finally {
     cleanup();
@@ -39,32 +49,6 @@ async function laden() {
 }
 
 const antwort = (content, data = {}) => ({ id: 'message_x', data: { role: 'assistant', status: 'complete', content, ...data } });
-
-test('Vorschläge: höchstens drei, aus dem Inhalt abgeleitet, ohne weiteren Aufruf', async () => {
-  const { chat } = await laden();
-  const { vorschlaegeFuer } = chat;
-  assert.deepEqual(vorschlaegeFuer(antwort('')), [], 'nichts zu antworten, nichts vorzuschlagen');
-
-  const liste = vorschlaegeFuer(antwort('Dein Plan:\n\n- Montag\n- Dienstag\n- Mittwoch'));
-  assert.ok(liste.length >= 1 && liste.length <= 3);
-  assert.ok(liste.some((v) => v.label === 'Als Tabelle'), 'eine Aufzählung lässt sich als Tabelle zeigen');
-  assert.ok(liste.some((v) => v.label === 'Nächste Schritte'), 'ein Plan hat nächste Schritte');
-  for (const v of liste) assert.ok(v.sende.length > 5, `„${v.label}“ schickt einen ganzen Satz`);
-
-  const lang = vorschlaegeFuer(antwort('Ein langer Absatz. '.repeat(120)));
-  assert.ok(lang.some((v) => v.label === 'Kürzer'));
-  const tabelle = vorschlaegeFuer(antwort('| a | b |\n|---|---|\n| 1 | 2 |\n\n- x\n- y\n- z'));
-  assert.ok(!tabelle.some((v) => v.label === 'Als Tabelle'), 'was schon Tabelle ist, wird es nicht noch einmal');
-
-  const prompt = vorschlaegeFuer(antwort('Hier:\n\n```prompt\nDu bist …\n```'));
-  assert.equal(prompt[0].label, 'Noch besser', 'ein Prompt lässt sich verbessern');
-  assert.ok(!prompt.some((v) => v.label === 'Erklär den Code'), 'ein Prompt ist kein Code');
-
-  const termin = antwort('Eingetragen.', { agenten: [{ zustand: 'fertig', wirkung: [{ id: 'event_1', typ: 'event', aktion: 'angelegt' }] }] });
-  assert.ok(vorschlaegeFuer(termin).some((v) => v.label === 'Erinnere mich'));
-  const zurueck = antwort('Eingetragen.', { agenten: [{ zustand: 'fertig', zurueckgenommen: '2026-09-24T10:00:00Z', wirkung: [{ id: 'event_1', typ: 'event', aktion: 'angelegt' }] }] });
-  assert.ok(!vorschlaegeFuer(zurueck).some((v) => v.label === 'Erinnere mich'), 'kein Erinnern an einen zurückgenommenen Termin');
-});
 
 test('Karten: „Termin eingetragen · Do, 25. Sep · 15:00 · Zahnarzt“ – ohne Zeitzonen-Falle', async () => {
   const { agenten } = await laden();

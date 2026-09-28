@@ -119,7 +119,8 @@ const CSS = `
 .nw__search { position: relative; display: flex; align-items: center; }
 .nw__search svg { position: absolute; left: 10px; width: 15px; height: 15px; color: var(--fg-subtle); pointer-events: none; }
 .nw__search .input { width: 220px; padding-left: 32px; }
-.nw__modus .segmented__option svg { width: 15px; height: 15px; }
+.nw__modus .segmented__option { display: inline-flex; align-items: center; gap: 6px; }
+.nw__modus .segmented__option svg { flex: none; width: 15px; height: 15px; }
 .nw__tags { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 0 0 var(--sp-3); }
 .nw__tags-label { display: inline-flex; align-items: center; gap: 6px; margin-right: 4px; font-size: var(--fs-xs); color: var(--fg-subtle); }
 .nw__tags-label svg { width: 14px; height: 14px; }
@@ -303,8 +304,14 @@ const CSS = `
 
 /* ---- Das geoeffnete Blatt ---- */
 .nw__scrim {
+  /* Oben und hoch wie die sichtbare Flaeche (mountSheet setzt beides), nicht
+     wie die ganze Wand: sonst ragte ein langes Blatt unter den Rand, und
+     nichts liess sich mehr scrollen (Pruefer, Runde 1). */
   position: absolute;
-  inset: 0;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 100%;
   z-index: 6;
   display: flex;
   justify-content: center;
@@ -436,6 +443,24 @@ const CSS = `
 .nw__form-hint { margin: 0; font-size: var(--fs-sm); color: var(--fg-subtle); line-height: var(--lh); }
 .nw__form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .nw__form-actions .spacer { flex: 1 1 auto; }
+.nw__import-wahl { display: flex; flex-wrap: wrap; gap: 8px; }
+.nw__import-status { margin: 0; font-size: var(--fs-sm); color: var(--fg-muted); line-height: var(--lh); }
+.nw__import-liste { margin: 0; padding-left: 18px; font-size: var(--fs-sm); color: var(--fg-muted); max-height: 160px; overflow: auto; }
+.nw__konflikt { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); border-radius: var(--r-2); background: var(--danger-soft); }
+.nw__konflikt[hidden] { display: none; }
+.nw__konflikt p { margin: 0; font-size: var(--fs-sm); color: var(--fg); line-height: var(--lh); }
+.nw__konflikt pre { margin: 0; max-height: 140px; overflow: auto; padding: 8px 10px; font: inherit; font-size: var(--fs-sm); white-space: pre-wrap; color: var(--fg-muted); background: var(--surface-2); border-radius: var(--r-1); }
+.nw__konflikt-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (pointer: coarse) {
+  .nw__tag { height: auto; min-height: var(--tap-min); padding: 0 14px; }
+  .nw__link { min-height: var(--tap-min); }
+  .nw__card-item { min-height: var(--tap-min); }
+  /* Die Regel gegen das Hineinzoomen von iOS (16 px fuer jedes Feld) machte
+     den Titel so klein wie den Text darunter; er ist ohnehin groesser. */
+  input.nw__edit-title:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]) {
+    font-size: var(--fs-2xl) !important;
+  }
+}
 
 @container (max-width: 600px) {
   .nw__inner { padding: var(--sp-2) var(--sp-2) var(--sp-6); }
@@ -613,6 +638,24 @@ export function titelAusText(raw) {
   return { title: `${kurz}…`, body: value.trim() };
 }
 
+/**
+ * Zwei Fassungen desselben Textes zusammenfuehren, ohne etwas zu verlieren:
+ * die gespeicherte (von der anderen Sitzung) bleibt, wie sie ist, und die
+ * Zeilen der eigenen Fassung, die dort fehlen, kommen in ihrer Reihenfolge
+ * dahinter. "Milch, Brot, Eier (vom iPad)" + "Milch, Brot, Kaese" ergibt
+ * "Milch, Brot, Eier (vom iPad), Kaese". Das Ergebnis steht danach im Editor
+ * und wird erst mit dem naechsten Speichern geschrieben.
+ */
+export function zusammenfuehren(deren, meine) {
+  const a = String(deren || '').replace(/\r\n?/g, '\n');
+  const b = String(meine || '').replace(/\r\n?/g, '\n');
+  if (!a.trim()) return b;
+  if (!b.trim() || a === b) return a;
+  const vorhanden = new Set(a.split('\n').map((z) => z.trim()).filter(Boolean));
+  const neu = b.split('\n').filter((z) => z.trim() && !vorhanden.has(z.trim()));
+  return neu.length ? `${a.replace(/\s+$/, '')}\n${neu.join('\n')}` : a;
+}
+
 /** Art eines Satzes -> {label, glyph}: "Notiz", "Person", "Projekt" ... */
 export function artInfo(type, kind) {
   if (type === 'entity') {
@@ -657,7 +700,8 @@ export function zielFuer(eintrag) {
     case 'project': return `#/projects?id=${id}`;
     case 'chat': return `#/chat?id=${id}`;
     case 'event': return `#/kalender?id=${id}`;
-    case 'task': return '#/projects';
+    // Eine Aufgabe steht in ihrem Projekt; ohne Projekt in der Liste.
+    case 'task': return e.projectId ? `#/projects?id=${encodeURIComponent(String(e.projectId))}` : '#/projects';
     default: return `#/graph?focus=${id}`;
   }
 }
@@ -854,6 +898,10 @@ export default {
       }
 
       renderTags();
+      // Ein leerer Tresor zeigt keine Bedienelemente ueber dem Nichts -- nur
+      // die Einladung darunter (wie im Gehirn).
+      const ganzLeer = st.loaded && !st.error && !st.items.length && !st.q.trim() && !st.tag && st.filter === 'alle';
+      for (const el of [lead, segmented, search, modusSwitch]) el.hidden = ganzLeer;
 
       clear(wallHost);
       if (st.error) {
@@ -934,7 +982,7 @@ export default {
         line = 'Öffne eine Notiz und tippe auf „Anheften“ – dann steht sie hier ganz oben.';
       } else {
         title = 'Dein Wissensuniversum wartet.';
-        line = 'Erstelle deine erste Notiz oder halte einen Link fest. Was du schreibst, verbindet sich über [[Links]] und #Schlagworte von selbst.';
+        line = 'Erstelle deine erste Notiz oder importiere vorhandenes Wissen.';
       }
       return h('div.nw__empty', null,
         h('span.nw__empty-icon', { 'aria-hidden': 'true' }, icon(I.note)),
@@ -945,9 +993,9 @@ export default {
             h('button.btn.btn--small', { type: 'button', onClick: () => { st.q = ''; searchInput.value = ''; st.tag = null; st.filter = 'alle'; render(); syncRoute(); } }, text('Filter zurücksetzen')))
           : h('div.nw__empty-actions', null,
             h('button.btn.btn--primary', { type: 'button', onClick: () => openNew() }, text('Erste Notiz')),
-            // Vorhandenes Wissen kommt als Sicherung zurueck: der Bereich Stick spielt sie ein.
-            h('button.btn', { type: 'button', title: 'Eine Sicherung wiederherstellen (Bereich Stick)', onClick: () => navigate('#/stick') }, text('Importieren')),
-            h('button.btn.btn--ghost', { type: 'button', onClick: () => navigate('#/chat') }, text('KI kennenlernen'))));
+            // Markdown-Dateien oder ein ganzer Ordner (Obsidian) werden Notizen.
+            h('button.btn', { type: 'button', title: 'Markdown-Dateien oder einen Obsidian-Ordner als Notizen übernehmen', onClick: () => openForm('import') }, text('Importieren')),
+            h('button.btn', { type: 'button', onClick: () => navigate('#/chat') }, text('KI kennenlernen'))));
     }
 
     function originIcon(herkunft) {
@@ -1013,6 +1061,7 @@ export default {
       ['aufgabe', 'Neue Aufgabe', 'task', () => openForm('aufgabe')],
       ['link', 'Link speichern', 'globe', () => openForm('link')],
       ['text', 'Text speichern', 'text', () => openForm('text')],
+      ['import', 'Importieren', 'file', () => openForm('import')],
     ];
 
     function openMenu() {
@@ -1142,11 +1191,11 @@ export default {
       return ziel.type === 'note' ? `#/notes?id=${ziel.id}` : (zielFuer(ziel) || `#/graph?focus=${encodeURIComponent(ziel.id)}`);
     }
 
-    async function openNote(id, { fromRoute = false, mode = 'read' } = {}) {
+    async function openNote(id, { fromRoute = false, mode = 'read', frisch = false } = {}) {
       if (st.open && st.open.dirty && st.open.id !== id) {
         if (!closeSheet({ keepRoute: true })) return;
       }
-      let note = findNote(id);
+      let note = frisch ? null : findNote(id);
       if (!note) {
         try {
           note = await fetchNote(id);
@@ -1197,10 +1246,20 @@ export default {
       }, card);
       root.appendChild(sheet);
       // Das Blatt steht dort, wo man gerade hinsieht, nicht oben auf der Wand,
-      // und die Wand darunter rollt nicht mit, solange es offen ist.
-      sheet.style.top = `${container.scrollTop || 0}px`;
-      sheet.style.bottom = `${-(container.scrollTop || 0)}px`;
+      // und die Wand darunter rollt nicht mit, solange es offen ist. Hoch ist
+      // es wie die sichtbare Flaeche -- darin rollt das Blatt selbst.
+      const passe = () => {
+        if (!sheet) return;
+        sheet.style.top = `${container.scrollTop || 0}px`;
+        sheet.style.height = `${container.clientHeight || root.clientHeight}px`;
+      };
+      passe();
       container.style.overflowY = 'hidden';
+      if (typeof ResizeObserver === 'function') {
+        const ro = new ResizeObserver(passe);
+        ro.observe(container);
+        sheetCleanups.push(() => ro.disconnect());
+      }
       if (focus) {
         const target = typeof focus === 'string' ? card.querySelector(focus) : focus;
         if (target) setTimeout(() => target.focus({ preventScroll: true }), 0);
@@ -1333,7 +1392,9 @@ export default {
       const neu = setzeHaken(body, index, checked);
       if (neu === body) return false;
       st.eigene.set(note.id, Date.now() + 2000);
-      api.patch(`/records/${encodeURIComponent(note.id)}`, { data: { body: neu } }).then((res) => {
+      // Mit dem Stand, den das Blatt zeigt: hat inzwischen jemand anderes
+      // geschrieben, antwortet der Server 409 statt dessen Text zu ueberschreiben.
+      api.patch(`/records/${encodeURIComponent(note.id)}`, { data: { body: neu }, rev: note.rev }).then((res) => {
         if (!st.alive) return;
         const rec = res && res.record ? res.record : null;
         note.data.body = neu;
@@ -1342,6 +1403,11 @@ export default {
         if (auf && auf !== note) { auf.data.body = neu; if (rec) auf.updatedAt = rec.updatedAt; }
       }).catch((err) => {
         if (!st.alive) return;
+        if (err && err.status === 409) {
+          toast('Diese Notiz wurde inzwischen anderswo geändert – das Blatt zeigt jetzt den neuen Stand. Setz den Haken dort noch einmal.', 'info', { timeout: 8000 });
+          openNote(note.id, { fromRoute: true, frisch: true });
+          return;
+        }
         toast(`Der Haken ließ sich nicht speichern: ${errorText(err)}`, 'error');
         if (st.open && st.open.mode === 'read' && st.open.id === note.id && st.open.dom) renderProse(st.open.dom.prose, note);
       });
@@ -1516,11 +1582,16 @@ export default {
       k.busy = true;
       renderLinks();
       try {
+        // Je Ziel sein eigener Grund -- "Verknuepft mit" sagt spaeter, WARUM
+        // (Pruefer, Runde 1: bei mehreren stand ueberall derselbe Allgemeinsatz).
+        const gruende = {};
+        for (const v of liste) if (v.grund) gruende[v.id] = `Vorschlag angenommen: ${v.grund}`;
         const res = await api.post('/graph/verbinden', {
           from: o.id,
           to: liste.map((v) => v.id),
           kind: 'related',
-          reason: liste.length === 1 && liste[0].grund ? `Vorschlag angenommen: ${liste[0].grund}` : 'Verbindungsvorschlag angenommen',
+          reason: 'Verbindungsvorschlag angenommen',
+          gruende,
         });
         if (!st.alive || st.open !== o) return;
         const neu = res && res.rueckgaengig && Array.isArray(res.rueckgaengig.edges) ? res.rueckgaengig.edges : (res && res.neu) || [];
@@ -1617,10 +1688,27 @@ export default {
       });
       const host = h('div.nw__edit-host');
       const error = h('p.nw__edit-error', { role: 'alert', hidden: true });
+      const konflikt = h('div.nw__konflikt', { role: 'alert', hidden: true });
       const saveBtn = h('button.btn.btn--primary', { type: 'button', onClick: () => save() }, text('Speichern'));
 
+      // EINE Quelle fuer Schlagworte: der Text. Stehen im Feld `tags`
+      // Schlagworte, die im Text fehlen (Import, Schnellerfassung), kommen sie
+      // beim Bearbeiten als Zeile an den Schluss -- dort sieht man sie und
+      // kann sie loeschen; gespeichert wird das Feld leer (Pruefer, Runde 1:
+      // ein aus dem Text geloeschtes #biologie blieb sonst fuer immer).
+      let startText = String(data.body || '');
+      if (!neu) {
+        let imText = [];
+        try { imText = extractLinks(startText).tags.map((t) => falten(t)); } catch { imText = []; }
+        const fehlen = (Array.isArray(data.tags) ? data.tags : []).map((t) => String(t || '').trim().replace(/^#/, ''))
+          .filter((t) => t && !imText.includes(falten(t)));
+        if (fehlen.length) startText = `${startText.replace(/\s+$/, '')}${startText.trim() ? '\n\n' : ''}${fehlen.map((t) => `#${t.replace(/\s+/g, '-')}`).join(' ')}`;
+      }
+      // Der Stand, auf dem dieses Bearbeiten beruht -- fuer den Abgleich beim Speichern.
+      let basisRev = note.rev || null;
+
       const editor = createNoteEditor(host, {
-        value: data.body || '',
+        value: startText,
         label: 'Text der Notiz',
         minRows: 12,
         onChange: () => { o.dirty = true; },
@@ -1644,6 +1732,51 @@ export default {
       sheetCleanups.push(() => { try { editor.destroy(); } catch { /* schon weg */ } });
 
       let busy = false;
+      /**
+       * Gleichzeitig bearbeitet (Pruefer, Runde 1): hat eine andere Sitzung
+       * (das iPad, ein Agent) inzwischen gespeichert, sagt der Server 409 --
+       * statt still zu ueberschreiben. Hier stehen dann beide Fassungen, und
+       * der Mensch entscheidet: zusammenfuehren, seine behalten oder die andere.
+       */
+      function zeigeKonflikt(aktuell, meinTitel, meinText) {
+        clear(konflikt);
+        const d = (aktuell && aktuell.data) || {};
+        const deren = String(d.body || '');
+        konflikt.append(
+          h('p', null, h('strong', null, text('Diese Notiz wurde inzwischen anderswo geändert.')), text(' Deine Fassung ist noch nicht gespeichert. So steht sie jetzt im Tresor:')),
+          h('pre', null, text(deren || '(leer)')),
+          h('div.nw__konflikt-actions', null,
+            h('button.btn.btn--primary.btn--small', {
+              type: 'button',
+              title: 'Die andere Fassung behalten und deine neuen Zeilen darunter setzen -- danach noch einmal speichern',
+              onClick: () => {
+                editor.setValue(zusammenfuehren(deren, meinText));
+                if (d.title && !meinTitel) titleInput.value = d.title;
+                basisRev = aktuell.rev;
+                o.dirty = true;
+                konflikt.hidden = true;
+                editor.focus();
+              },
+            }, text('Zusammenführen')),
+            h('button.btn.btn--small', {
+              type: 'button',
+              title: 'Deine Fassung speichern; die andere wird ersetzt (sie bleibt im Änderungsverlauf)',
+              onClick: () => { basisRev = aktuell.rev; konflikt.hidden = true; save(); },
+            }, text('Meine behalten')),
+            h('button.btn.btn--ghost.btn--small', {
+              type: 'button',
+              onClick: () => {
+                editor.setValue(deren);
+                titleInput.value = d.title || titleInput.value;
+                basisRev = aktuell.rev;
+                o.dirty = false;
+                konflikt.hidden = true;
+              },
+            }, text('Andere übernehmen'))));
+        konflikt.hidden = false;
+        try { konflikt.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch { /* egal */ }
+      }
+
       async function save() {
         if (busy) return;
         const title = titleInput.value.trim();
@@ -1667,7 +1800,8 @@ export default {
             st.neuAufWand.add(id);
           } else {
             st.eigene.set(id, Date.now() + 2000);
-            await api.patch(`/records/${encodeURIComponent(id)}`, { data: { title, body } });
+            // tags: [] -- die Schlagworte stehen jetzt im Text (siehe oben).
+            await api.patch(`/records/${encodeURIComponent(id)}`, { data: { title, body, tags: [] }, rev: basisRev || undefined });
           }
           if (!st.alive) return;
           o.dirty = false;
@@ -1678,6 +1812,11 @@ export default {
           if (typeof ctx.replaceRoute === 'function') ctx.replaceRoute(`#/notes?id=${id}`);
         } catch (err) {
           if (!st.alive) return;
+          const details = err && (err.details || (err.body && err.body.error && err.body.error.details));
+          if (err && err.status === 409 && details && details.record) {
+            zeigeKonflikt(details.record, title, body);
+            return;
+          }
           clear(error);
           error.appendChild(text(`Speichern hat nicht geklappt: ${errorText(err)}`));
           error.hidden = false;
@@ -1696,7 +1835,7 @@ export default {
       const card = h('article.nw__read', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId },
         h('div.nw__read-top', null, h('span.nw__kicker', null, text(neu ? 'Neue Notiz' : 'Notiz bearbeiten')), close),
         h('div.nw__read-body', null,
-          h('div.nw__edit', null, titleInput, host, error)),
+          h('div.nw__edit', null, titleInput, konflikt, host, error)),
         foot);
       mountSheet(card, { focus: neu || !data.title ? titleInput : null });
       if (!neu && data.title) setTimeout(() => editor.focus(), 0);
@@ -1758,6 +1897,82 @@ export default {
           await load();
           if (rec && st.alive) openNote(rec.id);
         };
+      } else if (art === 'import') {
+        kicker = 'Importieren';
+        // Dateien werden im Browser gelesen und als Text in Portionen an
+        // POST /api/notizen/import geschickt: je Datei eine Notiz, [[Links]]
+        // und #Schlagworte bleiben -- die Ableitung verbindet danach alles.
+        const dateiWahl = h('input', { type: 'file', multiple: true, accept: '.md,.markdown,.txt,text/markdown,text/plain', hidden: true });
+        const ordnerWahl = h('input', { type: 'file', multiple: true, hidden: true });
+        ordnerWahl.setAttribute('webkitdirectory', '');
+        const status = h('p.nw__import-status', { 'aria-live': 'polite' }, text('Noch nichts gewählt.'));
+        const liste = h('ul.nw__import-liste', { hidden: true });
+        let gewaehlt = [];
+        const nimm = (files) => {
+          gewaehlt = [...files].filter((f) => /\.(md|markdown|txt)$/i.test(f.name));
+          const rest = files.length - gewaehlt.length;
+          clear(status);
+          status.appendChild(text(gewaehlt.length
+            ? `${gewaehlt.length === 1 ? '1 Datei' : `${gewaehlt.length} Dateien`} bereit${rest ? ` (${rest} andere übersprungen – nur .md, .markdown, .txt)` : ''}.`
+            : 'Keine Markdown- oder Textdatei dabei.'));
+          o.dirty = gewaehlt.length > 0;
+        };
+        dateiWahl.addEventListener('change', () => nimm(dateiWahl.files || []));
+        ordnerWahl.addEventListener('change', () => nimm(ordnerWahl.files || []));
+        felder = [
+          h('div.nw__import-wahl', null,
+            h('button.btn', { type: 'button', onClick: () => dateiWahl.click() }, icon(I.file), text('Dateien wählen')),
+            h('button.btn', { type: 'button', onClick: () => ordnerWahl.click() }, icon(I.project), text('Ordner wählen')),
+            dateiWahl, ordnerWahl),
+          status,
+          liste,
+        ];
+        hint = 'Markdown-Dateien oder ein ganzer Ordner, etwa ein Obsidian-Tresor: jede Datei wird eine Notiz, der Dateiname ihr Titel. [[Links]], #Schlagworte und Schlagworte im Kopf (tags:) bleiben erhalten und verbinden sich danach im Gehirn. Titel, die es schon gibt, werden nicht doppelt angelegt.';
+        submitLabel = 'Importieren';
+        focus = null;
+        submit = async () => {
+          if (!gewaehlt.length) { fail('Erst Dateien oder einen Ordner wählen.'); return; }
+          const texte = [];
+          for (const f of gewaehlt) texte.push({ name: f.webkitRelativePath || f.name, text: await f.text() });
+          // Portionen: hoechstens 200 Dateien bzw. ~4 MB je Anfrage.
+          const portionen = [];
+          let jetzt = [];
+          let groesse = 0;
+          for (const t of texte) {
+            if (jetzt.length && (jetzt.length >= 200 || groesse + t.text.length > 4000000)) { portionen.push(jetzt); jetzt = []; groesse = 0; }
+            jetzt.push(t);
+            groesse += t.text.length;
+          }
+          if (jetzt.length) portionen.push(jetzt);
+          let angelegt = 0;
+          const uebersprungen = [];
+          const ids = [];
+          for (let i = 0; i < portionen.length; i++) {
+            clear(status);
+            status.appendChild(text(`Importiere … ${i + 1} von ${portionen.length}`));
+            const res = await api.post('/notizen/import', { dateien: portionen[i] }, { timeoutMs: 120000 });
+            angelegt += (res && res.angelegt) || 0;
+            if (res && Array.isArray(res.ids)) ids.push(...res.ids);
+            if (res && Array.isArray(res.uebersprungen)) uebersprungen.push(...res.uebersprungen);
+          }
+          o.dirty = false;
+          clear(status);
+          status.appendChild(text(`${angelegt === 1 ? '1 Notiz' : `${angelegt} Notizen`} angelegt${uebersprungen.length ? `, ${uebersprungen.length} übersprungen` : ''}.`));
+          clear(liste);
+          liste.hidden = !uebersprungen.length;
+          for (const u of uebersprungen.slice(0, 50)) liste.appendChild(h('li', null, text(`${u.name}: ${u.grund}`)));
+          for (const id of ids) st.neuAufWand.add(id);
+          await load();
+          if (!uebersprungen.length) {
+            closeSheet({ force: true });
+            toast(`${angelegt === 1 ? '1 Notiz' : `${angelegt} Notizen`} importiert – im Gehirn sind sie schon verbunden.`, 'success', {
+              action: { label: 'Gehirn öffnen', run: () => navigate('#/graph') },
+              timeout: 8000,
+            });
+          } else {
+            toast(`${angelegt} importiert, ${uebersprungen.length} übersprungen.`, 'info');
+          }
+        };
       } else {
         kicker = 'Text speichern';
         const area = h('textarea.textarea', { placeholder: 'Einfügen oder tippen. Die erste Zeile wird der Titel.', 'aria-label': 'Text', rows: '8', onInput: () => { o.dirty = !!area.value.trim(); } });
@@ -1800,7 +2015,7 @@ export default {
       h('div.nw__form-actions', null, submitBtn,
         h('button.btn.btn--ghost', { type: 'button', onClick: () => closeSheet() }, text('Abbrechen')),
         h('span.spacer'),
-        h('span.meta', null, text(art === 'text' ? 'Strg+Enter speichert' : 'Enter speichert'))));
+        h('span.meta', null, text(art === 'text' ? 'Strg+Enter speichert' : art === 'import' ? '' : 'Enter speichert'))));
       if (art === 'text') {
         felder[0].addEventListener('keydown', (event) => {
           if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); form.requestSubmit(); }
@@ -1926,7 +2141,7 @@ export default {
     if (!st.alive) return;
     if (params.id) await openNote(params.id, { fromRoute: true });
     else if (params.neu === 'notiz') openNew();
-    else if (params.neu === 'aufgabe' || params.neu === 'link' || params.neu === 'text') openForm(params.neu);
+    else if (params.neu === 'aufgabe' || params.neu === 'link' || params.neu === 'text' || params.neu === 'import') openForm(params.neu);
   },
 
   async unmount() {

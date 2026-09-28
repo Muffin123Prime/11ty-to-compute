@@ -262,7 +262,11 @@ function createPostfach({ zustand, sichern, ich, darfAn = () => true }) {
       const name = sauberName(info.name);
       if (name) p.name = name;
       if (typeof info.version === 'string') p.version = info.version;
-      if (typeof info.pin === 'boolean') p.pin = info.pin;
+      // Eine PIN kommt dazu, sie geht nie wieder weg (es gibt kein "PIN
+      // entfernen"). Die Kopfzeile eines älteren Postfachs darf deshalb nie
+      // zurück auf "ohne PIN" stellen, was der Suchlauf eben auf dem Stick
+      // des Partners gesehen hat (data/secrets.json).
+      if (info.pin === true || (info.pin === false && p.pin !== true)) p.pin = info.pin;
       p.zuletzt = typeof info.at === 'string' ? info.at : nowIso();
       p.zustand = 'aktiv';
       p.erster = false;
@@ -394,9 +398,18 @@ function createKopplung(deps = {}) {
     }
   }
 
-  /** Ungleiche Schutzstufe: Nie an einen Partner ohne PIN schreiben, wenn ich eine habe. */
-  const schutzUngleich = (p) => typeof p.pin === 'boolean' && p.pin !== meinPin();
-  const darfAn = (p) => !(meinPin() && p.pin === false);
+  /**
+   * Ungleiche Schutzstufe (1.7 Punkt 3): Der Abgleich hält an, in beide
+   * Richtungen, bis beide gleich sind. Mit PIN nur an einen Partner, der
+   * sicher auch eine hat; eine unbekannte Stufe (Kopplung aus einem älteren
+   * Stand) zählt dann als "ohne" – er legte meine Sätze sonst im Klartext ab.
+   * Ohne PIN nicht an einen Partner mit PIN: Er zeigt "Dieser Stick hat eine
+   * PIN, Lena nicht.", und still weiterfließen soll dann nichts. Gelesen wird
+   * weiter: Daran erfährt diese KI, dass der Partner nachgezogen hat.
+   */
+  const schutzUngleich = (p) => (typeof p.pin === 'boolean' ? p.pin !== meinPin() : meinPin());
+  const darfAn = (p) => !schutzUngleich(p);
+  const schutzSatz = (p) => (meinPin() ? `Dieser Stick hat eine PIN, ${p.name} nicht.` : `${p.name} hat eine PIN, dieser Stick nicht.`);
   const postfach = createPostfach({ zustand: laden, sichern, ich, darfAn });
   const folder = createFolderSync({
     store, merge, bus, logger: deps.logger, config: deps.config, vaultCrypto, paths, identitaet, postfach,
@@ -1371,7 +1384,7 @@ function createKopplung(deps = {}) {
         for (const p of laden().partner) {
           const s = steckt.get(p.id);
           if (s && darfAn(p)) ziele.push({ eltern: s.pfad, ordner: s.sync, ziel: p.id, partner: p });
-          else if (s) warn(`Dieser Stick hat eine PIN, ${p.name} nicht.`);
+          else if (s) warn(schutzSatz(p));
         }
         const zw = laden().zwilling;
         if (zw && zw.grund === 'fremdes-postfach') {

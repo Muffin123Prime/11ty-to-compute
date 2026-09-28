@@ -127,7 +127,9 @@
   --surface-4: #242527;
   --fg: #eeeef0;
   --fg-muted: #a4a6ac;
-  --fg-subtle: #6e7076;
+  /* Leiser Text braucht trotzdem 4,5:1 (WCAG AA): #6e7076 hatte auf den
+     Flaechen nur 3,1-4,0:1 (Pruefer, 28.09.2026). */
+  --fg-subtle: #8a8c93;
   --border: rgba(255, 255, 255, 0.07);
   --border-strong: rgba(255, 255, 255, 0.14);
   --overlay-bg: rgba(3, 3, 4, 0.66);
@@ -176,7 +178,7 @@
   --surface-4: #e4e5e9;
   --fg: #15161a;
   --fg-muted: #555862;
-  --fg-subtle: #868993;
+  --fg-subtle: #676a74;
   --border: rgba(16, 18, 24, 0.08);
   --border-strong: rgba(16, 18, 24, 0.17);
   --overlay-bg: rgba(20, 22, 28, 0.32);
@@ -215,7 +217,7 @@
     --surface-4: #e4e5e9;
     --fg: #15161a;
     --fg-muted: #555862;
-    --fg-subtle: #868993;
+    --fg-subtle: #676a74;
     --border: rgba(16, 18, 24, 0.08);
     --border-strong: rgba(16, 18, 24, 0.17);
     --overlay-bg: rgba(20, 22, 28, 0.32);

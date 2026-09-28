@@ -484,7 +484,6 @@ async function cmdDienst(flags) {
     if (!laufend) scheitern(err);
   });
 
-  const start = Date.now();
   let r;
   try {
     r = await hochfahren(flags, {
@@ -496,9 +495,11 @@ async function cmdDienst(flags) {
           // Steckt am selben Pfad ein anderer Stick, ist unserer weg (s18).
           kennung: () => (lage.app && lage.app.identitaet ? lage.app.identitaet.id : ki && ki.id) || null,
           ordner: paths.home,
-          aktivitaet: () => (lage.app && lage.app.server && typeof lage.app.server.aktivitaet === 'function'
-            ? lage.app.server.aktivitaet()
-            : { streams: 0, inFlight: 0, letzteAnfrage: start }),
+          // Auch im Vorraum: Wer gerade die PIN eintippt, ist kein Leerlauf.
+          aktivitaet: require('../src/kernel/waechter').dienstAktivitaet({
+            app: () => lage.app,
+            vorraumOffen: () => !!lage.vorraum,
+          }),
           beenden: (grund) => beenden(grund),
           // Stick weg: sofort, ohne flush und ohne Laufzettel -- beides läge auf dem Stick.
           ende: (code) => process.exit(code),
@@ -540,7 +541,7 @@ async function laufendesAbwarten(paths, dauertNoch) {
       // ihrer Oberfläche keinen Knopf dafür -- also beendet der Starter sie
       // selbst, sonst zeigt der Browser für immer die alte App (so gesehen
       // beim Nutzer nach dem Herunterladen einer neuen Fassung).
-      if (aeltereVersucht || !(await aeltereBeenden(befund.pid))) {
+      if (aeltereVersucht || !befund.sicher || !(await aeltereBeenden(befund.pid))) {
         return { satz: 'Neural OS läuft schon (ältere Version). Bitte dort beenden.' };
       }
       aeltereVersucht = true;
@@ -555,7 +556,9 @@ async function laufendesAbwarten(paths, dauertNoch) {
 }
 
 /**
- * Eine ältere Version (Sperre ohne Laufzettel) beenden: SIGTERM, das sie
+ * Eine ältere Version (Sperre ohne Laufzettel) beenden -- nur, wenn
+ * laufzettel.pruefen sie als `sicher` erkannt hat (Befehlszeile und
+ * Startzeit passen), nie eine fremde, zufällig gleiche PID: SIGTERM, das sie
  * sauber schließt (unter Windows ist es ein hartes Ende -- ihr Speicher
  * ist reines Anhängen, es geht höchstens der letzte Satz verloren), dann bis
  * zu 10 s warten. Ein anderes Konto (EPERM) oder ein Prozess, der nicht
@@ -599,8 +602,18 @@ function startScheitert(paths, grund) {
 }
 
 async function browserAuf(flags, url) {
-  if (flags.open === true) await oeffnen(url);
-  else sagen(url);
+  if (flags.open === true) {
+    const { openInBrowser } = require('../src/portable/open');
+    const r = await openInBrowser(url);
+    if (!r.opened) {
+      // Neural OS läuft, nur der Browser ging nicht auf: Die Adresse bleibt
+      // stehen, das Fenster auch (Code 1 -> "Taste drücken").
+      sagen(`Adresse im Browser öffnen: ${url}`);
+      return 1;
+    }
+  } else {
+    sagen(url);
+  }
   sagen('Fertig. Dieses Fenster kann zu.');
   return 0;
 }
@@ -731,7 +744,7 @@ async function cmdStop(flags) {
   const befund = await laufzettel.pruefen(paths);
   if (befund.zustand === 'startet') { sagen('Neural OS startet gerade; gleich noch einmal versuchen.'); return 1; }
   if (befund.zustand === 'aeltere') {
-    if (!(await aeltereBeenden(befund.pid))) { sagen('Neural OS läuft schon (ältere Version). Bitte dort beenden.'); return 1; }
+    if (!befund.sicher || !(await aeltereBeenden(befund.pid))) { sagen('Neural OS läuft schon (ältere Version). Bitte dort beenden.'); return 1; }
     sagen('Eine ältere Version lief noch und wurde beendet.');
     return 0;
   }

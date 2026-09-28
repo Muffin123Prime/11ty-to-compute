@@ -228,6 +228,10 @@ async function main() {
     console.log(`\n${B}4c · Das Gehirn: leer lädt es ein, bei 10.000 Einträgen bleibt es flüssig${X}`);
     await pruefeGehirnGross(browser);
 
+    /* ----------- 4d. Das Gehirn: Import, Unterthemen, Karte, Begriffe */
+    console.log(`\n${B}4d · Das Gehirn: importiertes Wissen, Unterthemen als Bereiche, Karte mit Adresse${X}`);
+    await pruefeGehirnUnterthemen(browser);
+
     /* ------------------------ 5. Schnellerfassung von ueberall aus */
     console.log(`\n${B}5 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
     // Absichtlich aus dem Gehirn heraus: der ganze Sinn ist, dass man nicht
@@ -969,11 +973,23 @@ async function pruefeGehirnGross(browser) {
     check(!(await page.getByLabel('Im Gehirn suchen').count()) && !(await page.locator('.gh__crumb').count()),
       'Über dem leeren Universum steht kein Suchfeld und kein Pfad');
     await page.locator('.gh__state').getByRole('button', { name: 'Erste Notiz', exact: true }).click();
-    await warte(500);
+    // Nicht nur die Adresse: der Editor muss offen und sichtbar sein.
+    const editorDa = await page.locator('.nw__edit-title').waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false);
     const hash = await page.evaluate(() => window.location.hash);
-    check(hash === '#/notes?neu', '„Erste Notiz“ führt zu den Notizen, mit neuem Blatt', hash);
+    check(editorDa && hash === '#/notes?neu=notiz', '„Erste Notiz“ öffnet den Editor mit neuem Blatt (Titelfeld sichtbar)', `${hash} · Titelfeld ${editorDa ? 'sichtbar' : 'fehlt'}`);
+    await page.keyboard.press('Escape').catch(() => {});
 
-    // Voll: 10.000 Notizen, ein Thema mit 2.000, der Rest in 160 Schlagworten.
+    // „Importieren“ öffnet den Import der Notizen (nicht den Stick).
+    await page.goto(`${base}/#/graph`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => { const g = document.querySelector('.gh'); return g && g.gehirn && g.gehirn.leer; }, null, { timeout: 15000 }).catch(() => {});
+    await page.locator('.gh__state').getByRole('button', { name: 'Importieren', exact: true }).click();
+    const importDa = await page.locator('.nw__import-wahl input[type=file]').first().waitFor({ state: 'attached', timeout: 5000 }).then(() => true, () => false);
+    const importHash = await page.evaluate(() => window.location.hash);
+    check(importDa && importHash.startsWith('#/notes'), '„Importieren“ öffnet den Import von Markdown-Dateien', `${importHash} · Dateiwahl ${importDa ? 'da' : 'fehlt'}`);
+
+    // Voll: 10.000 Notizen, ein Thema mit 2.400, der Rest in 160 Schlagworten.
+    // Ebene 1 zeigt hoechstens 2.000 (MAX_KNOTEN) -- die 2.400 pruefen, dass
+    // die Kuerzung dasteht statt verschwiegen zu werden.
     // Geschrieben wie ein Import (app.bulkWrite): dabei ruht die Ableitung,
     // und mit ihr die Verbindungsvorschlaege nach dem Speichern. Ohne das
     // stuenden nach 10.000 store.create() 10.000 Vorschlags-Zeitgeber an,
@@ -982,7 +998,8 @@ async function pruefeGehirnGross(browser) {
     // Browserkontext, wie nach einem Neustart.
     await page.close();
     const N = 10000;
-    const GROSS = 2000;
+    const GROSS = 2400;
+    const SICHTBAR = 2000;
     const TAGS = 160;
     const t0 = Date.now();
     const ids = [];
@@ -1028,7 +1045,9 @@ async function pruefeGehirnGross(browser) {
     const drin = await page.waitForFunction(() => { const g = document.querySelector('.gh').gehirn; return g.ebene === 1 && g.nodes >= 1000; }, null, { timeout: 30000 }).then(() => true, () => false);
     const ebene1Ms = Date.now() - t2;
     z = await gehirn();
-    check(drin && z.nodes >= GROSS, 'Ebene 1 des größten Themas zeigt seine 2.000 Knoten', `${z && z.thema}: ${z && z.nodes} Knoten nach ${ebene1Ms} ms`);
+    check(drin && z.nodes >= SICHTBAR, 'Ebene 1 des größten Themas zeigt seine stärksten 2.000 Knoten', `${z && z.thema}: ${z && z.nodes} Knoten nach ${ebene1Ms} ms`);
+    const kuerzung = await page.evaluate(() => { const n = document.querySelector('.gh__note'); return n && !n.hidden ? n.innerText.trim() : ''; });
+    check(/^2\.000 von 2\.400 Einträgen/.test(kuerzung), 'Das gekürzte Thema sagt es: „2.000 von 2.400 Einträgen – die am stärksten verbundenen …“', kuerzung || 'kein Hinweis');
     const ruht = await page.waitForFunction(() => document.querySelector('.gh').dataset.ruhe === 'ja', null, { timeout: 40000 }).then(() => true, () => false);
     check(ruht, 'Das Netz mit 2.000 Knoten kommt zur Ruhe', `nach ${Date.now() - t2} ms`);
     await warte(300);
@@ -1075,7 +1094,7 @@ async function pruefeGehirnGross(browser) {
     const sage = (r) => `${r.fps} Bilder/s (${r.frames} in 2 s, teuerstes Bild ${r.maxDrawMs} ms) bei Zoom ${r.zoom}, ${r.sichtbar} Knoten / ${r.linien} Linien${r.physik ? ', Physik lief' : ''}`;
     await page.mouse.move(20, 880);
     const panFit = await bench('pan', 2000);
-    check(panFit.fps >= 45 && panFit.sichtbar >= GROSS, 'Pan bei 2.000 sichtbaren Knoten, eingepasst: flüssig (Ziel 60 Bilder/s)', sage(panFit));
+    check(panFit.fps >= 45 && panFit.sichtbar >= SICHTBAR, 'Pan bei 2.000 sichtbaren Knoten, eingepasst: flüssig (Ziel 60 Bilder/s)', sage(panFit));
     for (let i = 0; i < 5; i++) { await page.keyboard.press('+'); await warte(260); }
     await warte(400);
     const panZoom = await bench('pan', 2000);
@@ -1087,6 +1106,220 @@ async function pruefeGehirnGross(browser) {
     const oben = await page.waitForFunction(() => document.querySelector('.gh').gehirn.ebene === 0, null, { timeout: 10000 }).then(() => true, () => false);
     check(oben, 'Escape führt aus dem großen Thema zurück ins Universum', `nach ${Date.now() - t3} ms`);
     check(!fehler.length, 'Keine Skriptfehler bei 10.000 Einträgen', fehler[0] || '');
+  } finally {
+    await context.close().catch(() => {});
+    await app.close().catch(() => {});
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Ein kleiner Schul-Tresor, wie ihn jemand aus Obsidian mitbringt: echte
+ * Markdown-Dateien ueber [Importieren] (Dateiwahl), dann das Gehirn damit.
+ * Geprueft wird, was die Pruefer in Runde 1 vermisst haben: Unterthemen sind
+ * in Ebene 1 als Bereiche sichtbar und fuehren tiefer (Name antippen), ein
+ * Trackpad-Zug taucht ein, ohne das neue Netz weiter zu vergroessern, die
+ * Karte rechts verdeckt den gewaehlten Knoten nicht, ein Begriff bietet
+ * "Umfeld zeigen" statt eines Oeffnens ins Leere, und die Themenkarte ist
+ * direkt aufrufbar und traegt ihren Ort in der Adresse (auch nach Neuladen).
+ */
+async function pruefeGehirnUnterthemen(browser) {
+  const { createApp } = require('../src/app');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-ui-unter-'));
+  const app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error' });
+  await app.loadModules({});
+  const server = await app.listen();
+  const base = `http://127.0.0.1:${server.server.address().port}`;
+  const store = app.store;
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+  const page = await context.newPage();
+  const fehler = [];
+  page.on('pageerror', (e) => fehler.push(e.message.slice(0, 120)));
+  const warte = (ms) => page.waitForTimeout(ms);
+  const gh = (fn, arg) => page.evaluate(fn, arg);
+  // Bis Leinwand und Bereichsnamen stillstehen: nach dem Eintauchen waechst
+  // die Netz-Ebene noch (CSS-Uebergang), auch wenn die Physik schon ruht --
+  // ein Klick nach Koordinaten von vorher traefe daneben.
+  const stillStehen = async () => {
+    let vorher = '';
+    for (let i = 0; i < 30; i++) {
+      const jetzt = await gh(() => {
+        const c = document.querySelector('.gh__canvas--netz').getBoundingClientRect();
+        const bs = document.querySelector('.gh').gehirn.bereiche();
+        return JSON.stringify([Math.round(c.left), Math.round(c.top), Math.round(c.width), bs.map((b) => [Math.round(b.x), Math.round(b.y)])]);
+      });
+      if (jetzt === vorher) return true;
+      vorher = jetzt;
+      await warte(200);
+    }
+    return false;
+  };
+  const dateien = {
+    'Photosynthese.md': '---\ntags: [schule, biologie]\n---\nPflanzen wandeln Licht in Zucker um. Siehe [[Zellatmung]] und [[Chlorophyll]].',
+    'Zellatmung.md': 'Umkehrung der [[Photosynthese]]: Zucker wird verbrannt. #biologie #schule',
+    'Chlorophyll.md': 'Blattgrün, absorbiert Licht. #biologie #schule',
+    'Zelle.md': 'Kleinste Einheit des Lebens, siehe [[Zellatmung]]. #biologie #schule',
+    'DNA.md': 'Doppelhelix, Träger der Erbinformation. #biologie #genetik #schule',
+    'Mendel.md': 'Vererbungsregeln, siehe [[DNA]]. #biologie #genetik #schule',
+    'Mutation.md': 'Veränderung der [[DNA]]. #biologie #genetik #schule',
+    'Ökosystem.md': 'Wald und See, siehe [[Photosynthese]]. #biologie #schule',
+    'Erster Weltkrieg.md': '1914 bis 1918. #geschichte #schule',
+    'Zweiter Weltkrieg.md': 'Folge des [[Erster Weltkrieg]]. #geschichte #schule',
+    'Weimarer Republik.md': 'Zwischen [[Erster Weltkrieg]] und [[Zweiter Weltkrieg]]. #geschichte #schule',
+    'Französische Revolution.md': '1789. #geschichte #schule',
+    'Industrialisierung.md': 'Dampfmaschine und Fabriken. #geschichte #schule',
+    'Pasta.md': 'Nudeln al dente, dazu [[Tomatensoße]]. #kochen',
+    'Tomatensoße.md': 'Tomaten, Knoblauch, Olivenöl. #kochen',
+    'Risotto.md': 'Reis langsam rühren. #kochen',
+    'Einkauf.md': 'Milch, Brot.',
+    'Ideen.txt': 'Ein Garten auf dem Balkon.',
+    'bild.png': 'kein Text',
+  };
+  const texte = Object.keys(dateien).filter((n) => /\.(md|txt)$/.test(n)).length;
+  try {
+    /* Import ueber die Oberflaeche: Dateiwahl -> [Importieren]. */
+    await page.goto(`${base}/#/notes?neu=import`, { waitUntil: 'domcontentloaded' });
+    await dismissWelcome(page);
+    const wahl = page.locator('.nw__import-wahl input[type=file]').first();
+    await wahl.waitFor({ state: 'attached', timeout: 8000 });
+    // Als Puffer statt als Pfade: Chromium ohne LANG verliert sonst Dateien mit
+    // Umlaut im Namen (gemessen: Ökosystem.md fehlte) -- das waere ein Fehler
+    // des Pruefaufbaus, nicht der Seite.
+    await wahl.setInputFiles(Object.entries(dateien).map(([name, inhalt]) => ({ name, mimeType: /\.png$/.test(name) ? 'image/png' : 'text/markdown', buffer: Buffer.from(inhalt) })));
+    await warte(200);
+    const bereit = (await page.locator('.nw__import-status').innerText().catch(() => '')).trim();
+    check(new RegExp(`^${texte} Dateien bereit \\(1 andere übersprungen`).test(bereit), 'Import: gewählte Dateien werden gezählt, Fremdes übersprungen', bereit);
+    await page.getByRole('button', { name: 'Importieren', exact: true }).last().click();
+    const fertig = await page.waitForFunction((n) => {
+      const t = [...document.querySelectorAll('.toast')].map((x) => x.innerText).join(' ');
+      return new RegExp(`${n} Notizen importiert`).test(t);
+    }, texte, { timeout: 20000 }).then(() => true, () => false);
+    const kanten = await (async () => {
+      for (let i = 0; i < 40; i++) {
+        const n = store.all('note').reduce((s, r) => s + store.edges.for(r.id, { direction: 'out' }).filter((e) => e.data.kind === 'links-to').length, 0);
+        if (n >= 11) return n;
+        await warte(150);
+      }
+      return store.all('note').reduce((s, r) => s + store.edges.for(r.id, { direction: 'out' }).filter((e) => e.data.kind === 'links-to').length, 0);
+    })();
+    const tags = (store.all('note').find((r) => r.data.title === 'Photosynthese') || { data: {} }).data.tags || [];
+    check(fertig && store.count('note') === texte && kanten >= 11 && tags.includes('biologie'),
+      'Import: jede Datei eine Notiz, [[Links]] als Kanten, tags: aus dem Kopf übernommen', `${store.count('note')} Notizen · ${kanten} Wiki-Kanten · Photosynthese: ${tags.join(', ')}`);
+
+    /* Das Universum: Schule traegt Biologie und Geschichte. */
+    await page.goto(`${base}/#/graph`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => { const g = document.querySelector('.gh'); return g && g.gehirn && g.gehirn.themen > 0; }, null, { timeout: 15000 }).catch(() => {});
+    await warte(1200);
+    const kreise = await gh(() => document.querySelector('.gh').gehirn.kreise);
+    check(kreise.includes('thema:schule') && kreise.includes('thema:kochen'), 'Ebene 0: die importierten Themen stehen als Kreise', kreise.join(', '));
+
+    // Ein Trackpad-Zug ueber Schule taucht ein -- und vergroessert das neue Netz nicht weiter.
+    const schule = await gh(() => document.querySelector('.gh').gehirn.screenPosition('thema:schule'));
+    const uni = await page.locator('.gh__canvas--uni').boundingBox();
+    if (schule && uni) {
+      await page.mouse.move(uni.x + schule.x, uni.y + schule.y);
+      for (let i = 0; i < 30; i++) { await page.mouse.wheel(0, -40); await warte(16); }
+    }
+    await page.waitForFunction(() => { const g = document.querySelector('.gh').gehirn; return g.ebene === 1; }, null, { timeout: 8000 }).catch(() => {});
+    await page.waitForFunction(() => document.querySelector('.gh').dataset.ruhe === 'ja', null, { timeout: 15000 }).catch(() => {});
+    const nachZug = await gh(() => { const g = document.querySelector('.gh').gehirn; return { ebene: g.ebene, thema: g.thema && g.thema.id, zoom: g.stats().zoom }; });
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => document.querySelector('.gh').gehirn.ebene === 0, null, { timeout: 8000 }).catch(() => {});
+    await gh(() => document.querySelector('.gh').gehirn.tauchen('thema:schule'));
+    await page.waitForFunction(() => document.querySelector('.gh').gehirn.ebene === 1, null, { timeout: 8000 }).catch(() => {});
+    await page.waitForFunction(() => document.querySelector('.gh').dataset.ruhe === 'ja', null, { timeout: 15000 }).catch(() => {});
+    await stillStehen();
+    const eingepasst = await gh(() => document.querySelector('.gh').gehirn.stats().zoom);
+    check(nachZug.thema === 'thema:schule' && Math.abs(nachZug.zoom - eingepasst) <= eingepasst * 0.15,
+      'Ein Trackpad-Zug über „Schule“ taucht ein und zoomt das neue Netz nicht weiter', `Zoom nach dem Zug ${Math.round(nachZug.zoom * 100) / 100}, eingepasst ${Math.round(eingepasst * 100) / 100}`);
+
+    // Unterthemen: als Bereiche im Netz und als Knoepfe unter dem Pfad.
+    const bereiche = await gh(() => document.querySelector('.gh').gehirn.bereiche());
+    const chips = (await page.locator('.gh__sub .chip').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim());
+    const namen = bereiche.map((b) => b.name);
+    check(namen.includes('Biologie') && namen.includes('Geschichte') && chips.some((c) => c.startsWith('Biologie')),
+      'Ebene 1 „Schule“ zeigt Biologie und Geschichte als Bereiche und als Knöpfe', `Bereiche: ${namen.join(', ')} · Knöpfe: ${chips.join(' · ')}`);
+    const netz = await page.locator('.gh__canvas--netz').boundingBox();
+    const bio = bereiche.find((b) => b.id === 'thema:biologie');
+    if (bio && netz) {
+      await page.mouse.click(netz.x + bio.x, netz.y + bio.y);
+      // Erst wenn das neue Netz steht, sind Pfad und Adresse nachgezogen.
+      await page.waitForFunction(() => {
+        const g = document.querySelector('.gh').gehirn;
+        return g.thema && g.thema.id === 'thema:biologie' && /biologie/.test(location.hash) && /Biologie/.test(document.querySelector('.gh__crumbs').innerText);
+      }, null, { timeout: 8000 }).catch(() => {});
+    }
+    const tiefer = await gh(() => ({ thema: document.querySelector('.gh').gehirn.thema && document.querySelector('.gh').gehirn.thema.id, pfad: document.querySelector('.gh__crumbs').innerText.replace(/\s+/g, ' ').trim(), hash: location.hash }));
+    check(tiefer.thema === 'thema:biologie' && /Schule/.test(tiefer.pfad) && /thema=thema%3Abiologie/.test(tiefer.hash),
+      'Den Namen des Bereichs antippen führt tiefer: Mein Wissen › Schule › Biologie', `${tiefer.pfad} · ${tiefer.hash}`);
+    await page.keyboard.press('Escape');
+    const hoch = await page.waitForFunction(() => { const g = document.querySelector('.gh').gehirn; return g.thema && g.thema.id === 'thema:schule'; }, null, { timeout: 8000 }).then(() => true, () => false);
+    check(tiefer.thema === 'thema:biologie' && hoch, 'Escape: eine Ebene hoch, von Biologie zurück nach Schule');
+
+    // Den staerksten Knoten waehlen: die Karte rechts laesst ihn frei.
+    await page.waitForFunction(() => document.querySelector('.gh').dataset.ruhe === 'ja', null, { timeout: 15000 }).catch(() => {});
+    await stillStehen();
+    const hub = await gh(() => {
+      const g = document.querySelector('.gh').gehirn;
+      let best = null;
+      for (const id of g.ids) { const q = g.screenPosition(id); if (q && (!best || q.r > best.r)) best = { id, ...q }; }
+      return best;
+    });
+    if (hub && netz) await page.mouse.click(netz.x + hub.x, netz.y + hub.y);
+    await page.locator('.gh__card').waitFor({ state: 'visible', timeout: 6000 }).catch(() => {});
+    await warte(900);
+    const frei = await gh(() => {
+      const g = document.querySelector('.gh').gehirn;
+      const card = document.querySelector('.gh__card').getBoundingClientRect();
+      const canvas = document.querySelector('.gh__canvas--netz').getBoundingClientRect();
+      const tools = document.querySelector('.gh__tools').getBoundingClientRect();
+      const q = g.selectedId ? g.screenPosition(g.selectedId) : null;
+      return q ? { x: Math.round(canvas.left + q.x), karte: Math.round(card.left), suche: Math.round(tools.right) } : null;
+    });
+    check(!!frei && frei.x < frei.karte - 4 && frei.suche <= frei.karte,
+      'Die Karte rechts verdeckt den gewählten Knoten nicht, die Suche rückt links daneben', frei ? `Knoten bei x ${frei.x}, Karte ab x ${frei.karte}, Suche bis x ${frei.suche}` : 'nichts gewählt');
+
+    // Ein Begriff: "Umfeld zeigen", kein Oeffnen ins Leere.
+    const begriff = store.create('entity', { name: 'Blattgrün', kind: 'topic', description: 'Der grüne Farbstoff der Pflanzen.' });
+    for (const titel of ['Chlorophyll', 'Photosynthese']) {
+      const n = store.all('note').find((r) => r.data.title === titel);
+      if (n) store.edges.add({ from: n.id, to: begriff.id, kind: 'mentions', source: 'derived', reason: 'Begriff im Text' });
+    }
+    await store.flush();
+    // Das Umfeld der Notiz Chlorophyll zeigt den Begriff als Nachbarn; ihn waehlen.
+    const chloro = store.all('note').find((r) => r.data.title === 'Chlorophyll');
+    await page.goto(`${base}/#/graph?focus=${encodeURIComponent(chloro.id)}`, { waitUntil: 'domcontentloaded' });
+    await page.locator('.gh__card').waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+    await warte(600);
+    await gh((id) => document.querySelector('.gh').gehirn.select(id), begriff.id);
+    await warte(600);
+    const kopf = (await page.locator('.gh__card-title').innerText().catch(() => '')).trim();
+    const knoepfe = (await page.locator('.gh__card-actions .btn').allInnerTexts()).map((t) => t.trim());
+    if (knoepfe.includes('Umfeld zeigen')) await page.locator('.gh__card-actions').getByRole('button', { name: 'Umfeld zeigen' }).click();
+    await warte(900);
+    const toasts = (await page.locator('.toast').allInnerTexts()).join(' · ');
+    const umfeldHash = await page.evaluate(() => location.hash);
+    check(kopf === 'Blattgrün' && knoepfe.includes('Umfeld zeigen') && !knoepfe.includes('Öffnen') && !/gibt es nicht|nicht gefunden/.test(toasts)
+      && umfeldHash.includes(`focus=${encodeURIComponent(begriff.id)}`),
+    'Ein Begriff bietet „Umfeld zeigen“ statt eines Öffnens ins Leere, und es führt in sein Umfeld', `${kopf}: ${knoepfe.join(' · ')} → ${umfeldHash}${toasts ? ` · ${toasts}` : ''}`);
+
+    /* Die Themenkarte: direkt aufrufbar, ihr Ort steht in der Adresse. */
+    await page.goto(`${base}/#/graph?ansicht=karte`, { waitUntil: 'domcontentloaded' });
+    await page.locator('.wk__tile').first().waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+    const kacheln = await page.locator('.wk__tile').count();
+    check(kacheln >= 2, 'Die Themenkarte öffnet sich beim direkten Aufruf (#/graph?ansicht=karte)', `${kacheln} Kacheln`);
+    await page.locator('.wk__tile', { hasText: 'Schule' }).first().click().catch(() => {});
+    await warte(900);
+    const ort = await page.evaluate(() => location.hash);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.locator('.wk__title').waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+    await warte(600);
+    const nachReload = (await page.locator('.wk__title').innerText().catch(() => '')).trim();
+    check(/ansicht=karte/.test(ort) && /thema=thema%3Aschule/.test(ort) && nachReload === 'Schule',
+      'Die Karte trägt ihren Ort in der Adresse und steht nach dem Neuladen wieder bei „Schule“', `${ort} · nach dem Neuladen: ${nachReload || 'nichts'}`);
+    const unterzeilen = (await page.locator('.wk__sub').innerText().catch(() => '')).trim();
+    check(/\d+ Unterthem/.test(unterzeilen) && !/(^|\D)1 (Unterthemen|Einträge|Einträgen)\b/.test(unterzeilen), 'Die Zahlen darunter sind richtig gebeugt', unterzeilen);
+    check(!fehler.length, 'Keine Skriptfehler bei Import, Unterthemen und Karte', fehler[0] || '');
   } finally {
     await context.close().catch(() => {});
     await app.close().catch(() => {});

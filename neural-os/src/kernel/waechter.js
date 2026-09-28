@@ -180,4 +180,47 @@ function starte({
   };
 }
 
-module.exports = { starte, STICK_TAKT_MS, LEERLAUF_TAKT_MS, LEERLAUF_MS, SCHONFRIST_MS, SPRUNG_MS };
+/**
+ * Die Aktivität des Dienstes für den Leerlauf-Wächter. Läuft die Anwendung,
+ * zählt ihr Server selbst (`server.aktivitaet()`). Davor, im Vorraum (PIN
+ * noch nicht eingegeben), sieht niemand sonst die Anfragen: Sie werden hier
+ * über den Diagnosekanal von node:http gezählt, der jede Anfrage jedes
+ * HTTP-Servers dieses Prozesses meldet. Sonst endete ein Dienst, dessen
+ * PIN-Seite offen ist und in den gerade getippt wird, nach 10 min als
+ * "Leerlauf" (Prüfung von Welle 1). Die Gesundheitsabfrage zählt nicht: Sie
+ * kommt vom Starter, nicht von einem Menschen.
+ *
+ * @param {{app:()=>object|null, vorraumOffen:()=>boolean, jetzt?:()=>number}} o
+ * @returns {(()=>{streams:number, inFlight:number, letzteAnfrage:number}) & {abmelden:()=>void}}
+ */
+function dienstAktivitaet({ app = () => null, vorraumOffen = () => false, jetzt = Date.now } = {}) {
+  const kanal = require('node:diagnostics_channel');
+  let letzte = jetzt();
+  let inFlight = 0;
+  const beiAnfrage = (nachricht) => {
+    if (!vorraumOffen()) return;
+    const url = String((nachricht && nachricht.request && nachricht.request.url) || '');
+    if (url === '/api/health' || url.startsWith('/api/health?')) return;
+    inFlight += 1;
+    letzte = jetzt();
+    const antwort = nachricht && nachricht.response;
+    if (antwort && typeof antwort.once === 'function') {
+      antwort.once('close', () => {
+        inFlight = Math.max(0, inFlight - 1);
+        letzte = jetzt();
+      });
+    } else {
+      inFlight = Math.max(0, inFlight - 1);
+    }
+  };
+  kanal.subscribe('http.server.request.start', beiAnfrage);
+  const aktivitaet = () => {
+    const a = app();
+    if (a && a.server && typeof a.server.aktivitaet === 'function') return a.server.aktivitaet();
+    return { streams: 0, inFlight, letzteAnfrage: letzte };
+  };
+  aktivitaet.abmelden = () => kanal.unsubscribe('http.server.request.start', beiAnfrage);
+  return aktivitaet;
+}
+
+module.exports = { starte, dienstAktivitaet, STICK_TAKT_MS, LEERLAUF_TAKT_MS, LEERLAUF_MS, SCHONFRIST_MS, SPRUNG_MS };

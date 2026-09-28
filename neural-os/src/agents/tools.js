@@ -435,12 +435,15 @@ function moduleNetworkLevel(caps) {
   return 'offline';
 }
 
-function createToolbox({ store, registry, gate, graph, paths, approvals, config, logger, audit } = {}) {
+function createToolbox({ store, registry, gate, graph, paths, approvals, config, logger, audit, portable } = {}) {
   if (!store || typeof store.create !== 'function') {
     throw new ValidationError('createToolbox benötigt einen Store.');
   }
   const log = typeof logger === 'function' ? logger('tools') : nullLogger();
   const cfg = isPlainObject(config) ? config : {};
+  // Where the stick is, so `fileRoots` resolve to the folders on THIS computer
+  // (docs/STICK-BAUPLAN.md 2.7). Not given: the stick this program runs from.
+  const ortOpts = portable !== undefined ? { portable } : {};
   /** Set by the runtime after construction; breaks the tools <-> runtime cycle. */
   let runtime = null;
 
@@ -460,7 +463,7 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
 
   function permsOf(ctx) {
     if (ctx && ctx._perms) return ctx._perms;
-    const perms = permissionsMod.effective(agentOf(ctx), cfg);
+    const perms = permissionsMod.effective(agentOf(ctx), cfg, ortOpts);
     if (ctx) ctx._perms = perms;
     return perms;
   }
@@ -1373,7 +1376,7 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
         if (permissionsMod.agentId(parent) === child.id) {
           throw new ValidationError('Ein Agent darf sich nicht selbst starten.');
         }
-        const subset = permissionsMod.subsetOf(child, parent, cfg);
+        const subset = permissionsMod.subsetOf(child, parent, cfg, ortOpts);
         if (!subset.ok) {
           throw new PermissionError(
             `Unteragent "${child.data.name}" verlangt mehr Rechte als der startende Agent hat: ${subset.missing.join(', ')}.`,
@@ -1571,7 +1574,7 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
      * @returns {Array<{name:string, description:string, parameters:object}>}
      */
     list(agent) {
-      const perms = permissionsMod.effective(agent, cfg);
+      const perms = permissionsMod.effective(agent, cfg, ortOpts);
       const allowlist = (() => {
         const data = permissionsMod.agentData(agent);
         return Array.isArray(data.tools) && data.tools.length ? new Set(data.tools) : null;

@@ -39,7 +39,10 @@ test(`${N.toLocaleString('de-DE')} Knoten: GET /api/graph/universum (Ebene 0) un
       for (let i = 0; i < N; i++) {
         ids.push(store.create('note', {
           title: `Notiz ${i}`,
-          body: `Inhalt ${i} ueber Thema ${i % 37} und Begriff ${i % 53}.`,
+          // Ein Merkmal teilen je 25 Notizen: daran erkennen die Vorschlaege
+          // Verwandte. Die Floskeln drumherum ("Inhalt", "Thema") stehen in
+          // allen 10 000 und duerfen nichts verbinden (Runde 1).
+          body: `Inhalt ${i} ueber Thema ${i % 37} und Begriff ${i % 53}. Merkmal Farbton${i % 400}.`,
           tags: [`thema${i % TAGS}`],
         }).id);
       }
@@ -81,10 +84,19 @@ test(`${N.toLocaleString('de-DE')} Knoten: GET /api/graph/universum (Ebene 0) un
     assert.ok(e1.knoten.filter((k) => !k.ausserhalb).length <= uni.MAX_KNOTEN, 'Ebene 1 haelt die Obergrenze');
 
     // Vorschlaege fuer eine Notiz: die Suche filtert vor, kein Vergleich mit allen 10 000.
+    // Der erste Aufruf zaehlt einmal die Worthaeufigkeiten des Tresors (in der
+    // Anwendung geschieht das 3 s nach dem Start im Hintergrund); gemessen und
+    // begrenzt wird der Aufruf danach, so wie jedes Speichern ihn ausloest.
+    const t40 = process.hrtime.bigint();
+    uni.vorschlaegeFuer(store, ids[7]);
+    const ersterVorschlagMs = Number(process.hrtime.bigint() - t40) / 1e6;
     const t4 = process.hrtime.bigint();
     const vorschlaege = uni.vorschlaegeFuer(store, ids[123]);
     const vorschlagMs = Number(process.hrtime.bigint() - t4) / 1e6;
     assert.ok(vorschlaege.length >= 1);
+    for (const v of vorschlaege) {
+      assert.match(v.grund, /Farbton123/, `nur das gemeinsame Merkmal verbindet, nicht die Floskeln: ${v.title}: ${v.grund}`);
+    }
 
     const zahlen = {
       knoten: N + BEGRIFFE,
@@ -97,6 +109,7 @@ test(`${N.toLocaleString('de-DE')} Knoten: GET /api/graph/universum (Ebene 0) un
       ebene1Ms: Math.round(ebene1Ms * 10) / 10,
       groesstesThema: `${groesstes.name} (${groesstes.anzahl} Knoten, ${e1.kanten.length} Kanten)`,
       vorschlaegeMs: Math.round(vorschlagMs * 10) / 10,
+      ersterVorschlagMitZaehlungMs: Math.round(ersterVorschlagMs * 10) / 10,
     };
     console.log(`    Leistung 10.000 Knoten: ${JSON.stringify(zahlen)}`);
 
@@ -104,6 +117,7 @@ test(`${N.toLocaleString('de-DE')} Knoten: GET /api/graph/universum (Ebene 0) un
     assert.ok(ebene1Ms < GRENZE_MS, `Ebene 1 zu langsam: ${ebene1Ms.toFixed(1)} ms`);
     assert.ok(warmMs < 5, `aus dem Cache zu langsam: ${warmMs.toFixed(2)} ms`);
     assert.ok(vorschlagMs < GRENZE_MS, `Vorschlaege zu langsam: ${vorschlagMs.toFixed(1)} ms`);
+    assert.ok(ersterVorschlagMs < 3 * GRENZE_MS, `erster Vorschlag samt Zaehlung zu langsam: ${ersterVorschlagMs.toFixed(1)} ms`);
   } finally {
     anbindung.detach();
     await store.close();

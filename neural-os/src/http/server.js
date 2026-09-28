@@ -58,13 +58,41 @@ const CSP = [
   "base-uri 'none'",
   "form-action 'none'",
   "frame-ancestors 'none'",
+  // Der Chat bettet den Sandkasten (/sandbox.html) als Rahmen ein
+  // (docs/ANTWORT-BAUSTEINE.md 7). Ohne diese Zeile fiele frame-src auf
+  // default-src 'self' zurück -- gleich weit, aber nur zufällig; so steht
+  // ausdrücklich da, dass Rahmen nur aus der eigenen Quelle kommen.
+  "frame-src 'self'",
+].join('; ');
+
+/**
+ * Die eigene Kopfzeile des Sandkastens (docs/ANTWORT-BAUSTEINE.md 7). Er ist
+ * die EINE Seite, die fremdes HTML und JavaScript (aus einer KI-Antwort)
+ * ausführt -- deshalb darf er genau das und sonst nichts: kein Netz
+ * (connect-src 'none'), keine Formulare, nur eingebettet in die App. Der
+ * Chat lädt ihn als <iframe sandbox="allow-scripts"> ohne allow-same-origin:
+ * ein undurchsichtiger Ursprung, kein Zugriff auf Cookies, Speicher oder /api.
+ */
+const SANDBOX_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline' 'unsafe-eval' blob:",
+  'worker-src blob:',
+  "style-src 'unsafe-inline'",
+  'img-src data: blob:',
+  'font-src data:',
+  "connect-src 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'self'",
 ].join('; ');
 
 const SECURITY_HEADERS = {
   'Content-Security-Policy': CSP,
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
-  'Permissions-Policy': 'geolocation=(), camera=(), microphone=()',
+  // Mikrofon nur für die eigene Seite: der Chat nimmt Sprache auf
+  // (docs/ANTWORT-BAUSTEINE.md 6, "Sprechen"). `microphone=()` sperrte es
+  // ganz; eingebettete Rahmen (der Sandkasten) bekommen es weiterhin nicht.
+  'Permissions-Policy': 'geolocation=(), camera=(), microphone=(self)',
   // Redundant next to frame-ancestors, kept for browsers that predate CSP 2.
   'X-Frame-Options': 'DENY',
 };
@@ -917,6 +945,14 @@ async function createServer(ctx = {}) {
     res.setHeader('ETag', etag);
     res.setHeader('Last-Modified', new Date(stat.mtimeMs).toUTCString());
     res.setHeader('Cache-Control', cacheable ? 'public, max-age=0, must-revalidate' : 'no-cache');
+    // Der Sandkasten (nur die Datei im Wurzelordner der Oberfläche) bekommt
+    // seine eigene, engere Kopfzeile -- und darf als einziger eingebettet
+    // werden, und nur von der App selbst (siehe SANDBOX_CSP).
+    if (file === path.join(webRoot, 'sandbox.html')) {
+      res.setHeader('Content-Security-Policy', SANDBOX_CSP);
+      res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+      res.setHeader('Permissions-Policy', 'geolocation=(), camera=(), microphone=()');
+    }
 
     const inm = req.headers['if-none-match'];
     if (inm && inm.split(',').some((candidate) => candidate.trim() === etag)) {
@@ -976,9 +1012,16 @@ async function createServer(ctx = {}) {
         // lokalen Aufrufer beantwortbar.
         let eigenerName = true;
         try { guardHost(req); } catch { eigenerName = false; }
-        sendJson(rc, 200, eigenerName
+        const antwort = eigenerName
           ? { ok: true, at: new Date().toISOString(), instanz, heim: heimJetzt() }
-          : { ok: true, at: new Date().toISOString() });
+          : { ok: true, at: new Date().toISOString() };
+        // Derselbe Datenordner unter einem zweiten Pfad? Der Starter legt
+        // `.heimprobe-<probe>` an und fragt, ob sie hier liegt (Laufzettel).
+        const probe = target.query.get('probe');
+        if (eigenerName && probe && laufzettelMod.PROBE_RE.test(probe) && ctx.paths && ctx.paths.home) {
+          antwort.probe = fs.existsSync(path.join(ctx.paths.home, `${laufzettelMod.PROBE_PRAEFIX}${probe}`));
+        }
+        sendJson(rc, 200, antwort);
         return;
       }
 
@@ -1232,6 +1275,7 @@ async function createServer(ctx = {}) {
 module.exports = {
   createServer,
   CSP,
+  SANDBOX_CSP,
   SECURITY_HEADERS,
   DEFAULT_BODY_LIMIT,
   HEARTBEAT_MS,

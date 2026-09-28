@@ -5,6 +5,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const defaultExtract = require('./extract');
+const ortspfad = require('../kernel/ortspfad');
+const { istBegleitdatei } = require('../kernel/dateien');
 const {
   NeuralError,
   ValidationError,
@@ -55,7 +57,20 @@ const {
  * Watching `paths.home` would make the system read its own blobs, write them
  * back as new blobs, notice those, and grow until the disk is full. Both
  * directions are refused: the folder may not lie inside the home directory,
- * and the home directory may not lie inside the folder.
+ * and the home directory may not lie inside the folder. The same holds for
+ * any other Neural OS: a stick root, its program and data, another data
+ * directory -- „Hier liegt eine Neural-OS-KI." (docs/STICK-BAUPLAN.md 2.7).
+ *
+ * Ordner je Rechner (docs/STICK-BAUPLAN.md 2.7)
+ * ---------------------------------------------
+ * A stick wanders between computers. Every folder is therefore recorded with
+ * where it lies (src/kernel/ortspfad.js): on the stick (`ort:'stick'`, relative
+ * to the stick root, valid everywhere) or on this computer and account
+ * (`ort:'rechner'`, valid only here). A folder of another computer is not
+ * attached, not walked and not read, and says so in one sentence -- without a
+ * `lastError` per round, because nothing went wrong. Files the operating
+ * system puts on sticks (`._*`, `.DS_Store`, …) are skipped without a word:
+ * they are never documents, and listing them would bury the real reasons.
  *
  * Why `fs.watch` is not trusted on its own
  * ----------------------------------------
@@ -165,6 +180,11 @@ function disabled(record) {
 function isInside(child, parent) {
   const rel = path.relative(path.resolve(parent), path.resolve(child));
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/** A path inside a watched folder, with `/` at every computer. */
+function posixRel(rel) {
+  return String(rel || '').split(path.sep).join('/');
 }
 
 function extensionOf(name) {
@@ -278,6 +298,18 @@ function createWatcher(deps = {}) {
       return resolved; // not created yet: the plain path is the best we have
     }
   })();
+  // Wo der Stick hängt, durch `realpath` wie der Ordner selbst: sonst läge
+  // `/private/tmp/stick/Schule` am Mac nicht "unter" `/tmp/stick`.
+  // `deps.portable` wie `app.portable`; ohne Angabe der Stick dieses Programms.
+  const ortOpts = (() => {
+    const portable = ortspfad.stickAus(deps);
+    if (!portable || typeof portable.root !== 'string') return { portable: portable || null };
+    try {
+      return { portable: { ...portable, root: fs.realpathSync(path.resolve(portable.root)) } };
+    } catch {
+      return { portable };
+    }
+  })();
   const bus = deps.bus || null;
   const extract = deps.extract && typeof deps.extract.extractText === 'function' ? deps.extract : defaultExtract;
   const log = typeof deps.logger === 'function' ? deps.logger('store.watch') : (deps.logger || nullLogger());
@@ -301,6 +333,8 @@ function createWatcher(deps = {}) {
   const skipLog = new Map();
   /** @type {Set<string>} ids with a run in flight; two clicks are not two imports */
   const busy = new Set();
+  /** @type {Set<string>} ids whose place is being written right now (see `binde`) */
+  const bindend = new Set();
   /** Bus subscriptions, so `stop()` really removes everything it added. */
   const busHandlers = [];
 
@@ -324,6 +358,54 @@ function createWatcher(deps = {}) {
     const record = store.get(id);
     if (!record || record.type !== 'watch') throw new NotFoundError(`Beobachteter Ordner ${id}`);
     return record;
+  }
+
+  /* --- where a folder lies (docs/STICK-BAUPLAN.md 2.7) ------------------- */
+
+  function istGebunden(record) {
+    return record.data.ort === 'stick' || record.data.ort === 'rechner';
+  }
+
+  /** The three place fields for an absolute path, the unused one set to null. */
+  function ortFelder(abs) {
+    const e = ortspfad.erfassen(abs, ortOpts);
+    return e.ort === 'stick'
+      ? { ort: 'stick', rel: e.rel, rechner: null }
+      : { ort: 'rechner', rel: null, rechner: e.rechner };
+  }
+
+  /**
+   * Give a record from before this existed its place, once, and keep it:
+   * under the stick root it belongs to the stick, otherwise to the computer
+   * this runs on first (docs/STICK-BAUPLAN.md 2.7 and 4.1 -- that may be the
+   * wrong one; then the folder is chosen once more).
+   *
+   * The write fires `record.updated` synchronously, which would re-enter
+   * `attach` halfway through this one; `bindend` keeps that echo out.
+   */
+  function binde(record) {
+    if (istGebunden(record)) return record;
+    const felder = ortFelder(record.data.path);
+    bindend.add(record.id);
+    try {
+      return store.update(record.id, felder);
+    } catch (err) {
+      // A locked or read-only vault: decide in memory, write on the next start.
+      log.warn(`Ort von ${record.data.path} nicht gespeichert: ${asNeuralError(err).message}`);
+      return { ...record, data: { ...record.data, ...felder } };
+    } finally {
+      bindend.delete(record.id);
+    }
+  }
+
+  /**
+   * The folder on THIS computer, or `null` when it belongs to another one.
+   * A record without a place is read as if it were bound here -- the only
+   * reading `binde` could give it on this computer.
+   */
+  function ordnerVon(record) {
+    const data = istGebunden(record) ? record.data : { ...record.data, ...ortFelder(record.data.path) };
+    return ortspfad.aufloesen(data, ortOpts);
   }
 
   /**
@@ -377,14 +459,22 @@ function createWatcher(deps = {}) {
         + 'sonst nimmt das System seine eigenen Dateien auf.',
       );
     }
+    // Any other Neural OS: a stick root, its program, its data, another
+    // vault. Reading it would take in what another KI knows.
+    if (ortspfad.kiBereich(abs)) throw new ValidationError(ortspfad.KI_ORDNER);
     return abs;
   }
 
-  /** Already-watched folders, so the same directory is not added twice. */
+  /**
+   * Already-watched folders, so the same directory is not added twice. A
+   * folder of another computer is not the same directory, whatever its path
+   * string says.
+   */
   function assertNotDuplicate(abs, exceptId) {
     for (const record of records()) {
       if (record.id === exceptId) continue;
-      if (path.resolve(record.data.path) === abs) {
+      const ordner = ordnerVon(record);
+      if (ordner !== null && path.resolve(ordner) === abs) {
         throw new ValidationError(`${abs} wird bereits beobachtet („${record.data.label || record.data.path}“).`);
       }
     }
@@ -396,6 +486,7 @@ function createWatcher(deps = {}) {
 
     const data = {
       path: abs,
+      ...ortFelder(abs),
       label: typeof input.label === 'string' && input.label.trim() ? input.label.trim() : path.basename(abs),
       // Never taken from the caller: a folder that is on the moment it is
       // created is the invisible automation this feature exists to avoid.
@@ -419,6 +510,7 @@ function createWatcher(deps = {}) {
       const abs = resolveFolder(patch.path);
       assertNotDuplicate(abs, id);
       next.path = abs;
+      Object.assign(next, ortFelder(abs));
     }
     if (patch.label !== undefined) next.label = String(patch.label || '').trim();
     if (patch.recursive !== undefined) next.recursive = patch.recursive !== false;
@@ -489,14 +581,28 @@ function createWatcher(deps = {}) {
   function buildIndex() {
     const byHash = new Set();
     const byPath = new Map();
+    // byRel -- the same question for a folder on the stick, which lies under
+    // another absolute path at every computer: watch id + path inside it.
+    // Files taken in before `watchRel` existed get it from the path the
+    // folder had then.
+    const byRel = new Map();
+    const ordnerDamals = new Map(records().map((r) => [r.id, r.data.path]));
     for (const record of store.all('file')) {
       const data = record.data || {};
       if (typeof data.hash === 'string' && data.hash) byHash.add(data.hash);
       if (typeof data.externalPath === 'string' && data.externalPath) {
         byPath.set(path.resolve(data.externalPath), record);
       }
+      if (typeof data.watchId === 'string' && data.watchId) {
+        let rel = typeof data.watchRel === 'string' && data.watchRel ? data.watchRel : null;
+        if (!rel && typeof data.externalPath === 'string' && ordnerDamals.has(data.watchId)) {
+          const r = path.relative(path.resolve(ordnerDamals.get(data.watchId)), path.resolve(data.externalPath));
+          if (r && !r.startsWith('..') && !path.isAbsolute(r)) rel = posixRel(r);
+        }
+        if (rel) byRel.set(`${data.watchId}\u0000${rel}`, record);
+      }
     }
-    return { byHash, byPath };
+    return { byHash, byPath, byRel };
   }
 
   /* --- the folder's side: walking it ------------------------------------ */
@@ -534,6 +640,9 @@ function createWatcher(deps = {}) {
           stack.length = 0;
           break;
         }
+        // Put there by the operating system, never by a person: not taken in
+        // and not listed (docs/STICK-BAUPLAN.md 2.7).
+        if (istBegleitdatei(entry.name)) continue;
         const full = path.join(dir, entry.name);
         const rel = path.relative(root, full);
 
@@ -555,6 +664,12 @@ function createWatcher(deps = {}) {
           continue;
         }
         if (entry.isDirectory()) {
+          // A copy of a stick or another data directory further down: what
+          // another KI knows is not a document.
+          if (ortspfad.istKiOrdner(full)) {
+            skipped.push({ datei: rel, grund: ortspfad.KI_ORDNER });
+            continue;
+          }
           stack.push(full);
           continue;
         }
@@ -606,7 +721,8 @@ function createWatcher(deps = {}) {
       };
     }
 
-    const known = index.byPath.get(path.resolve(file.abs));
+    const known = index.byPath.get(path.resolve(file.abs))
+      || index.byRel.get(`${record.id}\u0000${posixRel(file.rel)}`);
     if (known) {
       const sameSize = Number(known.data.size) === stat.size;
       const sameTime = Number(known.data.sourceMtimeMs) === Math.round(stat.mtimeMs);
@@ -669,6 +785,9 @@ function createWatcher(deps = {}) {
       // Extra fields; ./schema.js keeps unknown keys inside `data`. They are
       // what makes the "das habe ich aufgenommen" list answerable later.
       watchId: record.id,
+      // Where inside the folder, POSIX: the same at every computer, even
+      // when the folder is on the stick and `externalPath` is not.
+      watchRel: posixRel(file.rel),
       sourceMtimeMs: Math.round(stat.mtimeMs),
       extractKind: extracted.kind || null,
       extractWarnings: warnings,
@@ -677,6 +796,7 @@ function createWatcher(deps = {}) {
 
     index.byHash.add(blob.hash);
     index.byPath.set(path.resolve(file.abs), created);
+    index.byRel.set(`${record.id}\u0000${posixRel(file.rel)}`, created);
     return { taken: created, warnings, kind: extracted.kind };
   }
 
@@ -715,9 +835,10 @@ function createWatcher(deps = {}) {
 
   async function runScan(record, { dryRun, quiet, started }) {
     const id = record.id;
+    const ordner = ordnerVon(record);
     const result = {
       id,
-      ordner: record.data.path,
+      ordner: ordner || record.data.path,
       dryRun,
       // Nach dem Filtern: die Einträge, die überhaupt in Frage kommen. NICHT
       // die Zahl dessen, was im Ordner liegt -- was vorher aussortiert wurde,
@@ -734,11 +855,21 @@ function createWatcher(deps = {}) {
       dauerMs: 0,
     };
 
+    // A folder of another computer: not read, not even listed, and nothing
+    // written -- it is not an error, it is simply not here.
+    if (ordner === null) {
+      result.abgebrochen = ortspfad.FREMDER_RECHNER;
+      result.fremd = true;
+      result.dauerMs = Math.max(0, now() - started);
+      return result;
+    }
+
     // A folder that has been unplugged is a state, not a crash: it is written
     // into `lastError` so the panel can say what is wrong with which folder.
     let root;
     try {
-      root = resolveFolder(record.data.path);
+      root = resolveFolder(ordner);
+      result.ordner = root;
     } catch (err) {
       const message = asNeuralError(err).message;
       store.update(id, { lastError: message, lastScanAt: new Date(now()).toISOString() });
@@ -866,9 +997,11 @@ function createWatcher(deps = {}) {
   function takeOne(record, relName) {
     const id = record.id;
     if (busy.has(id)) return; // a full run is already looking at this folder
+    const ordner = ordnerVon(record);
+    if (ordner === null) return; // another computer's folder is never read
     let root;
     try {
-      root = resolveFolder(record.data.path);
+      root = resolveFolder(ordner);
     } catch {
       return; // the sweep will record the real reason in lastError
     }
@@ -876,6 +1009,13 @@ function createWatcher(deps = {}) {
     if (!isInside(abs, root)) return; // a name from outside the folder is not ours
 
     const file = { abs, rel: path.relative(root, abs), name: path.basename(abs) };
+
+    // The sweep's two silent rules, applied here too: files the operating
+    // system leaves on sticks, and anything inside another KI.
+    if (file.rel.split(path.sep).some((teil) => istBegleitdatei(teil))) return;
+    for (let dir = path.dirname(abs); dir !== root && isInside(dir, root); dir = path.dirname(dir)) {
+      if (ortspfad.istKiOrdner(dir)) return;
+    }
 
     // Name and position, decided by the same function as in the sweep. A
     // reason that belongs to a whole directory is not repeated for every file
@@ -955,11 +1095,12 @@ function createWatcher(deps = {}) {
     const taken = [];
     for (const file of store.all('file')) {
       if (!file.data || file.data.watchId !== id) continue;
+      let datei = file.data.name;
+      if (typeof file.data.watchRel === 'string' && file.data.watchRel) datei = file.data.watchRel;
+      else if (file.data.externalPath) datei = path.relative(record.data.path, file.data.externalPath) || file.data.name;
       taken.push({
         id: file.id,
-        datei: file.data.externalPath
-          ? path.relative(record.data.path, file.data.externalPath) || file.data.name
-          : file.data.name,
+        datei,
         name: file.data.name,
         groesse: file.data.size,
         art: file.data.extractKind || null,
@@ -973,7 +1114,7 @@ function createWatcher(deps = {}) {
     const skippedAll = (skipLog.get(id) || []).filter((entry) => entry.was !== 'aufgenommen');
     return {
       id,
-      ordner: record.data.path,
+      ordner: ordnerVon(record) || record.data.path,
       aufgenommen: taken.slice(0, limit),
       aufgenommenGesamt: taken.length,
       uebersprungen: skippedAll.slice(0, limit),
@@ -985,8 +1126,10 @@ function createWatcher(deps = {}) {
 
   /* --- fs.watch + sweep --------------------------------------------------- */
 
+  /** What an attachment depends on: the folder HERE, not the stored string. */
   function signatureOf(record) {
-    return `${record.data.path}\u0000${record.data.recursive ? '1' : '0'}\u0000${record.data.enabled ? '1' : '0'}`;
+    const ordner = ordnerVon(record);
+    return `${ordner === null ? '\u0000fremd' : ordner}\u0000${record.data.recursive ? '1' : '0'}\u0000${record.data.enabled ? '1' : '0'}`;
   }
 
   function detach(id) {
@@ -1014,14 +1157,25 @@ function createWatcher(deps = {}) {
    * and the sweep covers the subdirectories instead -- said out loud in
    * `status()`, not hidden.
    */
-  function attach(record) {
-    const id = record.id;
+  function attach(input) {
+    const id = input.id;
     detach(id);
-    if (!record.data.enabled) return;
+    if (!input.data.enabled) return;
+    const record = binde(input);
+
+    // Another computer's folder: no fs.watch, no stat, not even a look at
+    // whether the path exists here. A status, not an error.
+    const ordner = ordnerVon(record);
+    if (ordner === null) {
+      attached.set(id, {
+        watcher: null, signature: signatureOf(record), kind: 'keine', problem: ortspfad.FREMDER_RECHNER, fremd: true,
+      });
+      return;
+    }
 
     let dir;
     try {
-      dir = resolveFolder(record.data.path);
+      dir = resolveFolder(ordner);
     } catch (err) {
       attached.set(id, { watcher: null, signature: signatureOf(record), kind: 'keine', problem: asNeuralError(err).message });
       return;
@@ -1108,6 +1262,10 @@ function createWatcher(deps = {}) {
       // it is also the thing that re-attaches.
       const entry = attached.get(record.id);
       if (!entry || !entry.watcher) attach(record);
+      // Not here, so nothing to read -- and nothing to write into lastError
+      // every five minutes either (docs/STICK-BAUPLAN.md 2.7).
+      const jetzt = attached.get(record.id);
+      if (jetzt && jetzt.fremd) continue;
 
       try {
         await scan(record.id, { quiet: true });
@@ -1120,6 +1278,7 @@ function createWatcher(deps = {}) {
   function onRecordEvent(evt) {
     const record = evt && evt.payload && evt.payload.record;
     if (!record || record.type !== 'watch') return;
+    if (bindend.has(record.id)) return; // the echo of `binde`, which is already attaching
     reattach(record);
   }
 
@@ -1140,7 +1299,9 @@ function createWatcher(deps = {}) {
     if (running) return status();
     running = true;
 
-    for (const record of records()) attach(record);
+    // Every record gets its place now, switched on or not: a folder switched
+    // on later at another computer must already belong to this one.
+    for (const record of records()) attach(binde(record));
 
     if (bus && typeof bus.on === 'function') {
       const created = (evt) => onRecordEvent(evt);
@@ -1192,10 +1353,14 @@ function createWatcher(deps = {}) {
 
   function stateOf(record) {
     const entry = attached.get(record.id) || null;
+    const ordner = ordnerVon(record);
     return {
       aktiv: !!(entry && entry.watcher),
       art: entry ? entry.kind : (record.data.enabled ? 'noch nicht gestartet' : 'ausgeschaltet'),
-      problem: entry ? entry.problem : null,
+      problem: entry ? entry.problem : (ordner === null ? ortspfad.FREMDER_RECHNER : null),
+      // Wo der Ordner an diesem Rechner liegt; null: an einem anderen.
+      fremd: ordner === null,
+      ordnerHier: ordner,
       laeuftGerade: busy.has(record.id),
       uebersprungenGemerkt: (skipLog.get(record.id) || []).filter((e) => e.was !== 'aufgenommen').length,
     };

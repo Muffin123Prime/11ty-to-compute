@@ -1211,7 +1211,7 @@ test('Tresor gesperrt: Angebot und Entkoppel-Nachricht bleiben liegen, nichts wi
   });
 });
 
-test('PIN nach dem Koppeln: kopplungen.json und sync-folder.json werden sofort versiegelt, der Abgleich läuft weiter', async () => {
+test('PIN nach dem Koppeln: kopplungen.json und sync-folder.json werden sofort versiegelt; bis Lena auch eine PIN hat, hält der Abgleich an', async () => {
   await welt(async (w) => {
     kopplungMod();
     const A = w.stick('a');
@@ -1241,11 +1241,14 @@ test('PIN nach dem Koppeln: kopplungen.json und sync-folder.json werden sofort v
     assert.equal(istKlartext(sRoh), false, 'sync-folder.json liegt nach dem Festlegen der PIN weiter im Klartext');
     assert.ok(JSON.parse(appA.vaultCrypto.decryptBuffer(sRoh).toString('utf8')).devices[appB.identitaet.id]);
 
+    // Ungleiche Schutzstufe: nichts fließt still weiter, auch nicht von Lena zu Max (Prüfung von Welle 1).
     const n = appB.store.create('note', { title: 'nach der PIN', body: 'b' });
     await appB.kopplung.abgleichen();
     const r = await appA.kopplung.abgleichen();
     assert.equal(r.konflikte, 0);
-    assert.equal(notiz(appA, n.id), 'b');
+    assert.equal(appA.store.get(n.id), null);
+    assert.equal(appA.kopplung.status().partner[0].zustand, 'schutz');
+    assert.equal(appB.kopplung.status().partner[0].zustand, 'schutz');
   });
 });
 
@@ -1928,5 +1931,145 @@ test('Zwilling: lief die Kopie einmal mit dem Partner und wird dann formatiert, 
     assert.equal(notiz(appA, l.id), 'l2 von Lena', 'Lenas eigene Änderung bleibt und kommt zu A');
     assert.equal(notiz(appB, l.id), 'l2 von Lena');
     assert.deepEqual(kopien(appA).concat(kopien(appB)).map((k) => k.data.title), []);
+  });
+});
+
+/* ------------------------------------------ Welle 2: offene Befunde aus der Prüfung von Welle 1 */
+
+test('ABA nach einem Konflikt: A löscht erneut, nachdem B die lebende Fassung übernahm -> die Löschung bleibt, nichts kommt zurück', async () => {
+  await welt(async (w) => {
+    const A = w.stick('a');
+    const B = w.stick('b');
+    w.welt.add(A.root);
+    w.welt.add(B.root);
+    const appA = await w.start(A, { name: 'Max' });
+    const appB = await w.start(B, { name: 'Lena' });
+    await koppeln(appA, appB, B);
+    const x = appA.store.create('note', { title: 'Einkaufsliste', body: 'a' });
+    for (const a of [appA, appB, appA, appB]) await a.kopplung.abgleichen();
+
+    // A ändert, nur A steckt; B löscht, nur B steckt.
+    w.welt.delete(B.root);
+    appA.store.update(x.id, { body: 'b' });
+    await appA.kopplung.abgleichen();
+    w.welt.delete(A.root);
+    w.welt.add(B.root);
+    appB.store.remove(x.id);
+    await appB.kopplung.abgleichen();
+    // Beide stecken: geändert gegen gelöscht, die lebende Fassung bleibt.
+    w.welt.add(A.root);
+    await appA.kopplung.abgleichen();
+    await appB.kopplung.abgleichen();
+    assert.equal(notiz(appB, x.id), 'b', 'Vorbedingung: B hat die lebende Fassung');
+
+    // Jetzt löscht A, und B hat seitdem nichts geändert.
+    appA.store.remove(x.id);
+    let konflikte = 0;
+    for (const a of [appA, appB, appA, appB]) konflikte += (await a.kopplung.abgleichen()).konflikte;
+    assert.equal(notiz(appA, x.id), 'b (gelöscht)', 'die Löschung von A wurde still zurückgenommen');
+    assert.equal(notiz(appB, x.id), 'b (gelöscht)', 'B bekommt die Löschung nicht');
+    assert.equal(konflikte, 0, 'falscher Konflikt');
+    assert.deepEqual(kopien(appA).concat(kopien(appB)), []);
+  });
+});
+
+test('Rückgängig nach dem Abgleich, während A schon weiterschrieb: kein stilles Auseinanderlaufen, beide landen bei derselben Fassung', async () => {
+  await welt(async (w) => {
+    const A = w.stick('a');
+    const B = w.stick('b');
+    w.welt.add(A.root);
+    w.welt.add(B.root);
+    const appA = await w.start(A, { name: 'Max' });
+    const appB = await w.start(B, { name: 'Lena' });
+    await koppeln(appA, appB, B);
+    const x = appA.store.create('note', { title: 'Einkaufsliste', body: 'Milch' });
+    for (const a of [appA, appB, appA, appB]) await a.kopplung.abgleichen();
+
+    // A ändert (nur A steckt), dann übernimmt B.
+    w.welt.delete(B.root);
+    appA.store.update(x.id, { body: 'Milch, Brot' });
+    await appA.kopplung.abgleichen();
+    w.welt.add(B.root);
+    await appB.kopplung.abgleichen();
+    assert.equal(notiz(appB, x.id), 'Milch, Brot', 'Vorbedingung');
+
+    // Lena nimmt die Übernahme zurück, Max schreibt derweil weiter.
+    appA.store.update(x.id, { body: 'Milch, Brot, Eier' });
+    const schritt = appB.history.list({ limit: 20 }).items.find((i) => i.id === x.id && i.op === 'update');
+    await appB.history.undo(schritt.seq);
+    assert.equal(notiz(appB, x.id), 'Milch');
+    await appB.kopplung.abgleichen();
+    await appA.kopplung.abgleichen();
+    appA.store.update(x.id, { body: 'Milch, Brot' });
+    await appA.kopplung.abgleichen();
+    w.welt.delete(A.root);
+    await appB.kopplung.abgleichen();
+
+    w.welt.add(A.root);
+    for (const a of [appA, appB, appA, appB]) await a.kopplung.abgleichen();
+    assert.equal(notiz(appB, x.id), notiz(appA, x.id), 'A und B laufen still auseinander');
+    assert.equal(notiz(appA, x.id), 'Milch, Brot', 'die jüngste Fassung von Max gilt');
+  });
+});
+
+test('PIN nach dem Koppeln, Schutzstufe des Partners unbekannt (Kopplung aus einem älteren Stand): kein Klartext für ihn, der Abgleich hält an', async () => {
+  await welt(async (w) => {
+    const A = w.stick('a');
+    const B = w.stick('b');
+    w.welt.add(A.root);
+    w.welt.add(B.root);
+    const appA = await w.start(A, { name: 'Max' });
+    const appB = await w.start(B, { name: 'Lena' });
+    await koppeln(appA, appB, B);
+    for (const app of [appA, appB, appA]) await app.kopplung.abgleichen();
+    const serverA = await appA.listen();
+    const pin = await rufeAn(serverA.server.address().port, 'POST', '/api/vault/pin', { pin: '4711' });
+    assert.equal(pin.status, 200, pin.text);
+    // Ein Stand von vor Runde 2 kannte die Schutzstufe des Partners nicht.
+    appA.kopplung.__internals.laden().partner[0].pin = null;
+
+    w.welt.delete(B.root);
+    const geheim = appA.store.create('note', { title: 'GEHEIM-UNBEKANNT', body: 'nur mit PIN' });
+    await appA.kopplung.abgleichen();
+
+    // Lena liest Max' Stick an ihrem Laptop.
+    w.welt.add(B.root);
+    await appB.kopplung.abgleichen();
+    assert.equal(appB.store.get(geheim.id), null, 'B hat den Satz nach der PIN übernommen');
+    const imKlartext = alleDateien(B.root).concat(alleDateien(A.sync)).filter((d) => fs.readFileSync(d).includes('GEHEIM-UNBEKANNT'));
+    assert.deepEqual(imKlartext, [], 'Klartext auf einem Stick');
+    assert.equal(appA.kopplung.status().partner[0].zustand, 'schutz', 'A zeigt nicht, dass der Abgleich angehalten ist');
+  });
+});
+
+test('PIN nach dem Koppeln: auch der Stick ohne PIN hält an und sagt es, bis er selbst eine PIN hat', async () => {
+  await welt(async (w) => {
+    const A = w.stick('a');
+    const B = w.stick('b');
+    w.welt.add(A.root);
+    w.welt.add(B.root);
+    const appA = await w.start(A, { name: 'Max' });
+    const appB = await w.start(B, { name: 'Lena' });
+    await koppeln(appA, appB, B);
+    for (const app of [appA, appB, appA]) await app.kopplung.abgleichen();
+    const serverA = await appA.listen();
+    assert.equal((await rufeAn(serverA.server.address().port, 'POST', '/api/vault/pin', { pin: '4711' })).status, 200);
+
+    const n = appB.store.create('note', { title: 'von Lena nach der PIN von Max', body: 'b' });
+    const rb = await appB.kopplung.abgleichen();
+    const max = appB.kopplung.status().partner[0];
+    assert.equal(max.zustand, 'schutz', 'Lena sieht nicht, dass der Abgleich angehalten ist');
+    assert.equal(max.pin, true);
+    assert.ok(rb.warnungen.includes('Max hat eine PIN, dieser Stick nicht.'), JSON.stringify(rb.warnungen));
+    await appA.kopplung.abgleichen();
+    assert.equal(appA.store.get(n.id), null, 'der Abgleich läuft still weiter');
+
+    // Lena legt eine PIN fest: dann läuft es in beide Richtungen wieder.
+    const serverB = await appB.listen();
+    assert.equal((await rufeAn(serverB.server.address().port, 'POST', '/api/vault/pin', { pin: '2580' })).status, 200);
+    for (const app of [appB, appA, appB]) await app.kopplung.abgleichen();
+    assert.equal(notiz(appA, n.id), 'b');
+    assert.equal(appA.kopplung.status().partner[0].zustand, 'aktiv');
+    assert.equal(appB.kopplung.status().partner[0].zustand, 'aktiv');
   });
 });

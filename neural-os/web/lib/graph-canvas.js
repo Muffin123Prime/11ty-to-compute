@@ -67,7 +67,22 @@ export const GRAPH_TYPES = ['note', 'chat', 'project', 'task', 'event', 'agent',
  * "gewaehlt". Der Zeichner mischt sie tief ins Grau der Oberflaeche -- ein
  * Hauch Farbe, kein Anstrich. Der Server nennt nur den Index (0-7).
  */
-export const THEME_HUES = ['#5fb8a5', '#d4a857', '#a98bd6', '#8cbc6a', '#d9828f', '#b9b56a', '#cc86c0', '#d98f5c'];
+export const THEME_HUES = ['#5fb8a5', '#d4a857', '#a98bd6', '#8cbc6a', '#d9828f', '#b9b56a', '#cc86c0', '#8e9097'];
+
+/**
+ * Index 7 ist neutral (Vertrag G): "Unverbunden" und der Behaelter "Weitere
+ * Themen" sind keine Wissensgebiete und tragen kein Themen-Grau mit Ton,
+ * sondern das leise Grau der Oberflaeche (Pruefer, Runde 1: der Rest-Kreis
+ * war orange-braun wie ein Thema).
+ */
+export const FARBE_NEUTRAL = 7;
+
+/** Die CSS-Farbe eines Themen-Punkts (Suche, Karte, Detailkarte). */
+export function themaFarbeCss(index) {
+  const i = Number(index);
+  if (!Number.isInteger(i) || i < 0 || i >= FARBE_NEUTRAL) return i === FARBE_NEUTRAL ? 'var(--fg-subtle)' : `color-mix(in srgb, ${THEME_HUES[0]} 55%, var(--fg-muted))`;
+  return `color-mix(in srgb, ${THEME_HUES[i]} 55%, var(--fg-muted))`;
+}
 
 /** Themenkreise: Radius in Welt-Einheiten, zwischen diesen beiden Werten. */
 export const THEMA_R_MIN = 30;
@@ -100,15 +115,20 @@ export function layoutThemen(themen, links = []) {
   const n = list.length;
   const out = new Map();
   if (!n) return out;
-  const maxA = list.reduce((mx, t) => Math.max(mx, Number(t.anzahl) || 0), 1);
-  const order = list.map((_, i) => i).sort((p, q) => ((Number(list[q].anzahl) || 0) - (Number(list[p].anzahl) || 0)) || (list[p].id < list[q].id ? -1 : 1));
+  // `groesse` (falls gesetzt) bestimmt den Radius, `anzahl` sonst; `rand`
+  // setzt einen Kreis an den Rand ("Weitere Themen", "Unverbunden"): er ist
+  // ein Behaelter, kein Wissensgebiet, und gehoert nicht in die Mitte.
+  const groesse = (t) => Number(t.groesse != null ? t.groesse : t.anzahl) || 0;
+  const maxA = list.reduce((mx, t) => Math.max(mx, groesse(t)), 1);
+  const order = list.map((_, i) => i).sort((p, q) => ((list[p].rand ? 1 : 0) - (list[q].rand ? 1 : 0))
+    || (groesse(list[q]) - groesse(list[p])) || (list[p].id < list[q].id ? -1 : 1));
   const r = new Float64Array(n);
   const x = new Float64Array(n);
   const y = new Float64Array(n);
   const GAP = 28;
   const golden = Math.PI * (3 - Math.sqrt(5));
   order.forEach((i, rank) => {
-    r[i] = themaRadius(list[i].anzahl, maxA);
+    r[i] = themaRadius(groesse(list[i]), maxA);
     if (rank === 0) return;
     const a = rank * golden;
     const d = THEMA_R_MAX + r[i] + 58 * Math.sqrt(rank);
@@ -123,25 +143,8 @@ export function layoutThemen(themen, links = []) {
     if (a === undefined || b === undefined || a === b) continue;
     L.push([a, b, Math.max(1, Number(l.anzahl) || 1)]);
   }
-  const ROUNDS = 120;
-  for (let it = 0; it < ROUNDS; it++) {
-    const t = 1 - it / ROUNDS;
-    for (const [a, b, w] of L) {
-      const dx = x[b] - x[a];
-      const dy = y[b] - y[a];
-      const d = Math.hypot(dx, dy) || 1;
-      const want = r[a] + r[b] + GAP * 2;
-      if (d <= want) continue;
-      const f = ((d - want) / d) * 0.02 * Math.min(1, Math.log2(1 + w) / 3);
-      x[a] += dx * f;
-      y[a] += dy * f;
-      x[b] -= dx * f;
-      y[b] -= dy * f;
-    }
-    for (let i = 0; i < n; i++) {
-      x[i] *= 1 - 0.012 * t;
-      y[i] *= 1 - 0.012 * t;
-    }
+  const trennen = (staerke) => {
+    let ueberlappt = 0;
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
         let dx = x[j] - x[i];
@@ -154,14 +157,44 @@ export function layoutThemen(themen, links = []) {
         }
         const want = r[i] + r[j] + GAP;
         if (d >= want) continue;
-        const f = ((want - d) / d) * 0.5;
+        ueberlappt++;
+        const f = ((want - d) / d) * staerke;
         x[i] -= dx * f;
         y[i] -= dy * f;
         x[j] += dx * f;
         y[j] += dy * f;
       }
     }
+    return ueberlappt;
+  };
+  const ROUNDS = 120;
+  for (let it = 0; it < ROUNDS; it++) {
+    const t = 1 - it / ROUNDS;
+    // Verbundene Themen ruecken zusammen -- deutlich, damit ihre Linie kurz
+    // ist und nicht unter fremden Kreisen durchlaeuft (Pruefer, Runde 1).
+    for (const [a, b, w] of L) {
+      const dx = x[b] - x[a];
+      const dy = y[b] - y[a];
+      const d = Math.hypot(dx, dy) || 1;
+      const want = r[a] + r[b] + GAP * 1.5;
+      if (d <= want) continue;
+      const f = ((d - want) / d) * 0.06 * Math.max(0.5, Math.min(1, Math.log2(1 + w) / 3));
+      x[a] += dx * f;
+      y[a] += dy * f;
+      x[b] -= dx * f;
+      y[b] -= dy * f;
+    }
+    for (let i = 0; i < n; i++) {
+      const sog = list[i].rand ? 0.004 : 0.012;
+      x[i] *= 1 - sog * t;
+      y[i] *= 1 - sog * t;
+    }
+    trennen(0.5);
   }
+  // Zum Schluss nur noch trennen, ohne Sog zur Mitte, bis kein Kreis mehr
+  // einen anderen beruehrt: bei vierzig dicht verbundenen Themen blieben
+  // sonst Paare uebereinander liegen, und ihre Namen verdeckten sich.
+  for (let it = 0; it < 400; it++) if (!trennen(0.5)) break;
   for (let i = 0; i < n; i++) out.set(list[i].id, { x: x[i], y: y[i], r: r[i] });
   return out;
 }
@@ -603,6 +636,17 @@ export function createGraphCanvas(canvas, options = {}) {
   let frameNow = 0;
   let padding = { top: 48, right: 48, bottom: 48, left: 48 }; // Rand beim Einpassen
   let levelArmed = true; // Zoomschwelle: einmal melden, dann erst wieder nach dem Zurueck
+  // Nach einem Ebenenwechsel gehoert der Rest der Radbewegung noch zur alten
+  // Geste: sie wird verschluckt, bis das Rad ~260 ms ruht (Pruefer, Runde 1:
+  // derselbe Zug zoomte das neue Netz sonst bis x5,6 weiter).
+  let schluckenSeit = 0;
+  // Bereiche (Unterthemen) auf Ebene 1: [{id, name, anzahl, ids, slots}]
+  let regionSpec = [];
+  let regions = [];
+  let regionOf = new Int32Array(0); // erster Bereich je Knoten, -1 = keiner
+  let hoveredRegion = -1;
+  let regionArmed = true;
+  let regionGeoCache = null;
 
   let structure = '';
   /**
@@ -747,7 +791,13 @@ export function createGraphCanvas(canvas, options = {}) {
       // eindrueckt statt aufzutragen.
       glyph: rgba(ground, 0.9),
       themeText: rgba(fg, dark ? 0.92 : 0.9),
-      themeSub: rgba(mix(ground, fg, dark ? 0.6 : 0.55)),
+      // "42 Eintraege" im Kreis: das Grau von --fg-muted, nicht leiser --
+      // darunter reichte der Kontrast nicht (hell 3,3:1, Pruefer, Runde 1).
+      themeSub: rgba(muted),
+      // Bereiche (Unterthemen) auf Ebene 1: eine leise Flaeche hinter den Knoten.
+      regionFill: rgba(mix(ground, fg, dark ? 0.075 : 0.055)),
+      regionHover: rgba(mix(mix(ground, fg, dark ? 0.08 : 0.06), accent, dark ? 0.16 : 0.12)),
+      regionText: rgba(mix(ground, fg, dark ? 0.78 : 0.72)),
     };
     // Themenkreise: ein Grau aus Grund und Schrift, mit einem Hauch des
     // Themen-Tons -- Saettigung niedrig, in beiden Darstellungen.
@@ -756,6 +806,9 @@ export function createGraphCanvas(canvas, options = {}) {
     palette.themeRing = THEME_HUES.map((css) => rgba(mix(mix(ground, fg, dark ? 0.32 : 0.28), parseColor(ctx, css, fg), 0.3)));
     palette.themeFillPlain = rgba(themeBase);
     palette.themeRingPlain = rgba(mix(ground, fg, dark ? 0.3 : 0.26));
+    // Neutral heisst neutral: kein Hauch Farbe fuer Index 7.
+    palette.themeFill[FARBE_NEUTRAL] = palette.themeFillPlain;
+    palette.themeRing[FARBE_NEUTRAL] = palette.themeRingPlain;
     palette.themeLine = mix(ground, fg, dark ? 0.36 : 0.36);
     labelWidthCache = new Array(n);
   }
@@ -970,9 +1023,31 @@ export function createGraphCanvas(canvas, options = {}) {
     } else if (fresh > 0) reheat(0.4);
     else if (shape !== structure) reheat(0.12);
     structure = shape;
+    resolveRegions();
     if (pendingColors) setColors(pendingColors.colorOf, pendingColors.list);
     requestFrame();
     return api;
+  }
+
+  /** Die Bereiche auf die Plaetze der aktuellen Knoten abbilden. */
+  function resolveRegions() {
+    regionOf = new Int32Array(n).fill(-1);
+    regions = [];
+    hoveredRegion = -1;
+    regionGeoCache = null;
+    if (themen || mini) return;
+    for (const spec of regionSpec) {
+      const slots = [];
+      for (const id of spec.ids || []) {
+        const sl = index.get(id);
+        if (sl === undefined) continue;
+        slots.push(sl);
+      }
+      if (!slots.length) continue;
+      const ri = regions.length;
+      regions.push({ id: spec.id, name: String(spec.name || 'Thema'), anzahl: Number(spec.anzahl) || slots.length, slots: Int32Array.from(slots) });
+      for (const sl of slots) if (regionOf[sl] < 0) regionOf[sl] = ri;
+    }
   }
 
   /**
@@ -1237,6 +1312,58 @@ export function createGraphCanvas(canvas, options = {}) {
       }
     }
 
+    // Bereiche halten zusammen: jeder Knoten zieht leicht zur Mitte seines
+    // (ersten) Unterthemas -- so wird aus "Biologie" eine Flaeche, in die man
+    // hineinzoomen kann, statt verstreuter Punkte.
+    if (regions.length) {
+      const zx = new Float64Array(regions.length);
+      const zy = new Float64Array(regions.length);
+      const zn = new Float64Array(regions.length);
+      for (let i = 0; i < n; i++) {
+        const ri = regionOf[i];
+        if (ri < 0 || !visible[i]) continue;
+        zx[ri] += posX[i];
+        zy[ri] += posY[i];
+        zn[ri]++;
+      }
+      const ks = 0.12 * alpha;
+      for (let i = 0; i < n; i++) {
+        const ri = regionOf[i];
+        if (ri < 0 || !visible[i] || zn[ri] < 2) continue;
+        velX[i] += (zx[ri] / zn[ri] - posX[i]) * ks;
+        velY[i] += (zy[ri] / zn[ri] - posY[i]) * ks;
+      }
+      // ... und halten Abstand voneinander: zwei Unterthemen sind zwei
+      // Flaechen, kein gemeinsamer Fleck.
+      if (regions.length > 1) {
+        const dx = new Float64Array(regions.length);
+        const dy = new Float64Array(regions.length);
+        for (let a = 0; a < regions.length; a++) {
+          if (!zn[a]) continue;
+          for (let b2 = a + 1; b2 < regions.length; b2++) {
+            if (!zn[b2]) continue;
+            let vx = zx[b2] / zn[b2] - zx[a] / zn[a];
+            let vy = zy[b2] / zn[b2] - zy[a] / zn[a];
+            let d = Math.hypot(vx, vy);
+            if (d < 1e-6) { vx = jitter(a * 13 + b2); vy = jitter(b2 * 13 + a); d = Math.hypot(vx, vy) || 1; }
+            const want = 26 * (Math.sqrt(zn[a]) + Math.sqrt(zn[b2])) + 60;
+            if (d >= want) continue;
+            const f = ((want - d) / d) * 0.06 * alpha;
+            dx[a] -= vx * f;
+            dy[a] -= vy * f;
+            dx[b2] += vx * f;
+            dy[b2] += vy * f;
+          }
+        }
+        for (let i = 0; i < n; i++) {
+          const ri = regionOf[i];
+          if (ri < 0 || !visible[i]) continue;
+          velX[i] += dx[ri];
+          velY[i] += dy[ri];
+        }
+      }
+    }
+
     // Integrieren. Eine Hoechstgeschwindigkeit verhindert, dass ein
     // losgelassener Knoten quer ueber die Karte schiesst.
     const decay = 1 - PHYS.velocityDecay;
@@ -1449,8 +1576,42 @@ export function createGraphCanvas(canvas, options = {}) {
     return api;
   }
 
+  /**
+   * Einen Knoten und seine direkten Nachbarn in die freie Flaeche holen
+   * (innerhalb von setPadding), wenn etwas davon ausserhalb liegt -- etwa
+   * unter der Karte rechts. Liegt alles frei, bewegt sich nichts.
+   */
+  function zeigeFrei(id) {
+    const slot = index.get(id);
+    if (slot === undefined || !visible[slot] || !width || !height) return api;
+    const slots = [slot];
+    for (let q = adjStart[slot]; q < adjStart[slot + 1]; q++) if (visible[adjList[q]]) slots.push(adjList[q]);
+    const box = bounds(slots);
+    if (!box) return api;
+    const k0 = transform.k;
+    const rand = 28;
+    const fx0 = padding.left + rand;
+    const fx1 = width - padding.right - rand;
+    const fy0 = padding.top + rand;
+    const fy1 = height - padding.bottom - rand;
+    const sx0 = box.minX * k0 + transform.x;
+    const sx1 = box.maxX * k0 + transform.x;
+    const sy0 = box.minY * k0 + transform.y;
+    const sy1 = box.maxY * k0 + transform.y;
+    if (sx0 >= fx0 && sx1 <= fx1 && sy0 >= fy0 && sy1 <= fy1) return api;
+    const bw = Math.max(1, box.maxX - box.minX);
+    const bh = Math.max(1, box.maxY - box.minY);
+    const k = clamp(Math.min(k0, (fx1 - fx0) / bw, (fy1 - fy0) / bh), MIN_ZOOM, MAX_ZOOM);
+    const cx = (fx0 + fx1) / 2;
+    const cy = (fy0 + fy1) / 2;
+    autoFit = false;
+    animateTo({ k, x: cx - ((box.minX + box.maxX) / 2) * k, y: cy - ((box.minY + box.maxY) / 2) * k }, MOVE_MS);
+    return api;
+  }
+
   function zoomAround(factor, cx, cy) {
-    const k = clamp(transform.k * factor, MIN_ZOOM, MAX_ZOOM);
+    const [lo, hi] = zoomGrenzen();
+    const k = clamp(transform.k * factor, lo, Math.max(lo, hi));
     const f = k / transform.k;
     transform = { k, x: cx - (cx - transform.x) * f, y: cy - (cy - transform.y) * f };
   }
@@ -1695,10 +1856,191 @@ export function createGraphCanvas(canvas, options = {}) {
       sy[i] = posY[i] * k + transform.y;
     }
 
+    drawRegions(k);
     drawEdges(k);
     drawNodes(k);
     drawLabels(k);
+    drawRegionLabels();
     drawMs = performance.now() - t0;
+  }
+
+  /* ---------------------------- Bereiche --------------------------- */
+
+  /** Konvexe Huelle (Andrew), Punkte als [x, y]. */
+  function huelle(pts) {
+    if (pts.length < 3) return pts.slice();
+    const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const lower = [];
+    for (const pt of p) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pt) <= 0) lower.pop();
+      lower.push(pt);
+    }
+    const upper = [];
+    for (let i = p.length - 1; i >= 0; i--) {
+      const pt = p[i];
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pt) <= 0) upper.pop();
+      upper.push(pt);
+    }
+    upper.pop();
+    lower.pop();
+    return lower.concat(upper);
+  }
+
+  function regionPad(k) {
+    return clamp(16 * Math.sqrt(k), 12, 30);
+  }
+
+  /**
+   * Lage der Bereiche auf dem Bildschirm: Huelle, Mitte, Name. Aus den
+   * Bildschirmpunkten des letzten Bildes; je Ausschnitt einmal gerechnet.
+   */
+  function regionGeo() {
+    if (!regions.length) return [];
+    const k = transform.k;
+    const key = `${sceneVersion}|${k}|${transform.x}|${transform.y}|${width}|${height}`;
+    if (regionGeoCache && regionGeoCache.key === key) return regionGeoCache.geo;
+    const pad = regionPad(k);
+    const geo = regions.map((reg) => {
+      const pts = [];
+      for (const sl of reg.slots) {
+        if (!visible[sl]) continue;
+        pts.push([posX[sl] * k + transform.x, posY[sl] * k + transform.y]);
+      }
+      if (!pts.length) return null;
+      const h = huelle(pts);
+      let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity;
+      for (const [x, y] of h) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+      const text = `${reg.name} · ${formatCount(reg.anzahl)}`;
+      ctx.font = `500 12px ${fontFamily}`;
+      const w = ctx.measureText(text).width + 16;
+      const label = { x: (minX + maxX) / 2 - w / 2, y: minY - pad - 24, w, h: 22 };
+      return { hull: h, pad, text, label, box: { minX: minX - pad, maxX: maxX + pad, minY: minY - pad, maxY: maxY + pad } };
+    });
+    regionGeoCache = { key, geo };
+    return geo;
+  }
+
+  /** Je Bereich ein eigener, sehr leiser Ton -- zwei Unterthemen sind zwei Flaechen. */
+  function regionFarbe(ri) {
+    if (!palette.regionTints) {
+      const basis = parseColor(ctx, palette.regionFill, palette.fg);
+      palette.regionTints = [0, 2, 3, 1, 5, 4, 6].map((h) => rgba(mix(basis, parseColor(ctx, THEME_HUES[h], palette.fg), palette.dark ? 0.1 : 0.12)));
+    }
+    return palette.regionTints[ri % palette.regionTints.length];
+  }
+
+  function drawRegions(k) {
+    if (!regions.length || overlayOnly) return;
+    const geo = regionGeo();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    geo.forEach((g, ri) => {
+      if (!g) return;
+      const color = ri === hoveredRegion ? palette.regionHover : regionFarbe(ri);
+      ctx.beginPath();
+      const h = g.hull;
+      ctx.moveTo(h[0][0], h[0][1]);
+      for (let q = 1; q < h.length; q++) ctx.lineTo(h[q][0], h[q][1]);
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = g.pad * 2;
+      ctx.stroke();
+      if (h.length >= 3) ctx.fill();
+    });
+    void k;
+  }
+
+  function drawRegionLabels() {
+    if (!regions.length || overlayOnly) return;
+    const geo = regionGeo();
+    ctx.font = `500 12px ${fontFamily}`;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    geo.forEach((g, ri) => {
+      if (!g) return;
+      const l = g.label;
+      const hov = ri === hoveredRegion;
+      ctx.beginPath();
+      if (typeof ctx.roundRect === 'function') ctx.roundRect(l.x, l.y, l.w, l.h, 11);
+      else ctx.rect(l.x, l.y, l.w, l.h);
+      ctx.fillStyle = hov ? palette.regionHover : palette.halo;
+      ctx.fill();
+      if (hov) {
+        ctx.strokeStyle = rgba(palette.accent, 0.55);
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      ctx.fillStyle = hov ? palette.labelStrong : palette.regionText;
+      ctx.fillText(g.text, l.x + l.w / 2, l.y + l.h / 2 + 0.5);
+    });
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  /** Der Bereich, dessen Name unter dem Punkt liegt (-1: keiner). */
+  function regionLabelAt(x, y) {
+    const geo = regionGeo();
+    for (let ri = 0; ri < geo.length; ri++) {
+      const g = geo[ri];
+      if (g && x >= g.label.x && x <= g.label.x + g.label.w && y >= g.label.y && y <= g.label.y + g.label.h) return ri;
+    }
+    return -1;
+  }
+
+  /** Der kleinste Bereich, in dessen Flaeche der Punkt liegt (-1: keiner). */
+  function regionAreaAt(x, y) {
+    const geo = regionGeo();
+    let best = -1;
+    let bestA = Infinity;
+    for (let ri = 0; ri < geo.length; ri++) {
+      const g = geo[ri];
+      if (!g || x < g.box.minX || x > g.box.maxX || y < g.box.minY || y > g.box.maxY) continue;
+      if (!inHuelle(g.hull, x, y, g.pad)) continue;
+      const a = (g.box.maxX - g.box.minX) * (g.box.maxY - g.box.minY);
+      if (a < bestA) { bestA = a; best = ri; }
+    }
+    return best;
+  }
+
+  function inHuelle(h, x, y, pad) {
+    if (h.length >= 3) {
+      let drin = false;
+      for (let i = 0, j = h.length - 1; i < h.length; j = i++) {
+        const [xi, yi] = h[i];
+        const [xj, yj] = h[j];
+        if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi || 1e-9) + xi) drin = !drin;
+      }
+      if (drin) return true;
+    }
+    for (let i = 0; i < h.length; i++) {
+      const [ax, ay] = h[i];
+      const [bx, by] = h[(i + 1) % h.length];
+      const vx = bx - ax;
+      const vy = by - ay;
+      const t = clamp(((x - ax) * vx + (y - ay) * vy) / (vx * vx + vy * vy || 1), 0, 1);
+      if (Math.hypot(ax + vx * t - x, ay + vy * t - y) <= pad) return true;
+    }
+    return false;
+  }
+
+  function regionInfo(ri) {
+    const r = regions[ri];
+    return r ? { id: r.id, name: r.name, anzahl: r.anzahl } : null;
+  }
+
+  function setHoveredRegion(ri) {
+    if (ri === hoveredRegion) return;
+    hoveredRegion = ri;
+    sceneVersion++;
+    canvas.style.cursor = ri >= 0 ? 'pointer' : '';
+    requestFrame();
   }
 
   function onScreen(i, margin) {
@@ -1827,8 +2169,16 @@ export function createGraphCanvas(canvas, options = {}) {
           const rp = screenRadius(p, k) * enterProgress(p) + 3;
           const rq = screenRadius(q, k) * enterProgress(q) + 3;
           if (d <= rp + rq) continue;
-          ctx.moveTo(sx[p] + (dx / d) * rp, sy[p] + (dy / d) * rp);
-          ctx.lineTo(sx[q] - (dx / d) * rq, sy[q] - (dy / d) * rq);
+          const ax = sx[p] + (dx / d) * rp;
+          const ay = sy[p] + (dy / d) * rp;
+          const bx = sx[q] - (dx / d) * rq;
+          const by = sy[q] - (dy / d) * rq;
+          // Eine Linie, die unter einem fremden Kreis durchliefe, taeuschte
+          // eine Verbindung vor, die es nicht gibt ("Schule-Technik"). In Ruhe
+          // bleibt sie weg; im Licht (Thema ueberfahren) liegt sie obenauf.
+          if (!hell && durchKreis(ax, ay, bx, by, p, q, k)) continue;
+          ctx.moveTo(ax, ay);
+          ctx.lineTo(bx, by);
           any = true;
         }
         if (!any) return;
@@ -1840,6 +2190,22 @@ export function createGraphCanvas(canvas, options = {}) {
       zeichne(false);
       if (lit) zeichne(true);
     });
+  }
+
+  /** Laeuft die Strecke a-b durch einen Kreis ausser p und q? */
+  function durchKreis(ax, ay, bx, by, p, q, k) {
+    const vx = bx - ax;
+    const vy = by - ay;
+    const len2 = vx * vx + vy * vy || 1;
+    for (let i = 0; i < n; i++) {
+      if (i === p || i === q || !visible[i]) continue;
+      const t = clamp(((sx[i] - ax) * vx + (sy[i] - ay) * vy) / len2, 0, 1);
+      const cx = ax + vx * t - sx[i];
+      const cy = ay + vy * t - sy[i];
+      const r = screenRadius(i, k) + 2;
+      if (cx * cx + cy * cy < r * r) return true;
+    }
+    return false;
   }
 
   /**
@@ -1947,7 +2313,10 @@ export function createGraphCanvas(canvas, options = {}) {
       ctx.arc(sx[i], sy[i], r - 0.5, 0, TAU);
       ctx.strokeStyle = hell || i === selected ? rgba(palette.accent, 0.45 + 0.4 * (i === selected ? 1 : fade)) : ck >= 0 && palette.themeRing[ck] ? palette.themeRing[ck] : palette.themeRingPlain;
       ctx.lineWidth = hell || i === selected ? 1.25 : 1;
+      // Ein Behaelter ("Weitere Themen") hat einen gestrichelten Rand.
+      if (nodes[i].gestrichelt && !hell) ctx.setLineDash([4, 4]);
       ctx.stroke();
+      ctx.setLineDash([]);
     }
     ctx.globalAlpha = 1;
   }
@@ -2109,7 +2478,16 @@ export function createGraphCanvas(canvas, options = {}) {
 
   function labelText(i) {
     const node = nodes[i];
-    return clip(node.label || node.title || node.id, mini ? 17 : 34);
+    // Die Kachel kuerzt nach Platz (unten beim Setzen), nicht nach Zeichen.
+    return clip(node.label || node.title || node.id, mini ? 40 : 34);
+  }
+
+  /** Einen Namen auf eine Breite kuerzen (mit der gerade gesetzten Schrift). */
+  function kuerzeAuf(textIn, maxW) {
+    let t = textIn;
+    if (ctx.measureText(t).width <= maxW) return t;
+    while (t.length > 4 && ctx.measureText(`${t}…`).width > maxW) t = t.slice(0, -1);
+    return `${t.trimEnd()}…`;
   }
 
   /**
@@ -2132,11 +2510,27 @@ export function createGraphCanvas(canvas, options = {}) {
    * mehr als zwei Zeilen gibt es nicht.
    */
   function wrapName(name, maxW, maxLines) {
-    const words = String(name).split(/\s+/).filter(Boolean);
+    // Ein Wort, das allein breiter ist als der Kreis ("Steuererklaerung"),
+    // wird getrennt statt abgeschnitten: "Steuer-" / "erklaerung".
+    const words = [];
+    let getrennt = false;
+    for (const w of String(name).split(/\s+/).filter(Boolean)) {
+      if (ctx.measureText(w).width <= maxW || w.length < 8) { words.push(w); continue; }
+      getrennt = true;
+      let rest = w;
+      while (rest.length >= 8 && ctx.measureText(rest).width > maxW) {
+        let cut = rest.length - 3;
+        while (cut > 4 && ctx.measureText(`${rest.slice(0, cut)}-`).width > maxW) cut--;
+        if (cut <= 4) break;
+        words.push(`${rest.slice(0, cut)}-`);
+        rest = rest.slice(cut);
+      }
+      words.push(rest);
+    }
     const lines = [];
     let cur = '';
     for (const w of words) {
-      const probe = cur ? `${cur} ${w}` : w;
+      const probe = cur ? (cur.endsWith('-') ? `${cur}${w}` : `${cur} ${w}`) : w;
       if (ctx.measureText(probe).width <= maxW || !cur) cur = probe;
       else {
         lines.push(cur);
@@ -2149,8 +2543,9 @@ export function createGraphCanvas(canvas, options = {}) {
     if (!lines.length) lines.push(String(name));
     const last = lines.length - 1;
     let s = lines[last];
-    while (ctx.measureText(s).width > maxW && s.length > 3) s = `${s.slice(0, s.length - 2).trimEnd()}…`;
+    while (ctx.measureText(s).width > maxW && s.length > 3) { s = `${s.slice(0, s.length - 2).trimEnd()}…`; getrennt = true; }
     lines[last] = s;
+    lines.getrennt = getrennt;
     return lines;
   }
 
@@ -2158,8 +2553,14 @@ export function createGraphCanvas(canvas, options = {}) {
     const lit = fade > 0;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    for (let i = 0; i < n; i++) {
-      if (!visible[i]) continue;
+    // Groesste Kreise zuerst: wo sich Namen ueberlagern wuerden (herausgezoomt),
+    // behaelt der groessere seinen und der kleinere schweigt -- wie auf Ebene 1.
+    const reihe = [];
+    for (let i = 0; i < n; i++) if (visible[i]) reihe.push(i);
+    reihe.sort((p, q) => radius[q] - radius[p] || p - q);
+    const belegt = [];
+    const frei = (b) => !belegt.some((o) => b.x < o.x + o.w && b.x + b.w > o.x && b.y < o.y + o.h && b.y + b.h > o.y);
+    for (const i of reihe) {
       const p = enterProgress(i);
       if (p <= 0.2) continue;
       const r = screenRadius(i, k);
@@ -2173,14 +2574,62 @@ export function createGraphCanvas(canvas, options = {}) {
       const font = `500 ${px}px ${fontFamily}`;
       ctx.font = font;
       const maxW = innen ? r * 1.72 : 180;
-      const zeilen = wrapName(clip(node.label || node.name || node.id, 48), maxW, innen ? 2 : 1);
+      const voll = clip(node.label || node.name || node.id, 48);
+      let zeilen = wrapName(voll, maxW, innen ? 2 : 1);
+      // Ein kleiner Kreis, in den der Name nur getrennt oder gekuerzt passte
+      // ("Steuererkl-aerung"): der Name steht ganz darunter, die Zahl innen.
+      const unten = innen && r < 48 && zeilen.getrennt;
+      if (unten) zeilen = [voll];
       const count = `${formatCount(node.anzahl)} ${Number(node.anzahl) === 1 ? 'Eintrag' : 'Einträge'}`;
-      const subPx = clamp(Math.round(r * 0.19), 10, 12);
+      const subPx = clamp(Math.round(r * 0.19), 11, 12);
+      // Unterthemen andeuten, wenn der Kreis gross genug ist: "Biologie · Geschichte".
+      const kinder = Array.isArray(node.kinder) ? node.kinder : [];
+      let kinderZeile = '';
+      if (innen && r >= 56 && kinder.length) {
+        ctx.font = `${subPx}px ${fontFamily}`;
+        kinderZeile = kinder.slice(0, 2).map((c) => c.name).join(' · ') + (kinder.length > 2 ? ` +${kinder.length - 2}` : '');
+        while (kinderZeile.length > 6 && ctx.measureText(kinderZeile).width > r * 1.6) kinderZeile = `${kinderZeile.slice(0, -2).trimEnd()}…`;
+        ctx.font = font;
+      }
+      const zeilenH = px * 1.15;
+      const block = innen && !unten ? zeilen.length * zeilenH + subPx * 1.3 + (kinderZeile ? subPx * 1.3 : 0) : zeilenH;
+      let breit = 0;
+      for (const z of zeilen) breit = Math.max(breit, ctx.measureText(z).width);
+      const box = innen && !unten
+        ? { x: sx[i] - breit / 2 - 4, y: sy[i] - block / 2 - 2, w: breit + 8, h: block + 4 }
+        : { x: sx[i] - breit / 2 - 4, y: sy[i] + r + 10 - zeilenH / 2, w: breit + 8, h: zeilenH + 2 };
+      // Ein Name unter dem Kreis darf keinen fremden Kreis ueberdecken.
+      const ueberKreis = (innen && !unten) ? false : reihe.some((j) => {
+        if (j === i) return false;
+        const rj = screenRadius(j, k);
+        const cx = clamp(sx[j], box.x, box.x + box.w);
+        const cy = clamp(sy[j], box.y, box.y + box.h);
+        return (sx[j] - cx) ** 2 + (sy[j] - cy) ** 2 < rj * rj;
+      });
+      if (!strong && (!frei(box) || ueberKreis)) {
+        // Kein Platz fuer den Namen: die Zahl im Kreis bleibt trotzdem.
+        if (unten) {
+          ctx.globalAlpha = a;
+          ctx.font = `${subPx}px ${fontFamily}`;
+          ctx.fillStyle = palette.themeSub;
+          ctx.fillText(count, sx[i], sy[i]);
+        }
+        continue;
+      }
+      belegt.push(box);
       ctx.globalAlpha = a;
-      if (innen) {
+      if (unten) {
+        ctx.font = `${subPx}px ${fontFamily}`;
+        ctx.fillStyle = palette.themeSub;
+        ctx.fillText(count, sx[i], sy[i]);
+        ctx.font = font;
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = palette.halo;
+        ctx.strokeText(zeilen[0], sx[i], sy[i] + r + 10);
+        ctx.fillStyle = strong ? palette.labelStrong : palette.themeText;
+        ctx.fillText(zeilen[0], sx[i], sy[i] + r + 10);
+      } else if (innen) {
         // Name (eine oder zwei Zeilen) und darunter die Zahl, als Block mittig.
-        const zeilenH = px * 1.15;
-        const block = zeilen.length * zeilenH + subPx * 1.3;
         let y = sy[i] - block / 2 + zeilenH / 2;
         ctx.fillStyle = strong ? palette.labelStrong : palette.themeText;
         for (const z of zeilen) {
@@ -2190,6 +2639,7 @@ export function createGraphCanvas(canvas, options = {}) {
         ctx.font = `${subPx}px ${fontFamily}`;
         ctx.fillStyle = palette.themeSub;
         ctx.fillText(count, sx[i], y - zeilenH / 2 + subPx * 0.85);
+        if (kinderZeile) ctx.fillText(kinderZeile, sx[i], y - zeilenH / 2 + subPx * 0.85 + subPx * 1.3);
       } else {
         ctx.lineWidth = 3;
         ctx.strokeStyle = palette.halo;
@@ -2300,6 +2750,11 @@ export function createGraphCanvas(canvas, options = {}) {
     }
 
     const hgt = px * 1.25;
+    // Die Namen der Bereiche (Unterthemen) haben Vorrang: kein Knotenname
+    // liegt darauf.
+    if (regions.length && !overlayOnly) {
+      for (const g of regionGeo()) if (g) occupy({ x: g.label.x - 2, y: g.label.y - 2, w: g.label.w + 4, h: g.label.h + 4 });
+    }
     if (mini) {
       // In der Kachel sind die Punkte selbst belegt: ein Name, der auf dem
       // eigenen oder einem fremden Punkt liegt, liest sich nicht.
@@ -2347,11 +2802,28 @@ export function createGraphCanvas(canvas, options = {}) {
         if (i === selected) cands = [right, below, above, left];
         else if (Math.abs(dx) > Math.abs(dy) * 1.2) cands = dx > 0 ? [right, below, above, left] : [left, below, above, right];
         else cands = dy > 0 ? [below, dx > 0 ? right : left, above] : [above, dx > 0 ? right : left, below];
-        const pick = cands.find(([cx, cy]) => fits(cx, cy, w) && free(cx, cy, w, i))
-          || cands.find(([cx, cy]) => fits(cx, cy, w))
-          || cands[0];
-        x = clamp(pick[0], 2, Math.max(2, width - w - 2));
+        let pick = cands.find(([cx, cy]) => fits(cx, cy, w) && free(cx, cy, w, i))
+          || cands.find(([cx, cy]) => fits(cx, cy, w));
+        let kurz = null;
+        if (!pick) {
+          // Passt der ganze Name nirgends: dort, wo am meisten Platz ist, und
+          // nach der Breite gekuerzt -- nicht nach Zeichenzahl (Pruefer, Runde 1).
+          const platz = (c) => (c === right ? width - 4 - right[0] : c === left ? left[0] + w - 4 : width - 8);
+          pick = cands.slice().sort((a2, b2) => platz(b2) - platz(a2))[0];
+          ctx.font = font;
+          kurz = kuerzeAuf(labelText(i), Math.max(40, platz(pick)));
+          const kw = ctx.measureText(kurz).width;
+          if (pick === left) pick = [left[0] + w - kw, left[1]];
+          else if (pick !== right) pick = [sx[i] - kw / 2, pick[1]];
+        }
+        const breite = kurz ? ctx.measureText(kurz).width : w;
+        x = clamp(pick[0], 2, Math.max(2, width - breite - 2));
         y = clamp(pick[1], 2, Math.max(2, height - hgt - 2));
+        const box = { x: x - 2, y: y - 1, w: breite + 4, h: hgt + 2 };
+        if (collides(box.x, box.y, box.w, box.h) && !(isForced && (i === focusSlot || i === selected))) continue;
+        occupy(box);
+        placed.push([i, x, y, a, isForced, kurz]);
+        continue;
       } else {
         x = sx[i] - w / 2;
         y = sy[i] + r + 3;
@@ -2367,15 +2839,15 @@ export function createGraphCanvas(canvas, options = {}) {
     ctx.lineWidth = 3;
     ctx.strokeStyle = palette.halo;
     const alphaOf = (i, a, isForced) => a * enterA * (outside[i] && !isForced ? 0.6 : 1);
-    for (const [i, x, y, a, isForced] of placed) {
+    for (const [i, x, y, a, isForced, kurz] of placed) {
       ctx.globalAlpha = alphaOf(i, a, isForced);
-      ctx.strokeText(labelText(i), x, y);
+      ctx.strokeText(kurz || labelText(i), x, y);
     }
-    for (const [i, x, y, a, isForced] of placed) {
+    for (const [i, x, y, a, isForced, kurz] of placed) {
       ctx.globalAlpha = alphaOf(i, a, isForced);
       const strong = i === focusSlot || i === selected;
       ctx.fillStyle = strong ? palette.labelStrong : isForced && !mini ? palette.labelStrong : palette.label;
-      ctx.fillText(labelText(i), x, y);
+      ctx.fillText(kurz || labelText(i), x, y);
     }
     ctx.globalAlpha = 1;
   }
@@ -2509,7 +2981,12 @@ export function createGraphCanvas(canvas, options = {}) {
     const p = local(event);
     if (!pointers.has(event.pointerId)) {
       // Maus ohne gedrueckte Taste: nur Ueberfahren.
-      if (event.pointerType === 'mouse' || event.pointerType === 'pen') setHovered(nodeAt(p.x, p.y, 4));
+      if (event.pointerType === 'mouse' || event.pointerType === 'pen') {
+        const slot = nodeAt(p.x, p.y, 4);
+        setHovered(slot);
+        if (regions.length) setHoveredRegion(slot >= 0 ? -1 : regionLabelAt(p.x, p.y));
+        if (hoveredRegion >= 0) canvas.style.cursor = 'pointer';
+      }
       return;
     }
     pointers.set(event.pointerId, p);
@@ -2617,7 +3094,20 @@ export function createGraphCanvas(canvas, options = {}) {
       emit('onSelect', nodes[slot]);
       if (again) emit('onOpen', nodes[slot]);
     } else {
+      // Ein Bereich (Unterthema): sein Name antippen, oder zweimal in seine
+      // Flaeche tippen, taucht hinein.
+      const ri = regions.length ? regionLabelAt(p.x, p.y) : -1;
+      if (ri >= 0) {
+        lastTap = { time: 0, slot: -1, x: p.x, y: p.y };
+        emit('onRegion', regionInfo(ri), 'tippen');
+        return;
+      }
       if (again) {
+        const ra = regions.length ? regionAreaAt(p.x, p.y) : -1;
+        if (ra >= 0) {
+          emit('onRegion', regionInfo(ra), 'tippen');
+          return;
+        }
         zoomBy(1.6, p.x, p.y, true);
         return;
       }
@@ -2650,13 +3140,46 @@ export function createGraphCanvas(canvas, options = {}) {
         const slot = nearestNode(px, py, 260);
         if (slot < 0) return;
         levelArmed = false;
+        schluckenSeit = performance.now();
         emit('onDive', nodes[slot]);
       } else if (k < fit.k * 1.5) levelArmed = true;
-    } else if (k < fit.k * SURFACE_FACTOR) {
+      return;
+    }
+    if (k < fit.k * SURFACE_FACTOR) {
       if (!levelArmed) return;
       levelArmed = false;
+      schluckenSeit = performance.now();
       emit('onSurface');
-    } else if (k > fit.k * 0.7) levelArmed = true;
+      return;
+    }
+    if (k > fit.k * 0.7) levelArmed = true;
+    // Tief in einen Bereich hineingezoomt: in das Unterthema tauchen -- so geht
+    // es von "Schule" ueber "Biologie" bis "Genetik" hinein (Vision).
+    if (regions.length) {
+      if (k > fit.k * DIVE_FACTOR) {
+        if (!regionArmed) return;
+        const ri = regionAreaAt(px, py);
+        if (ri < 0) return;
+        regionArmed = false;
+        schluckenSeit = performance.now();
+        emit('onRegion', regionInfo(ri), 'zoom');
+      } else if (k < fit.k * 1.6) regionArmed = true;
+    }
+  }
+
+  /**
+   * Wie weit gezoomt werden darf. Themen-Ebene: kaum kleiner als eingepasst
+   * (sonst schrumpft das Universum zum Klumpen) und nur bis knapp ueber die
+   * Tauchschwelle. Netz mit Rueckweg (onSurface): nicht unter die Schwelle,
+   * an der es ohnehin ins Universum zurueckgeht.
+   */
+  function zoomGrenzen() {
+    if (!interactive) return [MIN_ZOOM, MAX_ZOOM];
+    const fit = fitTransform();
+    if (!fit) return [MIN_ZOOM, MAX_ZOOM];
+    if (themen) return [Math.max(MIN_ZOOM, fit.k * 0.8), Math.min(MAX_ZOOM, fit.k * DIVE_FACTOR * 1.08)];
+    if (typeof options.onSurface === 'function') return [Math.max(MIN_ZOOM, fit.k * SURFACE_FACTOR * 0.96), MAX_ZOOM];
+    return [MIN_ZOOM, MAX_ZOOM];
   }
 
   /** Der Knoten, dessen Mitte dem Bildschirmpunkt am naechsten liegt (bis maxDist). */
@@ -2682,6 +3205,14 @@ export function createGraphCanvas(canvas, options = {}) {
 
   function onWheel(event) {
     event.preventDefault();
+    if (schluckenSeit) {
+      const jetzt = performance.now();
+      if (jetzt - schluckenSeit < 260) {
+        schluckenSeit = jetzt;
+        return;
+      }
+      schluckenSeit = 0;
+    }
     const p = local(event);
     let dy = event.deltaY;
     if (event.deltaMode === 1) dy *= 16;
@@ -3033,6 +3564,7 @@ export function createGraphCanvas(canvas, options = {}) {
     addEdge,
     fitToView,
     focus,
+    zeigeFrei,
     zoomBy,
     resize,
     screenPosition,
@@ -3048,6 +3580,34 @@ export function createGraphCanvas(canvas, options = {}) {
     get fitZoom() { const f = fitTransform(); return f ? f.k : 1; },
     get hoveredId() { return hovered >= 0 ? nodes[hovered].id : null; },
     stopFollowing() { autoFit = false; },
+    /**
+     * Die laufende Radbewegung gehoert noch zur vorigen Ebene: schlucken, bis
+     * das Rad ruht (die Ansicht ruft das nach jedem Ebenenwechsel).
+     */
+    gesteBeenden() { schluckenSeit = performance.now(); levelArmed = false; regionArmed = false; return api; },
+    /**
+     * Bereiche (Unterthemen) auf der Netz-Ebene: [{id, name, anzahl, ids}].
+     * Sie liegen als leise Flaeche hinter ihren Knoten, der Name steht
+     * darueber; antippen oder hineinzoomen meldet onRegion(bereich, woher).
+     */
+    setRegions(list) {
+      regionSpec = Array.isArray(list) ? list.filter((r) => r && typeof r.id === 'string') : [];
+      sceneVersion++;
+      resolveRegions();
+      if (regions.length && !themen) reheat(0.3);
+      requestFrame();
+      return api;
+    },
+    /** Fuer Pruefwerkzeuge: wo die Namen der Bereiche stehen. */
+    regionLabels() {
+      return regionGeo().map((g, ri) => (g ? {
+        ...regionInfo(ri),
+        x: g.label.x + g.label.w / 2,
+        y: g.label.y + g.label.h / 2,
+        mitteX: g.hull.reduce((acc, q) => acc + q[0], 0) / g.hull.length,
+        mitteY: g.hull.reduce((acc, q) => acc + q[1], 0) / g.hull.length,
+      } : null)).filter(Boolean);
+    },
     /** Die Kachel will ein ruhiges Bild ohne Nachschwingen. */
     freeze() {
       alpha = 0;

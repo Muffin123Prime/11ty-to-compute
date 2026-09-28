@@ -1529,6 +1529,11 @@ function createShell() {
     let input = null;
     let listNode = null;
     let searchToken = 0;
+    // Die Maus waehlt nur, wenn sie sich WIRKLICH bewegt hat. Baut sich die
+    // Liste unter einem ruhenden Zeiger neu auf (jeder Tastendruck), meldet
+    // der Browser sonst die Zeile darunter als ueberfahren -- und Enter nahm
+    // "Stick" statt des obersten Treffers "Gehirn" (Pruefer, Runde 1).
+    let zeiger = null; // {x, y}: wo der Zeiger zuletzt war
 
     function baseItems() {
       const status = state.get('status');
@@ -1750,9 +1755,12 @@ function createShell() {
           role: 'option',
           'aria-selected': index === active ? 'true' : 'false',
           class: index === active ? 'is-active' : '',
-          onMouseenter: () => {
-            active = index;
-            paint();
+          onMousemove: (event) => {
+            const neu = !zeiger || zeiger.x !== event.clientX || zeiger.y !== event.clientY;
+            const ersteMessung = !zeiger;
+            zeiger = { x: event.clientX, y: event.clientY };
+            if (!neu || ersteMessung) return;
+            if (active !== index) markiere(index);
           },
           onClick: () => run(index),
         },
@@ -1766,6 +1774,18 @@ function createShell() {
       if (activeNode && typeof activeNode.scrollIntoView === 'function') {
         activeNode.scrollIntoView({ block: 'nearest' });
       }
+    }
+
+    /** Nur die Markierung umsetzen -- die Liste bleibt, wie sie ist. */
+    function markiere(index) {
+      if (!listNode) return;
+      active = index;
+      for (const node of listNode.querySelectorAll('.palette__item')) {
+        const an = node.id === `palette-option-${index}`;
+        node.classList.toggle('is-active', an);
+        node.setAttribute('aria-selected', an ? 'true' : 'false');
+      }
+      if (input) input.setAttribute('aria-activedescendant', `palette-option-${active}`);
     }
 
     async function run(index) {
@@ -1787,7 +1807,9 @@ function createShell() {
         return;
       }
       try {
-        const result = await api.get('/search', { query: { q: query.trim(), limit: 8 }, timeoutMs: 8000 });
+        // Nur Arten, die man oeffnen kann: kein Merkzettel ("Verbindung
+        // abgelehnt: ..."), keine Buchhaltung (Pruefer, Runde 1).
+        const result = await api.get('/search', { query: { q: query.trim(), limit: 8, types: PALETTE_TYPEN }, timeoutMs: 8000 });
         if (token !== searchToken) return;
         const rows = (result && Array.isArray(result.items) ? result.items : []).map((row) => {
           const record = row && row.record ? row.record : row;
@@ -1898,6 +1920,7 @@ function createShell() {
         },
       });
       entry.panel.classList.add('overlay__panel--palette');
+      zeiger = null;
       render(initialQuery);
       if (initialQuery) runSearch(initialQuery);
     }
@@ -2283,6 +2306,9 @@ function chatTitle(record) {
   return title || 'Chat ohne Titel';
 }
 
+/** Was die Suche der Palette findet: Wissen und Gespraeche, keine Merkzettel. */
+const PALETTE_TYPEN = 'note,chat,message,project,task,event,file,entity,memory,agent,run';
+
 function recordTypeLabel(type) {
   const labels = {
     note: 'Notiz', chat: 'Chat', message: 'Nachricht', project: 'Projekt', task: 'Aufgabe',
@@ -2307,8 +2333,9 @@ function targetForRecord(record) {
     case 'note': return `#/notes?id=${id}`;
     case 'chat': return `#/chat?id=${id}`;
     case 'message': return `#/chat?id=${encodeURIComponent((record.data && record.data.chatId) || record.id)}`;
-    case 'project':
-    case 'task': return `#/projects?id=${id}`;
+    case 'project': return `#/projects?id=${id}`;
+    // Eine Aufgabe steht in ihrem Projekt; ohne Projekt in der Liste.
+    case 'task': return record.data && record.data.projectId ? `#/projects?id=${encodeURIComponent(record.data.projectId)}` : '#/projects';
     case 'agent':
     case 'run': return `#/agents?id=${id}`;
     case 'event': return `#/kalender?id=${id}`;

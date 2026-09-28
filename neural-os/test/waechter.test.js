@@ -256,3 +256,56 @@ test('Stick getauscht: die eigene KI erneuert sich (eigenständig) -> kein Ende,
     w.stoppe();
   }
 });
+
+test('Leerlauf im Vorraum (PIN-Seite offen): Eingaben zählen als Aktivität, die Gesundheitsabfrage nicht; ohne Eingabe endet er nach 10 min', async () => {
+  const http = require('node:http');
+  const { tempHome } = require('./harness');
+  const vorraum = require('../src/kernel/vorraum');
+  const pathsMod = require('../src/kernel/paths');
+  const configMod = require('../src/kernel/config');
+  const { createVaultCrypto } = require('../src/store/vaultcrypto');
+  const heim = tempHome('nos-w-vorraum');
+  const geraete = tempHome('nos-w-vorraum-geraete');
+  const paths = pathsMod.ensureLayout(pathsMod.layout(heim.home));
+  const vc = createVaultCrypto({ paths, config: {}, geraet: false });
+  await vc.initialise('4711');
+  vc.lock();
+  const rufe = (port, pfad, method = 'GET', body) => new Promise((resolve, reject) => {
+    const daten = body ? Buffer.from(JSON.stringify(body)) : null;
+    const req = http.request({ host: '127.0.0.1', port, path: pfad, method, agent: false, headers: {
+      host: `127.0.0.1:${port}`, 'x-neural-os': '1', ...(daten ? { 'content-type': 'application/json', 'content-length': daten.length } : {}),
+    } }, (res) => { res.resume(); res.on('end', () => setTimeout(() => resolve(res.statusCode), 50)); });
+    req.on('error', reject);
+    req.end(daten || undefined);
+  });
+  let jetzt = 1_800_000_000_000;
+  const lage = { app: null, vorraum: null };
+  const aufrufe = [];
+  let aktivitaet = null;
+  try {
+    lage.vorraum = await vorraum.oeffnen({ paths, config: configMod.load(paths.config), host: '127.0.0.1', port: 0, ki: { id: 'dev_5e11ab1e5e11ab1e5e11ab1e', name: 'Max' }, geraeteOrdner: geraete.home });
+    aktivitaet = waechter().dienstAktivitaet({ app: () => lage.app, vorraumOffen: () => !!lage.vorraum, jetzt: () => jetzt });
+    const w = waechter().starte({
+      marker: null, aktivitaet, beenden: (g) => aufrufe.push(g), jetzt: () => jetzt,
+      setInterval: () => ({}), clearInterval: () => {},
+    });
+    const port = lage.vorraum.port;
+    // Die Zeit vergeht, der Wächter prüft alle 15 s (größere Lücken hielte er für einen Ruhezustand).
+    const vergehe = (ms) => { for (let t = 0; t < ms; t += 15000) { jetzt += 15000; w.pruefeLeerlauf(); } };
+    vergehe(9 * MIN);
+    await rufe(port, '/'); // die PIN-Seite
+    vergehe(1 * MIN);
+    assert.equal(await rufe(port, '/api/vault/unlock', 'POST', { passphrase: '0000' }), 401); // vertippt
+    vergehe(6 * MIN);
+    assert.deepEqual(aufrufe, [], 'wer gerade die PIN eintippt, wird nicht als Leerlauf beendet');
+    vergehe(3 * MIN);
+    await rufe(port, '/api/health'); // der Starter fragt nach, das ist kein Mensch
+    vergehe(1 * MIN + 30000);
+    assert.deepEqual(aufrufe, ['leerlauf'], '10 min ohne Eingabe: Ende');
+  } finally {
+    if (aktivitaet) aktivitaet.abmelden();
+    if (lage.vorraum) await lage.vorraum.schliessen();
+    heim.cleanup();
+    geraete.cleanup();
+  }
+});

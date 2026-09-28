@@ -826,4 +826,213 @@ test('Ein geteilter Zugang darf die Liste lesen, aber keinen Ordner anlegen', as
   }, { ctx: { auth: gast } });
 });
 
+/* ------------------------------------------ Ordner je Rechner (Bauplan 2.7) */
+
+const rechner = require('../src/kernel/rechner');
+
+const PROFIL_A = 'aaaaaaaaaaaaaaaa';
+const PROFIL_B = 'bbbbbbbbbbbbbbbb';
+const FREMD = 'Gehört zu einem anderen Rechner.';
+const KI = 'Hier liegt eine Neural-OS-KI.';
+
+/** Einen anderen Rechner spielen: `rechner.profil` am Modulobjekt ersetzen. */
+async function alsRechner(profil, fn) {
+  const echt = rechner.profil;
+  rechner.profil = () => profil;
+  try {
+    return await fn();
+  } finally {
+    rechner.profil = echt;
+  }
+}
+
+/** Ein Temp-Stick in der heutigen Aufteilung: Markierung in der Wurzel, daneben data/ und app/. */
+function tempStick(wurzel) {
+  fs.mkdirSync(path.join(wurzel, 'data'), { recursive: true });
+  fs.mkdirSync(path.join(wurzel, 'app'), { recursive: true });
+  fs.writeFileSync(path.join(wurzel, pathsMod.PORTABLE_MARKER), JSON.stringify({ neuralOsPortable: true, dataDir: 'data' }));
+  return { root: wurzel, dataDir: path.join(wurzel, 'data'), marker: path.join(wurzel, pathsMod.PORTABLE_MARKER), info: {} };
+}
+
+/** Ein weiterer Beobachter auf demselben Tresor: derselbe Stick an einem anderen Rechner. */
+function beobachter({ store, bus, paths }, portable) {
+  return createWatcher({
+    store, bus, paths, portable, logger: silentLogger, config: { watch: { debounceMs: 60, sweepIntervalMs: 5000 } },
+  });
+}
+
+test('Ein Satz, angelegt mit profil()="aaaa", wird bei profil()="bbbb" nicht angehängt, und es wird kein lastError geschrieben', async () => {
+  await withWatcher(async (env) => {
+    const { store, quelle } = env;
+    write(quelle, 'brief.txt', 'Liebe Oma,');
+    const id = await alsRechner(PROFIL_A, () => {
+      const hier = beobachter(env, null);
+      return armed(hier, quelle).id;
+    });
+
+    await alsRechner(PROFIL_B, async () => {
+      const anderer = beobachter(env, null);
+      anderer.start();
+      try {
+        const karte = anderer.get(id);
+        assert.equal(karte.beobachtung.aktiv, false, 'kein fs.watch auf dem Ordner eines anderen Rechners');
+        assert.equal(karte.beobachtung.problem, FREMD);
+        const vorher = store.get(id).data;
+        await anderer.sweep();
+        await anderer.sweep();
+        const nachher = store.get(id).data;
+        assert.equal(nachher.lastError, null, 'kein lastError je Runde');
+        assert.equal(nachher.lastScanAt, vorher.lastScanAt);
+        assert.equal(store.count('file'), 0, 'nichts eingelesen');
+
+        const ausdruecklich = await anderer.scan(id);
+        assert.equal(ausdruecklich.aufgenommen, 0);
+        assert.equal(ausdruecklich.abgebrochen, FREMD);
+        assert.equal(store.get(id).data.lastError, null);
+        assert.equal(store.count('file'), 0);
+      } finally {
+        anderer.stop();
+      }
+    });
+
+    await alsRechner(PROFIL_A, async () => {
+      const wieder = beobachter(env, null);
+      wieder.start();
+      try {
+        assert.equal(wieder.get(id).beobachtung.aktiv, true, 'zurück am eigenen Rechner wird wieder beobachtet');
+        const ergebnis = await wieder.scan(id);
+        assert.equal(ergebnis.aufgenommen, 1);
+      } finally {
+        wieder.stop();
+      }
+    });
+  });
+});
+
+test('Ein Ordner auf dem Stick ({ort:"stick", rel:"Schule"}) gilt bei portable.root=/x und bei /y', async () => {
+  await withWatcher(async (env) => {
+    const { store, home } = env;
+    const x = tempStick(path.join(home, 'x'));
+    const y = tempStick(path.join(home, 'y'));
+    write(path.join(x.root, 'Schule'), 'mathe.txt', 'Aufgabe 1 von x');
+    write(path.join(y.root, 'Schule'), 'deutsch.txt', 'Aufsatz von y');
+
+    const id = await alsRechner(PROFIL_A, async () => {
+      const w = beobachter(env, x);
+      const record = w.add({ path: path.join(x.root, 'Schule') });
+      assert.equal(record.data.ort, 'stick');
+      assert.equal(record.data.rel, 'Schule');
+      w.enable(record.id, true);
+      assert.equal((await w.scan(record.id)).aufgenommen, 1);
+      return record.id;
+    });
+
+    await alsRechner(PROFIL_B, async () => {
+      const w = beobachter(env, y);
+      w.start();
+      try {
+        const karte = w.get(id);
+        assert.equal(karte.beobachtung.aktiv, true, 'an einem anderen Rechner, unter einer anderen Wurzel');
+        assert.equal(karte.beobachtung.problem, null);
+        const ergebnis = await w.scan(id);
+        assert.equal(ergebnis.aufgenommen, 1);
+        assert.equal(ergebnis.ordner, path.join(fs.realpathSync(y.root), 'Schule'));
+        assert.deepEqual(store.all('file').map((f) => f.data.name).sort(), ['deutsch.txt', 'mathe.txt']);
+      } finally {
+        w.stop();
+      }
+    });
+  });
+});
+
+test('._brief.txt und .DS_Store erzeugen keinen Eintrag', async () => {
+  await withWatcher(async ({ store, watcher, quelle }) => {
+    write(quelle, 'brief.txt', 'Ein echter Brief.');
+    write(quelle, '._brief.txt', 'AppleDouble');
+    write(quelle, '.DS_Store', 'Bud1');
+    write(quelle, 'Thumbs.db', 'x');
+    write(path.join(quelle, '.Spotlight-V100'), 'Store-V2.txt', 'x');
+    const record = armed(watcher, quelle);
+
+    const still = (ergebnis) => ergebnis.uebersprungen.filter((e) => /\._|DS_Store|Thumbs|Spotlight/.test(e.datei));
+    const vorschau = await watcher.scan(record.id, { dryRun: true });
+    assert.deepEqual(still(vorschau), [], 'die Vorschau nennt sie nicht');
+    const ergebnis = await watcher.scan(record.id);
+    assert.equal(ergebnis.aufgenommen, 1);
+    assert.deepEqual(still(ergebnis), [], 'der Durchlauf nennt sie nicht');
+    assert.deepEqual(filesIn(store).map((f) => f.data.name), ['brief.txt']);
+    assert.equal(store.get(record.id).data.skipped, 0);
+
+    // Der schnelle Weg genauso.
+    watcher.start();
+    write(quelle, '._neu.txt', 'AppleDouble');
+    write(quelle, 'neu.txt', 'Neu.');
+    await waitFor(() => filesIn(store).length === 2, { what: 'neu.txt aufgenommen' });
+    await sleep(300);
+    assert.deepEqual(watcher.log(record.id).uebersprungen.filter((e) => /\._/.test(e.datei)), []);
+    assert.equal(filesIn(store).length, 2);
+  });
+});
+
+test('Die Stick-Wurzel beobachten wird verweigert: Hier liegt eine Neural-OS-KI.', async () => {
+  await withWatcher(async ({ watcher, home }) => {
+    const ki = (err) => err.code === 'VALIDATION_FAILED' && err.message === KI;
+    const alt = tempStick(path.join(home, 'alt'));
+    fs.mkdirSync(path.join(alt.root, 'Schule'));
+    assert.throws(() => watcher.add({ path: alt.root }), ki, 'die Wurzel eines Sticks');
+    assert.throws(() => watcher.add({ path: alt.dataDir }), ki, 'die Daten einer KI');
+    assert.throws(() => watcher.add({ path: path.join(alt.root, 'app') }), ki, 'das Programm einer KI');
+
+    const neu = path.join(home, 'neu');
+    fs.mkdirSync(path.join(neu, 'Inhalt', 'data'), { recursive: true });
+    fs.writeFileSync(path.join(neu, 'Inhalt', pathsMod.PORTABLE_MARKER), JSON.stringify({ neuralOsPortable: true }));
+    assert.throws(() => watcher.add({ path: neu }), ki, 'die Wurzel eines Sticks mit Inhalt/');
+    assert.throws(() => watcher.add({ path: path.join(neu, 'Inhalt') }), ki, 'Inhalt/');
+
+    const fremderTresor = pathsMod.ensureLayout(pathsMod.layout(path.join(home, 'fremd'))).home;
+    assert.throws(() => watcher.add({ path: fremderTresor }), ki, 'der Datenordner einer anderen KI');
+    assert.throws(() => watcher.add({ path: path.join(fremderTresor, 'exports') }), ki, 'ein Ordner darin');
+
+    const schule = watcher.add({ path: path.join(alt.root, 'Schule') });
+    assert.ok(schule.id, 'ein eigener Ordner auf dem Stick geht');
+    assert.throws(() => watcher.update(schule.id, { path: alt.root }), ki, 'auch nicht nachträglich');
+  });
+});
+
+test('Altbestand ohne ort: unter der Stick-Wurzel wird er stick, sonst gehört er dem Rechner, an dem das Update zuerst startet', async () => {
+  await withWatcher(async (env) => {
+    const { store, home, quelle } = env;
+    const x = tempStick(path.join(home, 'x'));
+    fs.mkdirSync(path.join(x.root, 'Schule'));
+    // So sahen die Sätze vor dem Update aus: nur `path`.
+    const aufStick = store.create('watch', { path: path.join(x.root, 'Schule'), enabled: true });
+    const aufPlatte = store.create('watch', { path: quelle, enabled: true });
+
+    await alsRechner(PROFIL_A, () => {
+      const w = beobachter(env, x);
+      w.start();
+      w.stop();
+    });
+    const s = store.get(aufStick.id).data;
+    assert.equal(s.ort, 'stick');
+    assert.equal(s.rel, 'Schule');
+    const p = store.get(aufPlatte.id).data;
+    assert.equal(p.ort, 'rechner');
+    assert.equal(p.rechner, PROFIL_A);
+    assert.equal(p.path, quelle, 'path bleibt für die Anzeige');
+
+    await alsRechner(PROFIL_B, () => {
+      const w = beobachter(env, x);
+      w.start();
+      try {
+        assert.equal(w.get(aufPlatte.id).beobachtung.problem, FREMD);
+        assert.equal(w.get(aufStick.id).beobachtung.aktiv, true);
+      } finally {
+        w.stop();
+      }
+    });
+    assert.equal(store.get(aufPlatte.id).data.rechner, PROFIL_A, 'der zweite Rechner übernimmt nichts');
+  });
+});
+
 module.exports = { name: 'watch', tests: drain() };

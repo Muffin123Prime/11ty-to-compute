@@ -322,7 +322,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     check(await antwortA.locator('.cv-quellen .cv-quelle').count() >= 1, 'Die Quellen der Websuche stehen als kleine Liste unter der Antwort');
     check(await antwortA.locator('.cv-denken summary').count() === 1, 'Der Gedankengang ist einklappbar („Gedankengang“)');
     const vorschlaege = await p.locator('.cv-vorschlaege button').count();
-    check(vorschlaege >= 1 && vorschlaege <= 3, 'Nach der fertigen Antwort bis zu drei Vorschlags-Knöpfe', `${vorschlaege}: ${(await p.locator('.cv-vorschlaege').innerText().catch(() => '')).replace(/\s+/g, ' ')}`);
+    check(vorschlaege === 0, 'Keine geratenen Vorschlags-Knöpfe mehr – nächste Schritte bietet die KI selbst an (Baustein aktionen)', String(vorschlaege));
     const kal = (await p.locator('.tile[data-tile="kalender"]').innerText().catch(() => '')).replace(/\s+/g, ' ');
     check(/Produkt-Review/.test(kal) && /Besprechungsraum 2/.test(kal), 'Die Kachel „Kalender“ zeigt den neuen Termin, ohne Neuladen', kal.slice(0, 100));
     const notizKachel = (await p.locator('.tile[data-tile="notizen"]').innerText().catch(() => '')).replace(/\s+/g, ' ');
@@ -515,8 +515,12 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     await warteBis(async () => /Neue Fassung/.test(await letzteAntwort(p).innerText().catch(() => '')), { timeout: 8000 });
     await strom(p);
     const nachNeu = nachrichten(chatIdAus(p));
-    check(nachNeu[nachNeu.length - 1].data.content === 'Neue Fassung: kurz und vollständig.' && nachNeu.filter((m) => m.data.role === 'assistant').length === nachrichten(chatIdAus(p)).filter((m) => m.data.role === 'user').length,
-      '„Neu antworten“ ersetzt die letzte Antwort (die alte liegt im Papierkorb)', `${nachNeu.length} Nachrichten`);
+    // Seit den Fassungen (docs/ANTWORT-BAUSTEINE.md 4) bleibt die alte Antwort
+    // als Fassung derselben Nachricht erhalten, statt im Papierkorb zu landen.
+    const neuSatz = nachNeu[nachNeu.length - 1];
+    check(neuSatz.data.content === 'Neue Fassung: kurz und vollständig.' && nachNeu.filter((m) => m.data.role === 'assistant').length === nachrichten(chatIdAus(p)).filter((m) => m.data.role === 'user').length
+      && Array.isArray(neuSatz.data.versionen) && neuSatz.data.versionen.length >= 2,
+    '„Neu antworten“ ersetzt die letzte Antwort (die alte bleibt als Fassung wählbar)', `${nachNeu.length} Nachrichten, ${(neuSatz.data.versionen || []).length} Fassungen`);
 
     const eigene = p.locator('.cv-msg--user').last();
     await eigene.hover();

@@ -1491,4 +1491,11 @@ const NOTE_CSS = `
   .nos-ne__hint { display: none; }
   .nos-ne__tool { width: var(--tap-min); height: 36px; }
 }
+/* Mit dem Finger: jedes Ziel mindestens 44 px (Pruefer, Runde 1: die
+   Werkzeugleiste hatte 32x30, die [[-Liste 32 px hohe Zeilen). Die Leiste
+   bricht dafuer um. */
+@media (pointer: coarse) {
+  .nos-ne__tool { width: var(--tap-min); height: var(--tap-min); }
+  .nos-ne__item { min-height: var(--tap-min); }
+}
 `;

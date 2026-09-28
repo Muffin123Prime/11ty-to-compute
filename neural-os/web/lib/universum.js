@@ -57,18 +57,41 @@ export function artVon(node) {
   return TYPE_LABELS[node.type] || 'Eintrag';
 }
 
-/** Wo ein Eintrag sich oeffnen laesst. */
+/**
+ * Wo ein Eintrag sich oeffnen laesst -- nur Arten, die einen eigenen Bereich
+ * haben. Ein Begriff (Person, Ort, Thema) hat keinen: er oeffnet sich im
+ * Gehirn als sein Umfeld (die Ansicht entscheidet das). Frueher fuehrte er in
+ * die Notizen und dort zu "Diese Notiz gibt es nicht mehr" (Pruefer, Runde 1).
+ * Eine Aufgabe steht in ihrem Projekt.
+ */
 export const OPEN_ROUTES = {
   note: (id) => `#/notes?id=${encodeURIComponent(id)}`,
-  file: (id) => `#/notes?id=${encodeURIComponent(id)}`,
-  entity: (id) => `#/notes?id=${encodeURIComponent(id)}`,
   chat: (id) => `#/chat?id=${encodeURIComponent(id)}`,
   project: (id) => `#/projects?id=${encodeURIComponent(id)}`,
-  task: (id) => `#/projects?id=${encodeURIComponent(id)}`,
+  task: (id, node) => (node && node.projectId ? `#/projects?id=${encodeURIComponent(node.projectId)}` : '#/projects'),
   event: (id) => `#/kalender?id=${encodeURIComponent(id)}`,
   agent: (id) => `#/agents?id=${encodeURIComponent(id)}`,
   run: (id) => `#/agents?id=${encodeURIComponent(id)}`,
 };
+
+/** Die Adresse, an der sich ein Knoten oeffnet -- oder null (dann: sein Umfeld im Gehirn). */
+export function oeffnenZiel(node) {
+  if (!node || typeof node.id !== 'string') return null;
+  const route = OPEN_ROUTES[node.type];
+  return route ? route(node.id, node) : null;
+}
+
+/** Die ID des Behaelters "Weitere Themen" (src/graph/universum.js WEITERE). */
+export const WEITERE_ID = 'weitere';
+export const UNVERBUNDEN_ID = 'unverbunden';
+
+/** "1 Thema", "3 Themen" -- mit Tausenderpunkt. */
+export function anzahlText(n, eins, viele) {
+  const k = Number(n) || 0;
+  let zahl;
+  try { zahl = k.toLocaleString('de-DE'); } catch { zahl = String(k); }
+  return `${zahl} ${k === 1 ? eins : viele}`;
+}
 
 /** Die Wurzel der Karte heisst immer so. */
 export const WURZEL_NAME = 'Mein Wissen';
@@ -82,7 +105,11 @@ export const KLEIN_AB = 8;
 
 /** Fuer die Suche: Umlaute so, wie ein Deutscher sie tippt, ohne Akzente. */
 export function fold(value) {
+  // Erst NFC: ein "ö" aus zwei Zeichen (o + Trema, so kommt es von manchen
+  // Tastaturen und aus Dateinamen) wird sonst zu "o" statt "oe" -- und die
+  // Suche fand "Größe" nicht (Pruefer, Runde 1). Der Server faltet genauso.
   return String(value == null ? '' : value)
+    .normalize('NFC')
     .toLowerCase()
     .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
     .normalize('NFD').replace(/[̀-ͯ]/g, '');
@@ -193,6 +220,7 @@ export function normaliseEbene1(data) {
       id: k.id,
       type: k.type || 'note',
       kind: k.kind || null,
+      projectId: typeof k.projectId === 'string' ? k.projectId : null,
       label: String(k.label || k.title || k.name || 'Ohne Titel'),
       tags: Array.isArray(k.tags) ? k.tags.map(String) : [],
       grad: num(k.grad, num(k.degree)),
@@ -235,6 +263,9 @@ export function normaliseVerknuepft(data) {
   const zeile = (r) => (r && typeof r.id === 'string' ? {
     id: r.id,
     type: r.type || 'note',
+    // Die Art der Gegenseite (Person, Ort ...) -- `kind` ist die der Kante.
+    entityKind: typeof r.entityKind === 'string' ? r.entityKind : null,
+    projectId: typeof r.projectId === 'string' ? r.projectId : null,
     title: String(r.title || r.label || 'Ohne Titel'),
     kind: r.kind || 'related',
     reason: String(r.reason || ''),
@@ -272,6 +303,57 @@ export function verknuepftAusGraph(id, graph) {
     });
   }
   return { eingehend, ausgehend, vorschlaege: [], themen: [] };
+}
+
+/**
+ * Verbindungen IN einem Thema, so gezaehlt wie auf dem Server (thema.kanten):
+ * Paare, nicht Kanten -- Wiki-Link und Schlagwort zwischen denselben zwei
+ * Eintraegen sind EINE Linie --, und nur zwischen Knoten des Themas, nicht zu
+ * den Nachbarn ausserhalb. Kopf, Karte und Server sagen so dieselbe Zahl.
+ * @param {Array} nodes  mit `ausserhalb`
+ * @param {Array} edges  {from, to}
+ * @param {(node:object)=>boolean} [sichtbar]
+ */
+export function verbindungenImThema(nodes, edges, sichtbar = () => true) {
+  const drin = new Set();
+  for (const n of nodes || []) if (n && !n.ausserhalb && sichtbar(n)) drin.add(n.id);
+  const paare = new Set();
+  for (const e of edges || []) {
+    if (!e || e.from === e.to || !drin.has(e.from) || !drin.has(e.to)) continue;
+    paare.add(e.from < e.to ? `${e.from}\u0000${e.to}` : `${e.to}\u0000${e.from}`);
+  }
+  return paare.size;
+}
+
+/**
+ * Wie viele Themen die Karte zeigt: die Kreise ohne "Unverbunden" und ohne
+ * den Behaelter "Weitere Themen" -- dessen Kinder zaehlen einzeln mit.
+ */
+export function themenZahl(themen) {
+  let n = 0;
+  for (const t of themen || []) {
+    if (!t || t.id === UNVERBUNDEN_ID) continue;
+    if (t.id === WEITERE_ID) n += Array.isArray(t.kinder) ? t.kinder.length : 0;
+    else n++;
+  }
+  return n;
+}
+
+/**
+ * Die Bereiche eines Themas auf Ebene 1: je Unterthema die Knoten, die
+ * dazugehoeren (`node.themen` kommt vom Server). Leere fallen weg.
+ * @returns {Array<{id,name,anzahl,farbe,ids:string[]}>}
+ */
+export function bereicheVon(thema, nodes) {
+  const kinder = thema && Array.isArray(thema.kinder) ? thema.kinder : [];
+  if (!kinder.length) return [];
+  const out = [];
+  for (const k of kinder) {
+    const ids = [];
+    for (const n of nodes || []) if (n && !n.ausserhalb && Array.isArray(n.themen) && n.themen.includes(k.id)) ids.push(n.id);
+    if (ids.length) out.push({ id: k.id, name: k.name, anzahl: k.anzahl || ids.length, farbe: k.farbe, ids });
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */

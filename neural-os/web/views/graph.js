@@ -41,13 +41,17 @@
  */
 
 import { h, text, clear, on, icon, formatNumber, timeAgo, debounce } from '../lib/dom.js';
-import { createGraphCanvas, layoutThemen, THEME_HUES } from '../lib/graph-canvas.js';
+import { createGraphCanvas, layoutThemen, THEME_HUES, FARBE_NEUTRAL, themaFarbeCss } from '../lib/graph-canvas.js';
 import {
-  TYPE_PLURALS, OPEN_ROUTES, WURZEL_NAME, KLEIN_AB, artVon, fold, passt,
+  TYPE_PLURALS, WURZEL_NAME, KLEIN_AB, UNIVERSUM_TYPEN, artVon, fold, passt, oeffnenZiel,
   normaliseEbene0, normaliseEbene1, normaliseVerknuepft, verknuepftAusGraph, brotkrumen,
   sucheThemen, sucheKnoten, universumLokal, ebene1Lokal,
+  WEITERE_ID, UNVERBUNDEN_ID, anzahlText, verbindungenImThema, themenZahl, bereicheVon,
 } from '../lib/universum.js';
 import { createWissenskarte } from './wissenskarte.js';
+
+const WEITERE_ID_ = WEITERE_ID;
+const UNVERBUNDEN_ID_ = UNVERBUNDEN_ID;
 
 /* ------------------------------------------------------------------ */
 /* Konstanten                                                          */
@@ -59,8 +63,9 @@ const ICON = {
   search: '<circle cx="9" cy="9" r="5.2"/><path d="m13 13 4 4"/>',
   chevron: '<path d="m7.5 5 5 5-5 5"/>',
   back: '<path d="M12.5 5 7.5 10l5 5"/>',
-  in: '<path d="M4 10h9M9.5 6l4 4-4 4"/>',
-  out: '<path d="M16 10H7M10.5 6l-4 4 4 4"/>',
+  // Wie in der Notizansicht: "Verweist auf" zeigt nach rechts, "Hierher verweist" nach links.
+  out: '<path d="M4 10h9M9.5 6l4 4-4 4"/>',
+  in: '<path d="M16 10H7M10.5 6l-4 4 4 4"/>',
   link: '<path d="M8.5 11.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-1 1"/><path d="M11.5 8.5a3 3 0 0 0-4.2 0L5 10.8a3 3 0 0 0 4.2 4.2l1-1"/>',
   spark: '<path d="M10 3v3M10 14v3M3 10h3M14 10h3M5.5 5.5l2 2M12.5 12.5l2 2M14.5 5.5l-2 2M7.5 12.5l-2 2"/>',
   focus: '<circle cx="10" cy="10" r="3"/><path d="M10 2.5v3M10 14.5v3M2.5 10h3M14.5 10h3"/>',
@@ -115,14 +120,25 @@ const CSS = `
   pointer-events: none;
 }
 .gh__top > * { pointer-events: auto; }
+.gh__left { flex: 1 1 auto; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; pointer-events: none; }
+.gh__left > * { pointer-events: auto; }
+.gh__sub { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: min(560px, 100%); }
+.gh__sub[hidden] { display: none; }
+.gh__sub-label { color: var(--fg-muted); font-size: var(--fs-xs); margin-right: 2px; }
+.gh__sub .chip { min-height: 28px; padding: 0 10px; background: color-mix(in srgb, var(--surface-2) 88%, transparent); }
+.gh__sub .chip .gh__dot { width: 7px; height: 7px; }
+.gh__note { margin: 0; max-width: 460px; padding: 6px 10px; color: var(--fg-muted); font-size: var(--fs-xs); line-height: 1.45;
+  background: color-mix(in srgb, var(--surface-2) 88%, transparent); border: 1px solid var(--border); border-radius: var(--r-2); }
+.gh__note[hidden] { display: none; }
 .gh__crumbs {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+  display: flex; align-items: center; flex-wrap: nowrap; gap: 2px; max-width: 100%; overflow: hidden;
   min-height: 36px; padding: 0 6px 0 4px;
   background: color-mix(in srgb, var(--surface-2) 88%, transparent);
   border: 1px solid var(--border); border-radius: var(--r-2); box-shadow: var(--shadow-1);
   -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
 }
 .gh__crumb {
+  flex: 0 1 auto; min-width: 0;
   display: inline-flex; align-items: center; gap: 4px;
   min-height: 30px; padding: 0 8px; border: 0; border-radius: var(--r-1);
   background: none; color: var(--fg-muted); font: inherit; font-size: var(--fs-base); cursor: pointer;
@@ -134,7 +150,7 @@ const CSS = `
 .gh__crumb-sep { color: var(--fg-subtle); font-size: var(--fs-sm); }
 .gh__crumb-n { color: var(--fg-subtle); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; margin-left: 2px; }
 
-.gh__tools { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; max-width: min(360px, 60%); }
+.gh__tools { flex: 0 1 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; max-width: min(360px, 55%); }
 .gh__search { position: relative; width: 256px; max-width: 100%; }
 .gh__search .input {
   width: 100%; min-height: 36px; padding-left: 32px; padding-right: 10px;
@@ -142,8 +158,8 @@ const CSS = `
   -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
 }
 .gh__search-icon {
-  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
-  display: grid; color: var(--fg-subtle); pointer-events: none;
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%); z-index: 1;
+  display: grid; color: var(--fg-muted); pointer-events: none;
 }
 .gh__search-icon svg { width: 15px; height: 15px; }
 .gh__results {
@@ -176,7 +192,7 @@ const CSS = `
 /* Unten links: ein leiser Hinweis, wie man sich bewegt. */
 .gh__hint {
   position: absolute; left: 16px; bottom: 12px; z-index: 2; margin: 0;
-  color: var(--fg-subtle); font-size: var(--fs-xs); pointer-events: none;
+  color: var(--fg-muted); font-size: var(--fs-xs); pointer-events: none;
   transition: opacity var(--dur-3) var(--ease);
 }
 .gh__hint[hidden] { display: none; }
@@ -197,7 +213,7 @@ const CSS = `
 .gh__card-head { display: flex; align-items: center; gap: var(--sp-1); min-height: 32px; }
 .gh__card-kind {
   display: inline-flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0;
-  color: var(--fg-subtle); font-size: var(--fs-sm);
+  color: var(--fg-muted); font-size: var(--fs-sm);
 }
 .gh__card-kind .gh__dot { width: 9px; height: 9px; }
 .gh__card-head .icon-button { width: 32px; height: 32px; margin: -4px -6px -4px 0; }
@@ -211,7 +227,7 @@ const CSS = `
 }
 .gh__card-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .gh__card-tags .chip { min-height: 24px; padding: 0 8px; font-size: var(--fs-xs); cursor: default; }
-.gh__card-meta { margin: 10px 0 0; color: var(--fg-subtle); font-size: var(--fs-sm); }
+.gh__card-meta { margin: 10px 0 0; color: var(--fg-muted); font-size: var(--fs-sm); }
 .gh__card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
 .gh__card-actions .btn svg { width: 16px; height: 16px; }
 .gh__sec { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
@@ -228,7 +244,12 @@ const CSS = `
 .gh__link-dir svg { width: 15px; height: 15px; }
 .gh__link-main { flex: 1 1 auto; min-width: 0; }
 .gh__link-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gh__link-why { display: block; color: var(--fg-subtle); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh__link-why {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  color: var(--fg-muted); font-size: var(--fs-xs); line-height: 1.4; overflow-wrap: anywhere;
+}
+.gh__links-group { margin: 10px 0 2px; color: var(--fg-muted); font-size: var(--fs-xs); font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; display: flex; align-items: center; gap: 6px; }
+.gh__links-group svg { width: 13px; height: 13px; }
 .gh__link-art { flex: none; color: var(--fg-subtle); font-size: var(--fs-xs); }
 .gh__vorschlag { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 0; }
 .gh__vorschlag .gh__link-main { cursor: default; }
@@ -249,7 +270,7 @@ const CSS = `
 .gh__state-text { margin: 0; color: var(--fg-muted); font-size: var(--fs-md); line-height: var(--lh); }
 .gh__state-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: var(--sp-3); }
 .gh__state .spinner { margin: 0 auto 10px; }
-.gh__count { color: var(--fg-subtle); font-size: var(--fs-sm); white-space: nowrap; font-variant-numeric: tabular-nums; margin-right: var(--sp-1); }
+.gh__count { color: var(--fg-muted); font-size: var(--fs-sm); white-space: nowrap; font-variant-numeric: tabular-nums; margin-right: var(--sp-1); }
 .gh__switch { margin-right: var(--sp-1); }
 .gh__switch .segmented__option { min-height: 28px; }
 
@@ -258,8 +279,17 @@ const CSS = `
 .gh__karte[hidden] { display: none; }
 .gh[data-ansicht="karte"] .gh__top, .gh[data-ansicht="karte"] .gh__hint, .gh[data-ansicht="karte"] .gh__card { display: none; }
 
+/* Bei offener Karte ruecken Suche und Art-Chips links neben sie. */
+@media (min-width: 761px) {
+  .gh[data-karte="offen"] .gh__tools { margin-right: calc(min(340px, 100% - 28px) + 12px); }
+  /* Neben der Karte wird es eng: das Suchfeld gibt dem Pfad Platz. */
+  .gh[data-karte="offen"] .gh__search { width: 190px; }
+  .gh[data-karte="offen"] .gh__tools { max-width: min(240px, 50%); }
+}
 @media (pointer: coarse) {
-  .gh__crumb { min-height: 36px; }
+  .gh__crumb { min-height: var(--tap-min); }
+  .gh__crumbs { min-height: var(--tap-min); }
+  .gh__sub .chip { min-height: var(--tap-min); }
   .gh__chips .chip { min-height: 36px; }
   .gh__link { min-height: 44px; }
   .gh__card-head .icon-button { width: 40px; height: 40px; }
@@ -333,6 +363,11 @@ export default {
       thema: null, // {id, name, ...} des offenen Themas (Ebene 1)
       pfad: [], // Eltern des offenen Themas
       fokusId: null, // Ebene 1 als Umfeld eines Eintrags
+      unter: null, // Ebene 0 zeigt die Kinder eines Behaelters ("Weitere Themen")
+      einThema: null, // nur ein Thema im ganzen Tresor: dessen Netz ist die Wurzel
+      gekuerzt: false, // Ebene 1 zeigt nur die staerksten 2.000 eines groesseren Themas
+      karteThema: typeof params.thema === 'string' && params.thema && params.ansicht === 'karte' ? params.thema : null,
+      kantenPuffer: [],
       nodes: [],
       edges: [],
       byId: new Map(),
@@ -373,8 +408,13 @@ function build(self) {
   dom.layerUni = h('div.gh__layer.gh__layer--uni', { dataset: { zustand: 'weg' } }, dom.canvasUni);
   dom.layerNetz = h('div.gh__layer.gh__layer--netz', { dataset: { zustand: 'weg' } }, dom.canvasNetz);
   dom.crumbs = h('nav.gh__crumbs', { 'aria-label': 'Pfad im Wissen' });
+  // Unter dem Pfad: die Unterthemen des offenen Themas (tiefer hinein) und,
+  // wenn ein Thema gekuerzt ist, der ehrliche Satz dazu.
+  dom.sub = h('div.gh__sub', { hidden: true, role: 'group', 'aria-label': 'Unterthemen' });
+  dom.note = h('p.gh__note', { hidden: true, role: 'note' });
+  dom.left = h('div.gh__left', null, dom.crumbs, dom.sub, dom.note);
   dom.tools = h('div.gh__tools');
-  dom.top = h('div.gh__top', null, dom.crumbs, dom.tools);
+  dom.top = h('div.gh__top', null, dom.left, dom.tools);
   dom.hint = h('p.gh__hint', { hidden: true });
   dom.card = h('aside.gh__card', { hidden: true, 'aria-label': 'Ausgewählter Eintrag' });
   dom.state = h('div.gh__state', { hidden: true });
@@ -390,7 +430,6 @@ function build(self) {
     h('button.segmented__option', { type: 'button', role: 'tab', dataset: { ansicht: 'universum' }, onClick: () => setAnsicht(self, 'universum') }, text('Universum')),
     h('button.segmented__option', { type: 'button', role: 'tab', dataset: { ansicht: 'karte' }, onClick: () => setAnsicht(self, 'karte') }, text('Karte')));
   ctx.setHeadActions(dom.count, dom.switch);
-  renderSwitch(self);
 
   self.uni = createGraphCanvas(dom.canvasUni, {
     themen: true,
@@ -407,6 +446,8 @@ function build(self) {
     onLongPress: (node) => { if (node) { select(self, node.id, { fromCanvas: true, voll: true }); } },
     onHover: (node) => announce(self, node ? `${artVon(node)}: ${node.label}` : ''),
     onSurface: () => auftauchen(self, { woher: 'zoom' }),
+    // Ein Unterthema (Bereich) antippen oder hineinzoomen: eine Ebene tiefer.
+    onRegion: (region, woher) => { if (region) tauchen(self, region.id, { woher: woher || 'tippen' }); },
     onSettle: () => { if (self.alive) dom.root.dataset.ruhe = 'ja'; },
     onWake: () => { if (self.alive) dom.root.dataset.ruhe = 'nein'; },
   });
@@ -417,7 +458,9 @@ function build(self) {
     ctx,
     ladeUniversum: () => ladeUniversum(self),
     ladeThema: (id) => ladeThemaDaten(self, id),
-    onThema: (id) => { setAnsicht(self, 'universum'); if (id) tauchen(self, id, { woher: 'karte' }); else auftauchen(self, { woher: 'karte' }); },
+    onThema: (id) => { setAnsicht(self, 'universum'); if (id) tauchen(self, id, { woher: 'karte' }); else if (self.ebene === 1 || self.unter) zeigeUniversum(self); },
+    // Die Karte meldet, wo sie steht -- fuer die Adresse (#/graph?ansicht=karte&thema=…).
+    onOrt: (id) => { self.karteThema = id || null; if (self.ansicht === 'karte') adresse(self); },
     onKnoten: (node, themaId) => {
       setAnsicht(self, 'universum');
       if (themaId && !(self.ebene === 1 && self.thema && self.thema.id === themaId)) {
@@ -430,6 +473,9 @@ function build(self) {
     },
     onOeffnen: (node) => openNode(self, node),
   });
+  // Erst jetzt gibt es die Karte: beim direkten Aufruf von #/graph?ansicht=karte
+  // (und nach dem Neuladen) blieb sie sonst leer (Pruefer, Runde 1).
+  renderSwitch(self);
 
   // Die Leinwaende folgen der Darstellung (hell/dunkel), auch mitten im Blick.
   const retheme = () => {
@@ -470,7 +516,7 @@ function build(self) {
       event.preventDefault();
       if (self.selectedId) select(self, null);
       else if (self.fokusModus) setFokusModus(self, false);
-      else if (self.ebene === 1 && !self.klein) auftauchen(self, { woher: 'taste' });
+      else if ((self.ebene === 1 && !self.klein) || (self.ebene === 0 && self.unter)) auftauchen(self, { woher: 'taste' });
       return;
     }
     if (tippt || self.ansicht === 'karte') return;
@@ -510,6 +556,13 @@ function build(self) {
     get ids() { return self.nodes.filter((n) => !n.ausserhalb).map((n) => n.id); },
     get themen() { return self.universum ? self.universum.themen.length : 0; },
     get themenIds() { return self.universum ? self.universum.themen.map((t) => t.id) : []; },
+    /** Die Kreise, die gerade zu sehen sind (Ebene 0 oder die Kinder eines Behaelters). */
+    get kreise() { return sichtbareThemen(self).map((t) => t.id); },
+    get unter() { return self.unter ? self.unter.id : null; },
+    get gekuerzt() { return self.gekuerzt; },
+    get karteThema() { return self.karteThema; },
+    /** Die Bereiche (Unterthemen) auf Ebene 1, mit der Mitte ihres Namens. */
+    bereiche() { return self.ebene === 1 ? self.netz.regionLabels() : []; },
     get klein() { return self.klein; },
     get leer() { return self.leer; },
     screenPosition(id) {
@@ -593,8 +646,7 @@ async function start(self) {
     const u = await ladeUniversum(self, { frisch: true });
     if (!self.alive || token !== self.ladeToken) return;
     self.loading = false;
-    self.leer = u.gesamt.knoten === 0;
-    self.klein = !self.leer && u.gesamt.knoten < KLEIN_AB;
+    groesseBestimmen(self, u);
     renderState(self);
     renderCount(self);
     if (self.leer) {
@@ -602,6 +654,7 @@ async function start(self) {
       dom.layerNetz.dataset.zustand = 'weg';
       renderCrumbs(self);
       renderTools(self); // kein Suchfeld ueber einem leeren Universum
+      renderSub(self);
       renderHint(self);
       return;
     }
@@ -611,14 +664,14 @@ async function start(self) {
       await umfeld(self, id, { sofort: true });
       return;
     }
-    if (self.wunsch.thema && !self.klein) {
+    if (self.wunsch.thema && !self.klein && !self.einThema && self.ansicht !== 'karte') {
       const id = self.wunsch.thema;
       self.wunsch.thema = null;
       zeigeUniversum(self, { sofort: true });
       await tauchen(self, id, { woher: 'adresse', sofort: true });
       return;
     }
-    if (self.klein) {
+    if (self.klein || self.einThema) {
       await zeigeNetz(self, { art: 'alles', sofort: true });
       return;
     }
@@ -631,6 +684,18 @@ async function start(self) {
   }
 }
 
+/**
+ * Wie gross der Tresor ist -- davon haengt ab, ob es ueberhaupt eine
+ * Themen-Ebene gibt: leer, klein (unter KLEIN_AB Eintraegen: das Netz direkt)
+ * oder EIN Thema (ein Universum aus einem einzigen Kreis waere kein Ueberblick,
+ * sondern ein Umweg: sein Netz ist dann die Wurzel).
+ */
+function groesseBestimmen(self, u) {
+  self.leer = u.gesamt.knoten === 0;
+  self.klein = !self.leer && u.gesamt.knoten < KLEIN_AB;
+  self.einThema = !self.leer && !self.klein && u.themen.length === 1 ? u.themen[0] : null;
+}
+
 /** Nach einem Ereignis vom Bus: die gezeigte Ebene neu laden, Positionen bleiben. */
 async function nachladen(self) {
   if (!self.alive || self.loading) return;
@@ -639,12 +704,30 @@ async function nachladen(self) {
     const u = await ladeUniversum(self, { frisch: true });
     if (!self.alive || token !== self.ladeToken) return;
     const warLeer = self.leer;
-    self.leer = u.gesamt.knoten === 0;
-    self.klein = !self.leer && u.gesamt.knoten < KLEIN_AB;
-    if (self.ebene === 0 || warLeer) {
+    const warKlein = self.klein;
+    const warEins = !!self.einThema;
+    groesseBestimmen(self, u);
+    // Die Groesse hat die Schwelle ueberschritten (7 -> 8 Eintraege, ein
+    // zweites Thema kam dazu): die Wurzel wechselt ihre Gestalt. Frueher
+    // blieb das offene Gehirn beim alten Bild stehen (Pruefer, Runde 1).
+    const wurzelAlt = warLeer ? 'leer' : warKlein ? 'klein' : warEins ? 'eins' : 'universum';
+    const wurzelNeu = self.leer ? 'leer' : self.klein ? 'klein' : self.einThema ? 'eins' : 'universum';
+    const anDerWurzel = self.ebene === 0 || (self.ebene === 1 && !self.thema && !self.fokusId) || (self.ebene === 1 && warEins && self.thema && !self.pfad.length);
+    if (wurzelAlt !== wurzelNeu && anDerWurzel) {
+      if (self.leer) { renderState(self); renderCount(self); renderCrumbs(self); renderTools(self); renderSub(self); return; }
+      renderState(self);
+      if (self.klein || self.einThema) { await zeigeNetz(self, { art: 'alles', sofort: true }); return; }
+      zeigeUniversum(self);
+      return;
+    }
+    if (self.ebene === 0) {
       if (self.leer) { renderState(self); renderCount(self); renderCrumbs(self); renderTools(self); return; }
-      if (self.klein) { await zeigeNetz(self, { art: 'alles', sofort: true }); return; }
-      themenZeichnen(self, { neu: warLeer });
+      if (self.unter) {
+        const neu = u.themen.find((t) => t.id === self.unter.id);
+        if (neu) self.unter = neu;
+        else { zeigeUniversum(self); return; }
+      }
+      themenZeichnen(self, { neu: false });
       renderState(self);
     } else if (self.fokusId) {
       const e1 = await ladeUmfeld(self, self.fokusId);
@@ -656,7 +739,7 @@ async function nachladen(self) {
       self.thema = { ...self.thema, ...e1.thema };
       self.pfad = e1.pfad;
       netzDaten(self, e1, { still: true });
-    } else if (self.klein) {
+    } else if (self.klein || self.einThema) {
       const e1 = await ladeAlles(self);
       if (!self.alive || token !== self.ladeToken) return;
       netzDaten(self, e1, { still: true });
@@ -664,6 +747,7 @@ async function nachladen(self) {
     if (self.karte) self.karte.aktualisieren();
     renderCount(self);
     renderCrumbs(self);
+    renderSub(self);
   } catch (err) {
     if (!(err && err.status === 404)) console.warn('[gehirn] Nachladen ist gescheitert:', err && err.message);
   }
@@ -671,37 +755,62 @@ async function nachladen(self) {
 
 /* ---------------------------- Ebene 0 ------------------------------- */
 
+/** Die Kreise, die Ebene 0 gerade zeigt: das Universum, oder die Kinder eines Behaelters. */
+function sichtbareThemen(self) {
+  if (!self.universum) return [];
+  if (self.unter) return self.unter.kinder || [];
+  return self.universum.themen;
+}
+
 function themenZeichnen(self, { neu = false } = {}) {
   const u = self.universum;
   if (!u) return;
-  const lage = layoutThemen(u.themen, u.verbindungen);
-  const nodes = u.themen.map((t) => {
-    const p = lage.get(t.id) || { x: 0, y: 0 };
-    return { id: t.id, label: t.name, anzahl: t.anzahl, farbe: t.farbe, x: p.x, y: p.y, kinder: t.kinder, knoten: t.knoten };
+  const liste = sichtbareThemen(self);
+  const echte = liste.filter((t) => t.id !== WEITERE_ID_ && t.id !== UNVERBUNDEN_ID_);
+  const groesstesEchtes = echte.reduce((mx, t) => Math.max(mx, t.anzahl || 0), 1);
+  // Behaelter ("Weitere Themen", "Unverbunden") an den Rand und nie groesser
+  // als das groesste echte Thema: bei 10.000 Eintraegen war "Weitere Themen"
+  // sonst der groesste Kreis in der Mitte (Pruefer, Runde 1).
+  const fuerLage = liste.map((t) => {
+    const behaelter = t.id === WEITERE_ID_ || t.id === UNVERBUNDEN_ID_;
+    return { id: t.id, anzahl: t.anzahl, groesse: behaelter ? Math.min(t.anzahl, groesstesEchtes) : t.anzahl, rand: behaelter };
   });
-  const edges = u.verbindungen.map((v) => ({ from: v.from, to: v.to, anzahl: v.anzahl }));
+  const verbindungen = self.unter ? [] : u.verbindungen;
+  const lage = layoutThemen(fuerLage, verbindungen);
+  const nodes = liste.map((t, i) => {
+    const p = lage.get(t.id) || { x: 0, y: 0 };
+    return {
+      id: t.id, label: t.name, anzahl: t.anzahl, groesse: fuerLage[i].groesse, farbe: t.farbe, x: p.x, y: p.y,
+      kinder: t.kinder || [], knoten: t.knoten || [], gestrichelt: t.id === WEITERE_ID_,
+    };
+  });
+  const edges = verbindungen.map((v) => ({ from: v.from, to: v.to, anzahl: v.anzahl }));
   self.uni.setData({ nodes, edges });
   self.uni.setColors(new Map(nodes.map((n) => [n.id, n.farbe])), THEME_HUES);
   if (neu) self.uni.enter();
   self.uni.fitToView({ animate: false });
 }
 
-function zeigeUniversum(self, { sofort = false } = {}) {
+function zeigeUniversum(self, { sofort = false, unter = null } = {}) {
   const { dom } = self;
   self.ebene = 0;
   self.thema = null;
   self.pfad = [];
   self.fokusId = null;
   self.fokusModus = false;
+  self.unter = unter;
+  self.gekuerzt = false;
   dom.root.dataset.ebene = '0';
   dom.root.dataset.ruhe = 'ja';
   select(self, null, { still: true });
   themenZeichnen(self, { neu: true });
   dom.layerNetz.dataset.zustand = 'weg';
   dom.layerUni.dataset.zustand = 'da';
+  self.uni.gesteBeenden();
   void sofort;
   renderCrumbs(self);
   renderTools(self);
+  renderSub(self);
   renderHint(self);
   renderCount(self);
   describe(self);
@@ -712,18 +821,29 @@ function zeigeUniversum(self, { sofort = false } = {}) {
 /**
  * Hinein in ein Thema: die Kamera faehrt in den Kreis, das Netz baut sich
  * darin auf. Waehrend die Daten kommen, laeuft schon die Ueberblendung.
+ * "Weitere Themen" ist kein Netz, sondern ein Behaelter: hinein heisst dort,
+ * seine Themen als Kreise zu sehen (Pruefer, Runde 1: sonst ein Ring aus
+ * 2.000 namenlosen Punkten).
  */
 async function tauchen(self, themaId, { woher = 'tippen', sofort = false, dann = null } = {}) {
   if (!self.alive || self.ebene === 1 && self.thema && self.thema.id === themaId && !dann) return;
   const { dom } = self;
+  const behaelter = self.universum && self.universum.themen.find((t) => t.id === themaId && t.id === WEITERE_ID_);
+  if (behaelter) {
+    ++self.ladeToken;
+    ++self.wechsel;
+    zeigeUniversum(self, { unter: behaelter });
+    announce(self, `${behaelter.name}: ${anzahlText(behaelter.kinder.length, 'Thema', 'Themen')}.`);
+    return;
+  }
   const token = ++self.ladeToken;
   const wechsel = ++self.wechsel;
   // Vom Kreis aus hineinfahren: die Mitte des Kreises ist der Ursprung.
-  const pos = self.uni.screenPosition(themaId);
+  const pos = self.ebene === 0 ? self.uni.screenPosition(themaId) : null;
   if (pos && dom.layerUni.dataset.zustand === 'da') {
     dom.layerUni.style.transformOrigin = `${pos.x}px ${pos.y}px`;
     dom.layerUni.dataset.zustand = 'tief';
-  } else {
+  } else if (self.ebene === 0) {
     dom.layerUni.dataset.zustand = 'weg';
   }
   self.uni.setSelection(null);
@@ -733,7 +853,7 @@ async function tauchen(self, themaId, { woher = 'tippen', sofort = false, dann =
     e1 = await ladeThemaDaten(self, themaId);
   } catch (err) {
     if (!self.alive || token !== self.ladeToken) return;
-    dom.layerUni.dataset.zustand = 'da';
+    if (self.ebene === 0) dom.layerUni.dataset.zustand = 'da';
     self.ctx.toast(err && err.status === 404 ? 'Dieses Thema gibt es nicht mehr.' : `Das Thema konnte nicht geladen werden: ${err && err.message ? err.message : 'unbekannter Fehler'}`, 'error');
     return;
   }
@@ -741,11 +861,12 @@ async function tauchen(self, themaId, { woher = 'tippen', sofort = false, dann =
   self.thema = e1.thema.id ? e1.thema : { id: themaId, name: 'Thema', anzahl: e1.nodes.length, farbe: 0, kinder: [] };
   self.pfad = e1.pfad;
   self.fokusId = null;
-  await zeigeNetz(self, { art: 'thema', daten: e1, sofort, dann });
+  self.unter = null;
+  await zeigeNetz(self, { art: 'thema', daten: e1, sofort, dann, tiefer: self.ebene === 1 });
   void woher;
 }
 
-/** Das Umfeld eines Eintrags als eigene Ebene 1, der Eintrag gewaehlt. */
+/** Das Umfeld eines Eintrags bis Tiefe 2 -- als eigene Ebene 1. */
 async function umfeld(self, id, { sofort = false } = {}) {
   if (!self.alive) return;
   const token = ++self.ladeToken;
@@ -766,17 +887,19 @@ async function umfeld(self, id, { sofort = false } = {}) {
   self.thema = null;
   self.pfad = [];
   self.fokusId = id;
+  self.unter = null;
   await zeigeNetz(self, { art: 'umfeld', daten: e1, sofort, dann: id, name: mitte ? mitte.label : 'Eintrag' });
 }
 
 /** Die Netz-Ebene mit Daten fuellen und zeigen. */
-async function zeigeNetz(self, { art, daten = null, sofort = false, dann = null } = {}) {
+async function zeigeNetz(self, { art, daten = null, sofort = false, dann = null, tiefer = false } = {}) {
   const { dom } = self;
   let e1 = daten;
   if (!e1) {
     const token = ++self.ladeToken;
     try {
-      e1 = art === 'alles' ? await ladeAlles(self) : null;
+      // Ein einziges Thema: sein Netz (mit Kuerzung und Zahlen des Servers).
+      e1 = art === 'alles' ? (self.einThema ? await ladeThemaDaten(self, self.einThema.id) : await ladeAlles(self)) : null;
     } catch (err) {
       if (!self.alive) return;
       self.error = err;
@@ -785,9 +908,10 @@ async function zeigeNetz(self, { art, daten = null, sofort = false, dann = null 
       return;
     }
     if (!self.alive || token !== self.ladeToken || !e1) return;
-    self.thema = null;
+    self.thema = self.einThema && e1.thema && e1.thema.id ? e1.thema : null;
     self.pfad = [];
     self.fokusId = null;
+    self.unter = null;
   }
   self.ebene = 1;
   self.fokusModus = false;
@@ -796,6 +920,7 @@ async function zeigeNetz(self, { art, daten = null, sofort = false, dann = null 
   select(self, null, { still: true });
   netzDaten(self, e1, { still: false });
   // Ueberblenden: das Netz kommt klein und wird gross, das Universum ist schon tief.
+  // Von einem Thema in sein Unterthema: dasselbe, nur auf der Netz-Ebene.
   dom.layerNetz.dataset.zustand = sofort ? 'da' : 'klein';
   if (!sofort) {
     // Zwei Bilder Abstand, damit der Uebergang wirklich laeuft.
@@ -804,9 +929,13 @@ async function zeigeNetz(self, { art, daten = null, sofort = false, dann = null 
     dom.layerNetz.dataset.zustand = 'da';
   }
   self.netz.enter(sofort ? 0 : 120);
+  // Der Rest der Radbewegung, die hier hereingefuehrt hat, zoomt nicht weiter.
+  self.netz.gesteBeenden();
   setTimeout(() => { if (self.alive && self.ebene === 1) dom.layerUni.dataset.zustand = 'weg'; }, BLEND_MS);
+  void tiefer;
   renderCrumbs(self);
   renderTools(self);
+  renderSub(self);
   renderHint(self);
   renderCount(self);
   describe(self);
@@ -821,9 +950,12 @@ async function zeigeNetz(self, { art, daten = null, sofort = false, dann = null 
 function netzDaten(self, e1, { still = false } = {}) {
   self.nodes = e1.nodes;
   self.edges = e1.edges;
+  self.gekuerzt = !!e1.gekuerzt;
   self.byId = new Map(self.nodes.map((n) => [n.id, n]));
   const netz = self.netz;
   netz.setData({ nodes: self.nodes, edges: self.edges });
+  // Unterthemen als Bereiche: antippen oder hineinzoomen fuehrt tiefer.
+  netz.setRegions(self.thema && !self.fokusId ? bereicheVon(self.thema, self.nodes) : null);
   applyFilter(self, { quiet: true });
   faerben(self);
   if (!still) {
@@ -846,7 +978,7 @@ function netzDaten(self, e1, { still = false } = {}) {
 /** Ein Hauch der Themenfarbe fuer die Knoten des Themas; Nachbarn ausserhalb bleiben grau. */
 function faerben(self) {
   if (!self.netz) return;
-  if (self.ebene !== 1 || !self.thema) {
+  if (self.ebene !== 1 || !self.thema || self.thema.farbe === FARBE_NEUTRAL) {
     self.netz.setColors(null);
     return;
   }
@@ -857,8 +989,18 @@ function faerben(self) {
 
 /** Zurueck in die Uebersicht: das Netz wird klein, die Kreise kommen wieder. */
 async function auftauchen(self, { woher = 'taste' } = {}) {
-  if (!self.alive || self.ebene !== 1 || self.klein) return;
+  if (!self.alive || self.klein) return;
   const { dom } = self;
+  // Die Kinder eines Behaelters: eine Ebene hoch ist das Universum.
+  if (self.ebene === 0) {
+    if (self.unter) {
+      zeigeUniversum(self);
+      announce(self, 'Zurück im Universum.');
+    }
+    return;
+  }
+  // Ein einziges Thema ist selbst die Wurzel: hoeher geht es nicht.
+  if (self.einThema && self.thema && self.thema.id === self.einThema.id) return;
   ++self.ladeToken;
   ++self.wechsel;
   // Ein Kind-Thema: eine Ebene hoch ist sein Elternthema, nicht die Wurzel.
@@ -866,6 +1008,10 @@ async function auftauchen(self, { woher = 'taste' } = {}) {
     const eltern = self.pfad[self.pfad.length - 1];
     dom.layerNetz.dataset.zustand = 'klein';
     await tauchen(self, eltern.id, { woher: 'auf' });
+    return;
+  }
+  if (self.einThema) {
+    await zeigeNetz(self, { art: 'alles', sofort: true });
     return;
   }
   dom.layerNetz.dataset.zustand = 'klein';
@@ -878,9 +1024,10 @@ function adresse(self) {
   const { ctx } = self;
   if (typeof ctx.replaceRoute !== 'function') return;
   let ziel = '#/graph';
-  if (self.ansicht === 'karte') ziel = `#/graph?ansicht=karte${self.thema ? `&thema=${encodeURIComponent(self.thema.id)}` : ''}`;
+  if (self.ansicht === 'karte') ziel = `#/graph?ansicht=karte${self.karteThema ? `&thema=${encodeURIComponent(self.karteThema)}` : ''}`;
   else if (self.ebene === 1 && self.fokusId) ziel = `#/graph?focus=${encodeURIComponent(self.fokusId)}`;
-  else if (self.ebene === 1 && self.thema) ziel = `#/graph?thema=${encodeURIComponent(self.thema.id)}`;
+  else if (self.ebene === 1 && self.thema && !(self.einThema && self.thema.id === self.einThema.id)) ziel = `#/graph?thema=${encodeURIComponent(self.thema.id)}`;
+  else if (self.ebene === 0 && self.unter) ziel = `#/graph?thema=${encodeURIComponent(self.unter.id)}`;
   try { ctx.replaceRoute(ziel); } catch { /* die Adresse ist Komfort, kein Muss */ }
 }
 
@@ -890,13 +1037,11 @@ function setAnsicht(self, ansicht) {
   if (self.ansicht === ansicht) return;
   self.ansicht = ansicht;
   self.dom.root.dataset.ansicht = ansicht;
-  renderSwitch(self);
   if (ansicht === 'karte') {
-    self.dom.karte.hidden = false;
-    self.karte.zeige(self.thema ? self.thema.id : null);
-  } else {
-    self.dom.karte.hidden = true;
+    // Die Karte oeffnet dort, wo man im Universum gerade ist.
+    self.karteThema = self.thema ? self.thema.id : self.unter ? self.unter.id : self.karteThema;
   }
+  renderSwitch(self);
   adresse(self);
 }
 
@@ -907,7 +1052,7 @@ function renderSwitch(self) {
     b.setAttribute('aria-selected', active ? 'true' : 'false');
   }
   self.dom.karte.hidden = self.ansicht !== 'karte';
-  if (self.ansicht === 'karte' && self.karte) self.karte.zeige(self.thema ? self.thema.id : null);
+  if (self.ansicht === 'karte' && self.karte) self.karte.zeige(self.karteThema);
 }
 
 /* ---------------------------- Filter -------------------------------- */
@@ -1013,7 +1158,7 @@ function renderResults(self) {
   if (!q || dom.searchOffen !== true) return;
   const rows = [];
   const zeile = (opts) => h('li', null, h('button.gh__result', { type: 'button', onClick: opts.onClick },
-    opts.farbe !== undefined ? h('span.gh__dot', { style: { background: `color-mix(in srgb, ${THEME_HUES[opts.farbe] || THEME_HUES[0]} 55%, var(--fg-muted))` } }) : null,
+    opts.farbe !== undefined ? h('span.gh__dot', { style: { background: themaFarbeCss(opts.farbe) } }) : null,
     h('span.gh__result-main', null, text(opts.title)),
     h('span.gh__result-sub', null, text(opts.sub))));
   if (self.ebene === 1 && self.matches.length) {
@@ -1025,9 +1170,9 @@ function renderResults(self) {
   if (self.fernThemen.length) {
     rows.push(h('li.gh__results-head', null, text('Themen')));
     for (const r of self.fernThemen.slice(0, 5)) {
-      rows.push(zeile({ farbe: r.thema.farbe, title: r.thema.name, sub: `${formatNumber(r.thema.anzahl)} Einträge`, onClick: () => { tauchen(self, r.thema.id, { woher: 'suche' }); schliesseSuche(self); } }));
+      rows.push(zeile({ farbe: r.thema.farbe, title: r.thema.name, sub: anzahlText(r.thema.anzahl, 'Eintrag', 'Einträge'), onClick: () => { tauchen(self, r.thema.id, { woher: 'suche' }); schliesseSuche(self); } }));
       for (const k of r.kinder.slice(0, 3)) {
-        rows.push(zeile({ farbe: k.farbe, title: `${r.thema.name} › ${k.name}`, sub: `${formatNumber(k.anzahl)}`, onClick: () => { tauchen(self, k.id, { woher: 'suche' }); schliesseSuche(self); } }));
+        rows.push(zeile({ farbe: k.farbe, title: `${r.thema.name} › ${k.name}`, sub: anzahlText(k.anzahl, 'Eintrag', 'Einträge'), onClick: () => { tauchen(self, k.id, { woher: 'suche' }); schliesseSuche(self); } }));
       }
     }
   }
@@ -1062,8 +1207,14 @@ function select(self, id, { fromCanvas = false, hinzoomen = false, still = false
   if (!fromCanvas) self.netz.setSelection(next);
   // Neben der offenen Karte bleibt weniger Flaeche: Einpassen und Hinzoomen
   // zielen auf die freie Mitte, nicht unter die Karte.
-  self.netz.setPadding({ right: next && !istSchmal(self) ? 340 + 28 + 24 : 72 });
+  const breit = !istSchmal(self);
+  self.netz.setPadding({ right: next && breit ? 340 + 28 + 24 : 72, bottom: next && !breit ? Math.round(self.dom.root.clientHeight * 0.52) + 16 : 48 });
+  self.dom.root.dataset.karte = next ? 'offen' : 'zu';
   if (next && hinzoomen) self.netz.focus(next, { zoom: Math.max(1.6, self.netz.transform.k) });
+  // Die Karte verdeckt nie, was man gerade gewaehlt hat: liegen der Knoten
+  // oder seine direkten Nachbarn darunter, faehrt die Kamera weich zur Seite
+  // (Pruefer, Runde 1: "Sch" halb unter der Karte, Nachbarn ganz darunter).
+  else if (next) self.netz.zeigeFrei(next);
   self.dom.card.dataset.kompakt = voll || !fromCanvas || !istSchmal(self) ? 'nein' : 'ja';
   renderCard(self);
   if (!still) {
@@ -1080,8 +1231,11 @@ function istSchmal(self) {
 
 function openNode(self, node) {
   if (!node) return;
-  const route = OPEN_ROUTES[node.type];
-  if (route) self.ctx.navigate(route(node.id));
+  const ziel = oeffnenZiel(node);
+  if (ziel) self.ctx.navigate(ziel);
+  // Ein Begriff (Person, Ort, Thema) hat keinen eigenen Bereich: er oeffnet
+  // sich hier als sein Umfeld -- statt in den Notizen ins Leere zu fuehren.
+  else if (self.fokusId !== node.id) umfeld(self, node.id);
 }
 
 /** Zu einem verknuepften Eintrag springen -- hier, oder in sein Umfeld. */
@@ -1100,13 +1254,13 @@ function renderCard(self) {
   if (!node) return;
   const token = ++self.kartenToken;
   const links = self.netz.neighbours(node.id).length;
-  const route = OPEN_ROUTES[node.type];
+  const ziel = oeffnenZiel(node);
   const farbe = self.thema && !node.ausserhalb ? self.thema.farbe : null;
 
   const scroll = h('div.gh__card-scroll');
   const kopf = h('div.gh__card-head', null,
     h('span.gh__card-kind', null,
-      farbe !== null ? h('span.gh__dot', { style: { background: `color-mix(in srgb, ${THEME_HUES[farbe]} 55%, var(--fg-muted))` } }) : null,
+      farbe !== null ? h('span.gh__dot', { style: { background: themaFarbeCss(farbe) } }) : null,
       text(`${artVon(node)}${node.ausserhalb ? ' · außerhalb des Themas' : ''}`)),
     h('button.icon-button', { type: 'button', title: 'Schließen', 'aria-label': 'Auswahl schließen', onClick: () => select(self, null) }, icon(ICON.close)));
   const titel = h('h3.gh__card-title', null, text(node.label || 'Ohne Titel'));
@@ -1117,10 +1271,15 @@ function renderCard(self) {
     node.updatedAt ? `zuletzt bearbeitet ${timeAgo(node.updatedAt)}` : null,
     links === 1 ? '1 Verbindung' : `${formatNumber(links)} Verbindungen`,
   ].filter(Boolean).join(' · ')));
+  // "Oeffnen" nur, wo es einen Bereich gibt. Ein Begriff oeffnet sein Umfeld --
+  // das ist dann der Hauptknopf, kein zweiter daneben.
+  const umfeldHaupt = !ziel && self.fokusId !== node.id;
   const actions = h('div.gh__card-actions', null,
-    route
+    ziel
       ? h('button.btn.btn--accent', { type: 'button', onClick: () => openNode(self, node) }, icon(ICON.open), text('Öffnen'))
-      : null,
+      : umfeldHaupt
+        ? h('button.btn.btn--accent', { type: 'button', title: 'Alles, was mit diesem Eintrag zusammenhängt, als eigene Ebene', onClick: () => umfeld(self, node.id) }, icon(ICON.focus), text('Umfeld zeigen'))
+        : null,
     h('button.btn.btn--ghost', {
       type: 'button',
       title: 'Nur dieser Eintrag und seine Nachbarn bis Tiefe 2',
@@ -1128,7 +1287,7 @@ function renderCard(self) {
       class: self.fokusModus ? 'is-active' : '',
       onClick: () => setFokusModus(self, !self.fokusModus),
     }, icon(ICON.focus), text('Fokus')),
-    self.fokusId !== node.id
+    self.fokusId !== node.id && !umfeldHaupt
       ? h('button.btn.btn--ghost', { type: 'button', title: 'Das Umfeld dieses Eintrags als eigene Ebene', onClick: () => umfeld(self, node.id) }, text('Umfeld'))
       : null);
 
@@ -1194,14 +1353,14 @@ async function ladeVerknuepft(self, node, token, teile) {
   }
   const zeile = (row, richtung) => h('li', null, h('button.gh__link', {
     type: 'button',
-    title: row.reason ? `${richtung === 'out' ? 'Ausgehend' : 'Eingehend'} · ${row.reason}` : (richtung === 'out' ? 'Ausgehend' : 'Eingehend'),
+    title: row.reason ? `${richtung === 'out' ? 'Verweist auf' : 'Verweist hierher'} · ${row.reason}` : (richtung === 'out' ? 'Verweist auf' : 'Verweist hierher'),
     onClick: () => springeZu(self, row.id),
   },
   h('span.gh__link-dir', null, icon(richtung === 'out' ? ICON.out : ICON.in)),
   h('span.gh__link-main', null,
     h('span.gh__link-title', null, text(row.title)),
     row.reason ? h('span.gh__link-why', null, text(row.reason)) : null),
-  h('span.gh__link-art', null, text(artVon(row)))));
+  h('span.gh__link-art', null, text(artVon({ type: row.type, kind: row.entityKind })))));
   // Zwei Kanten zum selben Eintrag in derselben Richtung (Wiki-Link und
   // Schlagwort) sind EINE Zeile mit beiden Gruenden.
   const buendeln = (rows) => {
@@ -1217,10 +1376,19 @@ async function ladeVerknuepft(self, node, token, teile) {
     }
     return out;
   };
-  const alle = [...buendeln(v.ausgehend).map((r) => zeile(r, 'out')), ...buendeln(v.eingehend).map((r) => zeile(r, 'in'))];
+  // Wie in der Notizansicht: zwei Gruppen mit Ueberschrift und Pfeil, damit
+  // man sieht, wer auf wen verweist (Pruefer, Runde 1: Pfeile ohne Legende).
+  const raus = buendeln(v.ausgehend).map((r) => zeile(r, 'out'));
+  const rein = buendeln(v.eingehend).map((r) => zeile(r, 'in'));
+  const gruppe = (titel, glyph, liste) => (liste.length
+    ? [h('p.gh__links-group', null, icon(glyph), text(titel)), h('ul.gh__links', null, ...liste)]
+    : []);
+  const summe = raus.length + rein.length;
   teile.verknuepft.append(
-    h('div.gh__sec-head', null, h('h4.gh__sec-title', null, text('Verknüpft mit')), h('span.gh__link-art', null, text(alle.length ? formatNumber(alle.length) : ''))),
-    alle.length ? h('ul.gh__links', null, ...alle) : h('p.gh__sec-hint', null, text('Noch mit nichts verknüpft. Ein [[Link]] im Text oder ein gemeinsames #Schlagwort verbindet.')));
+    h('div.gh__sec-head', null, h('h4.gh__sec-title', null, text('Verknüpft mit')), h('span.gh__link-art', null, text(summe ? formatNumber(summe) : ''))),
+    ...(summe
+      ? [...gruppe('Verweist auf', ICON.out, raus), ...gruppe('Hierher verweist', ICON.in, rein)]
+      : [h('p.gh__sec-hint', null, text('Noch mit nichts verknüpft. Ein [[Link]] im Text oder ein gemeinsames #Schlagwort verbindet.'))]));
 
   const files = [...v.ausgehend, ...v.eingehend].filter((r) => r.type === 'file');
   clear(teile.dateien);
@@ -1239,7 +1407,7 @@ async function ladeVerknuepft(self, node, token, teile) {
       h('div.gh__sec-head', null, h('h4.gh__sec-title', null, text('Themen'))),
       h('div.gh__themen', null, ...v.themen.map((t) => h('button.chip', {
         type: 'button', title: `Thema ${t.name} öffnen`, onClick: () => tauchen(self, t.id, { woher: 'karte' }),
-      }, h('span.gh__dot', { style: { background: `color-mix(in srgb, ${THEME_HUES[t.farbe] || THEME_HUES[0]} 55%, var(--fg-muted))` } }), h('span.chip__label', null, text(t.name))))));
+      }, h('span.gh__dot', { style: { background: themaFarbeCss(t.farbe) } }), h('span.chip__label', null, text(t.name))))));
   }
 
   renderVorschlaege(self, node, v.vorschlaege, teile.vorschlaege);
@@ -1262,7 +1430,11 @@ async function verbinden(self, node, ziele, sec, liste) {
   for (const b of sec.querySelectorAll('button')) b.disabled = true;
   let res;
   try {
-    res = await ctx.api.post('/graph/verbinden', { from: node.id, to: ziele, kind: 'related', reason: 'Im Gehirn verbunden' }, { timeoutMs: 15000 });
+    // Der Grund jedes Vorschlags reist mit -- "Verknuepft mit" sagt dann
+    // "Vorschlag angenommen: 3 gemeinsame Begriffe: ...", nicht nur "verbunden".
+    const gruende = {};
+    for (const v of liste) if (ziele.includes(v.id) && v.grund) gruende[v.id] = `Im Gehirn verbunden: ${v.grund}`;
+    res = await ctx.api.post('/graph/verbinden', { from: node.id, to: ziele, kind: 'related', reason: 'Im Gehirn verbunden', gruende }, { timeoutMs: 15000 });
   } catch (err) {
     if (!self.alive) return;
     for (const b of sec.querySelectorAll('button')) b.disabled = false;
@@ -1322,9 +1494,19 @@ function renderCrumbs(self) {
   clear(dom.crumbs);
   if (self.leer) { dom.crumbs.hidden = true; return; }
   dom.crumbs.hidden = false;
-  const krumen = self.ebene === 1 && self.fokusId
-    ? [{ id: null, name: WURZEL_NAME }, { id: '__fokus', name: (self.byId.get(self.fokusId) || {}).label || 'Umfeld' }]
-    : brotkrumen(self.pfad, self.ebene === 1 ? self.thema : null);
+  const wurzelThema = self.einThema && self.thema && self.thema.id === self.einThema.id;
+  let krumen;
+  if (self.ebene === 1 && self.fokusId) {
+    krumen = [{ id: null, name: WURZEL_NAME }, { id: '__fokus', name: (self.byId.get(self.fokusId) || {}).label || 'Umfeld' }];
+  } else if (self.ebene === 0 && self.unter) {
+    krumen = [{ id: null, name: WURZEL_NAME }, { id: self.unter.id, name: self.unter.name }];
+  } else if ((self.klein || wurzelThema) && self.ebene === 1) {
+    krumen = [{ id: null, name: WURZEL_NAME }];
+  } else {
+    krumen = brotkrumen(self.pfad, self.ebene === 1 ? self.thema : null);
+    // Liegt das Thema im einzigen Thema, ist dieses die Wurzel -- nicht doppelt.
+    if (self.einThema && krumen[1] && krumen[1].id === self.einThema.id) krumen.splice(1, 1);
+  }
   krumen.forEach((k, i) => {
     const letzte = i === krumen.length - 1;
     if (i > 0) dom.crumbs.appendChild(h('span.gh__crumb-sep', { 'aria-hidden': 'true' }, text('›')));
@@ -1334,18 +1516,55 @@ function renderCrumbs(self) {
       title: letzte ? null : (k.id ? `Zurück zu ${k.name}` : 'Zurück zur Übersicht'),
       onClick: () => {
         if (letzte) return;
-        if (!k.id) auftauchen(self, { woher: 'wurzel' });
-        else tauchen(self, k.id, { woher: 'krume' });
+        if (!k.id) {
+          if (self.ebene === 0) zeigeUniversum(self);
+          else auftauchen(self, { woher: 'wurzel' });
+        } else tauchen(self, k.id, { woher: 'krume' });
       },
     }, text(k.name));
-    if (letzte && self.ebene === 1 && self.thema) b.appendChild(h('span.gh__crumb-n', null, text(formatNumber(self.thema.anzahl))));
-    if (letzte && self.ebene === 0 && self.universum) b.appendChild(h('span.gh__crumb-n', null, text(`${formatNumber(self.universum.gesamt.themen)} Themen`)));
+    if (letzte) {
+      let zahl = null;
+      if ((self.klein || wurzelThema) && self.ebene === 1) zahl = anzahlText(self.nodes.filter((n) => !n.ausserhalb).length, 'Eintrag', 'Einträge');
+      else if (self.ebene === 1 && self.thema && !self.fokusId) zahl = formatNumber(self.thema.anzahl);
+      else if (self.ebene === 0 && self.unter) zahl = anzahlText((self.unter.kinder || []).length, 'Thema', 'Themen');
+      else if (self.ebene === 0 && self.universum) zahl = anzahlText(themenZahl(self.universum.themen), 'Thema', 'Themen');
+      if (zahl) b.appendChild(h('span.gh__crumb-n', null, text(zahl)));
+    }
     dom.crumbs.appendChild(b);
   });
-  if (self.klein && self.ebene === 1) {
-    // Unter acht Eintraegen: keine Themen -- die Wurzel ist alles.
-    clear(dom.crumbs);
-    dom.crumbs.appendChild(h('button.gh__crumb', { type: 'button', 'aria-current': 'page' }, text(WURZEL_NAME), h('span.gh__crumb-n', null, text(formatNumber(self.nodes.length)))));
+}
+
+/**
+ * Unter dem Pfad: die Unterthemen des offenen Themas als leise Knoepfe (der
+ * Weg tiefer hinein fuer Finger und Tastatur; im Netz liegen dieselben
+ * Unterthemen als Bereiche) -- und, wenn ein Thema zu gross ist, um ganz
+ * gezeigt zu werden, der ehrliche Satz dazu.
+ */
+function renderSub(self) {
+  const { dom } = self;
+  clear(dom.sub);
+  clear(dom.note);
+  const kinder = self.ebene === 1 && self.thema && !self.fokusId && Array.isArray(self.thema.kinder) ? self.thema.kinder : [];
+  dom.sub.hidden = !kinder.length || self.leer;
+  if (kinder.length && !self.leer) {
+    dom.sub.appendChild(h('span.gh__sub-label', null, text(kinder.length === 1 ? 'Unterthema' : 'Unterthemen')));
+    for (const k of kinder.slice(0, 8)) {
+      dom.sub.appendChild(h('button.chip', {
+        type: 'button',
+        title: `${k.name} öffnen (${anzahlText(k.anzahl, 'Eintrag', 'Einträge')})`,
+        onClick: () => tauchen(self, k.id, { woher: 'unterthema' }),
+      }, h('span.gh__dot', { style: { background: themaFarbeCss(k.farbe) } }), h('span.chip__label', null, text(k.name)), h('span.gh__chip-n', null, text(formatNumber(k.anzahl)))));
+    }
+    if (kinder.length > 8) dom.sub.appendChild(h('span.gh__sub-label', null, text(`+${kinder.length - 8} weitere in der Karte`)));
+  }
+  // Gekuerzt: der Server zeigt die staerksten 2.000 -- das steht hier, statt
+  // verschwiegen zu werden (Pruefer, Runde 1).
+  const drin = self.nodes.filter((n) => !n.ausserhalb).length;
+  const gesamt = self.thema ? self.thema.anzahl : drin;
+  const zeigen = self.ebene === 1 && self.gekuerzt && gesamt > drin;
+  dom.note.hidden = !zeigen;
+  if (zeigen) {
+    dom.note.appendChild(text(`${formatNumber(drin)} von ${anzahlText(gesamt, 'Eintrag', 'Einträgen')} – die am stärksten verbundenen. Den Rest findet die Suche oben rechts${kinder.length ? ', die Unterthemen zeigen alles' : ''}.`));
   }
 }
 
@@ -1450,8 +1669,9 @@ function renderState(self) {
       h('p.gh__state-title', null, text('Dein Wissensuniversum wartet.')),
       h('p.gh__state-text', null, text('Erstelle deine erste Notiz oder importiere vorhandenes Wissen.')),
       h('div.gh__state-actions', null,
-        h('button.btn.btn--primary', { type: 'button', onClick: () => self.ctx.navigate('#/notes?neu') }, text('Erste Notiz')),
-        h('button.btn', { type: 'button', onClick: () => self.ctx.navigate('#/stick') }, text('Importieren')),
+        h('button.btn.btn--primary', { type: 'button', onClick: () => self.ctx.navigate('#/notes?neu=notiz') }, text('Erste Notiz')),
+        // Markdown-Dateien oder ein Obsidian-Ordner werden Notizen (POST /api/notizen/import).
+        h('button.btn', { type: 'button', onClick: () => self.ctx.navigate('#/notes?neu=import') }, text('Importieren')),
         h('button.btn', { type: 'button', onClick: () => self.ctx.navigate('#/chat') }, text('KI kennenlernen'))));
   }
   dom.state.hidden = !box;
@@ -1466,11 +1686,22 @@ function renderCount(self) {
   if (!self.universum || self.leer) return;
   if (self.ebene === 0) {
     const g = self.universum.gesamt;
-    dom.count.appendChild(text(`${formatNumber(g.themen)} Themen · ${formatNumber(g.knoten)} Einträge`));
+    if (self.unter) {
+      dom.count.appendChild(text(`${anzahlText((self.unter.kinder || []).length, 'Thema', 'Themen')} · ${anzahlText(self.unter.anzahl, 'Eintrag', 'Einträge')}`));
+      return;
+    }
+    dom.count.appendChild(text(`${anzahlText(themenZahl(self.universum.themen), 'Thema', 'Themen')} · ${anzahlText(g.knoten, 'Eintrag', 'Einträge')}`));
     return;
   }
-  const s = self.netz.stats();
-  dom.count.appendChild(text(`${formatNumber(s.visibleNodes)} Einträge · ${formatNumber(s.visibleEdges)} Verbindungen`));
+  // Dieselbe Zaehlung wie in der Karte und auf dem Server: Eintraege des
+  // Themas (ohne Nachbarn ausserhalb), Verbindungen als Paare zwischen ihnen.
+  const sichtbar = (n) => !self.hiddenTypes.has(n.type);
+  const drin = self.nodes.filter((n) => !n.ausserhalb && sichtbar(n)).length;
+  const paare = verbindungenImThema(self.nodes, self.edges, sichtbar);
+  const draussen = self.nodes.filter((n) => n.ausserhalb && sichtbar(n)).length;
+  const teile = [anzahlText(drin, 'Eintrag', 'Einträge'), anzahlText(paare, 'Verbindung', 'Verbindungen')];
+  if (draussen && self.thema) teile.push(`${formatNumber(draussen)} Nachbarn außerhalb`);
+  dom.count.appendChild(text(teile.join(' · ')));
 }
 
 function describe(self) {
@@ -1503,40 +1734,84 @@ function announce(self, message) {
  * Auf Ebene 1 erscheint die Linie sofort und zieht sich; ein Ende, das noch
  * nicht geladen ist, kommt als Nachbar dazu. Ebene 0 laedt gebuendelt nach,
  * weil sich dort nur Zahlen aendern.
+ *
+ * Gebuendelt je Bild (Pruefer, Runde 1): 1.000 Kanten nach einem Nachziehen
+ * kamen einzeln, jede baute das ganze Netz neu -- 4 s stand das Bild. Jetzt
+ * sammelt ein Puffer, was in einem Bild ankommt, und setzt es EINMAL; ab 50
+ * Kanten auf einmal laedt die Ebene schlicht neu.
  */
+const KANTEN_FLUT = 50;
+
 function neueKante(self, payload, bald) {
   if (!self.alive) return;
   const edge = payload && payload.edge;
   const d = edge && edge.data ? edge.data : edge;
   if (!d || typeof d.from !== 'string' || typeof d.to !== 'string') { bald(); return; }
+  // Nur Wissen gehoert ins Netz -- keine Nachricht, kein Lauf.
+  for (const ende of [payload.von, payload.zu]) {
+    if (ende && ende.type && !UNIVERSUM_TYPEN.includes(ende.type)) return;
+  }
   if (self.ebene !== 1) { bald(); return; }
-  if (payload.entfernt) {
-    const vorher = self.edges.length;
-    self.edges = self.edges.filter((e) => e.id !== edge.id && !(e.from === d.from && e.to === d.to && e.kind === (d.kind || 'related')));
-    if (self.edges.length !== vorher) self.netz.setData({ nodes: self.nodes, edges: self.edges }, { beweglich: [d.from, d.to] });
-    bald();
+  self.kantenPuffer.push(payload);
+  if (self.kantenPuffer.length === 1) requestAnimationFrame(() => kantenEinarbeiten(self, bald));
+}
+
+function kantenEinarbeiten(self, bald) {
+  if (!self.alive) return;
+  const puffer = self.kantenPuffer.splice(0);
+  if (!puffer.length || self.ebene !== 1) return;
+  if (puffer.length > KANTEN_FLUT) {
+    nachladen(self);
     return;
   }
-  const hatFrom = self.byId.has(d.from);
-  const hatTo = self.byId.has(d.to);
-  if (!hatFrom && !hatTo) { bald(); return; }
-  const neuer = !hatFrom ? payload.von : !hatTo ? payload.zu : null;
-  if ((!hatFrom || !hatTo) && !(neuer && typeof neuer.id === 'string')) { bald(); return; }
-  if (neuer) {
-    const node = { id: neuer.id, type: neuer.type || 'note', label: String(neuer.label || 'Ohne Titel'), tags: [], grad: 1, ausserhalb: !!self.thema, snippet: '' };
-    self.nodes = [...self.nodes, node];
-    self.byId.set(node.id, node);
+  let nodes = self.nodes;
+  let edges = self.edges;
+  const beweglich = new Set();
+  let letzte = null;
+  let geaendert = false;
+  for (const payload of puffer) {
+    const edge = payload.edge;
+    const d = edge && edge.data ? edge.data : edge;
+    if (payload.entfernt) {
+      const vorher = edges.length;
+      edges = edges.filter((e) => e.id !== edge.id && !(e.from === d.from && e.to === d.to && e.kind === (d.kind || 'related')));
+      if (edges.length !== vorher) { geaendert = true; beweglich.add(d.from); beweglich.add(d.to); }
+      continue;
+    }
+    const hatFrom = self.byId.has(d.from);
+    const hatTo = self.byId.has(d.to);
+    if (!hatFrom && !hatTo) continue;
+    const neuer = !hatFrom ? payload.von : !hatTo ? payload.zu : null;
+    if ((!hatFrom || !hatTo) && !(neuer && typeof neuer.id === 'string')) continue;
+    if (neuer) {
+      const node = { id: neuer.id, type: neuer.type || 'note', label: String(neuer.label || 'Ohne Titel'), tags: [], grad: 1, ausserhalb: !!self.thema, snippet: '' };
+      nodes = [...nodes, node];
+      self.byId.set(node.id, node);
+    }
+    const kante = { id: edge.id || `${d.from}>${d.to}`, from: d.from, to: d.to, kind: d.kind || 'related', source: d.source || 'manual', reason: d.reason || '' };
+    if (edges.some((e) => e.id === kante.id)) continue;
+    edges = [...edges, kante];
+    beweglich.add(d.from);
+    beweglich.add(d.to);
+    letzte = payload;
+    geaendert = true;
   }
-  const kante = { id: edge.id || `${d.from}>${d.to}`, from: d.from, to: d.to, kind: d.kind || 'related', source: d.source || 'manual', reason: d.reason || '' };
-  if (self.edges.some((e) => e.id === kante.id)) return;
-  self.edges = [...self.edges, kante];
-  self.netz.setData({ nodes: self.nodes, edges: self.edges }, { beweglich: [d.from, d.to] });
-  self.netz.nudge([d.from, d.to]);
+  bald();
+  if (!geaendert) return;
+  self.nodes = nodes;
+  self.edges = edges;
+  self.netz.setData({ nodes: self.nodes, edges: self.edges }, { beweglich: [...beweglich] });
+  self.netz.nudge([...beweglich]);
   applyFilter(self, { quiet: true });
   faerben(self);
   renderCount(self);
-  if (self.selectedId === d.from || self.selectedId === d.to) renderCard(self);
-  announce(self, `Neue Verbindung: ${(payload.von && payload.von.label) || d.from} und ${(payload.zu && payload.zu.label) || d.to}`);
+  if (self.selectedId && beweglich.has(self.selectedId)) renderCard(self);
+  if (letzte) {
+    const d = letzte.edge && letzte.edge.data ? letzte.edge.data : letzte.edge;
+    announce(self, puffer.length === 1
+      ? `Neue Verbindung: ${(letzte.von && letzte.von.label) || d.from} und ${(letzte.zu && letzte.zu.label) || d.to}`
+      : `${formatNumber(puffer.length)} neue Verbindungen.`);
+  }
 }
 
 export { fold };

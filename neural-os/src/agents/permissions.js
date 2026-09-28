@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { safeJoin } = require('../kernel/paths');
+const ortspfad = require('../kernel/ortspfad');
 const schema = require('../store/schema');
 // Host patterns are matched with the gate's own matcher on purpose. A second,
 // independent implementation of "*.example.com" is a second place to get it
@@ -39,6 +40,16 @@ const { hostMatches, normaliseHost } = require('../net/gate');
  *    therefore resolves symlinks (including for a file that does not exist yet,
  *    by resolving its nearest existing ancestor) and runs `safeJoin` against
  *    every configured root.
+ *
+ * 4. A FOLDER OF ANOTHER COMPUTER IS NO FOLDER AT ALL (docs/STICK-BAUPLAN.md
+ *    2.7). `fileRoots` entries go through `ortspfad.aufloesen`: one on the
+ *    stick (`{ort:'stick', rel}`) is found under whatever path the stick has
+ *    here, one bound to a computer (`{ort:'rechner', rechner, pfad}`) exists
+ *    only there, and an old plain string on a stick counts only if it lies on
+ *    the stick. What resolves to `null` is dropped before anything else sees
+ *    it -- so the system prompt, `check` and `canAccessPath` agree.
+ *    `opts.portable` says where the stick is; without it, the stick this
+ *    program runs from.
  */
 
 /** Every capability the tool layer can ask about. Anything else is denied. */
@@ -117,10 +128,11 @@ function stringList(value) {
  *
  * @param {object} agent  agent record or bare agent object
  * @param {object} [config]
+ * @param {{portable?:object|null}} [opts] where the stick is (rule 4)
  * @returns {object} effective permissions, plus `_capped` explaining what the
  *   global policy tightened (the UI and the system prompt both need to say so).
  */
-function effective(agent, config) {
+function effective(agent, config, opts = {}) {
   const data = agentData(agent);
   const perms = schema.normalisePermissions(isPlainObject(data.permissions) ? data.permissions : {});
   const cfg = isPlainObject(config) ? config : {};
@@ -143,7 +155,7 @@ function effective(agent, config) {
   out.network = granted;
   out.requestedNetwork = wanted;
   out.allowedHosts = stringList(perms.allowedHosts);
-  out.fileRoots = normaliseRoots(perms.fileRoots);
+  out.fileRoots = normaliseRoots(perms.fileRoots, opts);
 
   const forcedApproval = security.globalApprovalOverride === true;
   out.requireApproval = forcedApproval || perms.requireApproval !== false;
@@ -169,18 +181,12 @@ function effective(agent, config) {
   return out;
 }
 
-/** Absolute, duplicate-free file roots. A relative root is meaningless here. */
-function normaliseRoots(value) {
-  const out = [];
-  if (!Array.isArray(value)) return out;
-  for (const entry of value) {
-    if (typeof entry !== 'string') continue;
-    const trimmed = entry.trim();
-    if (!trimmed || !path.isAbsolute(trimmed)) continue;
-    const resolved = path.resolve(trimmed);
-    if (!out.includes(resolved)) out.push(resolved);
-  }
-  return out;
+/**
+ * Absolute, duplicate-free file roots that exist on THIS computer (rule 4).
+ * A relative root is meaningless here, one of another computer too.
+ */
+function normaliseRoots(value, opts = {}) {
+  return ortspfad.aufloesenListe(value, { portable: ortspfad.stickAus(opts) });
 }
 
 /**
@@ -213,12 +219,12 @@ function realpathish(target) {
 /**
  * @param {object} agent
  * @param {string} absPath
- * @param {{config?:object}} [opts]
+ * @param {{config?:object, permissions?:object, portable?:object|null}} [opts]
  * @returns {boolean}
  */
 function canAccessPath(agent, absPath, opts = {}) {
   if (typeof absPath !== 'string' || !absPath.trim()) return false;
-  const perms = opts.permissions || effective(agent, opts.config);
+  const perms = opts.permissions || effective(agent, opts.config, opts);
   const roots = perms.fileRoots;
   if (!roots.length) return false; // no root configured = no filesystem access
 
@@ -245,11 +251,11 @@ function canAccessPath(agent, absPath, opts = {}) {
 /**
  * @param {object} agent
  * @param {string} capability one of CAPABILITIES
- * @param {{config?:object, host?:string, port?:number, path?:string, level?:string}} [ctx]
+ * @param {{config?:object, host?:string, port?:number, path?:string, level?:string, portable?:object|null}} [ctx]
  * @returns {{allowed:boolean, reason:string, requiresApproval:boolean, capability:string}}
  */
 function check(agent, capability, ctx = {}) {
-  const perms = ctx.permissions || effective(agent, ctx.config);
+  const perms = ctx.permissions || effective(agent, ctx.config, ctx);
   const name = agentName(agent);
   const deny = (reason) => ({ allowed: false, reason, requiresApproval: false, capability });
 
@@ -341,9 +347,9 @@ function networkScope(agent, runId) {
  * the step and time budgets (a child with a larger budget is a way to spend
  * more of the user's machine than the parent was given).
  */
-function subsetOf(child, parent, config) {
-  const c = effective(child, config);
-  const p = effective(parent, config);
+function subsetOf(child, parent, config, opts = {}) {
+  const c = effective(child, config, opts);
+  const p = effective(parent, config, opts);
   const missing = [];
   for (const cap of CAPABILITIES) {
     if (cap === 'network') continue;
@@ -427,8 +433,8 @@ function joinDe(items) {
  *
  * @returns {string}
  */
-function describe(agent, config) {
-  const perms = effective(agent, config);
+function describe(agent, config, opts = {}) {
+  const perms = effective(agent, config, opts);
   const lines = [];
 
   if (perms.readNotes && perms.writeNotes) lines.push('Darf Notizen lesen und schreiben.');

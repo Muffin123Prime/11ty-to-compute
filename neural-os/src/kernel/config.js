@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { StorageError, ValidationError } = require('./errors');
+const { schreibeDauerhaft } = require('./dateien');
 
 /**
  * Configuration is stored UNENCRYPTED on purpose.
@@ -43,12 +44,12 @@ function defaults() {
       audit: true,
     },
     models: {
-      /** Backends probed on startup. All default to loopback addresses. */
-      providers: [
-        { id: 'ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434', enabled: true },
-        { id: 'llamacpp', kind: 'openai', baseUrl: 'http://127.0.0.1:8080/v1', enabled: true },
-        { id: 'lmstudio', kind: 'openai', baseUrl: 'http://127.0.0.1:1234/v1', enabled: true },
-      ],
+      /**
+       * Lokale Modellserver gibt es nicht mehr (src/models/registry.js liest
+       * diese Liste nicht). Die früheren Vorgaben ollama/llamacpp/lmstudio
+       * entfernt `migriereAlt` beim Lesen aus alten config.json-Dateien.
+       */
+      providers: [],
       /** {provider, model} chosen for new chats; null = first available. */
       default: null,
       /** Remote providers are opt-in and carry an apiKeyEnv, never a raw key. */
@@ -92,7 +93,9 @@ function defaults() {
 function deepMerge(base, patch) {
   if (patch === undefined || patch === null) return base;
   if (Array.isArray(base) || Array.isArray(patch)) return patch;
-  if (typeof base !== 'object' || typeof patch !== 'object') return patch;
+  // `base === null` (etwa `models.default`) ist ein Platzhalter, kein Objekt:
+  // `k in null` würde werfen und jede config.json mit Standardmodell unlesbar machen.
+  if (base === null || typeof base !== 'object' || typeof patch !== 'object') return patch;
   const out = { ...base };
   for (const [k, v] of Object.entries(patch)) {
     out[k] = k in base ? deepMerge(base[k], v) : v;
@@ -123,17 +126,55 @@ function load(configPath) {
     e.recovered = base;
     throw e;
   }
-  return deepMerge(base, parsed);
+  return deepMerge(base, migriereAlt(parsed));
 }
 
-/** Atomic write: temp file + rename, so a crash cannot truncate the config. */
+/**
+ * Die früheren Vorgaben für lokale Modellserver, genau so, wie ältere
+ * Versionen sie in jede config.json geschrieben haben.
+ */
+const TOTE_ANBIETER = Object.freeze({
+  ollama: 'http://127.0.0.1:11434',
+  llamacpp: 'http://127.0.0.1:8080/v1',
+  lmstudio: 'http://127.0.0.1:1234/v1',
+});
+
+function istToterAnbieter(eintrag) {
+  return !!eintrag && typeof eintrag === 'object'
+    && Object.prototype.hasOwnProperty.call(TOTE_ANBIETER, eintrag.id)
+    && eintrag.baseUrl === TOTE_ANBIETER[eintrag.id];
+}
+
+/** Nennt das Standardmodell einen der entfernten Anbieter ("ollama/llama3.2" oder {provider:'ollama'})? */
+function zeigtAufToten(standard) {
+  const id = typeof standard === 'string' ? standard.split('/')[0]
+    : (standard && typeof standard === 'object' ? standard.provider : null);
+  return typeof id === 'string' && Object.prototype.hasOwnProperty.call(TOTE_ANBIETER, id);
+}
+
+/**
+ * Migration beim Lesen: alte Dateien laden weiter, nur die toten Vorgaben
+ * fallen weg. Eigene Einträge bleiben, auch wenn sie ollama heißen, aber
+ * woanders hinzeigen. Geschrieben wird erst beim nächsten `save`.
+ */
+function migriereAlt(parsed) {
+  const m = parsed && typeof parsed === 'object' ? parsed.models : null;
+  if (!m || typeof m !== 'object' || Array.isArray(m)) return parsed;
+  const models = { ...m };
+  if (Array.isArray(models.providers)) models.providers = models.providers.filter((p) => !istToterAnbieter(p));
+  if (zeigtAufToten(models.default)) models.default = null;
+  return { ...parsed, models };
+}
+
+/**
+ * Haltbar schreiben (Stick-Bauplan 2.3): tmp + fsync + umbenennen + fsync des
+ * Ordners, damit ein gezogener Stick die alte oder die neue Fassung behält.
+ */
 function save(configPath, config) {
   validateConfig(config);
   const dir = path.dirname(configPath);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const tmp = `${configPath}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, configPath);
+  schreibeDauerhaft(configPath, JSON.stringify(config, null, 2), { modus: 0o600 });
   return config;
 }
 

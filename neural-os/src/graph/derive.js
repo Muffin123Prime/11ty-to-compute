@@ -32,10 +32,11 @@
  *    search, umlauts and all. Two different normalisations would be two
  *    different systems.
  *
- * Known limitation, stated honestly: renaming a note does not retroactively
- * re-resolve links that pointed at its old title, because `deriveFor` only
- * looks at one record. `scanAll()` (exposed as POST /api/graph/rescan) is the
- * cure and is cheap enough to run on demand.
+ * Renaming a note or creating the target of an existing [[link]] touches
+ * OTHER records' links. `deriveFor` only looks at one record; `nachziehen()`
+ * re-derives exactly the affected sources and is called from the bus
+ * (src/graph/universum.js attach). `scanAll()` (POST /api/graph/rescan)
+ * remains the repair tool for everything else.
  */
 
 const { NotFoundError, ValidationError } = require('../kernel/errors');
@@ -73,7 +74,12 @@ const KEY_SEP = '\u0000';
 
 const FENCE_RE = /^(\s{0,3})(`{3,}|~{3,})(.*)$/;
 const URL_RE = /\b(?:https?|ftp):\/\/[^\s<>"'`\\\])}]+/gi;
-const WIKI_RE = /\[\[([^[\]\n]{1,300})\]\]/g;
+/**
+ * Bis 500 Zeichen -- so lang darf ein Titel sein (schema: note.title max 500).
+ * Frueher 300: die [[-Vervollstaendigung bot laengere Titel an, und der Link
+ * verband dann nie (Pruefer, Runde 1). web/lib/markdown.js zaehlt gleich.
+ */
+const WIKI_RE = /\[\[([^[\]\n]{1,500})\]\]/g;
 /**
  * A tag is `#` + a letter + word-ish characters, and must not sit directly
  * behind a letter, digit, `#`, `&` or `/`. That single look-behind class kills
@@ -463,6 +469,16 @@ function desiredEdges(store, record, index) {
   if (record.type === 'task' && live(data.projectId)) {
     want(data.projectId, 'belongs-to', 'Aufgabe gehoert zu diesem Projekt');
   }
+  // Eine Notiz, die die KI aus einem Gespraech gemacht hat (notiz_anlegen
+  // setzt chatId), haengt an diesem Gespraech -- wie ein Termin. Ohne die
+  // Kante lag "Zahnarzt: Fragen fuer heute" unter "Unverbunden", obwohl ihr
+  // Chat ein eigenes Thema ist (Pruefer, Runde 1). Ebenso eine Notiz mit
+  // projectId an ihrem Projekt.
+  if (record.type === 'note') {
+    const art = (id) => { const r = live(id); return r ? r.type : null; };
+    if (art(data.projectId) === 'project') want(data.projectId, 'belongs-to', 'Notiz gehoert zu diesem Projekt');
+    if (art(data.chatId) === 'chat') want(data.chatId, 'mentions', 'Notiz stammt aus diesem Chat');
+  }
   if (record.type === 'message' && live(data.chatId)) {
     want(data.chatId, 'belongs-to', 'Nachricht aus diesem Chat');
   }
@@ -592,6 +608,91 @@ function deriveFor(store, recordOrId, opts = {}) {
 }
 
 /**
+ * Links nachziehen, die an einem Titel haengen (Pruefer, Runde 1).
+ *
+ * `deriveFor` sieht nur den einen Satz, der geschrieben wurde. Zwei Faelle
+ * blieben so liegen:
+ *   1. **Das Ziel entsteht nach dem Link.** "Lernplan" enthaelt
+ *      [[Lichtreaktion]], die Notiz "Lichtreaktion" wird erst danach
+ *      angelegt -- der Link blieb unaufgeloest, bis jemand die Quelle noch
+ *      einmal speicherte, waehrend die Ansicht ihn schon als aufgeloest
+ *      zeigte.
+ *   2. **Das Ziel wird umbenannt.** Aus "Zellkern" wird "Nucleus": der Text
+ *      sagt [[Zellkern]] (gestrichelt, "anlegen?"), die Kante zeigte weiter
+ *      auf "Nucleus". Text und Netz widersprachen sich.
+ * Hier werden genau die Quellen neu abgeleitet, die es betrifft: fuer (1)
+ * die Saetze, in deren Text der neue Titel als [[Link]] steht (gefunden
+ * ueber die Volltextsuche als Wortfolge, dann exakt geprueft), fuer (2) die
+ * Saetze mit einer abgeleiteten `links-to`-Kante auf den umbenannten Satz.
+ * Danach gilt wieder: was der Text sagt, zeigt das Netz.
+ *
+ * @param {object} store
+ * @param {object} record  der neue oder umbenannte Satz (gespeicherte Fassung)
+ * @param {{umbenannt?:boolean, max?:number}} [opts]
+ * @returns {{quellen:string[], created:number, removed:number}}
+ */
+function nachziehen(store, record, opts = {}) {
+  const out = { quellen: [], created: 0, removed: 0 };
+  if (!store || !record || !record.id || !store.edges || record.type === 'edge') return out;
+  const max = Number.isInteger(opts.max) ? opts.max : 500;
+  const index = indexFor(store, record);
+  const quellen = new Set();
+
+  if (opts.umbenannt) {
+    let rein = [];
+    try { rein = store.edges.for(record.id, { direction: 'in' }); } catch { rein = []; }
+    for (const e of rein) {
+      if (e.data && e.data.source === 'derived' && e.data.kind === 'links-to') quellen.add(e.data.from);
+    }
+  }
+
+  if (!record.deletedAt && TITLE_TYPES.includes(record.type)) {
+    const titel = [titleOf(record)];
+    if (record.type === 'entity' && Array.isArray(record.data && record.data.aliases)) {
+      for (const a of record.data.aliases) if (typeof a === 'string' && a.trim()) titel.push(a.trim());
+    }
+    const textTypen = Object.keys(TEXT_FIELDS);
+    for (const t of titel) {
+      const key = fold(t);
+      if (!key) continue;
+      let kandidaten = [];
+      const woerter = t.replace(/"/g, ' ').trim();
+      if (typeof store.search === 'function' && woerter) {
+        try {
+          kandidaten = store.search(`"${woerter}"`, { types: textTypen, limit: max }).items.map((hit) => hit.record);
+        } catch { kandidaten = []; }
+      } else {
+        // Ein Store ohne Suche (Tests): alle Texte durchsehen.
+        for (const type of textTypen) {
+          try { kandidaten.push(...store.list(type, {}).items); } catch { /* keine */ }
+        }
+      }
+      for (const kand of kandidaten) {
+        if (!kand || kand.id === record.id || quellen.has(kand.id)) continue;
+        const d = kand.data || {};
+        let trifft = false;
+        for (const field of TEXT_FIELDS[kand.type] || []) {
+          const text = typeof d[field] === 'string' ? d[field] : '';
+          if (!text.includes('[[')) continue;
+          if (extractLinks(text).wikiLinks.some((w) => fold(w) === key)) { trifft = true; break; }
+        }
+        if (trifft) quellen.add(kand.id);
+      }
+    }
+  }
+
+  for (const id of quellen) {
+    try {
+      const res = deriveFor(store, id, { index });
+      out.quellen.push(id);
+      out.created += res.created.length;
+      out.removed += res.removed.length;
+    } catch { /* eine Quelle, die inzwischen weg ist */ }
+  }
+  return out;
+}
+
+/**
  * Re-derive the whole vault. This is the repair tool: it fixes links that
  * became resolvable after a rename and drops links whose target is gone.
  *
@@ -664,6 +765,7 @@ module.exports = {
   invalidateIndex,
   extractLinks,
   deriveFor,
+  nachziehen,
   scanAll,
   buildIndex,
   OWNED_KINDS,
