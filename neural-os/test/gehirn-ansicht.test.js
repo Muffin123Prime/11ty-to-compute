@@ -140,6 +140,18 @@ test('Suche: Umlaute wie getippt, Wortreihenfolge egal, Themen samt Kindern, Kno
   const tags = universum.sucheKnoten(nodes, 'genetik');
   assert.deepEqual(tags.map((n) => n.id), ['note_dna', 'note_gen'], 'Schlagworte zaehlen, der mit mehr Linien zuerst');
   assert.ok(universum.passt('saeure', 'Säuren und Basen'));
+
+  // Der genau so heissende Eintrag steht vorn, auch wenn ein anderer mehr
+  // Linien hat und den Suchtext nur enthaelt (Eingabetaste springt zum ersten).
+  const nummern = [
+    { id: 'n17', type: 'note', label: 'Notiz 17', tags: [], grad: 9 },
+    { id: 'n7', type: 'note', label: 'Notiz 7', tags: [], grad: 1 },
+    { id: 'n70', type: 'note', label: 'Notiz 7 und mehr', tags: [], grad: 5 },
+    { id: 'n71', type: 'note', label: 'Notiz 7a', tags: [], grad: 2 },
+  ];
+  assert.deepEqual(universum.sucheKnoten(nummern, 'Notiz 7').map((n) => n.id), ['n7', 'n70', 'n71', 'n17'],
+    'genauer Titel, dann Titelanfang (nach Grad), dann der Rest');
+  assert.equal(universum.sucheKnoten(nummern, 'notiz 7')[0].id, 'n7', 'Gross- und Kleinschreibung sind egal');
 });
 
 test('nachbarschaft: der Knoten und seine Nachbarn bis Tiefe 2 (Fokus)', async () => {

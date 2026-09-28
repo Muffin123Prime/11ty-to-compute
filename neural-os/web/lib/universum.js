@@ -291,13 +291,25 @@ export function sucheThemen(themen, query) {
   return out;
 }
 
-/** Knoten, deren Titel oder Schlagworte zur Anfrage passen -- die mit den meisten Linien zuerst. */
+/**
+ * Knoten, deren Titel oder Schlagworte zur Anfrage passen. Zuerst der genau
+ * so heissende Eintrag, dann die, deren Titel so anfaengt, dann der Rest --
+ * innerhalb jeder Stufe die mit den meisten Linien zuerst. "Notiz 7" muss
+ * "Notiz 7" finden, nicht "Notiz 17", nur weil die mehr Verbindungen hat.
+ */
 export function sucheKnoten(nodes, query) {
   const q = String(query || '').trim();
   if (!q) return [];
+  const fq = fold(q);
+  const stufe = (node) => {
+    const fl = fold(node.label);
+    return fl === fq ? 0 : fl.startsWith(fq) ? 1 : 2;
+  };
   return (nodes || [])
     .filter((node) => passt(q, node.label, node.tags || []))
-    .sort((a, b) => ((b.grad || b.degree || 0) - (a.grad || a.degree || 0)) || String(a.label).localeCompare(String(b.label), 'de'));
+    .sort((a, b) => (stufe(a) - stufe(b))
+      || ((b.grad || b.degree || 0) - (a.grad || a.degree || 0))
+      || String(a.label).localeCompare(String(b.label), 'de'));
 }
 
 /**

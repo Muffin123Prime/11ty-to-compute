@@ -30,10 +30,12 @@ async function laden() {
     if (!datei.endsWith('.js')) continue;
     fs.writeFileSync(path.join(home, datei.replace(/\.js$/, '.mjs')), alsModul(fs.readFileSync(path.join(web, 'lib', datei), 'utf8')));
   }
+  fs.writeFileSync(path.join(home, 'notes.mjs'), alsModul(fs.readFileSync(path.join(web, 'views', 'notes.js'), 'utf8')));
   try {
     geladen = {
       editor: await import(pathToFileURL(path.join(home, 'editor.mjs')).href),
       markdown: await import(pathToFileURL(path.join(home, 'markdown.mjs')).href),
+      notes: await import(pathToFileURL(path.join(home, 'notes.mjs')).href),
     };
   } finally {
     cleanup();
@@ -202,4 +204,82 @@ test('Callouts: "> [!info] Titel" wird erkannt, Links und Schlagworte darin auch
   const src = '> [!info] Licht und [[Chlorophyll]]\n> Pflanzen brauchen #licht.\n\n> normales Zitat';
   assert.equal(extractPlain(src), 'Licht und Chlorophyll\nPflanzen brauchen #licht.\nnormales Zitat');
   assert.deepEqual(extractLinks(src), { wikiLinks: ['Chlorophyll'], tags: ['licht'] });
+});
+
+/* ---------------------------------------------- Notizansicht */
+
+test('tagsVon/zaehleTags: Feld und #worte im Text, ohne Doppelte, haeufigste zuerst', async () => {
+  const { tagsVon, zaehleTags } = (await laden()).notes;
+  const a = { id: 'a', data: { title: 'Photosynthese', body: 'Licht und #Chlorophyll, siehe #biologie.', tags: ['schule', 'biologie'] } };
+  const b = { id: 'b', data: { title: 'Zellatmung', body: '', tags: ['#Biologie'] } };
+  const c = { id: 'c', data: { title: 'Ohne', body: 'kein Schlagwort, nur # ein Zeichen' } };
+  assert.deepEqual(tagsVon(a), ['schule', 'biologie', 'Chlorophyll'], 'erst das Feld, dann der Text; "biologie" nur einmal');
+  assert.deepEqual(tagsVon(b), ['Biologie'], 'ein fuehrendes # im Feld faellt weg');
+  assert.deepEqual(tagsVon(c), []);
+  assert.deepEqual(tagsVon(null), []);
+  assert.deepEqual(zaehleTags([a, b, c]), [{ tag: 'biologie', anzahl: 2 }, { tag: 'Chlorophyll', anzahl: 1 }, { tag: 'schule', anzahl: 1 }],
+    'Gross/Klein zaehlt zusammen, die erste Schreibweise bleibt; Gleichstand alphabetisch');
+});
+
+test('sichtbareNotizen: Quelle, Schlagwort und Suche greifen zusammen, die Reihenfolge bleibt', async () => {
+  const { sichtbareNotizen } = (await laden()).notes;
+  const items = [
+    { id: '1', data: { title: 'Pflanzen brauchen Licht', body: 'Ohne Licht keine Photosynthese.', tags: ['biologie'], pinned: true, source: 'user' } },
+    { id: '2', data: { title: 'Fragen für die Werkstatt', body: 'Bremsen prüfen.', tags: [], source: 'auto' } },
+    { id: '3', data: { title: 'Chlorophyll absorbiert Licht', body: 'grünes wird reflektiert #biologie', tags: [] } },
+    { id: '4', data: { title: 'Zitat', body: 'Was man nicht aufschreibt …', tags: ['zitat'] } },
+  ];
+  const ids = (list) => list.map((n) => n.id);
+  assert.deepEqual(ids(sichtbareNotizen(items)), ['1', '2', '3', '4']);
+  assert.deepEqual(ids(sichtbareNotizen(items, { filter: 'auto' })), ['2']);
+  assert.deepEqual(ids(sichtbareNotizen(items, { filter: 'angeheftet' })), ['1']);
+  assert.deepEqual(ids(sichtbareNotizen(items, { tag: '#Biologie' })), ['1', '3'], 'das Schlagwort aus Feld oder Text, ohne Gross/Klein und #');
+  assert.deepEqual(ids(sichtbareNotizen(items, { q: 'licht' })), ['1', '3']);
+  assert.deepEqual(ids(sichtbareNotizen(items, { q: 'Licht grün' })), ['3'], 'alle Woerter muessen vorkommen, auch mit Umlaut');
+  assert.deepEqual(ids(sichtbareNotizen(items, { q: 'gruen' })), ['3'], 'Umlaute sind gefaltet: gruen findet grün');
+  assert.deepEqual(ids(sichtbareNotizen(items, { q: 'PRÜFEN' })), ['2']);
+  assert.deepEqual(ids(sichtbareNotizen(items, { tag: 'biologie', q: 'chlorophyll' })), ['3']);
+  assert.deepEqual(ids(sichtbareNotizen(items, { q: 'gibtesnicht' })), []);
+  assert.deepEqual(sichtbareNotizen(null), []);
+});
+
+test('titelAusText: erste Zeile wird Titel, ohne Markdown-Zeichen; ein langer Satz bleibt als Text erhalten', async () => {
+  const { titelAusText } = (await laden()).notes;
+  assert.deepEqual(titelAusText('  \n## Pflanzen brauchen Licht\n\nOhne Licht keine [[Photosynthese]].\n'),
+    { title: 'Pflanzen brauchen Licht', body: 'Ohne Licht keine [[Photosynthese]].' });
+  assert.deepEqual(titelAusText('- [ ] **Dichtung** bestellen'), { title: 'Dichtung bestellen', body: '' });
+  assert.deepEqual(titelAusText('Nur eine Zeile'), { title: 'Nur eine Zeile', body: '' });
+  assert.equal(titelAusText('   \n\n'), null);
+  const lang = 'Chlorophyll absorbiert rotes und blaues Licht, grünes wird reflektiert, deshalb sehen Blätter grün aus, und das ist der Grund für die Farbe des Waldes im Sommer.';
+  const r = titelAusText(lang);
+  assert.ok(r.title.length <= 120 && r.title.endsWith('…'), r.title);
+  assert.equal(r.body, lang, 'der ganze Satz bleibt im Text, nichts geht verloren');
+});
+
+test('artInfo/kantenText/zielFuer/vorschlagsSatz: Symbole, Gruende und Ziele in Worten', async () => {
+  const { artInfo, kantenText, zielFuer, vorschlagsSatz } = (await laden()).notes;
+  assert.deepEqual(artInfo('note'), { label: 'Notiz', glyph: 'note' });
+  assert.deepEqual(artInfo('entity', 'person'), { label: 'Person', glyph: 'user' });
+  assert.deepEqual(artInfo('entity', 'place'), { label: 'Ort', glyph: 'place' });
+  assert.deepEqual(artInfo('entity'), { label: 'Begriff', glyph: 'term' }, 'ohne kind: Begriff');
+  assert.deepEqual(artInfo('project'), { label: 'Projekt', glyph: 'project' });
+  assert.equal(artInfo('sowas').label, 'sowas', 'Unbekanntes wird gezeigt, nicht verschluckt');
+
+  assert.equal(kantenText({ kind: 'tagged', reason: 'Schlagwort #biologie', source: 'derived' }), 'Schlagwort #biologie', 'die Art steckt schon im Grund: nicht doppelt');
+  assert.equal(kantenText({ kind: 'links-to', reason: 'Wiki-Link [[Photosynthese]] im Text', source: 'derived' }), 'Wiki-Link [[Photosynthese]] im Text');
+  assert.equal(kantenText({ kind: 'links-to', reason: '', source: 'derived' }), 'Link');
+  assert.equal(kantenText({ kind: 'related', reason: '', source: 'manual' }), 'Verwandt · von Hand');
+  assert.equal(kantenText({ kind: 'related', reason: 'Im Gehirn verbunden', source: 'manual' }), 'Verwandt · Im Gehirn verbunden');
+  assert.equal(kantenText({ kind: 'sonstwie' }), 'sonstwie');
+  assert.equal(kantenText(null), 'Verknüpft');
+
+  assert.equal(zielFuer({ id: 'note_1', type: 'note' }), null, 'Notizen oeffnet die Ansicht selbst');
+  assert.equal(zielFuer({ id: 'project_1', type: 'project' }), '#/projects?id=project_1');
+  assert.equal(zielFuer({ id: 'chat_1', type: 'chat' }), '#/chat?id=chat_1');
+  assert.equal(zielFuer({ id: 'entity_1', type: 'entity' }), '#/graph?focus=entity_1');
+  assert.equal(zielFuer({ id: 'a b', type: 'file' }), '#/graph?focus=a%20b');
+
+  assert.equal(vorschlagsSatz(1), 'Ich habe 1 mögliche Verbindung gefunden');
+  assert.equal(vorschlagsSatz(4), 'Ich habe 4 mögliche Verbindungen gefunden');
+  assert.equal(vorschlagsSatz(undefined), 'Ich habe 0 mögliche Verbindungen gefunden');
 });

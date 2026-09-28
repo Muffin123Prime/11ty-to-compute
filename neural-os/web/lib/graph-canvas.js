@@ -222,10 +222,12 @@ const ENTER_MS = 720; // weicher Aufbau eines Bildes (Vision: 600-900 ms, ease-o
 const ENTER_WAVE_MS = 70; // Abstand der vier Wellen: Hubs zuerst, Blaetter zuletzt
 const EDGE_GROW_MS = 420; // eine neue Linie zieht sich vom einen zum anderen Knoten
 const LONG_PRESS_MS = 480;
-const GLYPH_MIN_R = 7; // ab diesem Bildschirmradius traegt ein Punkt sein Art-Symbol
+const GLYPH_MIN_R = 9; // ab diesem Bildschirmradius traegt ein Punkt sein Art-Symbol (darunter waere es Gekrakel)
 const DICHT_AB = 160; // ab so vielen sichtbaren Knoten gelten die Zoomstufen fuer Namen (LOD)
 const DIVE_FACTOR = 2.3; // Themen-Ebene: so weit ueber das Eingepasste hinein -> onDive
 const SURFACE_FACTOR = 0.42; // Netz-Ebene: so weit unter das Eingepasste heraus -> onSurface
+const PAN_CACHE_AB = 1200; // ab so vielen sichtbaren Linien wird beim Ziehen ein Zwischenbild verschoben
+const PAN_MARGIN = 0.3; // Rand des Zwischenbilds je Seite, als Anteil der Flaeche
 
 /** "1.234" -- fuer "1.234 Eintraege" unter einem Themennamen. */
 function formatCount(value) {
@@ -536,7 +538,9 @@ export function createGraphCanvas(canvas, options = {}) {
   if (!canvas || typeof canvas.getContext !== 'function') {
     throw new TypeError('createGraphCanvas(): ein <canvas>-Element wird benötigt.');
   }
-  const ctx = canvas.getContext('2d', { alpha: true });
+  // `let`, nicht `const`: beim Ziehen zeichnet drawFromPanCache dieselbe Szene
+  // einmal in eine zweite Leinwand und tauscht dafuer kurz den Kontext.
+  let ctx = canvas.getContext('2d', { alpha: true });
   if (!ctx) throw new Error('createGraphCanvas(): 2D-Kontext nicht verfügbar.');
 
   const mini = !!options.mini;
@@ -664,6 +668,23 @@ export function createGraphCanvas(canvas, options = {}) {
 
   let api = null;
 
+  /* ---------------------------- Pan-Zwischenbild ------------------- */
+  // Beim Ziehen aendert sich nur der Ausschnitt. Steht die Wolke still und
+  // ist das Netz dicht, wird das Bild EINMAL mit Rand in eine zweite
+  // Leinwand gezeichnet und danach je Bild nur verschoben. Gemessen ohne
+  // GPU (Software-Raster, 2.000 Knoten, 4.000 Linien, hineingezoomt):
+  // 200 ms je Bild gezeichnet, 2 ms verschoben -- 6 statt 60 Bilder/s.
+  // Das Zwischenbild ist die UNBELEUCHTETE Szene. Licht (ueberfahren,
+  // gewaehlt, Suchtreffer) liegt darueber: das Bild mit der Deckkraft des
+  // Zuruecktretens, darauf nur die hellen Knoten, ihre Linien und Namen.
+  // So kostet auch das Ueberfahren in einem dichten Netz nur den kleinen
+  // Teil, der sich aendert.
+  let panCache = null; // {canvas, k, x, y, mx, my, key}
+  let panCanvas = null;
+  let sceneVersion = 0; // steigt, wenn sich etwas anderes als Ausschnitt oder Licht aendert
+  let overlayOnly = false; // die Zeichenfunktionen malen nur, was im Licht steht
+  let lastDrawK = 0; // Zoom des letzten Bildes: das Zwischenbild entsteht erst, wenn er steht
+
   /* ---------------------------- Farben ----------------------------- */
 
   /** Die Farbe, auf der die Leinwand liegt: der erste Vorfahr, der malt. */
@@ -718,6 +739,10 @@ export function createGraphCanvas(canvas, options = {}) {
       accentFill: rgba(accent),
       accentGlow: rgba(accent, dark ? 0.22 : 0.16),
       accentLine: rgba(accent, 0.85),
+      // Linien im Licht: der Akzent, aber ins Liniengrau gemischt -- betont,
+      // nicht neon (Vision: EIN dezentes Akzentblau).
+      accentSoft: mix(mix(ground, fg, dark ? 0.42 : 0.4), accent, 0.72),
+      themeGlow: rgba(accent, dark ? 0.1 : 0.08),
       // Das Art-Symbol im Punkt: die Farbe des Grundes, damit es sich
       // eindrueckt statt aufzutragen.
       glyph: rgba(ground, 0.9),
@@ -727,8 +752,8 @@ export function createGraphCanvas(canvas, options = {}) {
     // Themenkreise: ein Grau aus Grund und Schrift, mit einem Hauch des
     // Themen-Tons -- Saettigung niedrig, in beiden Darstellungen.
     const themeBase = mix(ground, fg, dark ? 0.13 : 0.06);
-    palette.themeFill = THEME_HUES.map((css) => rgba(mix(themeBase, parseColor(ctx, css, fg), dark ? 0.14 : 0.085)));
-    palette.themeRing = THEME_HUES.map((css) => rgba(mix(mix(ground, fg, dark ? 0.32 : 0.28), parseColor(ctx, css, fg), 0.36)));
+    palette.themeFill = THEME_HUES.map((css) => rgba(mix(themeBase, parseColor(ctx, css, fg), dark ? 0.1 : 0.075)));
+    palette.themeRing = THEME_HUES.map((css) => rgba(mix(mix(ground, fg, dark ? 0.32 : 0.28), parseColor(ctx, css, fg), 0.3)));
     palette.themeFillPlain = rgba(themeBase);
     palette.themeRingPlain = rgba(mix(ground, fg, dark ? 0.3 : 0.26));
     palette.themeLine = mix(ground, fg, dark ? 0.36 : 0.36);
@@ -742,9 +767,12 @@ export function createGraphCanvas(canvas, options = {}) {
     if (themen) return themaRadius(nodes[slot].anzahl, maxAnzahl);
     // Die sichtbaren Linien: ein Agent, dessen Laeufe ausgeblendet sind,
     // liegt als Waise im Ring und soll dort kein dicker Punkt sein.
+    // Groesse nach Verbindungen, sichtbar: ein Hub mit neun Linien ist gut
+    // doppelt so gross wie ein Blatt mit einer -- wie in der Vorlage, wo die
+    // Hubs als helle Scheiben aus dem Netz treten.
     const d = visDegree[slot];
-    const base = mini ? 2.8 : 2.8;
-    return settings.nodeScale * Math.min(base + 1.2 * Math.sqrt(d), mini ? 7 : 15);
+    const base = mini ? 2.8 : 3.3;
+    return settings.nodeScale * Math.min(base + (mini ? 1.2 : 1.75) * Math.sqrt(d), mini ? 7 : 17);
   }
 
   function tierOf(slot) {
@@ -761,6 +789,7 @@ export function createGraphCanvas(canvas, options = {}) {
    * erhalten, damit ein Nachladen die Karte nicht unter der Hand umwirft.
    */
   function setData(data, opts = {}) {
+    sceneVersion++;
     const inNodes = Array.isArray(data && data.nodes) ? data.nodes : [];
     const inEdges = Array.isArray(data && data.edges) ? data.edges : [];
 
@@ -1154,6 +1183,7 @@ export function createGraphCanvas(canvas, options = {}) {
   }
 
   function tick() {
+    sceneVersion++;
     const t0 = performance.now();
     alpha += (alphaTarget - alpha) * alphaDecayFor(n);
     if (tickCount++ % 6 === 0) updateRing();
@@ -1543,9 +1573,101 @@ export function createGraphCanvas(canvas, options = {}) {
     }
 
     frameNow = now;
-    draw();
+    // Bewegt sich die Wolke selbst (Physik, Aufbau, wachsende Linie), wird
+    // gezeichnet; Ausschnitt, Licht und Auswahl gehen ueber das Zwischenbild.
+    const wolkeBewegt = running() || !!enterStart || !!growingUntil;
+    if (wolkeBewegt || !drawFromPanCache()) draw();
+    lastDrawK = transform.k;
     if (busy) requestFrame();
     else lastFrame = 0;
+  }
+
+  function dropPanCache() {
+    panCache = null;
+    if (panCanvas) {
+      panCanvas.width = 1; // gibt den Speicher frei (bei dpr 2 auf dem iPad sind es Dutzende MB)
+      panCanvas.height = 1;
+    }
+  }
+
+  /**
+   * Das Zwischenbild (siehe oben). Liefert false, wenn keines genutzt werden
+   * kann -- dann zeichnet der Aufrufer ganz normal. Genutzt wird es nur bei
+   * einem dichten Netz (PAN_CACHE_AB sichtbare Linien), stillstehender Wolke
+   * (prueft der Aufrufer) und einem Zoom, der seit dem letzten Bild steht:
+   * waehrend Rad oder Pinch zoomen, wuerde jedes Bild ein neues Zwischenbild
+   * kosten, das ist teurer als Zeichnen.
+   */
+  function drawFromPanCache() {
+    if (m < PAN_CACHE_AB && panCanvas && panCanvas.width > 1) dropPanCache(); // ein kleines Netz braucht den Speicher nicht
+    if (mini || themen || !n || !width || !height || m < PAN_CACHE_AB) return false;
+    const k = transform.k;
+    const key = `${sceneVersion}|${k}|${dpr}|${width}|${height}`;
+    if (panCache && (panCache.key !== key
+      || Math.abs(transform.x - panCache.x) > panCache.mx || Math.abs(transform.y - panCache.y) > panCache.my)) {
+      panCache = null;
+    }
+    if (!panCache) {
+      if (k !== lastDrawK) return false;
+      let ve = 0;
+      for (let e = 0; e < m; e++) if (edgeVisible[e]) ve++;
+      if (ve < PAN_CACHE_AB) return false;
+      const mx = Math.round(width * PAN_MARGIN);
+      const my = Math.round(height * PAN_MARGIN);
+      const off = panCanvas || (panCanvas = document.createElement('canvas'));
+      off.width = Math.max(1, Math.round((width + 2 * mx) * dpr));
+      off.height = Math.max(1, Math.round((height + 2 * my) * dpr));
+      const octx = off.getContext('2d', { alpha: true });
+      if (!octx) return false;
+      // Dieselbe Szene, dieselben Zeichenfunktionen -- nur auf die zweite
+      // Leinwand, mit Rand, verschobenem Ursprung und ohne Licht und Auswahl.
+      const saved = { ctx, width, height, transform, fade, selected };
+      ctx = octx;
+      width += 2 * mx;
+      height += 2 * my;
+      transform = { k, x: saved.transform.x + mx, y: saved.transform.y + my };
+      fade = 0;
+      selected = -1;
+      try {
+        draw();
+      } finally {
+        ctx = saved.ctx;
+        width = saved.width;
+        height = saved.height;
+        transform = saved.transform;
+        fade = saved.fade;
+        selected = saved.selected;
+      }
+      panCache = { canvas: off, k, x: transform.x, y: transform.y, mx, my, key };
+    }
+    const t0 = performance.now();
+    frameNow = t0;
+    const dx = transform.x - panCache.x;
+    const dy = transform.y - panCache.y;
+    const lit = fade > 0;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    // Im Licht tritt das ganze Zwischenbild zurueck; die hellen Teile kommen darauf.
+    ctx.globalAlpha = lit ? 1 - fade * (1 - dimAlpha) : 1;
+    ctx.drawImage(panCache.canvas, Math.round((dx - panCache.mx) * dpr), Math.round((dy - panCache.my) * dpr));
+    ctx.globalAlpha = 1;
+    for (let i = 0; i < n; i++) {
+      sx[i] = posX[i] * k + transform.x;
+      sy[i] = posY[i] * k + transform.y;
+    }
+    if (lit || selected >= 0) {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      overlayOnly = true;
+      try {
+        drawEdges(k);
+        drawNodes(k);
+        drawLabels(k);
+      } finally {
+        overlayOnly = false;
+      }
+    }
+    drawMs = performance.now() - t0;
+    return true;
   }
 
   /** 0..1: wie weit ein Knoten im weichen Aufbau ist (Welle 0-3, Hubs zuerst). */
@@ -1560,7 +1682,7 @@ export function createGraphCanvas(canvas, options = {}) {
     frameNow = t0;
     if (!palette) readPalette();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     if (!width || !height || !n) {
       drawMs = performance.now() - t0;
       return;
@@ -1595,7 +1717,10 @@ export function createGraphCanvas(canvas, options = {}) {
     if (!m) return;
     // Linien bleiben duenn: sie wachsen nur sanft mit dem Zoom mit.
     const lw = settings.linkScale * clamp(0.55 + 0.45 * Math.sqrt(k), 0.5, 1.8) * (mini ? 1.1 : 1);
-    ctx.lineCap = 'round';
+    // Stumpfe Enden fuer die Masse: bei tausenden Linien kostet jedes runde
+    // Ende im Software-Raster ein Drittel der Zeit, und bei 1 px sieht man es
+    // nicht. Neue und beleuchtete Linien bekommen ihre runden Enden unten.
+    ctx.lineCap = m > 600 ? 'butt' : 'round';
     // Beim Aufbau blenden die Linien nach den Knoten ein.
     const enterA = enterStart ? easeOut((frameNow - enterStart - ENTER_WAVE_MS * 2) / ENTER_MS) : 1;
     if (enterA <= 0) return;
@@ -1609,7 +1734,7 @@ export function createGraphCanvas(canvas, options = {}) {
     // Ohne Licht: alle Linien in einem Pfad -- ein Strich fuer tausend Kanten.
     ctx.beginPath();
     let any = false;
-    for (let e = 0; e < m; e++) {
+    for (let e = 0; e < m && !overlayOnly; e++) {
       if (!edgeVisible[e]) continue;
       if (edgeBorn[e] && frameNow - edgeBorn[e] < EDGE_GROW_MS) {
         growing.push(e);
@@ -1628,6 +1753,7 @@ export function createGraphCanvas(canvas, options = {}) {
       ctx.lineWidth = lw;
       ctx.stroke();
     }
+    ctx.lineCap = 'round';
     // Eine neue Verbindung zieht sich vom einen zum anderen Knoten, im Akzent.
     for (const e of growing) {
       const p = edgeA[e];
@@ -1661,8 +1787,8 @@ export function createGraphCanvas(canvas, options = {}) {
         ctx.strokeStyle = rgba(palette.fg, 0.5);
         ctx.lineWidth = lw;
       } else if (focusSlot >= 0) {
-        ctx.strokeStyle = rgba(palette.accent, 0.35 + 0.5 * fade);
-        ctx.lineWidth = lw * (1 + 0.5 * fade);
+        ctx.strokeStyle = rgba(palette.accentSoft, 0.4 + 0.4 * fade);
+        ctx.lineWidth = lw * (1 + 0.3 * fade);
       } else {
         ctx.strokeStyle = rgba(palette.line, Math.min(1, lineAlpha * (1 + 0.6 * fade)));
         ctx.lineWidth = lw;
@@ -1707,7 +1833,7 @@ export function createGraphCanvas(canvas, options = {}) {
         }
         if (!any) return;
         const a = hell ? Math.min(1, lineAlpha * 1.3) : lineAlpha * (1 - fade * (1 - dimAlpha * 0.9));
-        ctx.strokeStyle = hell ? rgba(palette.accent, 0.35 + 0.45 * fade) : rgba(palette.themeLine, a * (0.55 + stufe * 0.15));
+        ctx.strokeStyle = hell ? rgba(palette.accentSoft, 0.4 + 0.4 * fade) : rgba(palette.themeLine, a * (0.55 + stufe * 0.15));
         ctx.lineWidth = (0.8 + stufe * 0.6) * (hell ? 1.4 : 1);
         ctx.stroke();
       };
@@ -1807,9 +1933,10 @@ export function createGraphCanvas(canvas, options = {}) {
       if (lit && !bright[i]) a *= 1 - fade * (1 - dimAlpha);
       ctx.globalAlpha = a;
       if (hell || i === selected) {
+        // Ein leiser Schein, kein zweiter Ring: der Kreis bleibt eine Flaeche.
         ctx.beginPath();
-        ctx.arc(sx[i], sy[i], r + 7, 0, TAU);
-        ctx.fillStyle = palette.accentGlow;
+        ctx.arc(sx[i], sy[i], r + 5, 0, TAU);
+        ctx.fillStyle = palette.themeGlow;
         ctx.fill();
       }
       ctx.beginPath();
@@ -1818,8 +1945,8 @@ export function createGraphCanvas(canvas, options = {}) {
       ctx.fill();
       ctx.beginPath();
       ctx.arc(sx[i], sy[i], r - 0.5, 0, TAU);
-      ctx.strokeStyle = hell || i === selected ? rgba(palette.accent, 0.5 + 0.5 * (i === selected ? 1 : fade)) : ck >= 0 && palette.themeRing[ck] ? palette.themeRing[ck] : palette.themeRingPlain;
-      ctx.lineWidth = hell || i === selected ? 1.5 : 1;
+      ctx.strokeStyle = hell || i === selected ? rgba(palette.accent, 0.45 + 0.4 * (i === selected ? 1 : fade)) : ck >= 0 && palette.themeRing[ck] ? palette.themeRing[ck] : palette.themeRingPlain;
+      ctx.lineWidth = hell || i === selected ? 1.25 : 1;
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
@@ -1845,6 +1972,7 @@ export function createGraphCanvas(canvas, options = {}) {
       const r = screenRadius(i, k);
       if (!onScreen(i, r + 2)) continue;
       if (i === selected || (lit && i === focusSlot)) continue; // kommt zuletzt, im Akzent
+      if (overlayOnly && !(lit && bright[i])) continue; // das Zwischenbild hat den Rest
       const ck = colorKey[i];
       let style = ck >= 0 && colors[ck] ? colors[ck] : palette.tiers[tierOf(i)];
       if (entering) style = `${style}\u0001${Math.min(3, Math.floor((labelRank[i] * 4) / Math.max(1, n)))}`;
@@ -2159,6 +2287,7 @@ export function createGraphCanvas(canvas, options = {}) {
       for (let o = 0; o < labelOrder.length; o++) {
         const i = labelOrder[o];
         if (!visible[i] || forced.has(i)) continue;
+        if (overlayOnly && !(lit && highlightSet && bright[i])) continue; // die anderen stehen im Zwischenbild
         const importance = radius[i] / (2.8 * settings.nodeScale);
         let a = dicht ? clamp((k * importance - lz) / (0.45 * lz), 0, 1) : 1;
         a = topSlots.has(i) ? 1 : a * gate;
@@ -2254,6 +2383,7 @@ export function createGraphCanvas(canvas, options = {}) {
   /* ---------------------------- Groesse ---------------------------- */
 
   function resize() {
+    sceneVersion++;
     const rect = canvas.getBoundingClientRect();
     const w = Math.max(0, Math.round(rect.width));
     const hgt = Math.max(0, Math.round(rect.height));
@@ -2409,6 +2539,7 @@ export function createGraphCanvas(canvas, options = {}) {
         canvas.style.cursor = 'grabbing';
       }
       if (gesture.dragging) {
+        sceneVersion++;
         fixX[gesture.slot] = (p.x - transform.x) / transform.k;
         fixY[gesture.slot] = (p.y - transform.y) / transform.k;
         posX[gesture.slot] = fixX[gesture.slot];
@@ -2628,6 +2759,7 @@ export function createGraphCanvas(canvas, options = {}) {
   }
 
   function setFilter(fn) {
+    sceneVersion++;
     filterFn = typeof fn === 'function' ? fn : null;
     const before = visible.slice();
     applyFilter();
@@ -2642,6 +2774,7 @@ export function createGraphCanvas(canvas, options = {}) {
 
   /** Einen Knoten an eine Weltposition heften (Kachel: die Mitte). */
   function pin(id, x = 0, y = 0) {
+    sceneVersion++;
     const s = index.get(id);
     if (s === undefined) return api;
     fixed[s] = 1;
@@ -2653,6 +2786,7 @@ export function createGraphCanvas(canvas, options = {}) {
   }
 
   function setOrphans(show) {
+    sceneVersion++;
     const next = show !== false;
     if (next === showOrphans) return api;
     showOrphans = next;
@@ -2681,6 +2815,7 @@ export function createGraphCanvas(canvas, options = {}) {
    * Thema faerbt den Punkt, es schreit nicht.
    */
   function setColors(colorOf, list) {
+    sceneVersion++;
     colorKey.fill(-1);
     colors = [];
     if (colorOf && Array.isArray(list) && palette) {
@@ -2700,6 +2835,7 @@ export function createGraphCanvas(canvas, options = {}) {
   }
 
   function setSettings(next) {
+    sceneVersion++;
     const before = settings;
     settings = { ...settings, ...next };
     for (const key of Object.keys(GRAPH_DEFAULTS)) {
@@ -2714,6 +2850,7 @@ export function createGraphCanvas(canvas, options = {}) {
   }
 
   function setLabels({ always = null, rings = null } = {}) {
+    sceneVersion++;
     alwaysLabel = always ? new Set(always) : null;
     ringIds = rings ? new Set(rings) : null;
     requestFrame();
@@ -2721,6 +2858,7 @@ export function createGraphCanvas(canvas, options = {}) {
   }
 
   function refreshTheme() {
+    sceneVersion++;
     palette = null;
     readPalette();
     if (pendingColors) setColors(pendingColors.colorOf, pendingColors.list);
@@ -2776,6 +2914,7 @@ export function createGraphCanvas(canvas, options = {}) {
 
   /** Weicher Aufbau: Knoten wachsen in Wellen, Linien und Namen blenden nach. */
   function enter(delayMs = 0) {
+    sceneVersion++;
     if (reduceMotion()) {
       enterStart = 0;
       requestFrame();
@@ -2864,6 +3003,8 @@ export function createGraphCanvas(canvas, options = {}) {
 
   function destroy() {
     destroyed = true;
+    dropPanCache();
+    panCanvas = null;
     if (rafId) cancelAnimationFrame(rafId);
     rafId = 0;
     for (const off of listeners.splice(0)) off();

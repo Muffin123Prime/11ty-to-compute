@@ -351,6 +351,76 @@ async function los(page, base, view, warten = 1000) {
       await shot(p, 'notiz-aus-dem-chat-dunkel');
       await p.keyboard.press('Escape');
     });
+    // Notizen als Teil des Wissensnetzes (web/views/notes.js): Liste mit
+    // Schlagwort-Filter, "Verknuepft mit", die Vorschlagskarte, der Editor
+    // mit der Liste hinter "[[", die Rueckfrage beim Verwerfen und das Plus.
+    await step('Notizen: Liste, Schlagwort #biologie', async () => {
+      await los(p, base, 'notes', 1400);
+      await p.locator('.nw__modus .segmented__option', { hasText: 'Liste' }).click();
+      await p.locator('.nw__tag[data-tag="biologie"]').click();
+      await p.waitForTimeout(500);
+      await shot(p, 'notizen-liste-biologie-dunkel');
+      // Zurueck auf die ganze Wand: der Filter steht in der Adresse (?tag=),
+      // ein erneutes Aufrufen derselben Adresse baut die Ansicht nicht neu.
+      await p.locator('.nw__modus .segmented__option', { hasText: 'Wand' }).click();
+      await p.locator('.nw__tag', { hasText: /^Alle$/ }).click();
+    });
+    await step('Notiz: Verknüpft mit, Callout, Haken', async () => {
+      await los(p, base, 'notes', 1400);
+      await klick(p, /^Photosynthese,/, { warten: 1400 });
+      await shot(p, 'notiz-verknuepft-mit-dunkel');
+      await p.keyboard.press('Escape');
+      await p.waitForTimeout(300);
+    });
+    await step('Notiz: Verbindungsvorschläge', async () => {
+      await klick(p, /^Chlorophyll absorbiert Licht,/, { warten: 1400 });
+      const karte = p.locator('.nw__card');
+      await karte.waitFor({ state: 'visible', timeout: 8000 });
+      await shot(p, 'notiz-vorschlaege-dunkel');
+      await karte.getByRole('button', { name: /^Bearbeiten$/ }).click();
+      await p.waitForTimeout(400);
+      await shot(p, 'notiz-vorschlaege-bearbeiten-dunkel');
+      await p.keyboard.press('Escape');
+      await p.waitForTimeout(300);
+    });
+    await step('Notiz: Editor mit der Liste hinter [[', async () => {
+      await klick(p, /^Photosynthese,/, { warten: 1400 });
+      await p.locator('.nw__read-foot').getByRole('button', { name: /^Bearbeiten$/ }).click();
+      await p.waitForTimeout(700);
+      await p.locator('.nos-ne__area').click();
+      await p.keyboard.press('Control+End');
+      await p.keyboard.type('\n\nSiehe auch [[Zell');
+      await p.locator('.nos-ne__list').waitFor({ state: 'visible', timeout: 4000 });
+      await shot(p, 'notiz-editor-vervollstaendigung-dunkel');
+      await p.keyboard.press('Escape'); // erst die Liste ...
+      await p.waitForTimeout(200);
+      await p.keyboard.press('Escape'); // ... dann der Editor: die Rueckfrage
+      await p.waitForTimeout(500);
+      await shot(p, 'notiz-editor-verwerfen-dunkel');
+      await p.getByRole('button', { name: /^Verwerfen$/ }).click();
+      await p.waitForTimeout(400);
+    });
+    await step('Notizen: das Plus (Neu)', async () => {
+      await p.locator('[data-nw-plus]').click();
+      await p.waitForTimeout(400);
+      await shot(p, 'notizen-plus-menue-dunkel');
+      await p.locator('[data-neu="link"]').click();
+      await p.waitForTimeout(500);
+      await shot(p, 'notizen-link-speichern-dunkel');
+      await p.keyboard.press('Escape');
+    });
+    await c.close();
+  }
+
+  {
+    // Die Notiz mit ihren Verknuepfungen auf dem iPad des Nutzers (quer, Finger).
+    const { c, p } = await mach('dark', { breite: 1180, hoehe: 820, finger: true });
+    await step('iPad: Notiz mit Verknüpfungen', async () => {
+      await los(p, base, 'notes', 1500);
+      await p.getByRole('button', { name: /^Photosynthese,/ }).first().tap();
+      await p.waitForTimeout(1400);
+      await shot(p, 'ipad-quer-notiz-verknuepft-dunkel');
+    });
     await c.close();
   }
 
@@ -707,6 +777,14 @@ async function los(page, base, view, warten = 1000) {
       if (!traf) throw new Error('„Freigabe erteilen“ nicht gefunden');
       await p.waitForTimeout(600);
       await shot(p, 'netz-freigabe-erteilen-hell');
+    });
+    await step('Notiz: Verbindungsvorschläge (hell)', async () => {
+      await los(p, base, 'notes', 1500);
+      await klick(p, /^Chlorophyll absorbiert Licht,/, { warten: 1400 });
+      await p.locator('.nw__card').waitFor({ state: 'visible', timeout: 8000 });
+      await shot(p, 'notiz-vorschlaege-hell');
+      await p.keyboard.press('Escape');
+      await p.waitForTimeout(300);
     });
     await step('Notiz: im Gehirn zeigen', async () => {
       await los(p, base, 'notes', 1500);

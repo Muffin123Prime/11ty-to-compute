@@ -29,7 +29,7 @@
  *    not an affordance.
  */
 
-import { h, text, clear, on } from './dom.js';
+import { h, text, clear, on, icon } from './dom.js';
 
 const STYLE_ID = 'nos-editor-style';
 

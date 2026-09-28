@@ -1554,14 +1554,40 @@ function createShell() {
         {
           id: 'act:new-note',
           group: 'Aktionen',
-          label: 'Neue Notiz anlegen',
+          label: 'Neue Notiz',
+          hint: 'Öffnet den Editor · [[ verknüpft, # setzt ein Schlagwort',
           icon: ICONS.notes,
-          run: async () => {
-            const record = await api.post('/records', { type: 'note', data: { title: 'Neue Notiz', body: '' } });
-            const id = record && (record.id || (record.record && record.record.id));
-            toast('Notiz angelegt.', 'success');
-            navigate(id ? `#/notes?id=${encodeURIComponent(id)}` : '#/notes');
-          },
+          keywords: 'anlegen schreiben notiz',
+          // Kein Platzhalter-Satz "Neue Notiz" im Tresor: die Notiz entsteht
+          // erst, wenn ein Titel da ist (web/views/notes.js, ?neu=notiz).
+          run: () => navigate('#/notes?neu=notiz'),
+        },
+        {
+          id: 'act:new-task',
+          group: 'Aktionen',
+          label: 'Neue Aufgabe',
+          hint: 'Text und Fälligkeit, landet unter Projekte',
+          icon: ICONS.checkCircle,
+          keywords: 'anlegen todo aufgabe',
+          run: () => navigate('#/notes?neu=aufgabe'),
+        },
+        {
+          id: 'act:save-link',
+          group: 'Aktionen',
+          label: 'Link speichern',
+          hint: 'Adresse als Notiz, mit Seitentitel, wenn online',
+          icon: ICONS.globe,
+          keywords: 'url adresse lesezeichen',
+          run: () => navigate('#/notes?neu=link'),
+        },
+        {
+          id: 'act:open-graph',
+          group: 'Aktionen',
+          label: 'Gehirn öffnen',
+          hint: 'Das Wissensuniversum: Themen, zoombar',
+          icon: ICONS.graph,
+          keywords: 'graph netz wissen universum',
+          run: () => navigate('#/graph'),
         },
         {
           id: 'act:left',
@@ -1690,7 +1716,18 @@ function createShell() {
       const stark = scored.filter((x) => query && x.s >= 9 && !schonDa.has(x.item.id)).map((x) => x.item);
       const lose = scored.filter((x) => (!query || x.s < 9) && !schonDa.has(x.item.id))
         .map((x) => (query ? { ...x.item, group: 'Weitere' } : x.item));
-      items = [...stark, ...treffer, ...lose];
+      // Ab zwei Zeichen: "Nach … suchen" fuehrt auf die Notizwand mit genau
+      // dieser Suche -- fuer den Fall, dass die acht Treffer hier nicht reichen.
+      const wort = String(query || '').trim();
+      const suchen = wort.length >= 2 ? [{
+        id: 'act:search-notes',
+        group: 'Treffer',
+        label: `Nach „${wort.length > 60 ? `${wort.slice(0, 60)}…` : wort}“ in den Notizen suchen`,
+        hint: 'Notizwand mit Filter',
+        icon: ICONS.search,
+        run: () => navigate(`#/notes?q=${encodeURIComponent(wort)}`),
+      }] : [];
+      items = [...stark, ...treffer, ...suchen, ...lose];
       active = 0;
       paint();
     }

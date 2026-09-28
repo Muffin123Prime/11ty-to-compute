@@ -135,7 +135,7 @@ const CSS = `
 .gh__crumb-n { color: var(--fg-subtle); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; margin-left: 2px; }
 
 .gh__tools { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; max-width: min(360px, 60%); }
-.gh__search { position: relative; width: 240px; max-width: 100%; }
+.gh__search { position: relative; width: 256px; max-width: 100%; }
 .gh__search .input {
   width: 100%; min-height: 36px; padding-left: 32px; padding-right: 10px;
   background: color-mix(in srgb, var(--surface-2) 88%, transparent);
@@ -398,7 +398,8 @@ function build(self) {
     onDive: (node) => { if (node) tauchen(self, node.id, { woher: 'zoom' }); },
     onHover: (node) => announce(self, node ? `Thema ${node.label}, ${formatNumber(node.anzahl)} Einträge` : ''),
   });
-  self.uni.setPadding({ top: 72, right: 72, bottom: 56, left: 56 });
+  // Luft um die Kreise: die Karte fuellt den Rahmen nicht bis an den Rand (Vision: viel freier Platz).
+  self.uni.setPadding({ top: 84, right: 96, bottom: 72, left: 88 });
 
   self.netz = createGraphCanvas(dom.canvasNetz, {
     onSelect: (node) => select(self, node ? node.id : null, { fromCanvas: true }),
@@ -515,6 +516,11 @@ function build(self) {
       const canvas = self.ebene === 1 ? self.netz : self.uni;
       return canvas.screenPosition(id);
     },
+    /** Der Knoten unter einem Punkt der Leinwand (CSS-Pixel), oder null -- fuer Pruefwerkzeuge. */
+    nodeAt(x, y) {
+      const canvas = self.ebene === 1 ? self.netz : self.uni;
+      return canvas.nodeAtScreen(x, y);
+    },
     stats() { return (self.ebene === 1 ? self.netz : self.uni).stats(); },
     tauchen: (id) => tauchen(self, id, { woher: 'test' }),
     auftauchen: () => auftauchen(self, { woher: 'test' }),
@@ -595,6 +601,7 @@ async function start(self) {
       dom.layerUni.dataset.zustand = 'weg';
       dom.layerNetz.dataset.zustand = 'weg';
       renderCrumbs(self);
+      renderTools(self); // kein Suchfeld ueber einem leeren Universum
       renderHint(self);
       return;
     }
@@ -635,7 +642,7 @@ async function nachladen(self) {
     self.leer = u.gesamt.knoten === 0;
     self.klein = !self.leer && u.gesamt.knoten < KLEIN_AB;
     if (self.ebene === 0 || warLeer) {
-      if (self.leer) { renderState(self); renderCount(self); return; }
+      if (self.leer) { renderState(self); renderCount(self); renderCrumbs(self); renderTools(self); return; }
       if (self.klein) { await zeigeNetz(self, { art: 'alles', sofort: true }); return; }
       themenZeichnen(self, { neu: warLeer });
       renderState(self);
@@ -1352,7 +1359,7 @@ function renderTools(self) {
 
   dom.search = h('input.input', {
     type: 'search',
-    placeholder: self.ebene === 0 ? 'Themen und Einträge suchen …' : 'Suchen …',
+    placeholder: self.ebene === 0 ? 'Thema oder Eintrag …' : 'Suchen …',
     value: self.query,
     'aria-label': 'Im Gehirn suchen',
     autocomplete: 'off',

@@ -224,6 +224,10 @@ async function main() {
     console.log(`\n${B}4b · Das Gehirn: ein Netz, das zur Ruhe kommt, und ein Antippen, das wirkt${X}`);
     await pruefeGehirn(page, base, store);
 
+    /* --------------------- 4c. Das Gehirn: leer, und bei 10.000 Eintraegen */
+    console.log(`\n${B}4c · Das Gehirn: leer lädt es ein, bei 10.000 Einträgen bleibt es flüssig${X}`);
+    await pruefeGehirnGross(browser);
+
     /* ------------------------ 5. Schnellerfassung von ueberall aus */
     console.log(`\n${B}5 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
     // Absichtlich aus dem Gehirn heraus: der ganze Sinn ist, dass man nicht
@@ -806,15 +810,20 @@ async function pruefeGehirn(page, base, store) {
   const ids = (z && z.ids) || [];
   if (ids.length >= 2) {
     const vorher = await page.evaluate(() => document.querySelector('.gh').gehirn.stats().visibleEdges);
-    // Zwei Knoten des Themas, zwischen denen es noch keine Linie gibt.
-    const von = ids[0];
-    const schon = new Set();
-    for (const e of store.edges.for(von, { direction: 'both' })) {
-      schon.add(e.data.from);
-      schon.add(e.data.to);
+    // Zwei Knoten des Themas, zwischen denen es noch keine Linie gibt -- der
+    // erste (Hub) haengt oft schon an allen, also ueber die Knoten hinweg suchen.
+    let von = null;
+    let zu = null;
+    for (const kandidat of ids.slice(0, 40)) {
+      const schon = new Set();
+      for (const e of store.edges.for(kandidat, { direction: 'both' })) {
+        schon.add(e.data.from);
+        schon.add(e.data.to);
+      }
+      const frei = ids.find((id) => id !== kandidat && !schon.has(id));
+      if (frei) { von = kandidat; zu = frei; break; }
     }
-    const zu = ids.find((id) => id !== von && !schon.has(id));
-    if (!zu) hmm('Eine neue Verbindung erscheint sofort im Netz', 'alle Knoten des Themas hängen schon am ersten');
+    if (!zu) hmm('Eine neue Verbindung erscheint sofort im Netz', 'jeder Knoten des Themas hängt schon an jedem');
     else {
       store.edges.add({ from: von, to: zu, kind: 'related', source: 'manual', reason: 'Prüfung: neue Verbindung' });
       const kam = await page.waitForFunction((n) => document.querySelector('.gh').gehirn.stats().visibleEdges > n, vorher, { timeout: 5000 }).then(() => true, () => false);
@@ -910,6 +919,178 @@ async function pruefeGehirn(page, base, store) {
     const gewaehlt = (await page.locator('.gh__card-title').innerText().catch(() => '')).trim();
     const krumen = (await page.locator('.gh__crumb').allInnerTexts()).map((t) => t.trim());
     check(!!gewaehlt, 'Antippen öffnet das Gehirn mit genau dieser Mitte gewählt (Umfeld, Karte offen)', gewaehlt ? `${gewaehlt} · ${krumen.join(' › ')}` : 'nichts gewählt');
+  }
+}
+
+/**
+ * Zwei Zustaende, die der geteilte Tresor oben nicht hergibt: das leere
+ * Gehirn (Vision: "Dein Wissensuniversum wartet." mit drei Wegen hinein und
+ * OHNE Suchfeld ueber dem Nichts) und das volle (Vertrag F: 10.000 Knoten,
+ * Ebene 0 sofort, Ebene 1 eines Themas mit 2.000 Knoten fluessig). Beides
+ * in einem eigenen Tresor, damit die Zaehlungen der anderen Abschnitte
+ * stimmen bleiben. Die Bilder je Sekunde werden IM Browser gezaehlt: je
+ * Bild ein synthetisches pointermove, requestAnimationFrame gegen
+ * performance.now() -- so misst die Zahl die Arbeit der Seite, nicht die
+ * Laufzeit der Fernsteuerung. Chromium hier hat keine GPU; die Zahlen sind
+ * also die eines Software-Rasters und damit die Untergrenze.
+ */
+async function pruefeGehirnGross(browser) {
+  const { createApp } = require('../src/app');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-ui-gross-'));
+  const app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error' });
+  await app.loadModules({});
+  const server = await app.listen();
+  const base = `http://127.0.0.1:${server.server.address().port}`;
+  const store = app.store;
+  let context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+  let page = await context.newPage();
+  const fehler = [];
+  page.on('pageerror', (e) => fehler.push(e.message.slice(0, 120)));
+  const warte = (ms) => page.waitForTimeout(ms);
+  const gehirn = () => page.evaluate(() => {
+    const g = document.querySelector('.gh');
+    const a = g && g.gehirn;
+    return a ? { ebene: a.ebene, nodes: a.nodes, themen: a.themen, leer: a.leer, thema: a.thema ? a.thema.name : null } : null;
+  });
+  try {
+    // Leer: eingeladen, nicht kaputt.
+    await page.goto(`${base}/#/graph`, { waitUntil: 'domcontentloaded' });
+    await dismissWelcome(page);
+    const leer = await page.waitForFunction(() => { const g = document.querySelector('.gh'); return g && g.gehirn && g.gehirn.leer; }, null, { timeout: 15000 }).then(() => true, () => false);
+    const titel = (await page.locator('.gh__state-title').innerText().catch(() => '')).trim();
+    const satz = (await page.locator('.gh__state-text').innerText().catch(() => '')).trim();
+    check(leer && titel === 'Dein Wissensuniversum wartet.' && satz === 'Erstelle deine erste Notiz oder importiere vorhandenes Wissen.',
+      'Das leere Gehirn sagt „Dein Wissensuniversum wartet.“', `${titel} · ${satz}`);
+    const knoepfe = [];
+    for (const name of ['Erste Notiz', 'Importieren', 'KI kennenlernen']) {
+      if (await page.locator('.gh__state').getByRole('button', { name, exact: true }).count()) knoepfe.push(name);
+    }
+    check(knoepfe.length === 3, 'Drei Wege hinein: [Erste Notiz] [Importieren] [KI kennenlernen]', knoepfe.join(' · '));
+    check(!(await page.getByLabel('Im Gehirn suchen').count()) && !(await page.locator('.gh__crumb').count()),
+      'Über dem leeren Universum steht kein Suchfeld und kein Pfad');
+    await page.locator('.gh__state').getByRole('button', { name: 'Erste Notiz', exact: true }).click();
+    await warte(500);
+    const hash = await page.evaluate(() => window.location.hash);
+    check(hash === '#/notes?neu', '„Erste Notiz“ führt zu den Notizen, mit neuem Blatt', hash);
+
+    // Voll: 10.000 Notizen, ein Thema mit 2.000, der Rest in 160 Schlagworten.
+    // Geschrieben wie ein Import (app.bulkWrite): dabei ruht die Ableitung,
+    // und mit ihr die Verbindungsvorschlaege nach dem Speichern. Ohne das
+    // stuenden nach 10.000 store.create() 10.000 Vorschlags-Zeitgeber an,
+    // die den Server rund 100 s blockieren (gemessen) -- kein Import tut
+    // das, weil jeder Import ueber bulkWrite geht. Danach ein neuer
+    // Browserkontext, wie nach einem Neustart.
+    await page.close();
+    const N = 10000;
+    const GROSS = 2000;
+    const TAGS = 160;
+    const t0 = Date.now();
+    const ids = [];
+    const begriffe = [];
+    await app.bulkWrite(async () => {
+      store.transaction(() => {
+        for (let i = 0; i < 20; i++) begriffe.push(store.create('entity', { name: `Begriff ${i}`, kind: 'topic', description: `Thema ${i}.` }).id);
+        for (let i = 0; i < N; i++) {
+          const tag = i < GROSS ? 'biologie' : `thema${i % TAGS}`;
+          ids.push(store.create('note', { title: `Notiz ${i}`, body: `Inhalt ${i} über ${tag}.`, tags: [tag] }).id);
+        }
+      });
+      store.transaction(() => {
+        for (let i = 0; i < GROSS; i++) {
+          store.edges.add({ from: ids[i], to: ids[(i + 1) % GROSS], kind: 'links-to', source: 'derived', reason: 'Ring' });
+          store.edges.add({ from: ids[i], to: ids[(i * 7 + 13) % GROSS], kind: 'links-to', source: 'derived', reason: 'Quer' });
+        }
+        for (let i = GROSS; i < N; i++) {
+          store.edges.add({ from: ids[i], to: ids[GROSS + ((i - GROSS + TAGS) % (N - GROSS))], kind: 'links-to', source: 'derived', reason: 'Ring' });
+          if (i % 5 === 0) store.edges.add({ from: ids[i], to: begriffe[i % 20], kind: 'tagged', source: 'derived', reason: 'Begriff' });
+        }
+      });
+    }, { rederive: false });
+    await store.flush();
+    const aufbauMs = Date.now() - t0;
+    await context.close();
+    context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+    page = await context.newPage();
+    page.on('pageerror', (e) => fehler.push(e.message.slice(0, 120)));
+
+    const t1 = Date.now();
+    await page.goto(`${base}/#/graph`, { waitUntil: 'domcontentloaded' });
+    const da = await page.waitForFunction(() => { const g = document.querySelector('.gh'); return g && g.gehirn && g.gehirn.themen > 0; }, null, { timeout: 30000 }).then(() => true, () => false);
+    const ebene0Ms = Date.now() - t1;
+    const route = await page.evaluate(() => performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/graph/universum')).map((e) => Math.round(e.duration)));
+    let z = await gehirn();
+    check(da && z && z.ebene === 0 && z.themen >= 2 && z.themen <= 40 && ebene0Ms < 3000,
+      `${N.toLocaleString('de-DE')} Einträge: Ebene 0 steht sofort (höchstens 40 Kreise)`,
+      `${z ? z.themen : 0} Kreise nach ${ebene0Ms} ms ab Navigation · Route ${route.join('/')} ms · Tresor gebaut in ${aufbauMs} ms`);
+
+    const t2 = Date.now();
+    await page.evaluate(() => document.querySelector('.gh').gehirn.tauchen(document.querySelector('.gh').gehirn.themenIds[0]));
+    const drin = await page.waitForFunction(() => { const g = document.querySelector('.gh').gehirn; return g.ebene === 1 && g.nodes >= 1000; }, null, { timeout: 30000 }).then(() => true, () => false);
+    const ebene1Ms = Date.now() - t2;
+    z = await gehirn();
+    check(drin && z.nodes >= GROSS, 'Ebene 1 des größten Themas zeigt seine 2.000 Knoten', `${z && z.thema}: ${z && z.nodes} Knoten nach ${ebene1Ms} ms`);
+    const ruht = await page.waitForFunction(() => document.querySelector('.gh').dataset.ruhe === 'ja', null, { timeout: 40000 }).then(() => true, () => false);
+    check(ruht, 'Das Netz mit 2.000 Knoten kommt zur Ruhe', `nach ${Date.now() - t2} ms`);
+    await warte(300);
+
+    // Bilder je Sekunde, im Browser gezaehlt (siehe oben).
+    const bench = (art, dauerMs) => page.evaluate(async ([art, dauerMs]) => {
+      const g = document.querySelector('.gh').gehirn;
+      const c = document.querySelector('.gh__canvas--netz');
+      const r = c.getBoundingClientRect();
+      // Ein freier Punkt nahe der Mitte: auf einem Knoten zoege man den Knoten, nicht den Ausschnitt.
+      let cx = r.left + r.width / 2;
+      let cy = r.top + r.height / 2;
+      suche: for (let ring = 0; ring < 30; ring++) {
+        for (const [ox, oy] of [[ring * 12, 0], [-ring * 12, 0], [0, ring * 12], [0, -ring * 12], [ring * 9, ring * 9], [-ring * 9, -ring * 9]]) {
+          const x = r.width / 2 + ox;
+          const y = r.height / 2 + oy;
+          if (![[0, 0], [6, 0], [-6, 0], [0, 6], [0, -6]].some(([a, b]) => g.nodeAt(x + a, y + b))) { cx = r.left + x; cy = r.top + y; break suche; }
+        }
+      }
+      const ev = (type, x, y) => c.dispatchEvent(new PointerEvent(type, {
+        bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse', isPrimary: true,
+        button: type === 'pointermove' ? -1 : 0, buttons: art === 'pan' && type !== 'pointerup' ? 1 : 0,
+      }));
+      if (art === 'pan') ev('pointerdown', cx, cy);
+      await new Promise((res) => requestAnimationFrame(res));
+      let frames = 0;
+      let maxDraw = 0;
+      const t0 = performance.now();
+      await new Promise((res) => {
+        const step = () => {
+          frames++;
+          const t = (performance.now() - t0) / 1000;
+          ev('pointermove', cx + Math.sin(t * 2.5) * 160, cy + Math.cos(t * 1.7) * 90);
+          maxDraw = Math.max(maxDraw, g.stats().drawMs);
+          if (performance.now() - t0 < dauerMs) requestAnimationFrame(step); else res();
+        };
+        requestAnimationFrame(step);
+      });
+      const ms = performance.now() - t0;
+      if (art === 'pan') ev('pointerup', cx, cy);
+      const s = g.stats();
+      return { fps: Math.round((frames / (ms / 1000)) * 10) / 10, frames, maxDrawMs: Math.round(maxDraw), zoom: Math.round(s.zoom * 100) / 100, sichtbar: s.visibleNodes, linien: s.visibleEdges, physik: s.running };
+    }, [art, dauerMs]);
+    const sage = (r) => `${r.fps} Bilder/s (${r.frames} in 2 s, teuerstes Bild ${r.maxDrawMs} ms) bei Zoom ${r.zoom}, ${r.sichtbar} Knoten / ${r.linien} Linien${r.physik ? ', Physik lief' : ''}`;
+    await page.mouse.move(20, 880);
+    const panFit = await bench('pan', 2000);
+    check(panFit.fps >= 45 && panFit.sichtbar >= GROSS, 'Pan bei 2.000 sichtbaren Knoten, eingepasst: flüssig (Ziel 60 Bilder/s)', sage(panFit));
+    for (let i = 0; i < 5; i++) { await page.keyboard.press('+'); await warte(260); }
+    await warte(400);
+    const panZoom = await bench('pan', 2000);
+    check(panZoom.fps >= 45, 'Pan hineingezoomt (Linien quer über den Bildschirm): flüssig dank Zwischenbild', sage(panZoom));
+    const hover = await bench('hover', 2000);
+    check(hover.fps >= 45, 'Überfahren hineingezoomt: Licht und Zurücktreten ohne Ruckeln', sage(hover));
+    const t3 = Date.now();
+    await page.keyboard.press('Escape');
+    const oben = await page.waitForFunction(() => document.querySelector('.gh').gehirn.ebene === 0, null, { timeout: 10000 }).then(() => true, () => false);
+    check(oben, 'Escape führt aus dem großen Thema zurück ins Universum', `nach ${Date.now() - t3} ms`);
+    check(!fehler.length, 'Keine Skriptfehler bei 10.000 Einträgen', fehler[0] || '');
+  } finally {
+    await context.close().catch(() => {});
+    await app.close().catch(() => {});
+    fs.rmSync(home, { recursive: true, force: true });
   }
 }
 
@@ -1361,6 +1542,97 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
     check(await page.locator('.nw__note.is-pinned', { hasText: 'Fragen für die Werkstatt' }).count() === 1,
       'und die Notiz steht angeheftet auf der Wand');
   }
+
+  /* --- Notizen als Teil des Wissensnetzes (web/views/notes.js) --- */
+  //
+  // Ein Haken im Anzeigen-Modus, "Verknuepft mit", die Liste hinter "[[",
+  // ein unaufgeloester Link, der zur Notiz wird, und die Vorschlagskarte
+  // nach drei Photosynthese-Notizen -- jedes Mal steht die Antwort im Tresor.
+  const nzKueche = store.all('note').find((x) => x.data.title === 'Küchenplan');
+  await page.goto(`${base}/#/notes?id=${encodeURIComponent(nzKueche.id)}`, { waitUntil: 'domcontentloaded' });
+  await warte(1500);
+  await page.locator('.nw__read input.md-check').first().check();
+  await warte(1000);
+  check(/- \[x\] Dichtung nachbestellen/.test(store.get(nzKueche.id).data.body),
+    'Ein Haken im Anzeigen-Modus einer Notiz schreibt die Zeile im Tresor um');
+  await page.keyboard.press('Escape');
+  await warte(400);
+  const nzMaschine = store.all('note').find((x) => x.data.title === 'Maschine entkalken');
+  await page.goto(`${base}/#/notes?id=${encodeURIComponent(nzMaschine.id)}`, { waitUntil: 'domcontentloaded' });
+  await warte(1500);
+  const nzEingehend = await page.locator('.nw__read .nw__link').count();
+  const nzVerknuepftText = (await page.locator('.nw__read .nw__links').innerText().catch(() => '')).replace(/\s+/g, ' ');
+  check(nzEingehend >= 10 && /Hierher verweist/i.test(nzVerknuepftText) && /Wiki-Link/.test(nzVerknuepftText),
+    '„Verknüpft mit“ zeigt die eingehenden Kanten mit Art und Grund', `${nzEingehend} Zeilen`);
+  check(await page.locator('.nw__read').getByRole('button', { name: /Im Gehirn zeigen/ }).count() === 1, 'und daneben „Im Gehirn zeigen“');
+  await page.keyboard.press('Escape');
+  await warte(400);
+
+  await page.locator('[data-nw-plus]').click();
+  await page.locator('[data-neu="notiz"]').click();
+  await warte(500);
+  await page.locator('.nw__edit-title').fill('Pflanzen brauchen Licht');
+  await page.locator('.nos-ne__area').click();
+  await page.keyboard.type('Ohne Licht keine Photosynthese, siehe [[Maschine entkalken');
+  await warte(600);
+  const nzListe = page.locator('.nos-ne__list');
+  // Der genaue Titel steht vor "Maschine entkalken (Kopie)": erst gleich, dann Anfang, dann neuer zuerst.
+  check(await nzListe.isVisible() && /^Maschine entkalken\s/.test((await nzListe.innerText()).trim()),
+    '„[[“ im Editor öffnet die Liste passender Titel, der genaue Treffer zuerst', (await nzListe.innerText().catch(() => '')).replace(/\s+/g, ' ').slice(0, 80));
+  await page.keyboard.press('Enter');
+  await warte(200);
+  check(/\[\[Maschine entkalken\]\]$/.test(await page.locator('.nos-ne__area').inputValue()), 'Enter setzt [[Maschine entkalken]] ein');
+  await page.keyboard.type('. Chlorophyll im Blatt fängt Licht. Siehe [[Lichtreaktion]].');
+  await warte(300);
+  await page.keyboard.press('Control+Enter');
+  await warte(2000);
+  const nzPflanzen = store.all('note').find((x) => x.data.title === 'Pflanzen brauchen Licht');
+  check(!!nzPflanzen && store.edges.for(nzPflanzen.id, { direction: 'out' }).some((e) => e.data.to === nzMaschine.id),
+    'Strg+Enter speichert die Notiz, und der [[Link]] ist im Tresor eine Kante');
+  const nzFehlend = page.locator('.nw__prose a.md-wiki--missing', { hasText: 'Lichtreaktion' });
+  check(await nzFehlend.count() === 1, 'Ein [[Link]] ohne Ziel ist gestrichelt');
+  await nzFehlend.click();
+  await warte(600);
+  check(/anlegen\?/.test(await page.locator('.dialog').innerText().catch(() => '')), 'Antippen fragt „Notiz „Lichtreaktion“ anlegen?“');
+  await page.locator('.dialog').getByRole('button', { name: /^Anlegen$/ }).click();
+  await warte(1500);
+  const nzLichtreaktion = store.all('note').find((x) => x.data.title === 'Lichtreaktion');
+  check(!!nzLichtreaktion && store.edges.for(nzPflanzen.id, { direction: 'out' }).some((e) => e.data.to === nzLichtreaktion.id),
+    'Nach [Anlegen] existiert die Notiz, und die Kante steht im Tresor');
+  check(await page.locator('.nw__read .nw__link', { hasText: 'Lichtreaktion' }).count() === 1,
+    '„Verknüpft mit“ zeigt die neue Kante ohne Neuladen');
+  await page.keyboard.press('Escape');
+  await warte(400);
+
+  for (const [titel, inhalt] of [
+    ['Chlorophyll absorbiert Licht', 'Chlorophyll absorbiert rotes und blaues Licht, grünes wird reflektiert.'],
+    ['Blatt und Licht', 'Das Blatt fängt Licht mit Chlorophyll; Photosynthese im Blatt.'],
+  ]) {
+    await page.locator('[data-nw-plus]').click();
+    await page.locator('[data-neu="notiz"]').click();
+    await warte(400);
+    await page.locator('.nw__edit-title').fill(titel);
+    await page.locator('.nos-ne__area').click();
+    await page.keyboard.type(inhalt);
+    await page.keyboard.press('Control+Enter');
+    await warte(2000);
+  }
+  const nzKarte = page.locator('.nw__read .nw__card');
+  const nzKarteText = (await nzKarte.innerText().catch(() => '')).replace(/\s+/g, ' ');
+  check(/Ich habe \d+ mögliche Verbindung/.test(nzKarteText) && /Pflanzen brauchen Licht|Chlorophyll absorbiert Licht/.test(nzKarteText),
+    'Nach der dritten Photosynthese-Notiz: „Ich habe N mögliche Verbindungen gefunden“', nzKarteText.slice(0, 120));
+  const nzBlatt = store.all('note').find((x) => x.data.title === 'Blatt und Licht');
+  await nzKarte.getByRole('button', { name: /Alle verbinden/ }).click();
+  await warte(1500);
+  const nzManuell = nzBlatt ? store.edges.for(nzBlatt.id, { direction: 'out' }).filter((e) => e.data.source === 'manual') : [];
+  check(nzManuell.length >= 2, '[Alle verbinden] legt manuelle Kanten im Tresor an', nzManuell.length);
+  const nzZeilen = (await page.locator('.nw__read .nw__links').innerText().catch(() => '')).replace(/\s+/g, ' ');
+  check(/Verbunden mit/.test(nzZeilen) && /Verwandt/.test(nzZeilen), 'und „Verknüpft mit“ zeigt sie, mit Rückgängig', nzZeilen.slice(0, 120));
+  await page.locator('.nw__read .nw__card').getByRole('button', { name: /Rückgängig/ }).click();
+  await warte(1200);
+  check(store.edges.for(nzBlatt.id, { direction: 'out' }).filter((e) => e.data.source === 'manual').length === 0, 'Rückgängig nimmt genau diese Kanten zurück');
+  await page.keyboard.press('Escape');
+  await warte(400);
 
   /* --- Projekte: das zuletzt geaenderte oben, abhaken wirkt --- */
   const projekt = store.create('project', { name: 'Auto verkaufen', description: 'Inserat, Probefahrt, Übergabe.' });
