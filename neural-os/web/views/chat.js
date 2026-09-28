@@ -57,12 +57,14 @@ import { rolle, wirkungZeilen, uhrzeit, dauerText } from '../lib/agenten.js';
 import {
   renderCodeBlock, auswahlKarte, nachrichtenZustand, markdownOhneUi, tasteBehandeln, letzteNachricht, istUi,
 } from '../lib/bausteine/index.js';
+import { ensureStyle as bausteinStil, CSS as BAUSTEIN_CSS } from '../lib/bausteine/gemeinsam.js';
+import { bearbeitenFeld, BEARBEITEN_CSS } from '../lib/bausteine/bearbeiten.js';
 import { tabellenVerbessern } from '../lib/tabelle.js';
 import { laufAnzeige } from '../lib/sandkasten.js';
 import { menue, menueSchliessen, auswahlMenue } from '../lib/auswahl-menue.js';
 import {
   schnittSicher, codebloecke, spracheErkennen, ausfuehrbar, wortUnterschied, geaenderteStelle, lesbar, zitat,
-  codeFrage, stellenFrage, abschnittFrage, NEU_VARIANTEN, UMWANDELN, STELLEN_AKTIONEN, SPRACHEN, fassungsName,
+  codeFrage, stellenFrage, stellenAuftrag, abschnittFrage, NEU_VARIANTEN, UMWANDELN, STELLEN_AKTIONEN, SPRACHEN, fassungsName,
 } from '../lib/antwort-hilfen.js';
 
 /* ------------------------------------------------------------------ */
@@ -119,6 +121,32 @@ function pruefsumme(wert) {
     x = Math.imul(x, 16777619);
   }
   return `${(x >>> 0).toString(36)}${s.length.toString(36)}`;
+}
+
+/**
+ * Was von einer Antwort zu sehen ist: die aktive Fassung (`content`) oder,
+ * wenn der Nutzer mit ‹ › blaettert, eine andere aus `versionen` (dort
+ * traegt jede ihren Text als `inhalt`). Blaettern ist nur Ansehen; erst
+ * [Wiederherstellen] macht die Fassung auf dem Server wieder aktiv.
+ * @returns {{inhalt:string, version:number, aktiv:boolean, anzahl:number}}
+ */
+export function fassungInhalt(m, ansicht = null) {
+  const d = (m && m.data) || {};
+  const liste = Array.isArray(d.versionen) ? d.versionen : [];
+  const aktiv = Number.isInteger(d.version) && d.version >= 0 && d.version < liste.length ? d.version : Math.max(0, liste.length - 1);
+  if (Number.isInteger(ansicht) && ansicht !== aktiv && liste[ansicht] && typeof liste[ansicht] === 'object') {
+    return { inhalt: String(liste[ansicht].inhalt || ''), version: ansicht, aktiv: false, anzahl: liste.length };
+  }
+  return { inhalt: String(d.content || ''), version: aktiv, aktiv: true, anzahl: Math.max(1, liste.length) };
+}
+
+/**
+ * Der Schluessel einer Insel (Baustein, Ausgabe eines Codeblocks): dieselbe
+ * Fassung, dieselbe Blocknummer, derselbe Code -- dann ist es derselbe
+ * Knoten, und er wird in den Neubau hinuebergetragen statt neu gebaut.
+ */
+export function inselSchluessel(version, nr, code) {
+  return `${version}|${nr}|${pruefsumme(code)}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -506,7 +534,8 @@ function vorlesen(id, inhalt) {
     return;
   }
   synth.cancel();
-  const klar = extractPlain(inhalt).replace(/\s+/g, ' ').trim();
+  // Bausteine als ihre Text-Fassung, nie als JSON.
+  const klar = extractPlain(markdownOhneUi(inhalt)).replace(/\s+/g, ' ').trim();
   if (!klar) return;
   const saetze = klar.match(/[^.!?…]+[.!?…]*\s*/g) || [klar];
   const stuecke = [];
@@ -577,14 +606,40 @@ function baueAnsicht(container, ctx) {
   let neuAngelegt = false;
 
   const uiVon = (id) => {
-    if (!ui.has(id)) ui.set(id, { v: 0, fragen: new Map() });
+    if (!ui.has(id)) {
+      ui.set(id, {
+        v: 0,
+        fragen: new Map(),
+        /** Inseln: einmal gebaute Bausteine und Ausgaben, Schluessel -> Knoten. */
+        inseln: new Map(),
+        /** Je Codeblock: Bearbeiten offen, Entwurf, laufende Ausgabe. */
+        code: new Map(),
+        /** Welche Fassung gerade zu sehen ist (null = die aktive). */
+        fassung: null,
+        /** Vergleich offen: {von} = die Fassung, mit der verglichen wird. */
+        vergleich: null,
+        /** "Frage dazu" unter einer Ueberschrift: {key, text}. */
+        abschnitt: null,
+        /** Nach dem Umwandeln einer Stelle: {suche, bis} -- kurz hervorheben. */
+        hervorheben: null,
+      });
+    }
     return ui.get(id);
   };
   const frageUi = (m, f) => {
     const u = uiVon(m.id);
-    if (!u.fragen.has(f.id)) u.fragen.set(f.id, { auswahl: new Set(), eigenOffen: false, eigenText: '', sendet: null, fehler: null });
+    // `auswahl` ist der Entwurf der Auswahl-Komponente (web/lib/bausteine/auswahl.js).
+    if (!u.fragen.has(f.id)) u.fragen.set(f.id, { auswahl: [], eigenOffen: false, eigenText: '', sendet: null, fehler: null });
     return u.fragen.get(f.id);
   };
+  const codeUi = (u, key) => {
+    if (!u.code.has(key)) u.code.set(key, { bearbeiten: false, entwurf: null, lauf: null });
+    return u.code.get(key);
+  };
+  /** Der Chat dieser Ansicht (auch bevor `s` steht). */
+  const cid = () => (s ? s.chatId : chatId);
+  /** Der letzte Grund, warum Senden scheiterte -- fuer Bausteine, die ihn zeigen. */
+  let letzterSendeFehler = null;
   const neuZeichnen = (id) => {
     const u = uiVon(id);
     u.v += 1;
@@ -698,7 +753,12 @@ function baueAnsicht(container, ctx) {
           // Fokus in einem Feld darin (eigene Antwort) nicht verlieren.
           const fokus = eintrag.node.contains(document.activeElement) ? document.activeElement : null;
           const fokusKey = fokus && fokus.dataset ? fokus.dataset.key : null;
-          verlauf.replaceChild(node, eintrag.node);
+          // Erst der neue Knoten ins Dokument, dann die Inseln hinueber
+          // (beide haengen dann im selben Dokument: `moveBefore` behaelt
+          // einen Rahmen samt Inhalt), erst danach der alte weg.
+          verlauf.insertBefore(node, eintrag.node);
+          inselnEinsetzen(node);
+          eintrag.node.remove();
           if (fokusKey) {
             const wieder = node.querySelector(`[data-key="${CSS.escape(fokusKey)}"]`);
             if (wieder) wieder.focus({ preventScroll: true });
@@ -709,12 +769,15 @@ function baueAnsicht(container, ctx) {
       }
       const soll = vorher ? vorher.nextSibling : verlauf.firstChild;
       if (eintrag.node !== soll) verlauf.insertBefore(eintrag.node, soll);
+      inselnEinsetzen(eintrag.node);
       vorher = eintrag.node;
     }
     for (const [id, eintrag] of [...knoten]) {
       if (bleiben.has(id)) continue;
       eintrag.node.remove();
       knoten.delete(id);
+      const u = ui.get(id);
+      if (u) u.inseln.clear();
     }
     // Ein Fehler ohne Antwort (vor `antwort`): sichtbar, nicht verschluckt.
     fehlerZeile.hidden = !(s && s.fehler);
@@ -734,7 +797,46 @@ function baueAnsicht(container, ctx) {
       m.updatedAt, d.status, (d.content || '').length, (d.denken || '').length, d.agenten, d.rueckfragen,
       d.rueckfrageOffen, (d.quellen || []).length, d.error, d.abgeschnitten, m._hinweise, m._stop, m._lokal,
       letzte, laeuft, aktiv, u.v, sprichtId === m.id, !!claude && claude.verbunden,
+      d.version, Array.isArray(d.versionen) ? d.versionen.length : 0, u.fassung, u.vergleich, u.abschnitt,
     ]);
+  }
+
+  /**
+   * Inseln an ihre Plaetze: Der Aufbau einer Nachricht setzt fuer jeden
+   * Baustein und jede laufende Ausgabe nur einen Platzhalter; hier kommt der
+   * einmal gebaute Knoten hinein. Haengt er noch im alten Knoten (und kann
+   * der Browser `moveBefore`), wandert er samt Zustand und Rahmen -- sonst
+   * wird er umgehaengt, was einen Rahmen neu laedt, aber nichts verliert,
+   * was ausserhalb des DOM liegt.
+   */
+  function inselnEinsetzen(node) {
+    const liste = node._inseln;
+    if (!liste || !liste.length) return;
+    node._inseln = [];
+    for (const [platz, insel] of liste) {
+      const eltern = platz.parentNode;
+      if (!eltern) continue;
+      if (insel === platz) continue;
+      let bewegt = false;
+      if (insel.isConnected && typeof eltern.moveBefore === 'function') {
+        try {
+          eltern.moveBefore(insel, platz);
+          platz.remove();
+          bewegt = true;
+        } catch {
+          bewegt = false;
+        }
+      }
+      if (!bewegt) platz.replaceWith(insel);
+    }
+  }
+
+  /** Ein Platzhalter fuer eine Insel; `zeile` merkt sich das Paar fuer `inselnEinsetzen`. */
+  function inselPlatz(zeile, insel) {
+    const platz = h('div.cv-insel-platz', { hidden: true });
+    if (!zeile._inseln) zeile._inseln = [];
+    zeile._inseln.push([platz, insel]);
+    return platz;
   }
 
   /* ------------------------------------------ oben: leer / verbinden */
@@ -1143,43 +1245,515 @@ function baueAnsicht(container, ctx) {
     // angelegt hat (Karten) und was sie gefragt hat (Rueckfragen). Ein Zug
     // mit drei Rueckfragen liest sich so wie ein Gespraech: Satz, Frage,
     // Antwort, Satz -- nicht drei Absaetze Text und darunter drei Fragen.
+    // Wird eine andere Fassung angesehen, steht nur ihr Text da: Karten und
+    // Fragen gehoeren zur aktiven.
+    const fs = fassungInhalt(m, u.fassung);
+    const angesehen = laeuft ? fassungInhalt(m) : fs;
+    const textInhalt = angesehen.aktiv ? inhalt : angesehen.inhalt;
+    const bloecke = codebloecke(textInhalt);
     const marken = [];
-    for (const a of agenten) {
-      if (Array.isArray(a.wirkung) && a.wirkung.length && a.zustand === 'fertig') marken.push({ pos: stelle(a.beiZeichen), art: 0, a });
+    if (angesehen.aktiv) {
+      for (const a of agenten) {
+        if (Array.isArray(a.wirkung) && a.wirkung.length && a.zustand === 'fertig') marken.push({ pos: stelle(a.beiZeichen), art: 0, a });
+      }
+      for (const f of fragen) marken.push({ pos: stelle(f.beiZeichen), art: 1, f });
+      marken.sort((x, y) => (x.pos - y.pos) || (x.art - y.art));
     }
-    for (const f of fragen) marken.push({ pos: stelle(f.beiZeichen), art: 1, f });
-    marken.sort((x, y) => (x.pos - y.pos) || (x.art - y.art));
     let cursor = 0;
+    let teil = 0;
+    // Blocknummern zaehlen ueber ALLE Textstuecke der Antwort (der Server
+    // zaehlt so: PATCH …/block, src/models/fassungen.js codebloecke).
+    let blockNr = 0;
+    const benutzt = new Set();
+    const hook = (block, standard) => {
+      const nr = blockNr;
+      blockNr += 1;
+      return codeBlock(zeile, m, u, angesehen.version, nr, block, standard, laeuft, letzte, benutzt);
+    };
     const textTeil = (bis) => {
-      const stueck = inhalt.slice(cursor, bis);
+      const stueck = textInhalt.slice(cursor, bis);
       cursor = bis;
       if (!stueck.trim()) return;
       const md = h('div.cv-md');
-      md.appendChild(renderMarkdown(stueck, { kopierKarten: true, hakenKreise: true }));
+      md.appendChild(renderMarkdown(stueck, { kopierKarten: true, hakenKreise: true, codeBlock: hook }));
+      // Jede Tabelle sortierbar, ab 7 Zeilen filterbar, mit fester Kopfzeile;
+      // ihr Zustand (Sortierung, Filter) liegt ausserhalb des DOM.
+      tabellenVerbessern(md, { schluessel: `${m.id}|${angesehen.version}|${teil}` });
+      if (!laeuft) ueberschriftenFragen(md, m, u, teil);
+      teil += 1;
       blase.appendChild(md);
     };
     for (const mk of marken) {
-      textTeil(Math.min(mk.pos, inhalt.length));
+      // Nie mitten in einem Codezaun schneiden (ein ```ui-Baustein zerbraeche).
+      textTeil(schnittSicher(textInhalt, Math.min(mk.pos, textInhalt.length), bloecke));
       blase.appendChild(mk.art === 0 ? wirkungKarten(m, [mk.a]) : frageKarte(m, mk.f, letzte));
     }
-    textTeil(inhalt.length);
+    textTeil(textInhalt.length);
+    if (!laeuft) stelleMarkieren(blase, u);
+    // Inseln, die diese Fassung nicht mehr braucht, loslassen.
+    for (const key of [...u.inseln.keys()]) if (!benutzt.has(key)) u.inseln.delete(key);
 
     // 7. Quellen der Websuche.
     const quellen = Array.isArray(d.quellen) ? d.quellen : [];
-    if (quellen.length) blase.appendChild(quellenListe(u, quellen));
+    if (quellen.length && angesehen.aktiv) blase.appendChild(quellenListe(u, quellen));
 
     // 8. Wie es endete, ehrlich.
     for (const n of statusZeilen(m, letzte, laeuft)) blase.appendChild(n);
 
+    if (!angesehen.aktiv) {
+      blase.appendChild(h('p.cv-fassung__hinweis', null,
+        icon(I.info),
+        h('span', null, text(`Fassung ${angesehen.version + 1} von ${angesehen.anzahl} · ${fassungsName((d.versionen || [])[angesehen.version])} – nur angesehen`))));
+    }
     if (!laeuft && !m._lokal) blase.appendChild(h('span.cv-zeit', null, text(uhrzeit(m.createdAt))));
 
     const spalteN = h('div.cv-msg__spalte', null, blase);
-    if (!laeuft && inhalt.trim()) spalteN.appendChild(antwortAktionen(m, letzte));
+    if (!laeuft && (textInhalt.trim() || angesehen.anzahl > 1)) spalteN.appendChild(antwortAktionen(m, letzte, angesehen));
+    if (!laeuft && u.vergleich) spalteN.appendChild(vergleichKarte(m, u, angesehen));
     // Geratene Vorschlags-Chips gibt es nicht mehr: Naechste Schritte bietet die
     // KI selbst ueber den Baustein "aktionen" an (docs/ANTWORT-BAUSTEINE.md, 6.).
     zeile.append(h('span.avatar.cv-avatar', { 'aria-hidden': 'true' }, icon(I.brand)), spalteN);
+    if (!angesehen.aktiv || u.vergleich) zeile.classList.add('is-fassung');
     return zeile;
   }
+
+  /* -------------------------------------------- Codebloecke, Bausteine */
+
+  /**
+   * Die `api` fuer Bausteine und Codebloecke: dieselbe wie die der Ansicht,
+   * nur dass ein PATCH (Block bearbeiten -> neue Fassung) seinen Satz gleich
+   * in die Sitzung uebernimmt. Sonst saehe man die neue Fassung erst, wenn
+   * der Bus sie meldet.
+   */
+  function bausteinApi() {
+    return {
+      ...api,
+      patch: async (pfad, body, opts) => {
+        const r = await api.patch(pfad, body, opts);
+        if (r && r.record && s) {
+          einsetzen(s, r.record);
+          const u = uiVon(r.record.id);
+          u.fassung = null;
+          u.vergleich = null;
+          plane();
+        }
+        return r;
+      },
+    };
+  }
+
+  /** Der ctx-Vertrag der Bausteine (web/lib/bausteine/index.js, Kopfkommentar). */
+  function bausteinCtx(m, version, nr, laeuft, letzte) {
+    const chat = cid();
+    return {
+      senden: (t) => sendenAusBaustein(t),
+      zustand: (schluessel) => zustandsSpeicher(api, chat, m, version, (err) => {
+        ctx.toast(`Nicht gespeichert: ${fehlerSatz(err)}`, 'error');
+      }).fuer(schluessel),
+      // Den Antwortstil neu anwenden geht nur bei der letzten Antwort
+      // (Server: 409 NUR_LETZTE_ANTWORT). Sonst bietet der Regler ehrlich
+      // "Senden" an statt eines Knopfs, der scheitert.
+      stilSetzen: letzte ? (stil) => stilSetzen(m, stil) : undefined,
+      api: bausteinApi(),
+      oeffnen: (route) => ctx.navigate(route),
+      renderMarkdown: (t) => markdownKnoten(t),
+      kiName: (claude && claude.name) || 'KI',
+      chatId: chat,
+      messageId: m.id,
+      blockNr: nr,
+      version,
+      laeuft,
+    };
+  }
+
+  /** Markdown in einem Baustein (`inhalt`-Felder): wie im Chat, ohne Codeblock-Leiste. */
+  function markdownKnoten(t) {
+    const box = h('div.cv-md');
+    box.appendChild(renderMarkdown(String(t || ''), { kopierKarten: true, hakenKreise: true }));
+    tabellenVerbessern(box);
+    return box;
+  }
+
+  /**
+   * Der Haken fuer jeden Codeblock einer Antwort (web/lib/markdown.js,
+   * `codeBlock`): ```ui wird Baustein (als Insel), alles andere ein Codeblock
+   * mit erkannter Sprache und der Leiste Bearbeiten · Ausfuehren · Erklaeren ·
+   * Fehler suchen.
+   */
+  function codeBlock(zeile, m, u, version, nr, block, standard, laeuft, letzte, benutzt) {
+    const offen = block.closed === false && laeuft;
+    const lang = String(block.lang || '').trim().toLowerCase();
+    if (istUi(lang) || (offen && lang === 'u')) {
+      // Noch nicht fertig: der ruhige Platzhalter (kein Zustand, keine Insel).
+      if (offen) return renderCodeBlock(block, { laeuft: true });
+      const key = inselSchluessel(version, nr, block.code);
+      benutzt.add(key);
+      let insel = u.inseln.get(key);
+      if (!insel) {
+        insel = renderCodeBlock({ ...block, closed: true }, bausteinCtx(m, version, nr, laeuft, letzte));
+        if (!insel) return null;
+        u.inseln.set(key, insel);
+      }
+      return inselPlatz(zeile, insel);
+    }
+    // Ohne Sprache: erkennen, wenn der Inhalt sie eindeutig verraet.
+    const erkannt = block.lang ? '' : spracheErkennen(block.code);
+    const b = erkannt ? { ...block, lang: erkannt, info: erkannt } : block;
+    const node = standard(b);
+    // Prompt- und Textkarten haben ihr eigenes Kopieren; waehrend die
+    // Antwort noch kommt, gibt es keine Leiste.
+    if (!node || node.classList.contains('md-copycard') || laeuft || block.closed === false) return node;
+    const sprache = String(b.lang || '').trim();
+    const key = inselSchluessel(version, nr, block.code);
+    benutzt.add(key);
+    const a = codeUi(u, key);
+    const laufArt = ausfuehrbar(sprache);
+    const knopf = (markup, label, fn) => h('button.cv-code__knopf', {
+      type: 'button',
+      title: label,
+      onClick: (e) => { e.stopPropagation(); fn(); },
+    }, icon(markup), h('span', null, text(label)));
+    const leiste = h('div.cv-code__leiste', { role: 'toolbar', 'aria-label': 'Codeblock' },
+      knopf(SYMBOL_STIFT, a.bearbeiten ? 'Bearbeiten beenden' : 'Bearbeiten', () => {
+        a.bearbeiten = !a.bearbeiten;
+        neuZeichnen(m.id);
+      }),
+      laufArt ? knopf(SYMBOL_START, 'Ausführen', () => {
+        // Ein Lauf je Block: der vorige geht (samt Rahmen oder Worker).
+        if (a.lauf) a.lauf.remove();
+        a.lauf = laufAnzeige({ sprache: laufArt, code: block.code, onSchliessen: () => { a.lauf = null; } });
+        neuZeichnen(m.id);
+      }) : null,
+      knopf(SYMBOL_ERKLAEREN, 'Erklären', () => senden(codeFrage('erklaeren', sprache, block.code))),
+      knopf(SYMBOL_FEHLER, 'Fehler suchen', () => senden(codeFrage('fehler', sprache, block.code))));
+    const box = h('div.cv-code', { dataset: { nr: String(nr) } }, node, leiste);
+    if (a.bearbeiten) {
+      // Dasselbe Feld wie bei Datei und Vorschau: Speichern ist PATCH …/block
+      // und legt eine neue Fassung an.
+      box.appendChild(bearbeitenFeld({
+        api: bausteinApi(),
+        chatId: cid(),
+        messageId: m.id,
+        blockNr: nr,
+        tiefe: 0,
+        quelle: null,
+        key: (t) => `code:${m.id}:${nr}:${t}`,
+        neuZeichnen: () => neuZeichnen(m.id),
+      }, a, block.code, { sprache: sprache || 'Text' }));
+    }
+    if (a.lauf) box.appendChild(inselPlatz(zeile, a.lauf));
+    return box;
+  }
+
+  /**
+   * "Frage dazu" an jeder Ueberschrift (h2/h3 der Antwort): beim Ueberfahren
+   * ein kleiner Knopf, mit dem Finger immer sichtbar; er oeffnet ein Feld
+   * direkt darunter, Enter fragt die KI zu genau diesem Abschnitt.
+   */
+  function ueberschriftenFragen(md, m, u, teil) {
+    const koepfe = md.querySelectorAll('.md-heading--2, .md-heading--3');
+    koepfe.forEach((kopf, i) => {
+      const key = `${teil}:${i}`;
+      const titel = kopf.textContent.trim();
+      kopf.classList.add('cv-abschnitt');
+      kopf.appendChild(h('button.cv-frage-dazu', {
+        type: 'button',
+        title: 'Frage zu diesem Abschnitt',
+        'aria-label': `Frage zum Abschnitt „${titel}“`,
+        'aria-expanded': String(!!(u.abschnitt && u.abschnitt.key === key)),
+        onClick: (e) => {
+          e.stopPropagation();
+          u.abschnitt = u.abschnitt && u.abschnitt.key === key ? null : { key, text: '' };
+          neuZeichnen(m.id);
+          if (u.abschnitt) {
+            setTimeout(() => {
+              const f = verlauf.querySelector(`[data-key="${CSS.escape(`abschnitt:${m.id}:${key}`)}"]`);
+              if (f) f.focus();
+            }, 30);
+          }
+        },
+      }, icon(SYMBOL_FRAGE_DAZU), h('span', null, text('Frage dazu'))));
+      if (u.abschnitt && u.abschnitt.key === key) {
+        const inp = h('input.input.cv-abschnitt__feld', {
+          type: 'text',
+          placeholder: `Frage zu „${titel.slice(0, 40)}“ …`,
+          maxlength: 2000,
+          'aria-label': `Frage zum Abschnitt „${titel}“`,
+          'data-key': `abschnitt:${m.id}:${key}`,
+          enterkeyhint: 'send',
+          onInput: (e) => { u.abschnitt.text = e.target.value; },
+          onKeydown: (e) => {
+            if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+              e.preventDefault();
+              abschnittSenden(m, u, titel);
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              u.abschnitt = null;
+              neuZeichnen(m.id);
+            }
+          },
+        });
+        inp.value = u.abschnitt.text || '';
+        kopf.after(h('div.cv-abschnitt__frage', null, inp,
+          h('button.btn.btn--primary', {
+            type: 'button',
+            onClick: (e) => { e.stopPropagation(); abschnittSenden(m, u, titel); },
+          }, text('Fragen'))));
+      }
+    });
+  }
+
+  async function abschnittSenden(m, u, titel) {
+    const frage = u.abschnitt ? String(u.abschnitt.text || '').trim() : '';
+    if (!frage) return;
+    const ok = await senden(abschnittFrage(titel, frage));
+    if (ok) {
+      u.abschnitt = null;
+      neuZeichnen(m.id);
+    }
+  }
+
+  /** Senden aus einem Baustein: wirft mit einem lesbaren Satz, statt still zu scheitern. */
+  async function sendenAusBaustein(t) {
+    if (s && s.lauf) throw new Error('Gerade läuft schon eine Antwort. Warte, bis sie fertig ist.');
+    if (claude && claude.verbunden === false) throw new Error('Erst eine KI verbinden – oben im Chat.');
+    letzterSendeFehler = null;
+    const ok = await senden(t);
+    if (!ok) throw new Error(letzterSendeFehler || 'Nicht gesendet.');
+    return true;
+  }
+
+  /**
+   * Der Regler "Antwortstil": den Stil des Chats setzen und die letzte
+   * Antwort damit neu erstellen (eine neue Fassung, Server: variante `stil`).
+   */
+  async function stilSetzen(m, stil) {
+    if (!s) throw new Error('Kein Chat.');
+    if (s.lauf) throw new Error('Gerade läuft schon eine Antwort. Warte, bis sie fertig ist.');
+    const u = uiVon(m.id);
+    u.fassung = null;
+    u.vergleich = null;
+    folgen = true;
+    try {
+      await strom(s, api, `/chats/${encodeURIComponent(s.chatId)}/neu-antworten`, { variante: 'stil', stil, messageId: m.id });
+    } catch (err) {
+      if (nichtVerbunden(err)) claudeAus(err);
+      throw new Error(fehlerSatz(err));
+    }
+  }
+
+  /* ------------------------------------------------- Fassungen */
+
+  /** ‹ 2/3 › mit Namen der Fassung, Vergleichen, Wiederherstellen. */
+  function fassungsLeiste(m, u, fs) {
+    const versionen = Array.isArray(m.data.versionen) ? m.data.versionen : [];
+    const n = versionen.length;
+    const zeige = (i) => {
+      u.fassung = i === fassungInhalt(m).version ? null : i;
+      u.vergleich = null;
+      neuZeichnen(m.id);
+    };
+    const name = fassungsName(versionen[fs.version]);
+    return h('div.cv-fassungen', { role: 'group', 'aria-label': 'Fassungen dieser Antwort' },
+      h('button.cv-aktion', {
+        type: 'button', title: 'Vorige Fassung', 'aria-label': 'Vorige Fassung', disabled: fs.version <= 0,
+        onClick: (e) => { e.stopPropagation(); zeige(fs.version - 1); },
+      }, icon(SYMBOL_ZURUECK)),
+      h('span.cv-fassungen__stand', { title: name }, text(`${fs.version + 1}/${n}`), h('span.cv-fassungen__name', null, text(` · ${name}`))),
+      h('button.cv-aktion', {
+        type: 'button', title: 'Nächste Fassung', 'aria-label': 'Nächste Fassung', disabled: fs.version >= n - 1,
+        onClick: (e) => { e.stopPropagation(); zeige(fs.version + 1); },
+      }, icon(SYMBOL_PFEIL)),
+      aktion(SYMBOL_VERGLEICH, u.vergleich ? 'Vergleich schließen' : 'Vergleichen', () => {
+        u.vergleich = u.vergleich ? null : { von: fs.version > 0 ? fs.version - 1 : (n > 1 ? 1 : 0) };
+        neuZeichnen(m.id);
+      }, { gedrueckt: !!u.vergleich, klasse: cx({ 'is-an': !!u.vergleich }) }),
+      !fs.aktiv && !(s && s.lauf) ? h('button.btn.btn--small.btn--accent', {
+        type: 'button',
+        onClick: (e) => { e.stopPropagation(); fassungWaehlen(m, fs.version); },
+      }, text('Wiederherstellen')) : null);
+  }
+
+  /** Eine Fassung wieder aktiv machen (PATCH …/version). */
+  async function fassungWaehlen(m, version) {
+    if (!s) return;
+    try {
+      const r = await api.patch(`/chats/${encodeURIComponent(s.chatId)}/messages/${encodeURIComponent(m.id)}/version`, { version });
+      if (r && r.record) einsetzen(s, r.record);
+      const u = uiVon(m.id);
+      u.fassung = null;
+      u.vergleich = null;
+      neuZeichnen(m.id);
+    } catch (err) {
+      ctx.toast(`Fassung nicht gewechselt: ${fehlerSatz(err)}`, 'error');
+    }
+  }
+
+  /** Wortweiser Unterschied zweier Fassungen (web/lib/antwort-hilfen.js, LCS). */
+  function vergleichKarte(m, u, fs) {
+    const versionen = Array.isArray(m.data.versionen) ? m.data.versionen : [];
+    const von = Math.max(0, Math.min(versionen.length - 1, u.vergleich.von));
+    // Verglichen wird, was man liest: Bausteine als ihre Text-Fassung, nicht als JSON.
+    const alt = von === fs.version ? '' : markdownOhneUi(String((versionen[von] || {}).inhalt || ''));
+    const neu = markdownOhneUi(fs.inhalt);
+    const diff = wortUnterschied(alt, neu);
+    const box = h('div.cv-vergleich', { role: 'region', 'aria-label': 'Vergleich zweier Fassungen' });
+    const kopf = h('div.cv-vergleich__kopf', null,
+      h('span.cv-vergleich__titel', null, text(`Fassung ${fs.version + 1} gegenüber`)),
+      h('span.cv-vergleich__wahl', null, versionen.map((v, i) => (i === fs.version ? null : h('button.cv-vergleich__chip', {
+        type: 'button',
+        class: cx({ 'is-an': i === von }),
+        'aria-pressed': String(i === von),
+        onClick: (e) => { e.stopPropagation(); u.vergleich = { von: i }; neuZeichnen(m.id); },
+      }, text(`${i + 1} · ${fassungsName(v)}`))))),
+      h('span.cv-vergleich__zahlen', null, text(diff.gleich ? 'kein Unterschied' : `${diff.weg} ${diff.weg === 1 ? 'Wort' : 'Wörter'} weg · ${diff.neu} neu`)),
+      h('button.cv-aktion', {
+        type: 'button', title: 'Vergleich schließen', 'aria-label': 'Vergleich schließen',
+        onClick: (e) => { e.stopPropagation(); u.vergleich = null; neuZeichnen(m.id); },
+      }, icon(SYMBOL_SCHLIESSEN)));
+    const textBox = h('div.cv-vergleich__text', null, diff.teile.map((t) => {
+      if (t.art === 'weg') return h('del.cv-vergleich__weg', null, text(t.text));
+      if (t.art === 'neu') return h('ins.cv-vergleich__neu', null, text(t.text));
+      return text(t.text);
+    }));
+    box.append(kopf, textBox);
+    return box;
+  }
+
+  /* ---------------------------------------- Neu erstellen, Umwandeln */
+
+  function neuMenue(anker, m) {
+    menue({
+      anker,
+      titel: 'Neu erstellen',
+      eintraege: NEU_VARIANTEN.map((v) => ({ label: v.label, id: v.variante || 'neu', aktion: () => neuAntworten(v.variante, m) })),
+    });
+  }
+
+  function umwandelnMenue(anker, m) {
+    const eintrag = (u) => (u.sprache
+      ? {
+        label: u.label,
+        id: u.anweisung,
+        untermenue: SPRACHEN.map((sp) => ({ label: sp.name, aktion: () => umwandeln(m, { anweisung: u.anweisung, sprache: sp.ziel }) })),
+      }
+      : { label: u.label, id: u.anweisung, aktion: () => umwandeln(m, { anweisung: u.anweisung }) });
+    menue({
+      anker,
+      titel: 'Umwandeln',
+      eintraege: [
+        { gruppe: 'Text' },
+        ...UMWANDELN.filter((u) => u.gruppe === 'text').map(eintrag),
+        { gruppe: 'Darstellung' },
+        ...UMWANDELN.filter((u) => u.gruppe === 'form').map(eintrag),
+      ],
+    });
+  }
+
+  /**
+   * Eine Antwort umwandeln (neue Fassung, ohne Werkzeuge). Mit `auswahl`
+   * nur die markierte Stelle; findet der Server sie nicht eindeutig, wird
+   * die KI stattdessen mit dem Zitat gefragt -- der Nutzer bekommt so in
+   * jedem Fall, was er wollte.
+   */
+  async function umwandeln(m, body) {
+    if (!s || s.lauf) return false;
+    const u = uiVon(m.id);
+    u.fassung = null;
+    u.vergleich = null;
+    const alt = String(m.data.content || '');
+    try {
+      await strom(s, api, `/chats/${encodeURIComponent(s.chatId)}/messages/${encodeURIComponent(m.id)}/umwandeln`, body);
+      // `fertig` hat den Satz in der Sitzung ersetzt -- `m` ist der alte.
+      if (body.auswahl) stelleHervorheben(nachricht(s, m.id) || m, alt);
+      return true;
+    } catch (err) {
+      if (err && err.code === 'AUSWAHL_NICHT_GEFUNDEN' && body.auswahl) {
+        return senden(stellenAuftrag(body.anweisung, body.auswahl, body.sprache));
+      }
+      if (nichtVerbunden(err)) claudeAus(err);
+      else ctx.toast(`Nicht umgewandelt: ${fehlerSatz(err)}`, 'error');
+      return false;
+    }
+  }
+
+  /**
+   * Die geaenderte Stelle kurz hervorheben, damit man sieht, was neu ist.
+   * Der Wunsch liegt im Zustand der Nachricht (nicht im DOM): Die Nachricht
+   * wird nach dem Strom noch ein paarmal neu gebaut, und jeder Neubau setzt
+   * die Klasse wieder (`stelleMarkieren`), bis die Zeit um ist.
+   */
+  function stelleHervorheben(m, alt) {
+    const st = geaenderteStelle(alt, String(m.data.content || ''));
+    const suche = lesbar(st.text).toLowerCase();
+    if (!suche) return;
+    const u = uiVon(m.id);
+    u.hervorheben = { suche, bis: Date.now() + 2600 };
+    neuZeichnen(m.id);
+    setTimeout(() => {
+      if (u.hervorheben && u.hervorheben.suche === suche) {
+        u.hervorheben = null;
+        neuZeichnen(m.id);
+      }
+    }, 2700);
+  }
+
+  /** Beim Aufbau: den Absatz mit der geaenderten Stelle markieren. */
+  function stelleMarkieren(blase, u) {
+    const hv = u.hervorheben;
+    if (!hv || hv.bis < Date.now()) return;
+    const kandidaten = [...blase.querySelectorAll('.cv-md p, .cv-md li, .cv-md td, .cv-md th, .cv-md h2, .cv-md h3, .cv-md h4, .cv-md blockquote')];
+    const passt = (el, n) => el.textContent.replace(/\s+/g, ' ').toLowerCase().includes(hv.suche.slice(0, n));
+    const treffer = kandidaten.find((el) => passt(el, 80)) || kandidaten.find((el) => passt(el, 24));
+    if (treffer) treffer.classList.add('is-geaendert');
+  }
+
+  /* ------------------------------------------- Markierter Text */
+
+  /**
+   * Was mit markiertem Text in einer Antwort passiert: Kuerzen, Umschreiben,
+   * Uebersetzen und Verbessern aendern nur die Stelle (Umwandeln mit
+   * `auswahl`); Erklaeren und Zusammenfassen stellen eine neue Frage mit dem
+   * Zitat; "Frage dazu" legt das Zitat ins Eingabefeld.
+   */
+  function stellenAktion(id, info, wert) {
+    const m = s ? nachricht(s, info.messageId) : null;
+    const a = STELLEN_AKTIONEN.find((x) => x.id === id);
+    if (!m || !a) return;
+    try { window.getSelection().removeAllRanges(); } catch { /* egal */ }
+    if (a.art === 'stelle') {
+      umwandeln(m, { anweisung: id, sprache: wert, auswahl: info.text });
+    } else if (a.art === 'frage') {
+      senden(stellenFrage(id, info.text));
+    } else {
+      feld.value = `${zitat(info.text)}\n\n`;
+      groesseAnpassen();
+      aktualisiereEingabe();
+      feld.focus();
+      feld.setSelectionRange(feld.value.length, feld.value.length);
+    }
+  }
+
+  const markierung = auswahlMenue({
+    wurzel: verlauf,
+    pruefen: (range) => {
+      const c = range.commonAncestorContainer;
+      const el = c.nodeType === 1 ? c : c.parentElement;
+      if (!el) return null;
+      const msg = el.closest('.cv-msg--bot');
+      // Nur Text einer Antwort -- nicht Bausteine, Code, Fragen oder die Leiste.
+      if (!msg || !el.closest('.cv-md') || el.closest('.bs, .md-code, .cv-code, .sk-lauf, .cv-frage, .cv-abschnitt__frage')) return null;
+      const m = s ? nachricht(s, msg.dataset.id) : null;
+      if (!m || (s && s.lauf)) return null;
+      const t = String(window.getSelection() || '').trim();
+      if (t.length < 2 || t.length > 4000) return null;
+      return { messageId: m.id, text: t };
+    },
+    eintraege: () => STELLEN_AKTIONEN.map((a) => (a.sprache
+      ? { id: a.id, label: a.label, untermenue: SPRACHEN.map((sp) => ({ label: sp.name, wert: sp.ziel })) }
+      : { id: a.id, label: a.label })),
+    beiAktion: stellenAktion,
+  });
 
   /** Die Textstelle einer Karte; ohne Angabe (aeltere Saetze) ans Ende. */
   function stelle(wert) {
@@ -1287,122 +1861,53 @@ function baueAnsicht(container, ctx) {
 
   /* ------------------------------------------------- Rueckfrage */
 
+  /**
+   * Die Rueckfrage mitten im Zug -- gezeichnet von DERSELBEN
+   * Auswahl-Komponente wie der Baustein `auswahl` (web/lib/bausteine/auswahl.js).
+   * Der Unterschied liegt nur darin, wohin die Wahl geht: an /rueckfrage.
+   */
   function frageKarte(m, f, aktivMoeglich) {
     const fu = frageUi(m, f);
     // Offen ist sie, solange sie die letzte Antwort ist und niemand geantwortet
     // hat; bedienbar nur, wenn gerade nichts gesendet wird.
     const offen = f.zustand === 'offen' && m.data.rueckfrageOffen && aktivMoeglich;
     const bedienbar = offen && !fu.sendet && !(s && s.lauf);
-    const sendet = new Set(fu.sendet || []);
     const beantwortet = f.zustand === 'beantwortet';
-    const gewaehlt = new Set(beantwortet ? String(f.antwort || '').split(/,\s*/) : []);
     const optionen = Array.isArray(f.optionen) ? f.optionen : [];
-    const eigeneAntwort = beantwortet && f.antwort && !optionen.some((o) => o === f.antwort) && ![...gewaehlt].every((g) => optionen.includes(g));
-    const karte = h('div.cv-frage', {
-      'data-zustand': offen ? 'offen' : f.zustand,
-      'data-frage': f.id,
-      role: 'group',
-      'aria-label': f.frage,
+    const teile = beantwortet ? String(f.antwort || '').split(/,\s*/).filter(Boolean) : [];
+    const gewaehlt = teile.filter((t) => optionen.includes(t));
+    const eigeneAntwort = beantwortet && f.antwort && !gewaehlt.length ? f.antwort : null;
+    let hinweis = null;
+    if (f.zustand === 'uebergangen') hinweis = 'Übergangen – du hast weitergeschrieben.';
+    else if (f.zustand === 'offen' && !offen && !(s && s.lauf) && !m.data.rueckfrageOffen) hinweis = 'Nicht mehr offen.';
+    const status = offen ? 'offen' : (beantwortet ? 'gesendet' : (f.zustand === 'uebergangen' ? 'uebergangen' : 'geschlossen'));
+    const karte = auswahlKarte({
+      frage: f.frage,
+      optionen: optionen.map((t) => ({ text: t })),
+      mehrfach: !!f.mehrfach,
+      eigene: true,
+      stil: 'knoepfe',
+      // Bei einer Rueckfrage heisst der Knopf der Mehrfachwahl "Senden": die
+      // Antwort geht an die KI, sie ist kein "Weiter" innerhalb der Antwort.
+      knopf: 'Senden',
+      status,
+      gewaehlt,
+      eigeneAntwort,
+      sendet: fu.sendet,
+      fehler: fu.fehler,
+      bedienbar,
+      hinweis,
+      entwurf: fu,
+      neuZeichnen: () => neuZeichnen(m.id),
+      onWaehlen: (antwort) => frageSenden(m, f, antwort),
+      key: (teil) => `frage:${f.id}:${teil}`,
+      tipp: true,
+      klasse: 'cv-frage__karte',
     });
-    karte.appendChild(h('p.cv-frage__text', null, text(f.frage)));
-    const reihe = h('div.cv-frage__optionen');
-    optionen.forEach((label, i) => {
-      const an = offen ? fu.auswahl.has(label) || sendet.has(label) : gewaehlt.has(label);
-      const knopf = h('button.cv-option', {
-        type: 'button',
-        class: cx({ 'is-gewaehlt': an, 'is-aus': (!offen || sendet.size) && !an }),
-        disabled: !bedienbar,
-        'aria-pressed': f.mehrfach ? String(an) : null,
-        'data-key': `option:${f.id}:${i}`,
-        onClick: (e) => {
-          e.stopPropagation();
-          waehlen(m, f, label);
-        },
-      },
-      i < 9 ? h('span.cv-option__nr', { 'aria-hidden': 'true' }, text(String(i + 1))) : null,
-      h('span.cv-option__label', null, text(label)),
-      an ? h('span.cv-option__haken', { 'aria-hidden': 'true' }, icon(I.check)) : null,
-      sendet.has(label) ? h('span.spinner.cv-spinner', { 'aria-hidden': 'true' }) : null);
-      reihe.appendChild(knopf);
-    });
-    if (offen) {
-      reihe.appendChild(h('button.cv-option.cv-option--eigen', {
-        type: 'button',
-        class: cx({ 'is-offen': fu.eigenOffen }),
-        disabled: !bedienbar,
-        'data-key': `eigen:${f.id}`,
-        onClick: (e) => {
-          e.stopPropagation();
-          fu.eigenOffen = !fu.eigenOffen;
-          neuZeichnen(m.id);
-          if (fu.eigenOffen) {
-            setTimeout(() => {
-              const inp = verlauf.querySelector(`[data-key="eigenfeld:${CSS.escape(f.id)}"]`);
-              if (inp) inp.focus();
-            }, 30);
-          }
-        },
-      }, h('span.cv-option__symbol', { 'aria-hidden': 'true' }, icon(I.pen)), h('span.cv-option__label', null, text('Eigene Antwort …'))));
-    }
-    karte.appendChild(reihe);
-
-    if (offen && fu.eigenOffen) {
-      const inp = h('input.input', {
-        type: 'text',
-        placeholder: 'Deine Antwort …',
-        maxlength: 500,
-        'aria-label': 'Eigene Antwort',
-        'data-key': `eigenfeld:${f.id}`,
-        enterkeyhint: 'send',
-        onInput: (e) => { fu.eigenText = e.target.value; },
-        onKeydown: (e) => {
-          if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
-            e.preventDefault();
-            if (fu.eigenText.trim()) frageSenden(m, f, fu.eigenText.trim());
-          } else if (e.key === 'Escape') {
-            e.preventDefault();
-            fu.eigenOffen = false;
-            neuZeichnen(m.id);
-          }
-        },
-      });
-      inp.value = fu.eigenText || '';
-      karte.appendChild(h('div.cv-frage__eigen', null, inp,
-        h('button.btn.btn--primary', {
-          type: 'button',
-          disabled: !bedienbar,
-          onClick: (e) => {
-            e.stopPropagation();
-            if (fu.eigenText.trim()) frageSenden(m, f, fu.eigenText.trim());
-            else inp.focus();
-          },
-        }, fu.sendet && !optionen.some((o) => sendet.has(o)) ? h('span.spinner.cv-spinner', { 'aria-hidden': 'true' }) : null, text('Senden'))));
-    }
-    if (offen && f.mehrfach) {
-      karte.appendChild(h('div.cv-frage__fuss', null,
-        h('span', null, text(fu.auswahl.size ? `${fu.auswahl.size} gewählt` : 'Mehreres möglich')),
-        h('button.btn.btn--primary', {
-          type: 'button',
-          disabled: !fu.auswahl.size || !bedienbar,
-          'data-key': `senden:${f.id}`,
-          onClick: (e) => {
-            e.stopPropagation();
-            frageSenden(m, f, [...fu.auswahl]);
-          },
-        }, text('Senden'))));
-    }
-    if (bedienbar && !f.mehrfach && !fu.eigenOffen) {
-      karte.appendChild(h('p.cv-frage__tipp', null, text('Antippen schickt die Antwort ab.')));
-    }
-    if (fu.fehler) karte.appendChild(h('p.cv-frage__fehler', { role: 'alert' }, text(fu.fehler)));
-    if (eigeneAntwort) karte.appendChild(h('p.cv-frage__antwort', null, text(`Deine Antwort: ${f.antwort}`)));
-    if (f.zustand === 'uebergangen') karte.appendChild(h('p.cv-frage__antwort', null, text('Übergangen – du hast weitergeschrieben.')));
-    if (f.zustand === 'offen' && !offen && !(s && s.lauf) && !m.data.rueckfrageOffen) {
-      karte.appendChild(h('p.cv-frage__antwort', null, text('Nicht mehr offen.')));
-    }
-    return karte;
+    return h('div.cv-frage', { 'data-zustand': offen ? 'offen' : f.zustand, 'data-frage': f.id }, karte);
   }
 
+  /** Tasten 1–9 auf Dokumentebene (der Fokus liegt nicht in der Karte). */
   function waehlen(m, f, label) {
     const fu = frageUi(m, f);
     if (fu.sendet) return;
@@ -1410,8 +1915,10 @@ function baueAnsicht(container, ctx) {
       frageSenden(m, f, label);
       return;
     }
-    if (fu.auswahl.has(label)) fu.auswahl.delete(label);
-    else fu.auswahl.add(label);
+    const set = new Set(fu.auswahl);
+    if (set.has(label)) set.delete(label);
+    else set.add(label);
+    fu.auswahl = (f.optionen || []).filter((o) => set.has(o));
     neuZeichnen(m.id);
   }
 
@@ -1426,7 +1933,7 @@ function baueAnsicht(container, ctx) {
       await strom(s, api, `/chats/${encodeURIComponent(s.chatId)}/rueckfrage`, { id: f.id, antwort });
       fu.sendet = null;
       fu.eigenOffen = false;
-      fu.auswahl.clear();
+      fu.auswahl = [];
     } catch (err) {
       fu.sendet = null;
       fu.fehler = fehlerSatz(err);
@@ -1508,11 +2015,13 @@ function baueAnsicht(container, ctx) {
       'aria-label': label,
       class: extra.klasse || '',
       'aria-pressed': extra.gedrueckt === undefined ? null : String(extra.gedrueckt),
+      'aria-haspopup': extra.menue ? 'menu' : null,
+      'aria-expanded': extra.menue ? 'false' : null,
       onClick: (e) => {
         e.stopPropagation();
         fn(e.currentTarget);
       },
-    }, icon(markup));
+    }, icon(markup), extra.menue ? h('span.cv-aktion__pfeil', { 'aria-hidden': 'true' }, icon(SYMBOL_RUNTER)) : null);
   }
 
   function kopierAktion(wert, label) {
@@ -1528,26 +2037,37 @@ function baueAnsicht(container, ctx) {
     });
   }
 
-  function antwortAktionen(m, letzte) {
-    const inhalt = () => String(m.data.content || '');
+  /**
+   * Die Leiste unter einer Antwort (docs/ANTWORT-BAUSTEINE.md 6): Kopieren ·
+   * Neu erstellen ▾ · Umwandeln ▾ · Vorlesen · Fassungen. Kopiert und
+   * vorgelesen wird die Text-Fassung der Bausteine, nie ihr JSON.
+   */
+  function antwortAktionen(m, letzte, fs) {
+    const u = uiVon(m.id);
+    const inhalt = () => markdownOhneUi(fs.inhalt);
+    const ruhig = !(s && s.lauf);
     return h('div.cv-aktionen', { role: 'toolbar', 'aria-label': 'Antwort' },
       kopierAktion(inhalt, 'Antwort kopieren'),
-      letzte && !(s && s.lauf) ? aktion(I.refresh, 'Neu antworten', () => neuAntworten()) : null,
-      sprechenMoeglich()
-        ? aktion(SYMBOL_LAUT, sprichtId === m.id ? 'Vorlesen beenden' : 'Vorlesen', () => vorlesen(m.id, inhalt()), {
+      letzte && ruhig ? aktion(SYMBOL_NEU, 'Neu erstellen', (k) => neuMenue(k, m), { menue: true }) : null,
+      ruhig && fs.inhalt.trim() ? aktion(SYMBOL_ZAUBER, 'Umwandeln', (k) => umwandelnMenue(k, m), { menue: true }) : null,
+      sprechenMoeglich() && fs.inhalt.trim()
+        ? aktion(SYMBOL_LAUT, sprichtId === m.id ? 'Vorlesen beenden' : 'Vorlesen', () => vorlesen(m.id, fs.inhalt), {
           klasse: sprichtId === m.id ? 'is-an' : '',
           gedrueckt: sprichtId === m.id,
         })
-        : null);
+        : null,
+      fs.anzahl > 1 ? fassungsLeiste(m, u, fs) : null);
   }
 
   /**
    * Auf dem iPad gibt es kein Ueberfahren: Antippen zeigt die Leiste. Nur
    * die Klasse wechselt -- ein Neuaufbau wuerde eine Markierung im Text
    * zerstoeren, und mit der Maus ist ein Klick meist genau das: markieren.
+   * Bausteine, Tabellen, Diagramme und Ausgaben sind ausgenommen: ein Tippen
+   * dort bedient sie.
    */
   function antippen(e, id) {
-    if (e.target.closest('button, a, input, textarea, summary, details')) return;
+    if (e.target.closest('button, a, input, textarea, select, summary, details, .bs, .tb, .dg, .cv-code, .sk-lauf, .cv-vergleich, .cv-abschnitt__frage')) return;
     const markiert = typeof window.getSelection === 'function' ? String(window.getSelection() || '') : '';
     if (markiert) return;
     const u = uiVon(id);
@@ -1673,7 +2193,8 @@ function baueAnsicht(container, ctx) {
           ctx.replaceRoute('#/chat');
         }
       } else {
-        ctx.toast(`Nicht gesendet: ${fehlerSatz(err)}`, 'error');
+        letzterSendeFehler = fehlerSatz(err);
+        ctx.toast(`Nicht gesendet: ${letzterSendeFehler}`, 'error');
       }
       plane();
       return false;
@@ -1686,15 +2207,28 @@ function baueAnsicht(container, ctx) {
     return true;
   }
 
-  async function neuAntworten() {
+  /**
+   * Die letzte Antwort neu erstellen -- als neue Fassung, die alte bleibt
+   * waehlbar. `variante`: kuerzer, einfacher, detaillierter, kreativer,
+   * anders oder null (einfach noch einmal).
+   */
+  async function neuAntworten(variante = null, m = null) {
     if (!s || s.lauf) return;
+    if (m) {
+      const u = uiVon(m.id);
+      u.fassung = null;
+      u.vergleich = null;
+    }
     folgen = true;
     try {
-      await strom(s, api, `/chats/${encodeURIComponent(s.chatId)}/neu-antworten`, {});
+      const body = {};
+      if (variante) body.variante = variante;
+      if (m) body.messageId = m.id;
+      await strom(s, api, `/chats/${encodeURIComponent(s.chatId)}/neu-antworten`, body);
       fokusNachAntwort();
     } catch (err) {
       if (nichtVerbunden(err)) claudeAus(err);
-      else ctx.toast(`Nicht neu geantwortet: ${fehlerSatz(err)}`, 'error');
+      else ctx.toast(`Nicht neu erstellt: ${fehlerSatz(err)}`, 'error');
     }
   }
 
@@ -1706,7 +2240,7 @@ function baueAnsicht(container, ctx) {
       if (!offen || feld.value.trim()) return;
       const aktiv = document.activeElement;
       if (aktiv && aktiv !== document.body && aktiv !== feld && root.contains(aktiv) === false) return;
-      const erste = verlauf.querySelector(`[data-frage="${CSS.escape(offen.f.id)}"] .cv-option`);
+      const erste = verlauf.querySelector(`[data-frage="${CSS.escape(offen.f.id)}"] .bs-option, [data-frage="${CSS.escape(offen.f.id)}"] button`);
       if (erste) erste.focus({ preventScroll: true });
     }, 80);
   }
@@ -1844,7 +2378,14 @@ function baueAnsicht(container, ctx) {
   /* -------------------------------------------------- Tastatur */
 
   offs.push(on(document, 'keydown', (e) => {
-    if (!lebt || !s || e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (!lebt || !s || e.defaultPrevented) return;
+    // Strg+Z / Strg+Umschalt+Z ausserhalb eines Bausteins: die Nachricht, in
+    // der zuletzt etwas geaendert wurde (im Baustein selbst faengt er es ab).
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && /^[zy]$/i.test(String(e.key || ''))) {
+      if (!document.querySelector('.overlay') && root.contains(e.target instanceof Node ? e.target : null) !== false) tasteBehandeln(e, letzteNachricht());
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (!/^[1-9]$/.test(e.key) && e.key !== 'Enter') return;
     if (istEingabe(e.target)) return;
     if (document.querySelector('.overlay')) return;
@@ -1853,9 +2394,9 @@ function baueAnsicht(container, ctx) {
     const { m, f } = offen;
     if (e.key === 'Enter') {
       const fu = frageUi(m, f);
-      if (f.mehrfach && fu.auswahl.size && !e.target.closest('button')) {
+      if (f.mehrfach && fu.auswahl.length && !e.target.closest('button')) {
         e.preventDefault();
-        frageSenden(m, f, [...fu.auswahl]);
+        frageSenden(m, f, fu.auswahl.slice());
       }
       return;
     }
@@ -1997,6 +2538,12 @@ function baueAnsicht(container, ctx) {
     lebt = false;
     clearTimeout(beobachter);
     trennen();
+    markierung.weg();
+    menueSchliessen();
+    // Was Bausteine noch nicht gespeichert haben, jetzt -- die Ansicht geht.
+    for (const z of zustaende.values()) {
+      try { z.jetzt(); } catch { /* weiter */ }
+    }
     sprechAbos.delete(sprechAbo);
     entwurfMerken.cancel();
     claudeBald.cancel();
@@ -2021,6 +2568,10 @@ function ensureStyle() {
   node.id = STYLE_ID;
   node.textContent = STIL;
   document.head.appendChild(node);
+  // Das Bearbeiten-Feld unter Codebloecken ist das der Bausteine; seine
+  // Gestaltung muss da sein, auch wenn noch kein Baustein gezeichnet wurde.
+  bausteinStil('nos-bausteine', BAUSTEIN_CSS);
+  bausteinStil('nos-bs-bearbeiten', BEARBEITEN_CSS);
 }
 
 const STIL = `
@@ -2136,33 +2687,72 @@ details[open] > summary > .cv-pfeil { transform: rotate(90deg); }
 .cv-karte__zurueck svg { width: 15px; height: 15px; }
 .cv-karte__hinweis { margin: 0; font-size: var(--fs-sm); color: var(--warn); }
 
-/* -- Rueckfrage: grosse, antippbare Chips -- */
-.cv-frage { margin: 14px 0 2px; padding: 16px 16px 14px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-3); }
-.cv-frage[data-zustand="offen"] { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong)); }
-.cv-frage__text { margin: 0 0 12px; font-size: var(--fs-md); font-weight: 500; line-height: 1.45; color: var(--fg); }
-.cv-frage__optionen { display: flex; flex-wrap: wrap; gap: 10px; }
-.cv-option { display: inline-flex; align-items: center; gap: 10px; min-height: var(--tap-min); max-width: 100%; padding: 0 18px 0 11px; font: inherit; font-size: var(--fs-md); line-height: 1.3; text-align: left; color: var(--accent-text); background: color-mix(in srgb, var(--accent) 7%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 62%, transparent); border-radius: var(--r-full); cursor: pointer; transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease), opacity var(--dur-2) var(--ease); }
-.cv-option:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
-.cv-option:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
-.cv-option:disabled { cursor: default; }
-.cv-option__nr { display: inline-grid; place-items: center; flex: none; width: 22px; height: 22px; font-size: var(--fs-xs); font-weight: 600; color: var(--accent-text); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 6px; }
-.cv-option__label { min-width: 0; overflow-wrap: anywhere; padding: 6px 0; }
-.cv-option__haken, .cv-option__symbol { display: inline-grid; place-items: center; flex: none; }
-.cv-option__haken svg, .cv-option__symbol svg { width: 16px; height: 16px; }
-.cv-option.is-gewaehlt { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
-.cv-option.is-gewaehlt .cv-option__nr { color: var(--accent-fg); border-color: color-mix(in srgb, var(--accent-fg) 45%, transparent); }
-.cv-option.is-aus { opacity: 0.42; }
-.cv-option--eigen { padding-left: 14px; color: var(--fg-muted); background: none; border-style: dashed; border-color: var(--border-strong); }
-.cv-option--eigen:hover:not(:disabled), .cv-option--eigen.is-offen { color: var(--fg); background: var(--surface-3); border-color: var(--fg-subtle); }
-.cv-frage__eigen { display: flex; gap: 8px; margin-top: 12px; }
-.cv-frage__eigen .input { flex: 1 1 auto; min-width: 0; }
-.cv-frage__fuss { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; font-size: var(--fs-sm); color: var(--fg-subtle); }
-.cv-frage__tipp { margin: 10px 0 0; font-size: var(--fs-xs); color: var(--fg-subtle); }
-.cv-frage__antwort { margin: 12px 0 0; font-size: var(--fs-sm); color: var(--fg-muted); }
-.cv-frage__fehler { margin: 10px 0 0; font-size: var(--fs-sm); color: var(--danger); }
+/* -- Rueckfrage: die Auswahl-Komponente der Bausteine, hier mit Rahmen -- */
+.cv-frage { margin: 14px 0 2px; }
+.cv-frage .cv-frage__karte { padding: 16px 16px 14px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-3); }
+.cv-frage[data-zustand="offen"] .cv-frage__karte { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong)); }
+
+/* -- Bausteine und Inseln in der Antwort -- */
+.cv-insel-platz { display: none; }
+.cv-md .bs { margin: 4px 0 14px; }
+.cv-md .bs:last-child { margin-bottom: 0; }
+.cv-md .bs--wird, .cv-md .bs-kaputt { margin: 4px 0 14px; }
+
+/* -- Codebloecke: Leiste darunter, Bearbeiten, Ausgabe -- */
+.cv-code { margin: 4px 0 14px; }
+.cv-code:last-child { margin-bottom: 0; }
+.cv-code .md-code { margin: 0; }
+.cv-code__leiste { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-top: 4px; }
+.cv-code__knopf { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 8px; font: inherit; font-size: var(--fs-xs); color: var(--fg-subtle); background: none; border: 0; border-radius: var(--r-1); cursor: pointer; }
+.cv-code__knopf svg { width: 14px; height: 14px; }
+.cv-code__knopf:hover { color: var(--fg); background: var(--surface-3); }
+.cv-code__knopf:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+.cv-code .bs-bearbeiten { margin-top: 8px; }
+.cv-code .sk-lauf { margin-top: 8px; }
+
+/* -- "Frage dazu" an Ueberschriften -- */
+.cv-md .cv-abschnitt { position: relative; display: flex; align-items: baseline; gap: 10px; }
+.cv-frage-dazu { display: inline-flex; align-items: center; gap: 4px; flex: none; min-height: 24px; padding: 0 7px; font: inherit; font-size: var(--fs-xs); font-weight: 500; color: var(--fg-subtle); background: none; border: 1px solid transparent; border-radius: var(--r-full); cursor: pointer; opacity: 0; transition: opacity var(--dur-1) var(--ease); }
+.cv-frage-dazu svg { width: 13px; height: 13px; }
+.cv-abschnitt:hover .cv-frage-dazu, .cv-frage-dazu:focus-visible, .cv-frage-dazu[aria-expanded="true"] { opacity: 1; }
+.cv-frage-dazu:hover, .cv-frage-dazu[aria-expanded="true"] { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); }
+.cv-frage-dazu:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+.cv-abschnitt__frage { display: flex; gap: 8px; margin: 4px 0 14px; }
+.cv-abschnitt__frage .input { flex: 1 1 auto; min-width: 0; }
+
+/* -- Fassungen und Vergleich -- */
+.cv-fassungen { display: inline-flex; align-items: center; gap: 2px; margin-left: 6px; padding-left: 8px; border-left: 1px solid var(--border); }
+.cv-fassungen__stand { padding: 0 4px; font-size: var(--fs-xs); color: var(--fg-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cv-fassungen__name { color: var(--fg-subtle); }
+.cv-fassungen .btn--small { margin-left: 4px; }
+.cv-fassung__hinweis { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; font-size: var(--fs-sm); color: var(--fg-muted); }
+.cv-fassung__hinweis svg { width: 16px; height: 16px; flex: none; }
+.cv-msg.is-fassung .cv-aktionen { opacity: 1; }
+.cv-aktion__pfeil { display: inline-grid; margin-left: -4px; }
+.cv-aktion__pfeil svg { width: 12px; height: 12px; }
+.cv-vergleich { width: 100%; max-width: 100%; margin-top: 8px; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-3); }
+.cv-vergleich__kopf { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-bottom: 10px; font-size: var(--fs-sm); color: var(--fg-muted); }
+.cv-vergleich__titel { font-weight: 500; color: var(--fg); }
+.cv-vergleich__wahl { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.cv-vergleich__chip { min-height: 26px; padding: 0 9px; font: inherit; font-size: var(--fs-xs); color: var(--fg-muted); background: var(--surface-3); border: 1px solid var(--border); border-radius: var(--r-full); cursor: pointer; }
+.cv-vergleich__chip.is-an { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: var(--accent-soft); }
+.cv-vergleich__zahlen { margin-left: auto; font-size: var(--fs-xs); color: var(--fg-subtle); white-space: nowrap; }
+.cv-vergleich__text { max-height: 420px; overflow: auto; font-size: var(--fs-sm); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-muted); }
+.cv-vergleich__weg { color: var(--danger); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--danger) 60%, transparent); background: var(--danger-soft); border-radius: 3px; }
+.cv-vergleich__neu { color: var(--fg); text-decoration: none; background: var(--accent-soft); border-radius: 3px; }
+.cv-md .is-geaendert { animation: cv-geaendert 2.6s var(--ease); border-radius: var(--r-1); }
+@keyframes cv-geaendert { 0%, 60% { background: var(--accent-soft); box-shadow: 0 0 0 4px var(--accent-soft); } 100% { background: transparent; box-shadow: none; } }
 @media (pointer: coarse) {
-  .cv-option__nr { display: none; }
-  .cv-option { padding: 0 20px; }
+  /* Mit dem Finger: alles, was sich antippen laesst, mindestens 44 px --
+     auch die Knoepfe der Tabellen und Bausteine, die im Chat stehen. */
+  .cv-frage-dazu { opacity: 0.85; min-height: var(--tap-min); }
+  .cv-code__knopf, .cv-vergleich__chip, .cv-fassungen .btn--small,
+  .cv-msg--bot .cv-md .tb-sort, .cv-msg--bot .cv-md .bs-knopf, .cv-msg--bot .cv-md .bs-aktion,
+  .cv-msg--bot .cv-md .dg .dg-umschalter, .cv-msg--bot .cv-md .dg-leg { min-height: var(--tap-min); }
+  .cv-code__knopf { padding: 0 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cv-md .is-geaendert { animation: none; background: var(--accent-soft); }
 }
 
 /* -- Quellen -- */

@@ -27,7 +27,7 @@
  * sees no new worker and keeps the old cache.
  */
 
-const VERSION = 'v8';
+const VERSION = 'v9';
 const CACHE_NAME = `neural-os-shell-${VERSION}`;
 
 /**
@@ -49,6 +49,43 @@ const SHELL_ASSETS = [
   './icons/icon-192.png',
   './lib/api.js',
   './lib/dom.js',
+  // Der Chat und alles, was eine Antwort zeichnet (Bausteine, Diagramme,
+  // Tabellen, Sandkasten, Menues): vorab, damit ein vom Home-Bildschirm
+  // gestartetes Fenster die erste Antwort ohne Nachladen zeichnen kann.
+  // Jede Datei einzeln (allSettled): fehlt eine, bleibt der Rest im Cache.
+  './lib/markdown.js',
+  './lib/agenten.js',
+  './lib/antwort-hilfen.js',
+  './lib/auswahl-menue.js',
+  './lib/tabelle.js',
+  './lib/diagramm.js',
+  './lib/sandkasten.js',
+  './lib/bausteine/index.js',
+  './lib/bausteine/gemeinsam.js',
+  './lib/bausteine/zustand.js',
+  './lib/bausteine/bearbeiten.js',
+  './lib/bausteine/sortieren.js',
+  './lib/bausteine/auswahl.js',
+  './lib/bausteine/formular.js',
+  './lib/bausteine/regler.js',
+  './lib/bausteine/karten.js',
+  './lib/bausteine/checkliste.js',
+  './lib/bausteine/schritte.js',
+  './lib/bausteine/abschnitte.js',
+  './lib/bausteine/mehr.js',
+  './lib/bausteine/tabs.js',
+  './lib/bausteine/liste.js',
+  './lib/bausteine/quiz.js',
+  './lib/bausteine/lernkarten.js',
+  './lib/bausteine/lueckentext.js',
+  './lib/bausteine/zuordnung.js',
+  './lib/bausteine/timer.js',
+  './lib/bausteine/countdown.js',
+  './lib/bausteine/termin.js',
+  './lib/bausteine/datei.js',
+  './lib/bausteine/vorschau.js',
+  './lib/bausteine/fortschritt.js',
+  './views/chat.js',
 ];
 
 self.addEventListener('install', (event) => {

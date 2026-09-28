@@ -127,6 +127,15 @@ function textLang(index, inhalt) {
 }
 
 const pause = (ms) => [{ type: '__pause', ms }];
+/** Ein Textblock, der mittendrin `ms` lang stockt -- so bleibt ein ```ui-Block eine Weile offen. */
+function textMitPause(index, teil1, ms, teil2) {
+  const ev = [{ type: 'content_block_start', index, content_block: { type: 'text', text: '' } }];
+  for (const stueck of teil1.match(/\S+\s*|\s+/g) || []) ev.push({ type: 'content_block_delta', index, delta: { type: 'text_delta', text: stueck } });
+  ev.push({ type: '__pause', ms });
+  for (const stueck of teil2.match(/\S+\s*|\s+/g) || []) ev.push({ type: 'content_block_delta', index, delta: { type: 'text_delta', text: stueck } });
+  ev.push({ type: 'content_block_stop', index });
+  return ev;
+}
 const zug = (teile, pauseMs) => ({ sse: teile.flat(), pauseMs });
 
 /* ------------------------------------------------------------- Pruefen */
@@ -190,10 +199,10 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
   const browser = await browserTyp.launch(exe ? { executablePath: exe } : {});
   const konsole = [];
 
-  async function neueSeite({ breite = 1440, hoehe = 900, finger = false, rechte = true, ohneClipboard = false } = {}) {
+  async function neueSeite({ breite = 1440, hoehe = 900, finger = false, rechte = true, ohneClipboard = false, hell = false } = {}) {
     const c = await browser.newContext({
       viewport: { width: breite, height: hoehe },
-      colorScheme: 'dark',
+      colorScheme: hell ? 'light' : 'dark',
       hasTouch: finger,
       isMobile: false,
       deviceScaleFactor: finger ? 2 : 1,
@@ -203,7 +212,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       // mitten in eine Messung fallen.
       serviceWorkers: 'block',
     });
-    await c.addInitScript(() => { try { localStorage.setItem('neural-os:theme', 'dark'); } catch { /* egal */ } });
+    await c.addInitScript((thema) => { try { localStorage.setItem('neural-os:theme', thema); } catch { /* egal */ } }, hell ? 'light' : 'dark');
     if (ohneClipboard) {
       // So sieht Safari auf dem iPad Neural OS ueber http://<LAN-IP>: ohne
       // sicheren Kontext gibt es navigator.clipboard gar nicht.
@@ -218,7 +227,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     }
     const p = await c.newPage();
     p.on('pageerror', (e) => konsole.push(e.message.slice(0, 160)));
-    p.on('console', (m) => { if (m.type() === 'error') konsole.push(m.text().slice(0, 160)); });
+    p.on('console', (m) => { if (m.type() === 'error') konsole.push(`${m.text().slice(0, 160)}  [${((m.location && m.location()) || {}).url || ''}]`); });
     return { c, p };
   }
 
@@ -229,6 +238,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
   const letzteAntwort = (p) => p.locator('.cv-msg--bot').last();
 
   let fehlgeschlagen = null;
+  let chatBausteine = null; // der Chat mit den Bausteinen (Abschnitt 5b), fuer iPad und hellen Modus
   try {
     /* ============================================ 1 · Verbinden, Vorlage */
     console.log(`\n${BO}1 · Verbinde Claude, dann die Vorlage nachgestellt (1440×900)${X}`);
@@ -236,38 +246,49 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     // Offline: Mit dem Statisten auf 127.0.0.1 laesst die Schleuse Claude
     // auch offline durch (loopback). Wie die Karte fuer einen echten
     // Offline-Stick aussieht, zeigt deshalb EINE nachgestellte Antwort von
-    // GET /api/claude -- der Schalter darunter schaltet dann wirklich.
+    // GET /api/ki -- der Schalter darunter schaltet dann wirklich.
     const echtOffline = app.gate && app.gate.mode;
-    await p.route('**/api/claude', (route) => {
+    await p.route('**/api/ki', (route) => {
       if (route.request().method() !== 'GET') return route.fallback();
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
-        verbunden: false, schluesselVorhanden: false, grundCode: 'offline', grund: 'Offline — Claude ist gerade nicht erreichbar.', netz: { modus: 'offline', erlaubt: false },
+        aktiv: 'claude', name: 'Claude', verbunden: false, schluesselVorhanden: false, grundCode: 'offline', grund: 'Offline — Claude ist gerade nicht erreichbar.', netz: { modus: 'offline', erlaubt: false },
       }) });
     });
     await p.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
     await p.locator('.cv-verbinden[data-grund="offline"]').waitFor({ timeout: 8000 });
-    const offlineText = (await p.locator('.cv-verbinden').innerText()).replace(/\s+/g, ' ');
-    check(/braucht Internet/.test(offlineText) && await p.getByRole('button', { name: 'Online schalten' }).count() === 1,
-      'Offline: ein Satz, dass die KI Internet braucht, und der Schalter', offlineText.slice(0, 110));
+    check(/Die KI braucht Internet/.test(await p.locator('.cv-verbinden').innerText()) && await p.locator('.cv-verbinden button', { hasText: 'Online schalten' }).count() === 1,
+      'Offline: „Die KI braucht Internet“ mit dem Schalter „Online schalten“ – statt eines leeren Chats', String(echtOffline));
     await foto(p, 'offline-1440');
-    await p.unroute('**/api/claude');
-    await p.getByRole('button', { name: 'Online schalten' }).click();
-    await p.locator('.cv-verbinden[data-grund="kein-schluessel"]').waitFor({ timeout: 8000 });
-    check(echtOffline === 'offline' && app.gate.mode === 'online', '„Online schalten“ schaltet wirklich (Netzmodus im Server: online)', `${echtOffline} → ${app.gate.mode}`);
+    await p.unroute('**/api/ki');
+    // Dieselbe Adresse noch einmal waere nur ein Hash-Wechsel: neu laden.
+    await p.reload({ waitUntil: 'domcontentloaded' });
     await p.locator('.cv-verbinden').waitFor({ timeout: 8000 });
     const karte = (await p.locator('.cv-verbinden').innerText()).replace(/\s+/g, ' ');
-    check(/Verbinde Claude/.test(karte) && /console\.anthropic\.com/.test(karte),
-      'Ohne Schlüssel: statt eines leeren Chats die Karte „Verbinde Claude“ mit dem Satz, wo es ihn gibt', karte.slice(0, 120));
-    check(await p.locator('.cv-verbinden input').count() === 1, 'genau ein Feld');
-    await foto(p, 'verbinde-claude-1440');
-
-    await p.locator('.cv-verbinden input').fill('sk-ant-falsch-0000000000000000000000');
-    await p.locator('.cv-verbinden button[type="submit"]').click();
-    await p.locator('.cv-verbinden__fehler:not([hidden])').waitFor({ timeout: 8000 });
-    check(!!(await p.locator('.cv-verbinden__fehler').innerText()).trim(), 'Ein falscher Schlüssel wird mit einem Satz abgelehnt',
-      (await p.locator('.cv-verbinden__fehler').innerText()).trim());
-    await p.locator('.cv-verbinden input').fill(SCHLUESSEL);
-    await p.locator('.cv-verbinden button[type="submit"]').click();
+    check(/Verbinde eine KI/.test(karte) && /Kostenlos mit Google/.test(karte) && /aistudio\.google\.com\/apikey/.test(karte),
+      'Ohne Schlüssel: statt eines leeren Chats die Karte „Verbinde eine KI“ – Google zuerst, mit dem Satz, wo es den Schlüssel gibt', karte.slice(0, 120));
+    check(await p.locator('.cv-verbinden input[aria-label="Google-Schlüssel"]').count() === 1
+      && await p.locator('.cv-verbinden details.cv-verbinden__mehr:not([open])').count() === 1,
+    'genau ein Feld für Google; Claude darunter zugeklappt („Oder Claude (kostet pro Nutzung)“)');
+    await foto(p, 'verbinde-ki-1440');
+    // Der Statist spricht Anthropics Schnittstelle: also Claude aufklappen.
+    await p.locator('.cv-verbinden details.cv-verbinden__mehr > summary').click();
+    const claudeFeld = p.locator('.cv-verbinden input[aria-label="Claude-Schlüssel"]');
+    await claudeFeld.waitFor({ timeout: 3000 });
+    check(/console\.anthropic\.com/.test(await p.locator('.cv-verbinden').innerText()), 'Aufgeklappt: das Claude-Feld mit dem Satz, wo es den Schlüssel gibt');
+    await claudeFeld.fill('sk-ant-falsch-0000000000000000000000');
+    await p.locator('.cv-verbinden details.cv-verbinden__mehr form button[type="submit"]').click();
+    // Die Karte wird nach der Pruefung neu gebaut (Zustand der KI); der Satz
+    // steht dann im Claude-Teil -- der ist wieder zugeklappt, also aufklappen.
+    const fehlerSatz = await warteBis(async () => {
+      const t = (await p.locator('.cv-verbinden__fehler').evaluateAll((els) => els.map((e) => e.textContent))).map((x) => x.trim()).filter(Boolean);
+      return t.length ? t[0] : null;
+    }, { timeout: 8000 });
+    check(!!fehlerSatz, 'Ein falscher Schlüssel wird mit einem Satz abgelehnt', String(fehlerSatz));
+    if (await p.locator('.cv-verbinden details.cv-verbinden__mehr:not([open])').count()) {
+      await p.locator('.cv-verbinden details.cv-verbinden__mehr > summary').click();
+    }
+    await p.locator('.cv-verbinden input[aria-label="Claude-Schlüssel"]').fill(SCHLUESSEL);
+    await p.locator('.cv-verbinden details.cv-verbinden__mehr form button[type="submit"]').click();
     await p.locator('.cv-leer__titel').waitFor({ timeout: 10000 });
     check(app.claude.zustand().verbunden === true, 'Danach geht es sofort weiter: Claude ist verbunden, ohne Neuladen');
     check((await p.locator('.cv-leer__titel').innerText()).trim() === 'Womit kann ich dir helfen?', 'Der leere Chat fragt „Womit kann ich dir helfen?“');
@@ -353,8 +374,11 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     await p.locator('.cv-frage[data-zustand="offen"]').waitFor({ timeout: 8000 });
     await strom(p);
     const chatB = chatIdAus(p);
-    const optionen = p.locator('.cv-frage[data-zustand="offen"] .cv-option');
-    check(await optionen.count() === 4, 'Die Rückfrage zeigt drei Optionen und „Eigene Antwort …“', (await optionen.allInnerTexts()).map((t) => t.replace(/\s+/g, ' ')).join(' | '));
+    // Die Rueckfrage zeichnet DIESELBE Auswahl-Komponente wie der Baustein
+    // `auswahl` (web/lib/bausteine/auswahl.js) -- es gibt keine zweite.
+    const optionen = p.locator('.cv-frage[data-zustand="offen"] .bs-option');
+    check(await optionen.count() === 4 && await p.locator('.cv-frage[data-zustand="offen"] .bs-wahl').count() === 1,
+      'Die Rückfrage zeigt drei Optionen und „Eigene Antwort …“ – mit der Auswahl-Komponente der Bausteine', (await optionen.allInnerTexts()).map((t) => t.replace(/\s+/g, ' ')).join(' | '));
     await p.waitForTimeout(300);
     await foto(p, 'rueckfrage-1440');
 
@@ -372,17 +396,17 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     const f1 = nachF1 && nachF1.data.rueckfragen.find((f) => f.id === 'toolu_f1');
     check(f1 && f1.zustand === 'beantwortet' && f1.antwort === 'Eine Woche', 'Taste 2 wählt die zweite Option und schickt sie ab (im Tresor: „Eine Woche“)', f1 && `${f1.zustand}: ${f1.antwort}`);
     const erste = p.locator('.cv-frage[data-frage="toolu_f1"]');
-    check(await erste.locator('.cv-option.is-gewaehlt').count() === 1 && /Eine Woche/.test(await erste.locator('.cv-option.is-gewaehlt').innerText()),
+    check(await erste.locator('.bs-option.is-gewaehlt').count() === 1 && /Eine Woche/.test(await erste.locator('.bs-option.is-gewaehlt').innerText()),
       'Die beantwortete Karte bleibt im Verlauf und zeigt die gewählte Antwort');
 
     const f2 = p.locator('.cv-frage[data-frage="toolu_f2"]');
     const anfragenVorMehrfach = statist.anfragen.length;
-    await f2.locator('.cv-option', { hasText: 'Antike' }).click();
-    await f2.locator('.cv-option.is-gewaehlt', { hasText: 'Antike' }).waitFor({ timeout: 3000 });
-    await f2.locator('.cv-option', { hasText: 'Essen' }).click();
-    await f2.locator('.cv-option.is-gewaehlt', { hasText: 'Essen' }).waitFor({ timeout: 3000 });
-    check(await f2.locator('.cv-option.is-gewaehlt').count() === 2 && statist.anfragen.length === anfragenVorMehrfach, 'Mehrfachauswahl: Antippen markiert, statt sofort zu senden',
-      `${await f2.locator('.cv-option.is-gewaehlt').count()} markiert, nichts gesendet`);
+    await f2.locator('.bs-option', { hasText: 'Antike' }).click();
+    await f2.locator('.bs-option.is-gewaehlt', { hasText: 'Antike' }).waitFor({ timeout: 3000 });
+    await f2.locator('.bs-option', { hasText: 'Essen' }).click();
+    await f2.locator('.bs-option.is-gewaehlt', { hasText: 'Essen' }).waitFor({ timeout: 3000 });
+    check(await f2.locator('.bs-option.is-gewaehlt').count() === 2 && statist.anfragen.length === anfragenVorMehrfach, 'Mehrfachauswahl: Antippen markiert, statt sofort zu senden',
+      `${await f2.locator('.bs-option.is-gewaehlt').count()} markiert, nichts gesendet`);
     await foto(p, 'rueckfrage-mehrfach-1440');
     statist.weiter(zug([
       B.start(),
@@ -397,8 +421,8 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     check(f2Satz && f2Satz.antwort === 'Antike, Essen', '„Senden“ schickt beide Antworten', f2Satz && f2Satz.antwort);
 
     const f3 = p.locator('.cv-frage[data-frage="toolu_f3"]');
-    await f3.locator('.cv-option--eigen').click();
-    const eigen = f3.locator('.cv-frage__eigen input');
+    await f3.locator('.bs-option--eigen').click();
+    const eigen = f3.locator('.bs-wahl__eigen input');
     await eigen.waitFor({ timeout: 3000 });
     check(true, '„Eigene Antwort …“ öffnet ein Feld an Ort und Stelle');
     await eigen.fill('Im Oktober, erste Woche');
@@ -511,7 +535,11 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     console.log(`\n${BO}5 · Neu antworten, Bearbeiten, Weiter bei max_tokens${X}`);
     statist.weiter(zug([B.start(), textLang(0, 'Neue Fassung: kurz und vollständig.'), B.ende('end_turn')], 10));
     await letzteAntwort(p).hover();
-    await letzteAntwort(p).locator('.cv-aktion[aria-label="Neu antworten"]').click();
+    await letzteAntwort(p).locator('.cv-aktion[aria-label="Neu erstellen"]').click();
+    await p.locator('.am[role="menu"]').waitFor({ timeout: 3000 });
+    check((await p.locator('.am__eintrag').allInnerTexts()).map((t) => t.trim()).join(' · ') === 'Neu erstellen · Kürzer · Einfacher · Detaillierter · Kreativer · Anders formuliert',
+      '„Neu erstellen ▾“ öffnet das Menü mit den Varianten', (await p.locator('.am__eintrag').allInnerTexts()).join(' · '));
+    await p.locator('.am__eintrag[data-id="neu"]').click();
     await warteBis(async () => /Neue Fassung/.test(await letzteAntwort(p).innerText().catch(() => '')), { timeout: 8000 });
     await strom(p);
     const nachNeu = nachrichten(chatIdAus(p));
@@ -542,6 +570,211 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     const weiterKnopf = letzteAntwort(p).getByRole('button', { name: 'Weiter' });
     check(await weiterKnopf.count() === 1, 'Bei max_tokens: ein Knopf „Weiter“');
     await foto(p, 'max-tokens-weiter-1440');
+
+    /* ===================== 5b · Bausteine, Fassungen, Umwandeln, Markieren, Code */
+    console.log(`\n${BO}5b · Die Antwort baut ihre Oberfläche: Bausteine, Tabelle, Diagramm, Code, Fassungen${X}`);
+    await p.locator('.rail__brand').click();
+    await p.locator('.cv-leer__titel').waitFor({ timeout: 5000 });
+    const teil1 = '## Dein Plan\n\nEine Stunde am Tag reicht, wenn du dranbleibst.\n\n```ui\n{"typ":"checkliste","titel":"Diese Woche","punkte":["Brüche üben","Gleichungen';
+    const teil2 = ' lösen","Probeklausur schreiben"]}\n```\n\n| Tag | Thema | Minuten |\n|---|---|---|\n| Mo | Brüche | 30 |\n| Di | Gleichungen | 45 |\n| Mi | Wiederholen | 60 |\n\n```ui\n{"typ":"diagramm","art":"saeulen","titel":"Lernzeit je Tag","einheit":"min","x":["Mo","Di","Mi"],"reihen":[{"name":"Minuten","werte":[30,45,60]}]}\n```\n\nSo rechnest du die Summe:\n\n```\nconst minuten = [30, 45, 60];\nconsole.log(minuten.reduce((a, b) => a + b, 0));\n```\n\n```ui\n{"typ":"aktionen","aktionen":["Mehr Übungen","Plan als PDF"]}\n```';
+    statist.weiter(zug([B.start(), textMitPause(0, teil1, 1100, teil2), B.ende('end_turn')], 6));
+    await p.locator('.cv-composer__feld').fill('Mach mir einen Lernplan mit Checkliste');
+    await p.keyboard.press('Enter');
+    const platzhalter = await warteBis(() => p.locator('.bs--wird').count(), { timeout: 6000 });
+    check(!!platzhalter && !/\{"typ"/.test(await letzteAntwort(p).innerText().catch(() => '')),
+      'Während der ```ui-Block noch ankommt: „Wird aufgebaut …“, nie rohes JSON');
+    await strom(p);
+    chatBausteine = chatIdAus(p);
+    await p.waitForTimeout(500);
+    const bausteinAntwort = letzteAntwort(p);
+    const typen = await bausteinAntwort.locator('.bs[data-baustein]').evaluateAll((els) => els.map((e) => e.dataset.baustein));
+    check(typen.join(',') === 'checkliste,diagramm,aktionen', 'Danach stehen die Bausteine als Bausteine da: Checkliste, Diagramm, Aktionen', typen.join(','));
+    check(await bausteinAntwort.locator('.md-code[data-lang="js"]').count() === 1 && /javascript/i.test(await bausteinAntwort.locator('.md-code__lang').first().innerText()),
+      'Ein Codeblock ohne Sprache wird als JavaScript erkannt (und so gefärbt)');
+    check(await bausteinAntwort.locator('.cv-md .tb .tb-sort').count() === 3, 'Die Markdown-Tabelle ist sortierbar (Kopfzeile aus Knöpfen)');
+    check(await bausteinAntwort.locator('.bs[data-baustein="diagramm"] svg').count() >= 1, 'Das Diagramm ist ein SVG');
+    check(!/\{"typ"/.test(await bausteinAntwort.innerText()), 'Nirgends steht JSON');
+    await bausteinAntwort.locator('.bs[data-baustein="checkliste"]').scrollIntoViewIfNeeded();
+    await foto(p, 'bausteine-1440');
+
+    // Checkliste: abhaken -> Fortschritt, gespeichert (PUT …/ui), nach Neuladen noch da, Strg+Z.
+    const liste = bausteinAntwort.locator('.bs[data-baustein="checkliste"]');
+    await liste.locator('.bs-check__text').first().click();
+    await warteBis(async () => /1 von 3/.test(await liste.innerText()), { timeout: 3000 });
+    check(/1 von 3/.test(await liste.innerText()), 'Abhaken zählt: „1 von 3“');
+    const uiGespeichert = await warteBis(() => {
+      const m = nachrichten(chatBausteine).filter((x) => x.data.role === 'assistant').pop();
+      const ui = m && m.data.ui && m.data.ui['0'];
+      return ui && Object.keys(ui).length ? ui : null;
+    }, { timeout: 4000 });
+    check(!!uiGespeichert, 'Der Zustand liegt im Tresor (PUT …/ui, entprellt)', JSON.stringify(uiGespeichert).slice(0, 100));
+    await p.reload({ waitUntil: 'domcontentloaded' });
+    await p.locator('.bs[data-baustein="checkliste"]').waitFor({ timeout: 8000 });
+    await p.waitForTimeout(400);
+    const listeNeu = letzteAntwort(p).locator('.bs[data-baustein="checkliste"]');
+    check(/1 von 3/.test(await listeNeu.innerText()) && await listeNeu.locator('.bs-check__punkt.is-erledigt').count() === 1,
+      'Nach dem Neuladen ist der Haken noch da');
+    await listeNeu.locator('.bs-check__text').nth(1).click();
+    await warteBis(async () => /2 von 3/.test(await listeNeu.innerText()), { timeout: 3000 });
+    await p.keyboard.press('Control+z');
+    await warteBis(async () => /1 von 3/.test(await listeNeu.innerText()), { timeout: 3000 });
+    check(/1 von 3/.test(await listeNeu.innerText()), 'Strg+Z nimmt das Abhaken zurück („1 von 3“)');
+    await p.keyboard.press('Control+Shift+z');
+    await warteBis(async () => /2 von 3/.test(await listeNeu.innerText()), { timeout: 3000 });
+    check(/2 von 3/.test(await listeNeu.innerText()), 'Strg+Umschalt+Z holt es wieder („2 von 3“)');
+
+    // Tabelle sortieren, Diagramm als Tabelle.
+    const antwortB = letzteAntwort(p);
+    await antwortB.locator('.cv-md .tb .tb-sort', { hasText: 'Minuten' }).click();
+    await p.waitForTimeout(200);
+    const sortiert = (await antwortB.locator('.cv-md .tb tbody tr:not(.tb-leer) td:first-child').allInnerTexts()).filter(Boolean);
+    await antwortB.locator('.cv-md .tb .tb-sort', { hasText: 'Minuten' }).click();
+    await p.waitForTimeout(200);
+    const sortiertAb = (await antwortB.locator('.cv-md .tb tbody tr:not(.tb-leer) td:first-child').allInnerTexts()).filter(Boolean);
+    check(sortiert.join(',') === 'Mo,Di,Mi' && sortiertAb.join(',') === 'Mi,Di,Mo', 'Klick auf „Minuten“ sortiert auf, noch ein Klick ab (als Zahl)', `${sortiert.join(',')} → ${sortiertAb.join(',')}`);
+    await antwortB.locator('.bs[data-baustein="diagramm"] button', { hasText: 'Als Tabelle' }).click();
+    await p.waitForTimeout(250);
+    check(await antwortB.locator('.bs[data-baustein="diagramm"] table').count() >= 1 && /60/.test(await antwortB.locator('.bs[data-baustein="diagramm"]').innerText()),
+      '„Als Tabelle“ am Diagramm zeigt die echten Zahlen');
+    await antwortB.locator('.bs[data-baustein="diagramm"] button', { hasText: 'Als Diagramm' }).click();
+
+    // Code ausfuehren im Sandkasten: die Ausgabe steht darunter.
+    const codeBox = antwortB.locator('.cv-code').first();
+    await codeBox.scrollIntoViewIfNeeded();
+    await codeBox.locator('.cv-code__knopf', { hasText: 'Ausführen' }).click();
+    const ausgabe = await warteBis(async () => {
+      const t = await antwortB.locator('.cv-code .sk-lauf').innerText().catch(() => '');
+      return /135/.test(t) ? t : null;
+    }, { timeout: 10000 });
+    check(!!ausgabe, 'Ausführen: JavaScript läuft im Sandkasten, die Ausgabe „135“ steht unter dem Code', String(ausgabe || '').replace(/\s+/g, ' ').slice(0, 80));
+    await foto(p, 'code-ausgefuehrt-1440');
+
+    // Markierter Text -> kleines Menue -> Kuerzen aendert nur die Stelle (neue Fassung).
+    await antwortB.locator('.cv-md p', { hasText: 'Eine Stunde am Tag' }).scrollIntoViewIfNeeded();
+    await p.evaluate(() => {
+      const el = [...document.querySelectorAll('.cv-msg--bot')].pop().querySelector('.cv-md p');
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    });
+    await p.locator('.am-leiste').waitFor({ timeout: 4000 });
+    const leisteText = (await p.locator('.am-leiste').innerText()).replace(/\s+/g, ' ').trim();
+    check(/Erklären.*Kürzen.*Umschreiben.*Übersetzen.*Verbessern.*Zusammenfassen.*Frage dazu/.test(leisteText), 'Markierter Text: die Leiste Erklären · Kürzen · Umschreiben · Übersetzen · Verbessern · Zusammenfassen · Frage dazu', leisteText);
+    await foto(p, 'markiert-menue-1440');
+    statist.weiter(zug([B.start(), textLang(0, 'Eine Stunde täglich genügt.'), B.ende('end_turn')], 6));
+    await p.locator('.am-leiste [data-id="kuerzen"]').click();
+    await warteBis(async () => /Eine Stunde täglich genügt/.test(await letzteAntwort(p).innerText().catch(() => '')), { timeout: 8000 });
+    await strom(p);
+    await p.waitForTimeout(300);
+    const nachKuerzen = nachrichten(chatBausteine).filter((x) => x.data.role === 'assistant').pop();
+    check(nachKuerzen.data.content.includes('Eine Stunde täglich genügt.') && nachKuerzen.data.content.includes('"typ":"checkliste"') && nachKuerzen.data.versionen.length === 2
+      && nachKuerzen.data.versionen[1].auswahl === true && nachKuerzen.data.versionen[1].anweisung === 'kuerzen',
+    'Kürzen ersetzt nur die Stelle; der Rest (Bausteine, Tabelle, Code) bleibt – als neue Fassung „Stelle: kürzen“', `${nachKuerzen.data.versionen.length} Fassungen`);
+    check(await letzteAntwort(p).locator('.cv-md .is-geaendert').count() === 1, 'und die geänderte Stelle ist kurz hervorgehoben');
+    const anfrageKuerzen = statist.anfragen[statist.anfragen.length - 1];
+    check(anfrageKuerzen && !anfrageKuerzen.tools && JSON.stringify(anfrageKuerzen).includes('Die markierte Stelle'),
+      'Die Anfrage an „Anthropic“ hatte keine Werkzeuge und nannte die markierte Stelle');
+
+    // Umwandeln ▾ -> Als Tabelle: eine weitere Fassung, dann blaettern, vergleichen, wiederherstellen.
+    await letzteAntwort(p).hover();
+    await letzteAntwort(p).locator('.cv-aktion[aria-label="Umwandeln"]').click();
+    await p.locator('.am[role="menu"]').waitFor({ timeout: 3000 });
+    const menueText = (await p.locator('.am').innerText()).replace(/\s+/g, ' ');
+    check(/Verbessern.*Zusammenfassen.*Übersetzen.*Als Tabelle.*Als Diagramm.*Als Checkliste.*Schritt für Schritt.*Wichtigste Punkte.*Nur Text/.test(menueText),
+      '„Umwandeln ▾“: Text (Verbessern, Zusammenfassen, Übersetzen ›) und Darstellung (Tabelle … Nur Text)', menueText.slice(0, 120));
+    await p.waitForTimeout(300);
+    await foto(p, 'umwandeln-menue-1440');
+    await p.locator('.am__eintrag[data-id="uebersetzen"]').click();
+    await p.waitForTimeout(150);
+    check(/Englisch/.test(await p.locator('.am').innerText()) && await p.locator('.am__zurueck').count() === 1, '„Übersetzen ›“ zeigt die Sprachen an Ort und Stelle (mit Zurück)');
+    await p.keyboard.press('Escape');
+    await p.waitForTimeout(100);
+    statist.weiter(zug([B.start(), textLang(0, 'Als Tabelle:\n\n| Tag | Thema |\n|---|---|\n| Mo | Brüche |\n| Di | Gleichungen |'), B.ende('end_turn')], 6));
+    await p.locator('.am__eintrag[data-id="tabelle"]').click();
+    await warteBis(async () => /Als Tabelle:/.test(await letzteAntwort(p).innerText().catch(() => '')), { timeout: 8000 });
+    await strom(p);
+    await p.waitForTimeout(300);
+    const nachTabelle = nachrichten(chatBausteine).filter((x) => x.data.role === 'assistant').pop();
+    check(nachTabelle.data.versionen.length === 3 && nachTabelle.data.version === 2 && nachTabelle.data.versionen[2].anweisung === 'tabelle' && !/checkliste/.test(nachTabelle.data.content),
+      '„Als Tabelle“ legt Fassung 3 an (Umgewandelt); Fassung 1 und 2 bleiben', `${nachTabelle.data.versionen.length} Fassungen, aktiv ${nachTabelle.data.version + 1}`);
+    await letzteAntwort(p).hover();
+    check(/3\/3/.test(await letzteAntwort(p).locator('.cv-fassungen__stand').innerText()) && /Als Tabelle/.test(await letzteAntwort(p).locator('.cv-fassungen__stand').innerText()),
+      'Unter der Antwort steht „3/3 · Als Tabelle“', (await letzteAntwort(p).locator('.cv-fassungen__stand').innerText()).trim());
+    await letzteAntwort(p).locator('.cv-aktion[aria-label="Vorige Fassung"]').click();
+    await p.waitForTimeout(250);
+    await letzteAntwort(p).locator('.cv-aktion[aria-label="Vorige Fassung"]').click();
+    await p.waitForTimeout(300);
+    const angesehen = letzteAntwort(p);
+    check(/Fassung 1 von 3 · Original – nur angesehen/.test(await angesehen.innerText()) && await angesehen.locator('.bs[data-baustein="checkliste"]').count() === 1
+      && await angesehen.getByRole('button', { name: 'Wiederherstellen' }).count() === 1,
+    '‹ ‹ blättert zur ersten Fassung: nur angesehen, mit ihren Bausteinen und [Wiederherstellen]');
+    await angesehen.locator('.cv-aktion[aria-label="Vergleichen"]').click();
+    await p.waitForTimeout(300);
+    const vergleich = angesehen.locator('.cv-vergleich');
+    check(await vergleich.count() === 1 && await vergleich.locator('del').count() >= 1 && await vergleich.locator('ins').count() >= 1
+      && /Wörter weg/.test(await vergleich.innerText()),
+    '„Vergleichen“ zeigt den wortweisen Unterschied zur vorigen Fassung (weg/neu, gezählt)', (await vergleich.locator('.cv-vergleich__zahlen').innerText()).trim());
+    await vergleich.scrollIntoViewIfNeeded();
+    await foto(p, 'fassungen-vergleich-1440');
+    await angesehen.getByRole('button', { name: 'Wiederherstellen' }).click();
+    await warteBis(() => { const m = nachrichten(chatBausteine).filter((x) => x.data.role === 'assistant').pop(); return m.data.version === 0 ? m : null; }, { timeout: 4000 });
+    const wieder = nachrichten(chatBausteine).filter((x) => x.data.role === 'assistant').pop();
+    check(wieder.data.version === 0 && wieder.data.content.includes('Eine Stunde am Tag reicht') && wieder.data.versionen.length === 3,
+      '„Wiederherstellen“ macht Fassung 1 wieder aktiv (PATCH …/version), im Tresor; keine Fassung geht verloren');
+    await p.waitForTimeout(300);
+    check(/1\/3/.test(await letzteAntwort(p).locator('.cv-fassungen__stand').innerText()) && await letzteAntwort(p).locator('.cv-vergleich').count() === 0,
+      'und die Leiste sagt „1/3“');
+
+    // Codeblock bearbeiten -> PATCH …/block -> Fassung „bearbeitet“.
+    const codeB = letzteAntwort(p).locator('.cv-code').first();
+    await codeB.scrollIntoViewIfNeeded();
+    await codeB.locator('.cv-code__knopf', { hasText: 'Bearbeiten' }).click();
+    const codeFeld = codeB.locator('textarea.bs-bearbeiten__feld');
+    await codeFeld.waitFor({ timeout: 3000 });
+    await codeFeld.fill('const minuten = [30, 45, 60, 15];\nconsole.log(minuten.length);');
+    await codeB.getByRole('button', { name: 'Speichern' }).click();
+    await warteBis(() => { const m = nachrichten(chatBausteine).filter((x) => x.data.role === 'assistant').pop(); return m.data.versionen.length === 4 ? m : null; }, { timeout: 5000 });
+    const nachBlock = nachrichten(chatBausteine).filter((x) => x.data.role === 'assistant').pop();
+    check(nachBlock.data.versionen.length === 4 && nachBlock.data.versionen[3].art === 'bearbeitet' && nachBlock.data.content.includes('minuten.length')
+      && nachBlock.data.content.includes('"typ":"checkliste"'),
+    'Bearbeiten unter dem Code speichert eine Fassung „bearbeitet“ mit dem neuen Code – alles andere bleibt', `${nachBlock.data.versionen.length} Fassungen`);
+    await p.waitForTimeout(300);
+    check(/minuten\.length/.test(await letzteAntwort(p).locator('.cv-code').first().innerText()) && /4\/4/.test(await letzteAntwort(p).locator('.cv-fassungen__stand').innerText()),
+      'und der Chat zeigt sie sofort („4/4“)');
+
+    // "Frage dazu" an der Ueberschrift.
+    const kopfB = letzteAntwort(p).locator('.cv-md .cv-abschnitt').first();
+    await kopfB.hover();
+    await kopfB.locator('.cv-frage-dazu').click();
+    const abschnittFeld = letzteAntwort(p).locator('.cv-abschnitt__feld');
+    await abschnittFeld.waitFor({ timeout: 3000 });
+    statist.weiter(zug([B.start(), textLang(0, 'Weil Brüche die Grundlage für Gleichungen sind.'), B.ende('end_turn')], 6));
+    await abschnittFeld.fill('Warum Brüche zuerst?');
+    await abschnittFeld.press('Enter');
+    await strom(p);
+    await p.waitForTimeout(300);
+    const frageDazu = nachrichten(chatBausteine).filter((x) => x.data.role === 'user').pop();
+    check(frageDazu.data.content === 'Zum Abschnitt „Dein Plan“ deiner Antwort: Warum Brüche zuerst?', '„Frage dazu“ unter der Überschrift fragt zu genau diesem Abschnitt', frageDazu.data.content);
+
+    // Baustein aktionen: ein Tippen sendet.
+    statist.weiter(zug([B.start(), textLang(0, 'Hier sind drei weitere Übungen zu Brüchen.'), B.ende('end_turn')], 6));
+    const aktionKnopf = p.locator('.bs[data-baustein="aktionen"] button', { hasText: 'Mehr Übungen' });
+    await aktionKnopf.scrollIntoViewIfNeeded();
+    await aktionKnopf.click();
+    await strom(p);
+    await p.waitForTimeout(300);
+    const nachAktion = nachrichten(chatBausteine).filter((x) => x.data.role === 'user').pop();
+    check(nachAktion.data.content === 'Mehr Übungen' && /drei weitere Übungen/.test(await letzteAntwort(p).innerText()),
+      'Der Baustein „aktionen“ schickt beim Antippen wirklich eine Nachricht, und die KI antwortet');
+    // Kopieren nimmt die Text-Fassung der Bausteine mit, nie JSON.
+    const bausteinMsg = p.locator('.cv-msg--bot', { has: p.locator('.bs[data-baustein="checkliste"]') }).first();
+    await bausteinMsg.hover();
+    await bausteinMsg.getByRole('button', { name: 'Antwort kopieren' }).click();
+    await p.waitForTimeout(250);
+    const kopie = await p.evaluate(() => navigator.clipboard.readText());
+    check(!/"typ"/.test(kopie) && /Brüche üben/.test(kopie) && /Lernzeit je Tag/.test(kopie), 'Kopieren unter der Antwort kopiert Bausteine als Text (Checkliste, Diagramm-Tabelle), nie JSON', `${kopie.length} Zeichen`);
     await c.close();
 
     /* ============================ 6 · Kopieren ohne navigator.clipboard */
@@ -581,7 +814,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       await p3.locator('.cv-frage[data-zustand="offen"]').waitFor({ timeout: 8000 });
       await p3.waitForFunction(() => !document.querySelector('.cv-composer__senden.is-stopp'), null, { timeout: 15000 });
       await p3.waitForTimeout(300);
-      const hoehen = await p3.locator('.cv-frage .cv-option').evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().height)));
+      const hoehen = await p3.locator('.cv-frage .bs-option').evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().height)));
       check(hoehen.length === 4 && hoehen.every((x) => x >= 44), 'Optionen sind für den Finger groß genug (≥ 44 px)', hoehen.join(', '));
       const klein = await p3.evaluate(() => [...document.querySelectorAll('.cv button, .cv a[href], .cv input, .cv textarea')]
         .filter((e) => e.offsetWidth && getComputedStyle(e).visibility !== 'hidden')
@@ -590,14 +823,50 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       check(klein.length === 0, 'Kein Bedienelement im Chat unter 44 px', klein.slice(0, 5).map(([k, hgt]) => `${String(k).split(' ')[0]} ${hgt}`).join(' · '));
       await foto(p3, 'ipad-rueckfrage-1180');
       statist.weiter(zug([B.start(), textLang(0, '## Dein Lernplan\n\nEine Stunde am Tag reicht, wenn du dranbleibst.\n\n| Tag | Thema |\n|---|---|\n| Mo | Brüche |\n| Di | Gleichungen |\n| Mi | Wiederholen |\n\n- [x] Themen gesammelt\n- [x] Zeit eingeplant'), B.ende('end_turn')], 10));
-      await p3.locator('.cv-frage .cv-option', { hasText: 'Eine Stunde' }).tap();
+      await p3.locator('.cv-frage .bs-option', { hasText: 'Eine Stunde' }).tap();
       await p3.waitForFunction(() => document.querySelector('.cv-frage[data-zustand="beantwortet"]'), null, { timeout: 8000 });
       await p3.waitForFunction(() => !document.querySelector('.cv-composer__senden.is-stopp'), null, { timeout: 15000 });
       await p3.waitForTimeout(500);
-      check(await p3.locator('.cv-frage .cv-option.is-gewaehlt', { hasText: 'Eine Stunde' }).count() === 1, 'Antippen schickt die Antwort; die Karte zeigt sie danach');
-      check(await p3.locator('.cv-md table').count() === 1, 'Tabellen werden sauber gesetzt');
+      check(await p3.locator('.cv-frage .bs-option.is-gewaehlt', { hasText: 'Eine Stunde' }).count() === 1, 'Antippen schickt die Antwort; die Karte zeigt sie danach');
+      check(await p3.locator('.cv-md table').count() === 1 && await p3.locator('.cv-md .tb-sort').count() === 2, 'Tabellen werden sauber gesetzt – und sind sortierbar');
       await foto(p3, 'ipad-antwort-1180');
+      // Der Chat mit den Bausteinen, mit dem Finger: alles gross genug, alles da.
+      await p3.goto(`${base}/#/chat?id=${encodeURIComponent(chatBausteine)}`, { waitUntil: 'domcontentloaded' });
+      await p3.locator('.bs[data-baustein="checkliste"]').waitFor({ timeout: 8000 });
+      await p3.waitForTimeout(600);
+      const kleinB = await p3.evaluate(() => [...document.querySelectorAll('.cv-msg--bot button, .cv-msg--bot a[href], .cv-msg--bot input:not([type="checkbox"])')]
+        .filter((e) => e.offsetWidth && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).opacity !== '0')
+        .map((e) => [String(e.className.baseVal === undefined ? e.className : '').split(' ')[0], Math.round(e.getBoundingClientRect().height)])
+        .filter(([, hgt]) => hgt < 44));
+      check(kleinB.length === 0, 'iPad: kein sichtbares Bedienelement in den Bausteinen, der Leiste oder den Codeblöcken unter 44 px', kleinB.slice(0, 6).map(([k, hgt]) => `${k} ${hgt}`).join(' · '));
+      // Zwei Punkte sind schon abgehakt (Abschnitt 5b); der dritte mit dem Finger.
+      // Der Zustand gehoert zur Fassung: die zuletzt bearbeitete Fassung
+      // faengt leer an. Geprueft wird, dass Antippen einen Punkt abhakt.
+      const listeI = p3.locator('.bs[data-baustein="checkliste"]');
+      await listeI.scrollIntoViewIfNeeded();
+      const vorherI = await listeI.locator('.bs-check__punkt.is-erledigt').count();
+      await listeI.locator('.bs-check__text').nth(2).tap();
+      await warteBis(async () => (await listeI.locator('.bs-check__punkt.is-erledigt').count()) !== vorherI, { timeout: 3000 });
+      const nachherI = await listeI.locator('.bs-check__punkt.is-erledigt').count();
+      check(nachherI === vorherI + 1 && new RegExp(`${nachherI} von 3`).test(await listeI.innerText()), 'iPad: Antippen hakt ab, der Zähler folgt', `${vorherI} → ${nachherI} von 3`);
+      await p3.locator('.cv-msg--bot').last().scrollIntoViewIfNeeded();
+      await foto(p3, 'ipad-bausteine-1180');
       await c3.close();
+    }
+
+    /* ============================ 7b · Dasselbe im hellen Modus */
+    console.log(`\n${BO}7b · Bausteine im hellen Modus (1440×900)${X}`);
+    {
+      const { c: c5, p: p5 } = await neueSeite({ hell: true });
+      await p5.goto(`${base}/#/chat?id=${encodeURIComponent(chatBausteine)}`, { waitUntil: 'domcontentloaded' });
+      await p5.locator('.bs[data-baustein="diagramm"] svg').waitFor({ timeout: 8000 });
+      await p5.waitForTimeout(700);
+      check((await p5.evaluate(() => document.documentElement.dataset.theme || document.documentElement.getAttribute('data-theme') || '')) !== 'dark'
+        && await p5.locator('.bs[data-baustein="checkliste"]').count() === 1,
+      'Im hellen Modus stehen dieselben Bausteine');
+      await p5.locator('.bs[data-baustein="diagramm"]').scrollIntoViewIfNeeded();
+      await foto(p5, 'bausteine-hell-1440');
+      await c5.close();
     }
 
     /* ======================================= 8 · Ansicht Agenten */
@@ -659,7 +928,11 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
   const gut = ergebnisse.filter((e) => e.ok).length;
   const schlecht = ergebnisse.length - gut;
   console.log(`\n${BO}Ergebnis${X}  ${G}${gut} funktionieren${X}${schlecht ? `  ${R}${schlecht} nicht${X}` : ''}  ${D}${bilder.length} Bilder in ${OUT}${X}`);
-  const echteFehler = konsole.filter((k) => !/Failed to load resource/.test(k));
+  // Playwrights `serviceWorkers: 'block'` greift in JEDEM Rahmen nach
+  // navigator.serviceWorker -- im Sandkasten (sandbox ohne allow-same-origin)
+  // wirft das. Ohne das Blockieren gibt es den Fehler nicht (nachgemessen);
+  // er stammt vom Pruefwerkzeug, nicht von der App.
+  const echteFehler = konsole.filter((k) => !/Failed to load resource/.test(k) && !/Service worker is disabled because the context is sandboxed/.test(k));
   if (echteFehler.length) {
     console.log(`${Y}Konsolenfehler (${echteFehler.length}):${X}`);
     for (const k of [...new Set(echteFehler)].slice(0, 8)) console.log(`  ${Y}·${X} ${k}`);

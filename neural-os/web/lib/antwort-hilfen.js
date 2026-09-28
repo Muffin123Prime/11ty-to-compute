@@ -351,6 +351,7 @@ export function wortUnterschied(alt, neu, { maxZellen = MAX_ZELLEN } = {}) {
 export function geaenderteStelle(alt, neu) {
   const a = String(alt || '');
   const b = String(neu || '');
+  if (a === b) return { start: b.length, ende: b.length, text: '' };
   let p = 0;
   while (p < a.length && p < b.length && a[p] === b[p]) p += 1;
   let q = 0;
@@ -399,6 +400,21 @@ export function stellenFrage(art, stelle) {
   const z = zitat(stelle);
   if (art === 'zusammenfassen') return `Fasse diese Stelle aus deiner Antwort kurz zusammen:\n\n${z}`;
   return `Erkläre mir diese Stelle aus deiner Antwort genauer:\n\n${z}`;
+}
+
+/**
+ * Findet der Server eine markierte Stelle nicht eindeutig (409
+ * AUSWAHL_NICHT_GEFUNDEN), fragt der Chat die KI stattdessen ganz normal --
+ * mit dem Zitat. Derselbe Auftrag wie beim Umwandeln, nur als Nachricht.
+ */
+export function stellenAuftrag(id, stelle, sprache) {
+  const saetze = {
+    kuerzen: 'Kürze diese Stelle deiner Antwort auf das Wesentliche',
+    umschreiben: 'Formuliere diese Stelle deiner Antwort neu, mit gleichem Inhalt',
+    verbessern: 'Verbessere diese Stelle deiner Antwort: klarer und genauer, gleicher Inhalt',
+    uebersetzen: `Übersetze diese Stelle deiner Antwort ins ${sprache || 'Englische'}`,
+  };
+  return `${saetze[id] || 'Überarbeite diese Stelle deiner Antwort'}:\n\n${zitat(stelle)}`;
 }
 
 /** "Frage dazu" unter einer Ueberschrift. */
