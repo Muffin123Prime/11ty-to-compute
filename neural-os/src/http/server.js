@@ -393,6 +393,7 @@ async function createServer(ctx = {}) {
     require('./api/stick'),
     require('./api/events'),
     require('./api/notizen'),
+    require('./api/gedaechtnis'),
     require('./api/beenden'),
   ]) {
     mod.register(router);

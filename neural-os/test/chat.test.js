@@ -281,7 +281,7 @@ test('preview zeigt, was ginge, ohne zu senden', async () => {
     assert.equal(claude.aufrufe.length, 0);
     assert.equal(p.system[0].text, SYSTEM_FEST);
     assert.deepEqual(p.werkzeuge, ['rueckfrage', 'termin_anlegen', 'termine_lesen', 'termin_aendern', 'termin_loeschen',
-      'notiz_anlegen', 'merken', 'projekt_anpassen', 'wissen_suchen', 'eintrag_lesen']);
+      'notiz_anlegen', 'merken', 'projekt_anpassen', 'wissen_suchen', 'eintrag_lesen', 'agent_starten']);
     assert.equal(p.modell, 'claude-opus-5');
   });
 });

@@ -160,6 +160,9 @@ function medienIn(body) {
  * Antwort ist `{sse:[…]}`, `{status, json}` oder `{sse, abbrechenNach:n}`
  * (Verbindung nach n Ereignissen hart trennen). Ist die Schlange leer, kommt
  * ein 500 -- ein Test, der mehr Anfragen auslöst als er erwartet, fällt auf.
+ * Mit `wenn: (body) => bool` gilt eine Antwort nur für passende Anfragen --
+ * so bekommen Chat und ein gleichzeitig laufender Agent je ihre eigene,
+ * egal wer zuerst fragt.
  */
 function starten({ schluessel = 'sk-ant-statist-0123456789abcdef' } = {}) {
   const anfragen = [];
@@ -205,7 +208,8 @@ function starten({ schluessel = 'sk-ant-statist-0123456789abcdef' } = {}) {
         }));
         return;
       }
-      const naechste = schlange.shift();
+      const passt = schlange.findIndex((a) => typeof a.wenn !== 'function' || a.wenn(body));
+      const naechste = passt >= 0 ? schlange.splice(passt, 1)[0] : null;
       if (!naechste) {
         res.writeHead(500, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Statist: keine Antwort mehr in der Schlange' } }));

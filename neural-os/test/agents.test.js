@@ -115,6 +115,46 @@ async function makeEnv(overrides = {}) {
   };
 }
 
+/* ------------------------------------------------------ Vorschlagsmodus */
+
+test('Vorschlagsmodus: Anlegen und Verknüpfen werden Vorschläge, anderes Ändernde wird mit einem Satz abgelehnt – ohne Rückfrage', async () => {
+  const env = await makeEnv();
+  try {
+    const agent = env.createAgent({ permissions: { writeNotes: true, createEdges: true, runTasks: true } });
+    const run = env.store.create('run', { agentId: agent.id, goal: 'Ordnen', vorschlagsmodus: true, titel: 'Ordnen' });
+    const ctx = { agent, run, produced: [] };
+    const a = env.store.create('note', { title: 'A', body: '' });
+    const b = env.store.create('note', { title: 'B', body: '' });
+    const r1 = await env.toolbox.call('notes.create', { title: 'Neu', body: 'Text' }, ctx);
+    assert.equal(r1.result.vorgeschlagen, true);
+    await env.toolbox.call('graph.link', { from: a.id, to: b.id, reason: 'passt zusammen' }, ctx);
+    await env.toolbox.call('tasks.create', { title: 'Lernen' }, ctx);
+    assert.equal(env.store.all('note').length, 2, 'keine neue Notiz');
+    assert.equal(env.store.all('edge').filter((e) => e.data.source === 'agent').length, 0, 'keine Kante');
+    assert.equal(env.store.all('task').length, 0, 'keine Aufgabe');
+    const vs = env.store.all('suggestion');
+    assert.deepEqual(vs.map((v) => v.data.kind).sort(), ['link', 'notiz', 'task']);
+    assert.ok(vs.every((v) => v.data.source === 'agent' && v.data.runId === run.id && v.data.status === 'open'));
+    assert.deepEqual(vs.find((v) => v.data.kind === 'link').data.action, { op: 'link', from: a.id, to: b.id, kind: 'related', reason: 'passt zusammen' });
+    await assert.rejects(env.toolbox.call('notes.update', { id: a.id, body: 'weg' }, ctx), /Du machst nur Vorschläge/);
+    await assert.rejects(env.toolbox.call('memory.remember', { text: 'Etwas' }, ctx), /Du machst nur Vorschläge/);
+    assert.equal(env.store.get(a.id).data.body, '');
+    assert.equal(env.store.all('memory').length, 0);
+    assert.equal(env.store.all('approval').length, 0, 'keine Rückfrage: es ändert sich ja nichts');
+    // Ein Verweis auf etwas, das es nicht gibt, wird kein Vorschlag.
+    await assert.rejects(env.toolbox.call('graph.link', { from: a.id, to: 'note_gibtesnicht', reason: 'x' }, ctx));
+    assert.equal(env.store.all('suggestion').length, 3);
+    // Ein Agent, der selbst im Vorschlagsmodus ist, bleibt es -- auch von Hand gestartet.
+    const immer = env.store.create('agent', { name: 'Immer', permissions: permissions.basePermissions({ writeNotes: true }), vorschlagsmodus: true });
+    const normal = env.store.create('run', { agentId: immer.id, goal: 'x' });
+    const r4 = await env.toolbox.call('notes.create', { title: 'Auch nur Vorschlag' }, { agent: immer, run: normal, produced: [] });
+    assert.equal(r4.result.vorgeschlagen, true);
+    assert.equal(env.store.all('note').length, 2);
+  } finally {
+    await env.close();
+  }
+});
+
 /* ------------------------------------------------------------- permissions */
 
 test('eine fehlende Fähigkeit gilt als verweigert', () => {

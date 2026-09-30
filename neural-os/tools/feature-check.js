@@ -528,7 +528,7 @@ async function checkTerminAgent(app) {
       const r = await an('POST', `/api/chats/${chat}/messages`, { inhalt: 'verschieb den Zahnarzt auf Freitag' });
       assert(/"stopReason":"end_turn"/.test(r.text), 'der Zug lief nicht zu Ende');
       namen.push(...statist.stromAnfragen()[0].body.tools.map((t) => t.name));
-      const soll = 'rueckfrage,termin_anlegen,termine_lesen,termin_aendern,termin_loeschen,notiz_anlegen,merken,projekt_anpassen,wissen_suchen,eintrag_lesen,web_search,web_fetch';
+      const soll = 'rueckfrage,termin_anlegen,termine_lesen,termin_aendern,termin_loeschen,notiz_anlegen,merken,projekt_anpassen,wissen_suchen,eintrag_lesen,agent_starten,web_search,web_fetch';
       assert(namen.join(',') === soll, `Werkzeuge: ${namen.join(',')}`);
       const gelesen = JSON.parse(statist.stromAnfragen()[1].body.messages.slice(-1)[0].content[0].content);
       assert(gelesen.termine.length === 1 && gelesen.termine[0].id === zahnarzt.id, 'termine_lesen fand den Zahnarzt nicht');

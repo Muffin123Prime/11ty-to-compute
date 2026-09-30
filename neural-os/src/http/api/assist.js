@@ -56,6 +56,7 @@ function register(router) {
     return assist.list({
       status,
       kind: kind || null,
+      source: strParam(rc.query, 'source', 20) || null,
       limit: intParam(rc.query, 'limit', 50, 1, 500),
       offset: intParam(rc.query, 'offset', 0, 0, 1000000),
     });

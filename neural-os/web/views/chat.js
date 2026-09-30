@@ -2082,8 +2082,9 @@ function baueAnsicht(container, ctx) {
         if (zurueck) {
           aktionen.appendChild(h('span.cv-karte__zurueck', null, icon(I.check), h('span', null, text('Zurückgenommen'))));
         } else {
-          if (z.href) aktionen.appendChild(h('a.btn.btn--small', { href: z.href, onClick: (e) => e.stopPropagation() }, text('Öffnen')));
-          if (a.runId) {
+          if (z.href) aktionen.appendChild(h('a.btn.btn--small', { href: z.href, onClick: (e) => e.stopPropagation() }, text(z.typ === 'run' ? 'Ansehen' : 'Öffnen')));
+          // Ein Hintergrund-Agent aendert nichts, es gibt also nichts zurueckzunehmen.
+          if (a.runId && z.typ !== 'run') {
             aktionen.appendChild(h('button.btn.btn--small.btn--ghost', {
               type: 'button',
               disabled: !!zustand.busy,

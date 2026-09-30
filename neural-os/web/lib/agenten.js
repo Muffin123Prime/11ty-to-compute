@@ -20,6 +20,7 @@ export const ROLLEN = Object.freeze({
   gedaechtnis: { name: 'Gedächtnis-Agent', kurz: 'Gedächtnis', symbol: 'graph' },
   projekte: { name: 'Projekt-Agent', kurz: 'Projekte', symbol: 'projects' },
   wissen: { name: 'Wissens-Agent', kurz: 'Wissen', symbol: 'graph' },
+  hintergrund: { name: 'Hintergrund-Agent', kurz: 'Hintergrund', symbol: 'agents' },
 });
 
 const UNBEKANNT = Object.freeze({ name: 'Agent', kurz: 'Agent', symbol: 'agents' });
@@ -50,6 +51,45 @@ export function zustandVon(lauf, jetzt = Date.now()) {
   const beginn = Date.parse(lauf.startedAt || lauf.beginn || '') || null;
   if (beginn && jetzt - beginn > VERWAIST_MS) return 'unterbrochen';
   return 'laeuft';
+}
+
+/** Was ein Werkzeug der Agenten-Laufzeit tut: [angelegt, nur vorgeschlagen]. */
+const WERKZEUG_WORTE = Object.freeze({
+  'notes.search': ['Sucht in deinen Notizen'],
+  'notes.read': ['Liest eine Notiz'],
+  'notes.create': ['Legt eine Notiz an', 'Schlägt eine Notiz vor'],
+  'notes.update': ['Ändert eine Notiz'],
+  'graph.neighbours': ['Folgt den Verknüpfungen'],
+  'graph.link': ['Verknüpft zwei Einträge', 'Schlägt eine Verknüpfung vor'],
+  'tasks.list': ['Liest die Aufgaben'],
+  'tasks.create': ['Legt eine Aufgabe an', 'Schlägt eine Aufgabe vor'],
+  'projects.list': ['Liest die Projekte'],
+  'tags.list': ['Liest die Schlagworte'],
+  'memory.recall': ['Liest das Gedächtnis'],
+  'time.now': ['Schaut auf die Uhr'],
+});
+
+/**
+ * Ein Schritt eines Laufs als Satz. Taetigkeiten des Chats tragen ihren
+ * Satz schon (`text`); Schritte der Agenten-Laufzeit (src/agents/runtime.js)
+ * sind `kind: 'model'` (was der Agent schrieb, ohne die Werkzeug-Tags) oder
+ * `kind: 'tool'` (welches Werkzeug, ob es ging).
+ */
+export function schrittText(st) {
+  if (!st || typeof st !== 'object') return '…';
+  if (st.text) return String(st.text);
+  if (st.kind === 'tool') {
+    const worte = WERKZEUG_WORTE[st.tool] || [`Werkzeug ${st.tool || '?'}`];
+    const vorgeschlagen = worte[1] && /"vorgeschlagen"\s*:\s*true/.test(String(st.result || ''));
+    const wort = vorgeschlagen ? worte[1] : worte[0];
+    return st.ok === false ? `${wort} – ging nicht` : wort;
+  }
+  if (st.kind === 'model') {
+    const t = String(st.content || '').replace(/<tool[\s\S]*?<\/tool\s*>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!t) return 'Überlegt';
+    return t.length > 160 ? `${t.slice(0, 160)} …` : t;
+  }
+  return String(st.tool || st.type || '…');
 }
 
 /** "unter 1 s", "12 s", "2 min 5 s", "1 h 4 min" -- nie "0 s" fuer etwas, das lief. */
@@ -102,8 +142,11 @@ export function zielVon(id, typ, extra = {}) {
     case 'note': return `#/notes?id=${q}`;
     case 'project': return `#/projects?id=${q}`;
     case 'task': return extra.projectId ? `#/projects?id=${encodeURIComponent(extra.projectId)}` : '#/projects';
-    case 'memory': return `#/graph?focus=${q}`;
+    // Gemerktes steht in den Einstellungen, Gruppe "Gedächtnis" -- dort laesst es sich ansehen und vergessen.
+    case 'memory': return `#/settings?bereich=gedaechtnis&id=${q}`;
     case 'chat': return `#/chat?id=${q}`;
+    // Ein Hintergrund-Agent: sein Lauf in "Agenten", mit den Vorschlaegen.
+    case 'run': return `#/agents?id=${q}`;
     default: return null;
   }
 }
@@ -112,9 +155,10 @@ export function zielVon(id, typ, extra = {}) {
 export const ARTEN = Object.freeze({
   event: { wort: 'Termin', symbol: 'calendar', oeffnen: 'Termin öffnen' },
   note: { wort: 'Notiz', symbol: 'notes', oeffnen: 'Notiz öffnen' },
-  memory: { wort: 'Gemerkt', symbol: 'graph', oeffnen: 'Im Gehirn zeigen' },
+  memory: { wort: 'Gemerkt', symbol: 'graph', oeffnen: 'Im Gedächtnis zeigen' },
   project: { wort: 'Projekt', symbol: 'projects', oeffnen: 'Projekt öffnen' },
   task: { wort: 'Aufgabe', symbol: 'check', oeffnen: 'Zum Projekt' },
+  run: { wort: 'Hintergrund-Agent', symbol: 'agents', oeffnen: 'Ansehen' },
 });
 
 /**
@@ -159,6 +203,10 @@ export function wirkungZeilen(wirkung) {
       }
       case 'task':
         label = 'Aufgabe angelegt';
+        break;
+      case 'run':
+        // Er arbeitet weiter, waehrend geredet wird; was er vorschlaegt, steht in "Agenten".
+        label = 'Hintergrund-Agent gestartet';
         break;
       default:
         label = art.wort;

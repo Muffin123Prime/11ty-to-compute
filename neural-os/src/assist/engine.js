@@ -43,6 +43,7 @@ const { DETECTORS } = require('./detectors');
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
 const STATUSES = ['open', 'accepted', 'dismissed', 'stale'];
+const SOURCES = ['assist', 'agent', 'module'];
 
 function nullLogger() {
   return { error() {}, warn() {}, info() {}, debug() {} };
@@ -246,9 +247,15 @@ function createAssist({ store, graph, bus, config, logger, detectors } = {}) {
     }
     const kind = opts.kind === undefined || opts.kind === null ? null : String(opts.kind);
     if (kind) assertKinds([kind]);
+    // Wer ihn machte: die Assistenz, ein Hintergrund-Agent, eine Erweiterung.
+    const source = opts.source === undefined || opts.source === null ? null : String(opts.source);
+    if (source && !SOURCES.includes(source)) {
+      throw new ValidationError(`"source" muss einer von ${SOURCES.join(', ')} sein (empfangen: ${source}).`);
+    }
 
     const items = store.all('suggestion').filter((rec) => (
       (status === 'all' || rec.data.status === status) && (!kind || rec.data.kind === kind)
+      && (!source || (rec.data.source || 'assist') === source)
     ));
     items.sort((a, b) => {
       const ac = Number.isFinite(a.data.confidence) ? a.data.confidence : 0;
@@ -353,26 +360,34 @@ function createAssist({ store, graph, bus, config, logger, detectors } = {}) {
       }
 
       case 'createTask': {
-        const source = liveOrNull(action.sourceId);
-        if (!source) {
+        // Ein Vorschlag der Assistenz kommt aus einer Notiz (sourceId); einer
+        // des Hintergrund-Agenten (source 'agent') steht fuer sich.
+        const source = action.sourceId ? liveOrNull(action.sourceId) : null;
+        if (action.sourceId && !source) {
           markStale(record);
           throw new NotFoundError(`Record ${action.sourceId}`);
         }
+        const title = String(action.title || '').slice(0, 500);
+        if (!title) throw new ValidationError('Dem Vorschlag fehlt der Titel der Aufgabe.');
         const projectId = liveOrNull(action.projectId) ? action.projectId : null;
         const task = store.create('task', {
-          title: String(action.title || '').slice(0, 500),
+          title,
           projectId,
-          body: `Übernommen aus „${String(source.data.title || 'Notiz')}“.`,
+          body: source ? `Übernommen aus „${String(source.data.title || 'Notiz')}“.` : String(action.body || ''),
+          ...(typeof action.due === 'string' && action.due ? { due: action.due } : {}),
+          ...(Number.isInteger(action.priority) ? { priority: action.priority } : {}),
           // Not a schema field, kept because the store preserves unknown keys:
           // without it the task would have no way back to where it came from.
-          sourceId: source.id,
+          ...(source ? { sourceId: source.id } : { source: 'agent' }),
         });
         return { op: 'createTask', taskId: task.id };
       }
 
       case 'createNote': {
-        const from = liveOrNull(action.linkFrom);
-        if (!from) {
+        // Mit `linkFrom` (Assistenz: ein [[Link]] ohne Notiz) haengt die neue
+        // Notiz dort an; ohne (Hintergrund-Agent) steht sie fuer sich.
+        const from = action.linkFrom ? liveOrNull(action.linkFrom) : null;
+        if (action.linkFrom && !from) {
           markStale(record);
           throw new NotFoundError(`Record ${action.linkFrom}`);
         }
@@ -389,18 +404,20 @@ function createAssist({ store, graph, bus, config, logger, detectors } = {}) {
         // way means the next rescan recognises the edge as its own and keeps
         // maintaining it instead of adding a second one beside it.
         let edgeId = null;
-        try {
-          edgeId = store.edges.add({
-            from: from.id,
-            to: note.id,
-            kind: 'links-to',
-            source: 'derived',
-            reason: `Wiki-Link [[${title}]] im Text`,
-          }).id;
-        } catch (err) {
-          // The note exists and that is the part the user asked for; the edge
-          // comes back on the next rescan. Reported, not hidden.
-          log.warn(`Kante zur neuen Notiz ${note.id} nicht angelegt: ${err && err.message}`);
+        if (from) {
+          try {
+            edgeId = store.edges.add({
+              from: from.id,
+              to: note.id,
+              kind: 'links-to',
+              source: 'derived',
+              reason: `Wiki-Link [[${title}]] im Text`,
+            }).id;
+          } catch (err) {
+            // The note exists and that is the part the user asked for; the edge
+            // comes back on the next rescan. Reported, not hidden.
+            log.warn(`Kante zur neuen Notiz ${note.id} nicht angelegt: ${err && err.message}`);
+          }
         }
         return { op: 'createNote', noteId: note.id, edgeId };
       }

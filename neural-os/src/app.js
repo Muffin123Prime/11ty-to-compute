@@ -343,6 +343,8 @@ async function createApp(opts = {}) {
   const runtime = runtimeMod && registry && toolbox
     ? optional(failures, 'runtime', () => runtimeMod.createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, config, logger, paths }))
     : null;
+  // Der Chat startet Hintergrund-Agenten (agent_starten); die Laufzeit steht erst jetzt.
+  if (chat && runtime && typeof chat.laufzeitAnbinden === 'function') chat.laufzeitAnbinden(runtime);
 
   // --- model-free assistance ------------------------------------------------
   //

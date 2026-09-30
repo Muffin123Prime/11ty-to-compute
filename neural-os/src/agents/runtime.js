@@ -642,10 +642,25 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
   runtime = {
     /**
      * @param {{agentId:string, goal:string, chatId?:string, context?:any,
-     *          parentRunId?:string, depth?:number}} opts
+     *          parentRunId?:string, depth?:number, messageId?:string,
+     *          titel?:string, rolle?:string, vorschlagsmodus?:boolean}} opts
+     *        `vorschlagsmodus`: der Lauf aendert nichts, alles Aendernde wird
+     *        ein Vorschlag (src/agents/tools.js). `titel`/`rolle`/`messageId`:
+     *        so zeigt ihn die Ansicht "Agenten" (web/views/agents.js).
      * @returns {Promise<object>} the run record; execution continues async
      */
     async start(opts = {}) {
+      return runtime.starten(opts);
+    },
+
+    /**
+     * Wie `start`, aber ohne Promise: der Lauf-Satz kommt sofort zurueck, der
+     * Lauf selbst geht weiter. Fuer Aufrufer, die synchron bleiben muessen
+     * (die Werkzeuge des Chats, src/models/werkzeuge.js agent_starten).
+     * Wirft bei ungueltigen Angaben oder erreichter Grenze.
+     * @returns {object} the run record
+     */
+    starten(opts = {}) {
       const agentId = typeof opts.agentId === 'string' ? opts.agentId.trim() : '';
       if (!agentId) throw new ValidationError('Ein Lauf braucht eine Agenten-ID.');
       const goal = typeof opts.goal === 'string' ? opts.goal.trim() : '';
@@ -684,6 +699,10 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
         maxSeconds: perms.maxSeconds,
         stopReason: null,
         networkTargets: [],
+        ...(typeof opts.messageId === 'string' && opts.messageId ? { messageId: opts.messageId } : {}),
+        ...(typeof opts.titel === 'string' && opts.titel.trim() ? { titel: opts.titel.trim().slice(0, 120) } : {}),
+        ...(typeof opts.rolle === 'string' && opts.rolle ? { rolle: opts.rolle } : {}),
+        ...(opts.vorschlagsmodus === true ? { vorschlagsmodus: true } : {}),
       });
 
       if (typeof opts.parentRunId === 'string' && opts.parentRunId) {
@@ -709,12 +728,27 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
       active.set(run.id, state);
 
       const started = store.update(run.id, { status: 'running', startedAt: new Date().toISOString() });
-      publish('run.started', { runId: run.id, agentId, goal, maxSteps: perms.maxSteps, maxSeconds: perms.maxSeconds });
+      const wer = {
+        titel: run.data.titel || null,
+        chatId: run.data.chatId || null,
+        vorschlagsmodus: run.data.vorschlagsmodus === true,
+      };
+      publish('run.started', { runId: run.id, agentId, goal, maxSteps: perms.maxSteps, maxSeconds: perms.maxSeconds, ...wer });
+      /** Wie viele Vorschlaege dieser Lauf abgelegt hat (Vorschlagsmodus). */
+      const vorschlaegeZaehlen = () => {
+        if (!wer.vorschlagsmodus) return undefined;
+        try {
+          return store.all('suggestion').filter((x) => x.data && x.data.runId === run.id).length;
+        } catch {
+          return 0;
+        }
+      };
 
       // Fire and forget: `start` returns the record so the HTTP layer can
       // answer immediately with a run id the UI can subscribe to.
       const task = withActor({ kind: 'agent', runId: run.id, agentId }, () => execute(state))
         .then((outcome) => {
+          const vorschlaege = vorschlaegeZaehlen();
           const record = finish(run.id, {
             status: outcome.status,
             result: outcome.result,
@@ -725,6 +759,7 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
             producedIds: outcome.produced,
             stopReason: outcome.stopReason,
             model: outcome.model,
+            ...(vorschlaege !== undefined ? { vorschlaege } : {}),
           });
           appendTranscript(run.id, {
             kind: 'run.finished',
@@ -738,6 +773,7 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
           publish('run.finished', {
             runId: run.id, agentId, status: outcome.status, stopReason: outcome.stopReason,
             usedNetwork: outcome.usedNetwork, result: outcome.result,
+            ...wer, ...(vorschlaege !== undefined ? { vorschlaege } : {}),
           });
           return record;
         })
@@ -754,6 +790,7 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
           publish(aborted ? 'run.finished' : 'run.failed', {
             runId: run.id, agentId, status: aborted ? 'aborted' : 'failed',
             error: { code: e.code, message: e.message },
+            ...wer,
           });
           return record;
         })

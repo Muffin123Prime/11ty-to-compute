@@ -555,6 +555,79 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
     return d.title || d.name || d.text || d.goal || record.id;
   }
 
+  /*
+   * Vorschlagsmodus (der Hintergrund-Agent aus dem Chat, src/models/werkzeuge.js
+   * agent_starten): NICHTS wird geaendert. Was der Agent anlegen oder
+   * verknuepfen will, wird ein Vorschlag (Satzart suggestion, source 'agent'),
+   * den der Nutzer in "Agenten" uebernimmt oder verwirft -- uebernommen wird
+   * er von src/assist/engine.js accept(), wie jeder andere Vorschlag. Andere
+   * Aenderungen gibt es in diesem Modus nicht; der Agent bekommt dafuer einen
+   * Satz statt einer Ausfuehrung.
+   */
+  const VORSCHLAEGE = {
+    'notes.create': (a) => ({
+      kind: 'notiz',
+      title: `Neue Notiz: „${shorten(a.title, 80)}“`,
+      detail: shorten(a.body || '', 600),
+      recordIds: [],
+      action: { op: 'createNote', title: a.title, body: a.body || '', tags: a.tags || [] },
+    }),
+    'tasks.create': (a) => {
+      const projekt = a.projectId ? requireRecord(a.projectId, 'project') : null;
+      return {
+        kind: 'task',
+        title: `Neue Aufgabe: „${shorten(a.title, 80)}“${projekt ? ` im Projekt „${shorten(labelOf(projekt), 60)}“` : ''}`,
+        detail: shorten(a.body || '', 600),
+        recordIds: projekt ? [projekt.id] : [],
+        action: { op: 'createTask', title: a.title, body: a.body || '', projectId: projekt ? projekt.id : null, due: a.due || null, priority: a.priority },
+      };
+    },
+    'graph.link': (a) => {
+      const von = requireRecord(a.from);
+      const nach = requireRecord(a.to);
+      return {
+        kind: 'link',
+        title: `Verknüpfen: „${shorten(labelOf(von), 60)}“ und „${shorten(labelOf(nach), 60)}“`,
+        detail: '',
+        reason: shorten(a.reason || '', 500),
+        recordIds: [von.id, nach.id],
+        action: { op: 'link', from: von.id, to: nach.id, kind: a.kind || 'related', reason: a.reason || '' },
+      };
+    },
+  };
+
+  /** Der Lauf ist im Vorschlagsmodus -- oder der Agent immer (der Hintergrund-Agent, auch von Hand gestartet). */
+  function imVorschlagsmodus(ctx) {
+    if (ctx && ctx.run && ctx.run.data && ctx.run.data.vorschlagsmodus === true) return true;
+    return permissionsMod.agentData(agentOf(ctx)).vorschlagsmodus === true;
+  }
+
+  function vorschlagAblegen(name, parsed, ctx) {
+    const bauen = VORSCHLAEGE[name];
+    if (!bauen) {
+      throw new PermissionError(`„${name}“ geht hier nicht: Du machst nur Vorschläge – eine Notiz anlegen, eine Aufgabe anlegen oder zwei Einträge verknüpfen. Alles andere beschreib in deiner Endantwort.`);
+    }
+    const v = bauen(parsed);
+    const run = ctx.run;
+    const record = store.create('suggestion', {
+      ...v,
+      reason: v.reason || `Vom Hintergrund-Agenten „${shorten((run.data && (run.data.titel || run.data.goal)) || 'Agent', 80)}“.`,
+      confidence: 0.6,
+      status: 'open',
+      source: 'agent',
+      // Nicht im Schema, bleibt aber (unbekannte Felder bleiben erhalten): so
+      // weiss die Ansicht, welcher Lauf ihn machte und aus welchem Chat.
+      runId: run.id,
+      chatId: (run.data && run.data.chatId) || null,
+      werkzeug: name,
+    });
+    return {
+      vorgeschlagen: true,
+      id: record.id,
+      hinweis: 'Als Vorschlag abgelegt. Der Nutzer entscheidet, ob es übernommen wird – geändert ist noch nichts.',
+    };
+  }
+
   /* ------------------------------------------------------------ definitions */
 
   const definitions = [
@@ -1713,6 +1786,19 @@ function createToolbox({ store, registry, gate, graph, paths, approvals, config,
         assertNotAborted(ctx);
       } catch (err) {
         return fail(err);
+      }
+
+      // 2a. Vorschlagsmodus: statt der Aenderung ein Vorschlag, ohne Rueckfrage
+      //     -- es aendert sich ja nichts, bis der Nutzer ihn uebernimmt.
+      if (def.mutating && imVorschlagsmodus(ctx)) {
+        let result;
+        try {
+          result = vorschlagAblegen(name, parsed, ctx);
+        } catch (err) {
+          return fail(err);
+        }
+        writeAudit('agent.tool.proposed', { tool: name, agentId: agentIdent, runId, ms: Date.now() - started });
+        return { ok: true, result };
       }
 
       // 2. approval -- for every mutating tool, when the effective policy asks

@@ -27,7 +27,7 @@
  * sees no new worker and keeps the old cache.
  */
 
-const VERSION = 'v11';
+const VERSION = 'v12';
 const CACHE_NAME = `neural-os-shell-${VERSION}`;
 
 /**

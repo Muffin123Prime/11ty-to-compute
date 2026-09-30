@@ -140,7 +140,7 @@ test('Gemini: die Anfrage hat die Form von generateContent (Kopf, Modell, system
     assert.equal(b.tools.length, 2);
     const namen = b.tools[0].functionDeclarations.map((t) => t.name);
     assert.deepEqual(namen, ['rueckfrage', 'termin_anlegen', 'termine_lesen', 'termin_aendern', 'termin_loeschen',
-      'notiz_anlegen', 'merken', 'projekt_anpassen', 'wissen_suchen', 'eintrag_lesen']);
+      'notiz_anlegen', 'merken', 'projekt_anpassen', 'wissen_suchen', 'eintrag_lesen', 'agent_starten']);
     const roh = JSON.stringify(b.tools);
     assert.ok(!/"strict"|eager_input_streaming|additionalProperties|input_schema|"anyOf"/.test(roh), 'keine Anthropic-Eigenheiten in den Deklarationen');
     const aendern = b.tools[0].functionDeclarations.find((t) => t.name === 'termin_aendern');

@@ -38,6 +38,7 @@ const SYMBOLE = {
   speicher: '<ellipse cx="10" cy="5.2" rx="6" ry="2.4"/><path d="M4 5.2v9.6c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4V5.2"/><path d="M4 10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4"/>',
   darstellung: '<circle cx="10" cy="10" r="6.6"/><path d="M10 3.4v13.2"/><path d="M10 3.4a6.6 6.6 0 0 1 0 13.2z" fill="currentColor" stroke="none"/>',
   kopieren: '<rect x="6.6" y="6.6" width="9" height="9" rx="2"/><path d="M13 4.4H6.2a1.8 1.8 0 0 0-1.8 1.8V13"/>',
+  gedaechtnis: '<path d="M6.2 3.4h7.6a1.2 1.2 0 0 1 1.2 1.2v12l-5-3.1-5 3.1v-12a1.2 1.2 0 0 1 1.2-1.2z"/><path d="M10 6.2l.8 1.6 1.7.3-1.2 1.2.3 1.7-1.6-.8-1.6.8.3-1.7-1.2-1.2 1.7-.3z" fill="currentColor" stroke="none"/>',
 };
 
 let aktiv = null;
@@ -67,6 +68,8 @@ export default {
         ipad: null,         // {link, bis, verbunden?:string, seit:number}
         busy: new Set(),
         pinMeldung: null,
+        gedaechtnisAlle: false,
+        allesVergessenFragen: false,
       },
     };
     aktiv = self;
@@ -75,6 +78,9 @@ export default {
     await allesLaden(self);
     if (!self.alive) return;
     allesZeichnen(self);
+    // #/settings?bereich=gedaechtnis&id=memory_… (etwa von "Gemerkt" im Chat)
+    const params = (ctx.route && ctx.route.params) || {};
+    if (params.bereich) zumBereich(self, String(params.bereich), params.id ? String(params.id) : null);
   },
 
   async unmount() {
@@ -101,6 +107,7 @@ function abbauen() {
 const QUELLEN = {
   status: '/status',
   ki: '/ki',
+  gedaechtnis: '/gedaechtnis',
   vault: '/vault',
   ipad: '/ipad',
   network: '/network',
@@ -145,10 +152,14 @@ function abonnieren(self) {
     schutz: debounce(async () => { await Promise.all([laden(self, 'vault'), laden(self, 'status')]); if (self.alive) { zeichneSchutz(self); zeichneSpeicher(self); } }, 300),
     ipad: debounce(async () => { await Promise.all([laden(self, 'ipad'), laden(self, 'tokens')]); if (self.alive) { zeichneIpad(self); zeichneNetz(self); zeichneFortgeschritten(self); } }, 200),
     netz: debounce(async () => { await Promise.all([laden(self, 'network'), laden(self, 'ki'), laden(self, 'status')]); if (self.alive) { zeichneNetz(self); zeichneKi(self); } }, 300),
+    gedaechtnis: debounce(async () => { await laden(self, 'gedaechtnis'); if (self.alive) zeichneGedaechtnis(self); }, 250),
   };
   self.cleanups.push(bus.on('*', (payload, event) => {
     const typ = (event && event.type) || '';
-    if (typ.startsWith('claude') || typ.startsWith('gemini') || typ === 'ki.anbieter') neu.ki();
+    // Merkt sich die KI im Chat etwas (oder vergisst es anderswo), steht es sofort hier.
+    const art = payload && (payload.type || (payload.record && payload.record.type));
+    if (typ.startsWith('record.') && art === 'memory') neu.gedaechtnis();
+    else if (typ.startsWith('claude') || typ.startsWith('gemini') || typ === 'ki.anbieter') neu.ki();
     else if (typ.startsWith('vault.')) neu.schutz();
     else if (typ === 'ipad.verbunden') {
       if (self.ui.ipad) self.ui.ipad.verbunden = (payload && payload.geraet) || 'iPad';
@@ -185,6 +196,7 @@ function geruestBauen(self) {
   self.container.appendChild(h('div.page.setv', null,
     self.dom.hinweis,
     gruppe(self, 'ki', { titel: 'KI', symbol: I.brand || I.cloud, satz: 'Gemini (kostenlos) oder Claude. Antwortet, sucht im Internet, denkt mit.' }),
+    gruppe(self, 'gedaechtnis', { titel: 'Gedächtnis', symbol: SYMBOLE.gedaechtnis, satz: 'Was sich die KI über dich gemerkt hat. Sie liest es bei jeder Antwort mit.' }),
     gruppe(self, 'schutz', { titel: 'Schutz', symbol: I.lock, satz: 'Eine PIN, damit niemand liest, wer den Stick findet.' }),
     gruppe(self, 'ipad', { titel: 'iPad verbinden', symbol: SYMBOLE.ipad, satz: 'Das iPad als zweiter Bildschirm, im selben WLAN.' }),
     gruppe(self, 'darstellung', { titel: 'Darstellung', symbol: SYMBOLE.darstellung }),
@@ -200,6 +212,7 @@ function geruestBauen(self) {
 function allesZeichnen(self) {
   zeichneHinweis(self);
   zeichneKi(self);
+  zeichneGedaechtnis(self);
   zeichneSchutz(self);
   zeichneIpad(self);
   zeichneDarstellung(self);
@@ -314,6 +327,122 @@ function zeichneHinweis(self) {
       icon((self.ctx.icons || {}).info),
       text('Dieses Gerät ist als Bildschirm verbunden. Einstellungen ändern geht nur am Laptop, auf dem Neural OS läuft.')));
   }
+}
+
+/** Fuer Selektoren. `CSS` heisst in dieser Datei der Stiltext -- daher ueber globalThis. */
+const escape = (x) => (globalThis.CSS && typeof globalThis.CSS.escape === 'function' ? globalThis.CSS.escape(x) : String(x).replace(/[^a-zA-Z0-9_-]/g, ''));
+
+/** Zu einer Gruppe springen und sie kurz hervorheben; mit `id` auch zu einem Eintrag darin. */
+function zumBereich(self, key, id = null) {
+  const gruppeEl = self.container.querySelector(`[data-gruppe="${escape(key)}"]`);
+  if (!gruppeEl) return;
+  const eintrag = id ? gruppeEl.querySelector(`[data-id="${escape(id)}"]`) : null;
+  const ziel = eintrag || gruppeEl;
+  ziel.classList.add('is-ziel');
+  setTimeout(() => {
+    try { ziel.scrollIntoView({ block: eintrag ? 'center' : 'start', behavior: 'smooth' }); } catch { ziel.scrollIntoView(); }
+  }, 60);
+  setTimeout(() => ziel.classList.remove('is-ziel'), 2600);
+}
+
+/* ------------------------------------------------------------------ */
+/* Gedächtnis: was sich die KI gemerkt hat                             */
+/* ------------------------------------------------------------------ */
+
+/** So viele stehen zuerst da; der Rest auf [Alle … zeigen]. */
+const GEDAECHTNIS_ERST = 12;
+
+function zeichneGedaechtnis(self) {
+  const { body } = self.dom.gedaechtnis;
+  clear(body);
+  const g = self.daten.gedaechtnis;
+  if (!g) {
+    status(self, 'gedaechtnis', null, '');
+    body.appendChild(nichtAbrufbar(self.fehler.gedaechtnis, 'Das Gedächtnis ließ sich nicht laden'));
+    return;
+  }
+  const items = Array.isArray(g.items) ? g.items : [];
+  status(self, 'gedaechtnis', null, items.length ? (items.length === 1 ? '1 Eintrag' : `${formatNumber(items.length)} Einträge`) : 'leer');
+  if (!items.length) {
+    body.appendChild(satz('Noch nichts gemerkt. Sag im Chat zum Beispiel: „Merk dir, dass ich vegetarisch esse.“', '.meta'));
+    return;
+  }
+  const zeigen = self.ui.gedaechtnisAlle ? items : items.slice(0, GEDAECHTNIS_ERST);
+  body.appendChild(h('ul.setv__fakten', { 'aria-label': 'Gemerkt' }, zeigen.map((f) => faktZeile(self, f))));
+  const zeile = h('div.setv__zeile');
+  if (items.length > GEDAECHTNIS_ERST) {
+    zeile.appendChild(knopf(self, self.ui.gedaechtnisAlle ? 'Weniger zeigen' : `Alle ${formatNumber(items.length)} zeigen`, () => {
+      self.ui.gedaechtnisAlle = !self.ui.gedaechtnisAlle;
+      zeichneGedaechtnis(self);
+    }, { art: '.btn--ghost.btn--small' }));
+  }
+  const nichtMit = items.filter((f) => f.fuerAlle && !f.liestMit).length;
+  if (nichtMit) {
+    body.appendChild(satz(`Bei so vielen liest die KI die neuesten ${formatNumber(g.mitgelesen)} mit; ${nichtMit === 1 ? 'ein älterer zählt' : `${formatNumber(nichtMit)} ältere zählen`} gerade nicht.`, '.meta'));
+  }
+  // Alles vergessen: mit Nachfrage hier in der Gruppe, nicht mit einem Fenster des Browsers.
+  if (self.ui.allesVergessenFragen) {
+    body.appendChild(h('div.setv__frage', { role: 'group', 'aria-label': 'Alles vergessen?' },
+      satz(`Wirklich alles vergessen? ${items.length === 1 ? 'Das ist ein Eintrag' : `Das sind ${formatNumber(items.length)} Einträge`}. Die KI weiß danach nichts mehr davon.`),
+      h('div.setv__zeile', null,
+        knopf(self, 'Ja, alles vergessen', () => vergessen(self, null), { art: '.btn--danger', schluessel: 'alles-vergessen' }),
+        knopf(self, 'Abbrechen', () => { self.ui.allesVergessenFragen = false; zeichneGedaechtnis(self); }, { art: '.btn--ghost' }))));
+  } else if (items.length > 1) {
+    zeile.appendChild(knopf(self, 'Alles vergessen …', () => { self.ui.allesVergessenFragen = true; zeichneGedaechtnis(self); }, { art: '.btn--ghost.btn--small' }));
+  }
+  if (zeile.childNodes.length) body.appendChild(zeile);
+}
+
+function faktZeile(self, f) {
+  const meta = [];
+  if (f.herkunft && f.herkunft.url) {
+    meta.push(h('a.setv__herkunft', { href: f.herkunft.url }, text(f.herkunft.art === 'chat' ? `aus dem Chat „${f.herkunft.titel}“` : 'von einem Agenten')));
+    meta.push(text(' · '));
+  }
+  meta.push(text(timeAgo(f.createdAt)));
+  if (!f.fuerAlle) meta.push(text(' · merkt sich nur ein Agent'));
+  else if (!f.liestMit) meta.push(text(' · wird gerade nicht mitgelesen'));
+  return h('li.setv__fakt', { dataset: { id: f.id } },
+    h('div.setv__fakt-text', null,
+      h('p', null, text(f.text)),
+      h('p.meta', null, ...meta)),
+    knopf(self, 'Vergessen', () => vergessen(self, [f.id]), { art: '.btn--ghost.btn--small', schluessel: `vergessen-${f.id}` }));
+}
+
+/** Vergessen -- einzeln oder alles (`ids` null) -- mit [Rückgängig] in der Meldung. */
+async function vergessen(self, ids) {
+  let r;
+  try {
+    r = await self.api.post('/gedaechtnis/vergessen', ids ? { ids } : { alle: true }, { timeoutMs: 20000 });
+  } catch (err) {
+    if (self.alive) self.ctx.toast(`Nicht vergessen: ${fehlerText(err)}`, 'error');
+    return;
+  }
+  const weg = r && Array.isArray(r.ids) ? r.ids : [];
+  self.ui.allesVergessenFragen = false;
+  await laden(self, 'gedaechtnis');
+  if (self.alive) zeichneGedaechtnis(self);
+  if (!weg.length) return;
+  const { api, ctx } = self;
+  ctx.toast(weg.length === 1 ? 'Vergessen.' : `${formatNumber(weg.length)} Einträge vergessen.`, 'success', {
+    timeout: 10000,
+    action: {
+      label: 'Rückgängig',
+      run: async () => {
+        try {
+          await api.post('/gedaechtnis/zurueck', { ids: weg }, { timeoutMs: 20000 });
+          ctx.toast(weg.length === 1 ? 'Wieder da.' : 'Alles wieder da.', 'info');
+        } catch (err) {
+          ctx.toast(`Rückgängig ist gescheitert: ${fehlerText(err)}`, 'error');
+          return;
+        }
+        if (self.alive) {
+          await laden(self, 'gedaechtnis');
+          if (self.alive) zeichneGedaechtnis(self);
+        }
+      },
+    },
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -1397,6 +1526,41 @@ const CSS = `
 }
 .setv__eintrag > span:first-child { display: inline-flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
 .setv__eintrag > .btn { margin-left: auto; }
+.setv__fakten {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.setv__fakt {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 10px 12px;
+  border-radius: var(--r-2);
+  background: var(--surface-3);
+  transition: box-shadow 0.3s;
+}
+.setv__fakt-text { flex: 1 1 auto; min-width: 0; }
+.setv__fakt-text > p:first-child { overflow-wrap: anywhere; line-height: var(--lh); }
+.setv__fakt-text > .meta { margin-top: 2px; color: var(--fg-subtle); font-size: var(--fs-sm); }
+.setv__fakt > .btn { flex: none; }
+.setv__herkunft { color: var(--accent-text); text-decoration: none; }
+.setv__herkunft:hover { text-decoration: underline; }
+.setv__frage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  border-radius: var(--r-3);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+.setv__gruppe.is-ziel,
+.setv__fakt.is-ziel { box-shadow: 0 0 0 2px var(--accent-ring), var(--shadow-1); }
+.setv__gruppe { transition: box-shadow 0.3s; }
 .setv__banner {
   display: flex;
   align-items: center;

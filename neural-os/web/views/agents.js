@@ -20,11 +20,15 @@
  *   "unterbrochen" (web/lib/agenten.js).
  * - **Freigaben bleiben erreichbar.** Die alte Agenten-Laufzeit (Zeitplaene)
  *   kann noch um Erlaubnis bitten; die Schale verweist dafuer hierher.
+ * - **Vorschlaege erst nach Bestaetigung.** Ein Hintergrund-Agent aus dem
+ *   Chat (agent_starten) aendert nichts; was er anlegen oder verknuepfen
+ *   wuerde, steht hier als Vorschlag mit [Übernehmen] und [Verwerfen]
+ *   (POST /api/assist/suggestions/:id/accept|dismiss).
  */
 
 import { h, text, clear, on, icon, cx, timeAgo } from '../lib/dom.js';
 import { api as defaultApi } from '../lib/api.js';
-import { rolle, zustandVon, dauerText, zielVon, ARTEN, uhrzeit } from '../lib/agenten.js';
+import { rolle, zustandVon, dauerText, zielVon, ARTEN, uhrzeit, schrittText } from '../lib/agenten.js';
 
 const STYLE_ID = 'nos-agents-view';
 const SEITE = 120;
@@ -60,6 +64,10 @@ function baue(container, ctx) {
   /** chatId -> Titel */
   const chats = new Map();
   let freigaben = [];
+  /** Offene Vorschlaege der Hintergrund-Agenten. */
+  let vorschlaege = [];
+  /** Vorschlaege, ueber die gerade entschieden wird. */
+  const entscheidet = new Set();
   let gesamt = 0;
   let offset = 0;
   let fehler = null;
@@ -79,11 +87,13 @@ function baue(container, ctx) {
 
   async function laden(mehr = false) {
     try {
-      const [runs, chatListe, appr] = await Promise.all([
+      const [runs, chatListe, appr, vor] = await Promise.all([
         api.get('/runs', { query: { limit: SEITE, offset: mehr ? offset : 0, sort: 'createdAt', order: 'desc' } }),
         mehr ? Promise.resolve(null) : api.get('/chats', { query: { limit: 300, sort: 'updatedAt', order: 'desc' } }).catch(() => null),
         mehr ? Promise.resolve(null) : api.get('/approvals').catch(() => null),
+        mehr ? Promise.resolve(null) : vorschlaegeHolen(),
       ]);
+      if (vor) vorschlaege = vor;
       if (!lebt) return;
       const items = Array.isArray(runs && runs.items) ? runs.items : [];
       for (const r of items) laeufe.set(r.id, r);
@@ -109,6 +119,22 @@ function baue(container, ctx) {
         if (el) el.scrollIntoView({ block: 'center' });
       }, 60);
     }
+  }
+
+  async function vorschlaegeHolen() {
+    try {
+      const r = await api.get('/assist/suggestions', { query: { status: 'open', source: 'agent', limit: 500 } });
+      return Array.isArray(r && r.items) ? r.items : [];
+    } catch {
+      return null;
+    }
+  }
+
+  async function vorschlaegeNeu() {
+    const vor = await vorschlaegeHolen();
+    if (!lebt || !vor) return;
+    vorschlaege = vor;
+    neuZeichnen();
   }
 
   async function titelHolen(ids) {
@@ -182,6 +208,7 @@ function baue(container, ctx) {
         fehlerZahl ? h('span.agv__zahl.is-fehler', null, text(`${fehlerZahl} mit Fehler`)) : null)));
 
     if (freigaben.length) root.appendChild(freigabenAbschnitt());
+    if (vorschlaege.length) root.appendChild(vorschlaegeAbschnitt());
 
     if (fehler && !alle.length) {
       root.appendChild(h('div.view-state.view-state--error', { role: 'alert' },
@@ -252,7 +279,7 @@ function baue(container, ctx) {
       z === 'laeuft' ? (ms !== null ? `seit ${dauerText(ms)}` : '') : (ms !== null ? dauerText(ms) : ''),
       uhrzeit(r.createdAt),
     ].filter(Boolean).join(' · ');
-    const aktuellerSchritt = z === 'laeuft' && Array.isArray(d.steps) && d.steps.length ? d.steps[d.steps.length - 1].text : '';
+    const aktuellerSchritt = z === 'laeuft' && Array.isArray(d.steps) && d.steps.length ? schrittText(d.steps[d.steps.length - 1]) : '';
 
     const det = h('details.agv__lauf', {
       'data-run': r.id,
@@ -291,7 +318,7 @@ function baue(container, ctx) {
     if (schritte.length) {
       box.appendChild(h('ol.agv__schritte', null, schritte.map((st) => h('li', null,
         h('span.agv__schritt-zeit', null, text(uhrzeitSek(st.at))),
-        h('span.agv__schritt-text', null, text(st.text || st.tool || st.type || '…'))))));
+        h('span.agv__schritt-text', null, text(schrittText(st)))))));
     }
     const ids = Array.isArray(d.producedIds) ? d.producedIds : [];
     if (ids.length) {
@@ -312,6 +339,13 @@ function baue(container, ctx) {
     if (d.zurueckgenommenAm) {
       box.appendChild(h('p.agv__hinweis', null, text(`Zurückgenommen ${timeAgo(d.zurueckgenommenAm)}.`)));
     }
+    if (d.vorschlagsmodus) {
+      const offenHier = vorschlaege.filter((v) => v.data && v.data.runId === r.id).length;
+      const gesamtHier = Number(d.vorschlaege) || 0;
+      box.appendChild(h('p.agv__hinweis', null, text(offenHier
+        ? `${offenHier === 1 ? 'Ein Vorschlag wartet' : `${offenHier} Vorschläge warten`} oben unter „Vorschläge“. Geändert hat dieser Agent nichts.`
+        : (gesamtHier ? 'Über alle Vorschläge ist entschieden.' : 'Dieser Agent ändert nichts; er hat keinen Vorschlag gemacht.'))));
+    }
     if (d.chatId) {
       box.appendChild(h('div.agv__aktionen', null,
         h('a.btn.btn--small', { href: `#/chat?id=${encodeURIComponent(d.chatId)}` }, icon(I.chat), h('span', null, text('Zum Chat')))));
@@ -326,6 +360,79 @@ function baue(container, ctx) {
     const dt = new Date(t);
     const p = (n) => String(n).padStart(2, '0');
     return `${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`;
+  }
+
+  /* --------------------------------------------------- Vorschlaege */
+
+  const VORSCHLAG_SYMBOL = { notiz: 'notes', task: 'check', link: 'graph' };
+
+  function vorschlaegeAbschnitt() {
+    const gruppen = new Map();
+    for (const v of vorschlaege) {
+      const k = (v.data && v.data.runId) || '';
+      if (!gruppen.has(k)) gruppen.set(k, []);
+      gruppen.get(k).push(v);
+    }
+    const sec = h('section.agv__abschnitt.agv__vorschlaege', { 'aria-labelledby': 'agv-vorschlaege' },
+      h('h2.agv__titel#agv-vorschlaege', null, text('Vorschläge')),
+      h('p.agv__leer', null, text('Deine Hintergrund-Agenten haben nichts geändert. Übernimm, was passt – der Rest bleibt, wie es ist.')));
+    for (const [runId, liste] of gruppen) {
+      const lauf = laeufe.get(runId);
+      const name = (lauf && lauf.data && (lauf.data.titel || lauf.data.goal)) || 'Hintergrund-Agent';
+      sec.appendChild(h('div.agv__gruppe', null,
+        h('div.agv__gruppe-kopf', null,
+          runId
+            ? h('a.agv__chat', { href: `#/agents?id=${encodeURIComponent(runId)}` }, icon(I.agents), h('span', null, text(name)))
+            : h('span.agv__chat', null, icon(I.agents), h('span', null, text(name))),
+          h('span.agv__gruppe-meta', null, text(liste.length === 1 ? '1 Vorschlag' : `${liste.length} Vorschläge`))),
+        h('ul.agv__liste', null, liste.map(vorschlagZeile))));
+    }
+    return sec;
+  }
+
+  function vorschlagZeile(v) {
+    const d = v.data || {};
+    const busy = entscheidet.has(v.id);
+    const knopf = (label, art, klasse) => h(`button.btn.btn--small${klasse}`, {
+      type: 'button',
+      disabled: busy,
+      onClick: () => entscheiden(v, art),
+    }, text(label));
+    return h('li.agv__vorschlag', { 'data-vorschlag': v.id, 'data-art': d.kind || '' },
+      h('span.tile__avatar.agv__avatar', { 'aria-hidden': 'true' }, icon(I[VORSCHLAG_SYMBOL[d.kind]] || I.info)),
+      h('span.agv__main', null,
+        h('span.agv__lauftitel', null, text(d.title || 'Vorschlag')),
+        d.detail ? h('span.agv__vorschlag-text', null, text(d.detail)) : null,
+        d.reason ? h('span.agv__sub', null, text(d.reason)) : null),
+      h('span.agv__freigabe-knoepfe', null,
+        knopf('Verwerfen', 'dismiss', '.btn--ghost'),
+        knopf(busy ? 'Übernimmt …' : 'Übernehmen', 'accept', '.btn--primary')));
+  }
+
+  async function entscheiden(v, art) {
+    if (entscheidet.has(v.id)) return;
+    entscheidet.add(v.id);
+    zeichne();
+    try {
+      const r = await api.post(`/assist/suggestions/${encodeURIComponent(v.id)}/${art}`, {});
+      vorschlaege = vorschlaege.filter((x) => x.id !== v.id);
+      if (art === 'accept') {
+        const ap = (r && r.applied) || {};
+        const id = ap.noteId || ap.taskId || null;
+        const href = id ? zielVon(id, String(id).split('_')[0]) : null;
+        ctx.toast(ap.op === 'link' ? 'Übernommen: die beiden sind jetzt verknüpft.' : 'Übernommen.', 'success',
+          href ? { action: { label: 'Öffnen', run: () => ctx.navigate(href) } } : undefined);
+      } else {
+        ctx.toast('Verworfen. Es bleibt, wie es ist.', 'info');
+      }
+    } catch (err) {
+      ctx.toast(`${art === 'accept' ? 'Nicht übernommen' : 'Nicht verworfen'}: ${(err && err.message) || 'unbekannter Fehler'}`, 'error');
+      // Etwa: der Eintrag, um den es ging, ist inzwischen weg -- die Liste neu holen.
+      vorschlaegeNeu();
+    } finally {
+      entscheidet.delete(v.id);
+      if (lebt) zeichne();
+    }
   }
 
   /* --------------------------------------------------- Freigaben */
@@ -352,7 +459,7 @@ function baue(container, ctx) {
         return h('li.agv__freigabe', null,
           h('span.agv__main', null,
             h('span.agv__lauftitel', null, text(d.summary || 'Ein Agent bittet um eine Freigabe.')),
-            d.tool ? h('span.agv__sub', null, text(`Werkzeug: ${d.tool}`)) : null),
+            d.payload && d.payload.tool ? h('span.agv__sub', null, text(`Werkzeug: ${d.payload.tool}`)) : null),
           h('span.agv__freigabe-knoepfe', null, knopf('Ablehnen', 'denied', ''), knopf('Erlauben', 'approved', '.btn--primary')));
       })));
   }
@@ -397,6 +504,16 @@ function baue(container, ctx) {
   for (const name of ['approval.requested', 'approval.resolved', 'hello']) {
     offs.push(ctx.bus.on(name, () => laden()));
   }
+  // Ein Hintergrund-Agent legt einen Vorschlag ab (oder anderswo wird entschieden).
+  let vorschlagBald = null;
+  const istVorschlag = (p) => p && (p.type === 'suggestion' || (p.record && p.record.type === 'suggestion'));
+  for (const name of ['record.created', 'record.updated', 'record.deleted']) {
+    offs.push(ctx.bus.on(name, (p) => {
+      if (!istVorschlag(p)) return;
+      clearTimeout(vorschlagBald);
+      vorschlagBald = setTimeout(vorschlaegeNeu, 200);
+    }));
+  }
   // Laufende Dauern zaehlen sichtbar mit -- nur, wenn etwas laeuft.
   const tick = setInterval(() => {
     const jetzt = Date.now();
@@ -411,6 +528,7 @@ function baue(container, ctx) {
   function weg() {
     lebt = false;
     clearTimeout(bald);
+    clearTimeout(vorschlagBald);
     clearInterval(tick);
     for (const off of offs) {
       try { off(); } catch { /* weiter */ }
@@ -481,6 +599,9 @@ a.agv__link:hover span { text-decoration: underline; text-underline-offset: 2px;
 .agv__mehr { display: flex; justify-content: center; margin-top: var(--sp-2); }
 .agv__freigabe { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 14px; background: var(--surface-2); border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border)); border-radius: var(--r-3); }
 .agv__freigabe-knoepfe { display: flex; gap: 8px; margin-left: auto; }
+.agv__vorschlag { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-3); }
+.agv__vorschlag > .agv__main { flex: 1 1 260px; min-width: 0; }
+.agv__vorschlag-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; color: var(--fg-muted); font-size: var(--fs-sm); line-height: var(--lh); white-space: pre-line; }
 @media (max-width: 760px) {
   .agv { padding: var(--sp-2) var(--sp-2) var(--sp-4); }
   .agv__details { padding-left: 16px; }

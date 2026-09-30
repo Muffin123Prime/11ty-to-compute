@@ -450,6 +450,18 @@ function createShell() {
     } else if (type === 'run.failed') {
       const message = payload.error && payload.error.message;
       toast(message ? `Agentenlauf fehlgeschlagen: ${message}` : 'Ein Agentenlauf ist fehlgeschlagen.', 'error');
+    } else if (type === 'run.finished' && payload.vorschlagsmodus && payload.runId) {
+      // Ein Hintergrund-Agent aus dem Chat ist fertig: was er vorschlaegt, wartet in "Agenten".
+      const wer = payload.titel ? `„${payload.titel}“` : '';
+      const n = Number(payload.vorschlaege) || 0;
+      const ziel = `#/agents?id=${encodeURIComponent(payload.runId)}`;
+      const satz = payload.status === 'aborted'
+        ? `Der Hintergrund-Agent ${wer} wurde abgebrochen.`
+        : `Der Hintergrund-Agent ${wer} ist fertig${n ? ` – ${n === 1 ? 'ein Vorschlag wartet' : `${n} Vorschläge warten`} auf dich` : ''}.`;
+      toast(satz.replace(/\s+/g, ' '), payload.status === 'aborted' ? 'info' : 'success', {
+        action: { label: 'Ansehen', run: () => navigate(ziel) },
+        timeout: 12000,
+      });
     }
 
     if (type === 'vault.locked') toast('Der Tresor wurde gesperrt.', 'info');

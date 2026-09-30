@@ -376,6 +376,35 @@ function mitCachePunkt(nachrichten) {
 
 /* ---------------------------------------------------------- Fabrik */
 
+/** Ein gemerkter Fakt als eine Zeile. */
+function faktText(m) {
+  return String((m && m.data && m.data.text) || '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Welche gemerkten Fakten der Chat bei jeder Antwort mitliest: nur die für
+ * alle (scope global, nicht die eines Agenten), und wenn es zu viele werden,
+ * die neuesten -- höchstens GEDAECHTNIS_MAX und GEDAECHTNIS_ZEICHEN. Die
+ * Reihenfolge bleibt fest (älteste zuerst), damit der Anfang jeder Anfrage
+ * gleich bleibt (Caching). Auch die Einstellungen fragen hier nach, was
+ * mitgelesen wird (src/http/api/gedaechtnis.js).
+ * @param {object[]} records memory-Sätze, älteste zuerst
+ * @returns {object[]}
+ */
+function gedaechtnisWahl(records) {
+  let fakten = (Array.isArray(records) ? records : [])
+    .filter((m) => m && m.data && (!m.data.scope || m.data.scope === 'global') && faktText(m));
+  if (fakten.length > GEDAECHTNIS_MAX) fakten = fakten.slice(-GEDAECHTNIS_MAX);
+  let summe = 0;
+  const aus = [];
+  for (let i = fakten.length - 1; i >= 0; i--) {
+    summe += faktText(fakten[i]).length + 3;
+    if (summe > GEDAECHTNIS_ZEICHEN) break;
+    aus.unshift(fakten[i]);
+  }
+  return aus;
+}
+
 /**
  * @param {object} deps
  * @param {object} deps.store
@@ -448,25 +477,13 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
   /* ------------------------------------------------------ Gedächtnis */
 
   function gedaechtnis() {
-    let fakten = [];
+    let alle = [];
     try {
-      fakten = store.list('memory', { sort: 'createdAt', order: 'asc' }).items
-        .filter((m) => !m.data.scope || m.data.scope === 'global')
-        .map((m) => String(m.data.text || '').replace(/\s+/g, ' ').trim())
-        .filter(Boolean);
+      alle = store.list('memory', { sort: 'createdAt', order: 'asc' }).items;
     } catch (err) {
       log.warn(`Gedächtnis nicht lesbar: ${err && err.message}`);
     }
-    // Die neuesten zählen, wenn es zu viele werden; die Reihenfolge bleibt fest.
-    if (fakten.length > GEDAECHTNIS_MAX) fakten = fakten.slice(-GEDAECHTNIS_MAX);
-    let summe = 0;
-    const aus = [];
-    for (let i = fakten.length - 1; i >= 0; i--) {
-      summe += fakten[i].length + 3;
-      if (summe > GEDAECHTNIS_ZEICHEN) break;
-      aus.unshift(fakten[i]);
-    }
-    return aus;
+    return gedaechtnisWahl(alle).map((m) => faktText(m));
   }
 
   function systemBloecke(chat) {
@@ -1150,6 +1167,9 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       if (rec.type === 'task' && d.projectId) s.projectId = d.projectId;
     } else if (rec.type === 'memory') {
       s.titel = d.text;
+    } else if (rec.type === 'run') {
+      // Ein Hintergrund-Agent (agent_starten): sein Titel, nicht der ganze Auftrag.
+      s.titel = d.titel || d.goal;
     } else if (rec.type === 'project') {
       s.titel = d.name;
     }
@@ -2188,6 +2208,10 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     /** Vorab (vor dem Strom): gehören die Kennungen zu Dateien dieses Chats? */
     anhaengePruefen: (chatId, ids) => { anhaengeFuer(getChat(chatId), Array.isArray(ids) ? ids : []); },
     zusammenfassen,
+    /** Die Agenten-Laufzeit fuer agent_starten (von src/app.js, sobald sie steht). */
+    laufzeitAnbinden(r) {
+      if (typeof tools.laufzeitAnbinden === 'function') tools.laufzeitAnbinden(r);
+    },
 
     abort(chatId) {
       const entry = inflight.get(chatId);
@@ -2272,5 +2296,7 @@ module.exports = {
   SYSTEM_UMWANDELN,
   DARSTELLUNG,
   MAX_CONTENT_CHARS,
+  GEDAECHTNIS_MAX,
+  gedaechtnisWahl,
   __internals: { verlaufHerrichten, mitCachePunkt, heuteSatz, firstLine, sortMessages },
 };

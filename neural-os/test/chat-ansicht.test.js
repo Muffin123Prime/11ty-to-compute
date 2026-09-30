@@ -79,7 +79,7 @@ test('Karten: „Termin eingetragen · Do, 25. Sep · 15:00 · Zahnarzt“ – o
   ]);
   assert.equal(projekt.length, 1);
   assert.equal(projekt[0].detail, 'Umzug · 2 Aufgaben');
-  assert.equal(wirkungZeilen([{ id: 'memory_m', typ: 'memory', aktion: 'angelegt', titel: 'Geht in die 10b.' }])[0].href, '#/graph?focus=memory_m');
+  assert.equal(wirkungZeilen([{ id: 'memory_m', typ: 'memory', aktion: 'angelegt', titel: 'Geht in die 10b.' }])[0].href, '#/settings?bereich=gedaechtnis&id=memory_m');
 });
 
 test('Agenten: Zustand, Dauer und Namen sind überall dieselben', async () => {
@@ -103,6 +103,28 @@ test('Agenten: Zustand, Dauer und Namen sind überall dieselben', async () => {
   const heute = new Date();
   heute.setHours(10, 24, 0, 0);
   assert.equal(uhrzeit(heute.toISOString(), new Date()), '10:24');
+});
+
+test('Hintergrund-Agent: Karte im Chat, Rolle und Schritte in Worten', async () => {
+  const { agenten } = await laden();
+  const { wirkungZeilen, rolle, schrittText, zielVon } = agenten;
+  const [z] = wirkungZeilen([{ id: 'run_h1', typ: 'run', aktion: 'angelegt', titel: 'Mathe-Notizen ordnen' }]);
+  assert.equal(z.label, 'Hintergrund-Agent gestartet');
+  assert.equal(z.detail, 'Mathe-Notizen ordnen');
+  assert.equal(z.href, '#/agents?id=run_h1');
+  assert.equal(zielVon('run_h1'), '#/agents?id=run_h1');
+  assert.equal(rolle('hintergrund').name, 'Hintergrund-Agent');
+  // Schritte der Agenten-Laufzeit (src/agents/runtime.js) lesen sich als Satz.
+  assert.equal(schrittText({ text: 'Trägt in den Kalender ein' }), 'Trägt in den Kalender ein');
+  assert.equal(schrittText({ kind: 'model', content: 'Ich suche.' }), 'Ich suche.');
+  assert.equal(schrittText({ kind: 'model', content: '' }), 'Überlegt');
+  assert.equal(schrittText({ kind: 'tool', tool: 'notes.search', ok: true }), 'Sucht in deinen Notizen');
+  assert.equal(schrittText({ kind: 'tool', tool: 'notes.create', ok: true, result: '{\n  "vorgeschlagen": true\n}' }), 'Schlägt eine Notiz vor');
+  assert.equal(schrittText({ kind: 'tool', tool: 'notes.create', ok: true, result: '{"id":"note_1"}' }), 'Legt eine Notiz an');
+  assert.equal(schrittText({ kind: 'tool', tool: 'notes.update', ok: false }), 'Ändert eine Notiz – ging nicht');
+  assert.equal(schrittText({ kind: 'tool', tool: 'web.fetch', ok: true }), 'Werkzeug web.fetch');
+  assert.equal(schrittText(null), '…');
+  assert.equal(schrittText({ kind: 'model', content: `${'a'.repeat(200)}` }).length, 162);
 });
 
 module.exports = { name: 'chat-ansicht', tests: drain() };

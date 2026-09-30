@@ -77,7 +77,10 @@ function langsamerStatist() {
         res.end(JSON.stringify({ id: 'msg_probe', type: 'message', role: 'assistant', model: body && body.model, content: [{ type: 'text', text: 'OK' }], stop_reason: 'end_turn', usage: { input_tokens: 12, output_tokens: 2 } }));
         return;
       }
-      const naechste = schlange.shift();
+      // `wenn`: eine Antwort nur fuer passende Anfragen -- so bekommen Chat und
+      // ein gleichzeitig laufender Hintergrund-Agent je ihre eigene.
+      const passt = schlange.findIndex((a) => typeof a.wenn !== 'function' || a.wenn(body));
+      const naechste = passt >= 0 ? schlange.splice(passt, 1)[0] : null;
       if (!naechste) {
         res.writeHead(500, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Statist: keine Antwort mehr in der Schlange' } }));
@@ -1678,6 +1681,169 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       await p4.waitForTimeout(900);
       check(/#\/kalender\?id=event_/.test(p4.url()), 'Der Sprung führt zum Termin im Kalender', p4.url().split('#')[1]);
       await c4.close();
+    }
+
+    /* ========== 9 · KI-Wissen: Mein Wissen, Gedächtnis, Zusammenfassung, Hintergrund-Agent */
+    console.log(`\n${BO}9 · KI-Wissen: „Mein Wissen“, Gedächtnis, Zusammenfassung im Gehirn, Hintergrund-Agent${X}`);
+    {
+      const istAgent = (body) => !!body && JSON.stringify(body.system || '').includes('Du bist \\"Hintergrund-Agent\\"');
+      const fuerChat = (a) => ({ ...a, wenn: (body) => !istAgent(body) });
+      const fuerAgent = (a) => ({ ...a, wenn: istAgent });
+      const pruefung = store.create('note', { title: 'Matheprüfung', body: 'Die Matheprüfung ist am 12. November. Thema: Brüche und Prozente.' });
+
+      // A · „Mein Wissen“: nur eigene Quellen, keine Websuche, die Quelle führt in die App.
+      const { c: c9, p: p9 } = await neueSeite();
+      await p9.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+      await p9.locator('.cv-leer__titel').waitFor({ timeout: 8000 });
+      const modus = p9.locator('.cv-composer__modus');
+      await modus.click();
+      check((await modus.getAttribute('aria-pressed')) === 'true' && /is-wissen/.test(String(await p9.locator('.cv-composer').getAttribute('class'))),
+        '[Mein Wissen] am Eingabefeld: angetippt leuchtet er, das Feld zeigt den Modus');
+      statist.weiter(
+        fuerChat(zug([B.start(), B.werkzeug(0, 'toolu_ws', 'wissen_suchen', { suche: 'Matheprüfung' }), B.ende('tool_use')], 4)),
+        fuerChat(zug([B.start(), B.werkzeug(0, 'toolu_el', 'eintrag_lesen', { id: pruefung.id }), B.ende('tool_use')], 4)),
+        fuerChat(zug([B.start(), textLang(0, 'Deine Matheprüfung ist am 12. November – Thema sind Brüche und Prozente.'), B.ende('end_turn')], 4)),
+      );
+      const vorWissen = statist.anfragen.length;
+      await p9.locator('.cv-composer__feld').fill('Wann ist meine Matheprüfung?');
+      await p9.keyboard.press('Enter');
+      await warteBis(() => p9.locator('.cv-composer__senden.is-stopp').count(), { timeout: 8000 });
+      await strom(p9);
+      await p9.waitForTimeout(400);
+      const wissenAnfragen = statist.anfragen.slice(vorWissen).filter((b) => b && b.stream === true);
+      const ersteW = wissenAnfragen[0] || {};
+      const ohneSuche = wissenAnfragen.length === 3 && wissenAnfragen.every((b) => !(b.tools || []).some((t) => /web_search|web_fetch/.test(`${t.name} ${t.type || ''}`)));
+      const modusSatz = JSON.stringify((ersteW.messages || []).slice(-1)).includes('Modus „Mein Wissen“');
+      check(ohneSuche && modusSatz, 'An die KI ging keine Websuche mit, dafür der Satz „Modus Mein Wissen“ in der Frage', `${wissenAnfragen.length} Anfragen`);
+      const antwort9 = letzteAntwort(p9);
+      const schritte9 = (await antwort9.locator('.cv-schritte > summary').innerText().catch(() => '')).trim();
+      check(/^2 Arbeitsschritte · Wissen$/.test(schritte9), 'Danach eingeklappt: „2 Arbeitsschritte · Wissen“', schritte9);
+      const quelle9 = antwort9.locator('.cv-quellen a.cv-quelle').first();
+      const quelleText = (await quelle9.innerText().catch(() => '')).replace(/\s+/g, ' ');
+      check(/Matheprüfung/.test(quelleText) && /Notiz/.test(quelleText) && (await quelle9.getAttribute('href')) === `#/notes?id=${pruefung.id}` && !(await quelle9.getAttribute('target')),
+        'Unter der Antwort: die eigene Notiz als Quelle – antippen öffnet sie in der App, nicht im Netz', quelleText);
+      await insBild(antwort9);
+      await foto(p9, 'mein-wissen-1440');
+      await quelle9.click();
+      await p9.waitForTimeout(900);
+      check(p9.url().includes(`#/notes?id=${pruefung.id}`), 'Die Quelle führt zur Notiz', p9.url().split('#')[1]);
+      await c9.close();
+
+      // B · Gedächtnis: „Gemerkt“ im Chat → in den Einstellungen ansehen, vergessen, zurückholen.
+      store.create('memory', { text: 'Geht in die 10b.', scope: 'global' });
+      const { c: c10, p: p10 } = await neueSeite();
+      await p10.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+      await p10.locator('.cv-leer__titel').waitFor({ timeout: 8000 });
+      statist.weiter(
+        fuerChat(zug([B.start(), B.werkzeug(0, 'toolu_mk', 'merken', { fakt: 'Isst vegetarisch.' }), B.ende('tool_use')], 4)),
+        fuerChat(zug([B.start(), textLang(0, 'Gemerkt: Du isst vegetarisch.'), B.ende('end_turn')], 4)),
+      );
+      await p10.locator('.cv-composer__feld').fill('Merk dir bitte, dass ich vegetarisch esse.');
+      await p10.keyboard.press('Enter');
+      await warteBis(() => p10.locator('.cv-composer__senden.is-stopp').count(), { timeout: 8000 });
+      await strom(p10);
+      await p10.waitForTimeout(400);
+      const gemerkt = letzteAntwort(p10).locator('.cv-karte[data-typ="memory"]');
+      const oeffnen = gemerkt.getByRole('link', { name: 'Öffnen' });
+      const ziel10 = String(await oeffnen.getAttribute('href').catch(() => ''));
+      check(/Gemerkt/.test(await gemerkt.innerText().catch(() => '')) && /^#\/settings\?bereich=gedaechtnis&id=memory_/.test(ziel10),
+        'Die Karte „Gemerkt“ führt in die Einstellungen, Gruppe „Gedächtnis“', ziel10);
+      await oeffnen.click();
+      const gruppe10 = p10.locator('.setv__gruppe[data-gruppe="gedaechtnis"]');
+      await gruppe10.locator('.setv__fakt').first().waitFor({ timeout: 8000 });
+      const fakt10 = gruppe10.locator('.setv__fakt', { hasText: 'Isst vegetarisch.' });
+      const faktText = (await fakt10.innerText()).replace(/\s+/g, ' ');
+      check(await fakt10.count() === 1 && /aus dem Chat „/.test(faktText) && /class="[^"]*is-ziel/.test(await fakt10.evaluate((el) => el.outerHTML)),
+        'Dort steht, was die KI sich gemerkt hat – mit Herkunft, der neue Eintrag kurz hervorgehoben', faktText.slice(0, 100));
+      await p10.waitForTimeout(700); // bis der Sprung zum Eintrag (sanft gescrollt) angekommen ist
+      await foto(p10, 'gedaechtnis-1440');
+      await fakt10.getByRole('button', { name: 'Vergessen' }).click();
+      await warteBis(async () => (await gruppe10.locator('.setv__fakt', { hasText: 'Isst vegetarisch.' }).count()) === 0, { timeout: 4000 });
+      const vergessenImTresor = !store.all('memory').some((m) => m.data.text === 'Isst vegetarisch.');
+      check(vergessenImTresor && await gruppe10.locator('.setv__fakt').count() === 1, '[Vergessen]: weg – auch im Tresor');
+      await p10.locator('.toast', { hasText: 'Vergessen.' }).getByRole('button', { name: 'Rückgängig' }).click();
+      await warteBis(async () => (await gruppe10.locator('.setv__fakt', { hasText: 'Isst vegetarisch.' }).count()) === 1, { timeout: 4000 });
+      check(await gruppe10.locator('.setv__fakt').count() === 2, '[Rückgängig] holt ihn zurück');
+      await gruppe10.getByRole('button', { name: 'Alles vergessen …' }).click();
+      const frage10 = (await gruppe10.locator('.setv__frage').innerText().catch(() => '')).replace(/\s+/g, ' ');
+      check(/Wirklich alles vergessen\? Das sind 2 Einträge\./.test(frage10), '„Alles vergessen …“ fragt erst nach – in der Gruppe, ohne Fenster des Browsers', frage10.slice(0, 90));
+      await foto(p10, 'gedaechtnis-alles-vergessen-1440');
+      await gruppe10.getByRole('button', { name: 'Ja, alles vergessen' }).click();
+      await warteBis(async () => /Noch nichts gemerkt/.test(await gruppe10.innerText()), { timeout: 4000 });
+      check(store.all('memory').length === 0, 'Ja: alles vergessen – die KI weiß nichts mehr davon');
+      await p10.locator('.toast', { hasText: 'Einträge vergessen' }).getByRole('button', { name: 'Rückgängig' }).click();
+      await warteBis(async () => (await gruppe10.locator('.setv__fakt').count()) === 2, { timeout: 4000 });
+      check(store.all('memory').length === 2, '… und [Rückgängig] holt alles zurück');
+      await c10.close();
+
+      // C · KI-Zusammenfassung in der Detailkarte des Gehirns: einmal fragen, dann gemerkt.
+      const { c: c11, p: p11 } = await neueSeite();
+      await p11.goto(`${base}/#/graph?focus=${encodeURIComponent(pruefung.id)}`, { waitUntil: 'domcontentloaded' });
+      const karte11 = p11.locator('.gh__card');
+      await karte11.waitFor({ state: 'visible', timeout: 10000 });
+      const zf = karte11.getByRole('button', { name: 'Zusammenfassen' });
+      await zf.waitFor({ timeout: 6000 });
+      check(await zf.count() === 1, 'Die Karte bietet [Zusammenfassen] an – eine KI ist verbunden');
+      statist.weiter(fuerChat(zug([B.start(), textLang(0, 'Die Notiz nennt den Termin der Matheprüfung am 12. November und ihre Themen, Brüche und Prozente.'), B.ende('end_turn')], 4)));
+      const vorZf = statist.anfragen.length;
+      await zf.click();
+      await karte11.locator('p.gh__ki').waitFor({ timeout: 10000 });
+      const zfText = (await karte11.locator('p.gh__ki').innerText()).trim();
+      const zfHinweis = (await karte11.locator('.gh__sec-hint', { hasText: 'Von ' }).innerText().catch(() => '')).trim();
+      check(/12\. November/.test(zfText) && /^Von claude/.test(zfHinweis) && await karte11.getByRole('button', { name: 'Neu zusammenfassen' }).count() === 1,
+        'Die KI-Zusammenfassung steht in der Karte, mit Modell und Zeit; daneben [Neu zusammenfassen]', `${zfText.slice(0, 60)} · ${zfHinweis}`);
+      await foto(p11, 'gehirn-zusammenfassung-1440');
+      await p11.reload({ waitUntil: 'domcontentloaded' });
+      await karte11.waitFor({ state: 'visible', timeout: 10000 });
+      await karte11.locator('p.gh__ki').waitFor({ timeout: 6000 });
+      check(statist.anfragen.length === vorZf + 1 && /12\. November/.test(await karte11.locator('p.gh__ki').innerText()),
+        'Wieder geöffnet: die Zusammenfassung ist sofort da – ohne zweite Anfrage an die KI');
+      await c11.close();
+
+      // D · Hintergrund-Agent: der Chat gibt ab, der Agent ändert nichts und legt Vorschläge ab.
+      const notizenVorher = store.all('note').length;
+      const { c: c12, p: p12 } = await neueSeite();
+      await p12.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+      await p12.locator('.cv-leer__titel').waitFor({ timeout: 8000 });
+      statist.weiter(
+        fuerChat(zug([B.start(), B.werkzeug(0, 'toolu_ag', 'agent_starten', { titel: 'Mathe-Notizen ordnen', auftrag: 'Geh die Notizen zur Matheprüfung durch und schlag eine Lernliste als Notiz vor.' }), B.ende('tool_use')], 4)),
+        fuerChat(zug([B.start(), textLang(0, 'Ein Agent ordnet das im Hintergrund. Seine Vorschläge findest du unter „Agenten“.'), B.ende('end_turn')], 4)),
+        fuerAgent(zug([B.start(), textLang(0, `Ich lese die Notiz.\n<tool name="notes.read">{"id": "${pruefung.id}"}</tool>`), B.ende('end_turn')], 4)),
+        fuerAgent(zug([B.start(), textLang(0, '<tool name="notes.create">{"title": "Lernliste Mathe", "body": "1. Brüche kürzen und erweitern\\n2. Prozente rechnen\\n3. Probeprüfung am 10. November"}</tool>'), B.ende('end_turn')], 4)),
+        fuerAgent(zug([B.start(), textLang(0, 'Ich schlage eine Lernliste als Notiz vor.'), B.ende('end_turn')], 4)),
+      );
+      await p12.locator('.cv-composer__feld').fill('Geh bitte meine Mathe-Notizen durch und mach mir eine Lernliste.');
+      await p12.keyboard.press('Enter');
+      await warteBis(() => p12.locator('.cv-composer__senden.is-stopp').count(), { timeout: 8000 });
+      await strom(p12);
+      const karte12 = letzteAntwort(p12).locator('.cv-karte[data-typ="run"]');
+      await karte12.waitFor({ timeout: 6000 });
+      const karteText = (await karte12.innerText()).replace(/\s+/g, ' ');
+      check(/Hintergrund-Agent gestartet/.test(karteText) && /Mathe-Notizen ordnen/.test(karteText)
+        && await karte12.getByRole('link', { name: 'Ansehen' }).count() === 1 && await karte12.getByRole('button', { name: 'Rückgängig' }).count() === 0,
+      'Im Chat: „Hintergrund-Agent gestartet · Mathe-Notizen ordnen“ mit [Ansehen] – ohne Rückgängig, er ändert ja nichts', karteText);
+      const fertig12 = p12.locator('.toast', { hasText: 'Hintergrund-Agent' });
+      await fertig12.waitFor({ timeout: 15000 });
+      const toastText = (await fertig12.innerText()).replace(/\s+/g, ' ');
+      check(/„Mathe-Notizen ordnen“ ist fertig – ein Vorschlag wartet auf dich\./.test(toastText), 'Ist er fertig, meldet sich die App: „… ist fertig – ein Vorschlag wartet auf dich.“', toastText.slice(0, 110));
+      await foto(p12, 'hintergrund-agent-fertig-1440');
+      check(store.all('note').length === notizenVorher, 'Bis hierher ist nichts angelegt – nur vorgeschlagen');
+      await fertig12.getByRole('button', { name: 'Ansehen' }).click();
+      const vor12 = p12.locator('.agv__vorschlaege');
+      await vor12.waitFor({ timeout: 8000 });
+      const zeile12 = vor12.locator('.agv__vorschlag', { hasText: 'Lernliste Mathe' });
+      check(/#\/agents\?id=run_/.test(p12.url()) && await zeile12.count() === 1 && /Brüche kürzen/.test(await zeile12.innerText()),
+        '„Ansehen“ führt zu „Agenten“: der Vorschlag steht dort mit Inhalt, [Übernehmen] und [Verwerfen]', p12.url().split('#')[1]);
+      await foto(p12, 'vorschlaege-1440');
+      await zeile12.getByRole('button', { name: 'Übernehmen' }).click();
+      await p12.locator('.toast', { hasText: 'Übernommen.' }).waitFor({ timeout: 5000 });
+      const neu12 = store.all('note').find((n) => n.data.title === 'Lernliste Mathe');
+      check(!!neu12 && /Prozente rechnen/.test(neu12.data.body) && await p12.locator('.agv__vorschlaege').count() === 0,
+        '[Übernehmen]: erst jetzt entsteht die Notiz – und der Vorschlag ist erledigt');
+      await p12.locator('.toast', { hasText: 'Übernommen.' }).getByRole('button', { name: 'Öffnen' }).click();
+      await p12.waitForTimeout(900);
+      check(neu12 && p12.url().includes(`#/notes?id=${neu12.id}`), '„Öffnen“ in der Meldung führt zur neuen Notiz', p12.url().split('#')[1]);
+      await c12.close();
     }
   } catch (err) {
     fehlgeschlagen = err;

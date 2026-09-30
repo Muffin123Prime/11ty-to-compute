@@ -40,6 +40,46 @@ const wdh = require('../kalender/wiederholung');
 
 const AGENT_ID = 'claude';
 
+/**
+ * Der Hintergrund-Agent (agent_starten). Liest das eigene Wissen, darf
+ * anlegen und verknuepfen -- aber nur als Vorschlag (vorschlagsmodus, siehe
+ * src/agents/tools.js). Kein Netz, keine Dateien, keine weiteren Agenten.
+ */
+const HINTERGRUND = Object.freeze({
+  kennung: 'hintergrund',
+  name: 'Hintergrund-Agent',
+  description: 'Arbeitet für den Chat im Hintergrund mit deinem Wissen und legt Vorschläge ab. Ändert selbst nichts.',
+  systemPrompt: [
+    'Du arbeitest im Hintergrund für den Chat: Der Nutzer hat dir einen Auftrag gegeben und redet inzwischen weiter.',
+    'Du arbeitest nur mit seinem eigenen Wissen (Notizen, Aufgaben, Projekte, Verknüpfungen) – kein Internet.',
+    'Du änderst nichts selbst. Was du anlegst oder verknüpfst (notes.create, tasks.create, graph.link), wird ein Vorschlag, den der Nutzer übernimmt oder verwirft.',
+    'Lege nur Vorschläge ab, die wirklich helfen – lieber drei gute als zehn beliebige. Keine doppelten.',
+    'Erfinde nichts: Jede Aussage stützt sich auf einen Eintrag, den du mit einem Werkzeug gelesen hast.',
+    'Deine Endantwort: zwei bis vier Sätze, was du gefunden hast und was du vorschlägst.',
+  ].join('\n'),
+  permissions: Object.freeze({
+    readNotes: true,
+    writeNotes: true,
+    createEdges: true,
+    runTasks: true,
+    readFiles: false,
+    writeFiles: false,
+    spawnAgents: false,
+    network: 'offline',
+    allowedHosts: [],
+    fileRoots: [],
+    requireApproval: true,
+    maxSteps: 8,
+    maxSeconds: 300,
+  }),
+  tools: Object.freeze(['notes.search', 'notes.read', 'notes.create', 'graph.neighbours', 'graph.link', 'tasks.list', 'tasks.create', 'projects.list', 'tags.list', 'memory.recall', 'time.now']),
+  builtin: true,
+  vorschlagsmodus: true,
+});
+
+/** Werkzeuge, deren Lauf-Satz ein anderer anlegt (agent_starten: die Agenten-Laufzeit). */
+const OHNE_EIGENEN_LAUF = new Set(['agent_starten']);
+
 /** Rolle je Werkzeug (Vertrag 7). */
 const ROLLEN = Object.freeze({
   rueckfrage: 'planung',
@@ -52,6 +92,7 @@ const ROLLEN = Object.freeze({
   projekt_anpassen: 'projekte',
   wissen_suchen: 'wissen',
   eintrag_lesen: 'wissen',
+  agent_starten: 'hintergrund',
   web_search: 'recherche',
   web_fetch: 'recherche',
 });
@@ -63,6 +104,7 @@ const ROLLEN_NAME = Object.freeze({
   gedaechtnis: 'Gedächtnis',
   projekte: 'Projekte',
   wissen: 'Wissen',
+  hintergrund: 'Hintergrund',
   recherche: 'Recherche',
 });
 
@@ -317,6 +359,19 @@ const DEFINITIONEN = Object.freeze([
       id: { type: 'string', description: 'Die id des Eintrags.' },
     },
     ['id'],
+  ),
+  werkzeug(
+    'agent_starten',
+    'Startet einen Hintergrund-Agenten für eine längere Arbeit im eigenen Wissen des Nutzers – sammeln, ordnen, '
+      + 'Zusammenhänge finden, Aufgaben ableiten. Er arbeitet weiter, während ihr redet, ändert selbst nichts und legt, '
+      + 'was er anlegen oder verknüpfen würde, als Vorschläge ab; der Nutzer übernimmt sie unter „Agenten“ oder nicht. '
+      + 'Nur, wenn der Nutzer so eine Arbeit ausdrücklich will („geh meine Notizen zu … durch“). Eine einzelne Frage '
+      + 'beantwortest du selbst mit wissen_suchen. Kein Internet.',
+    {
+      titel: { type: 'string', description: 'Kurzer Titel der Arbeit, höchstens 80 Zeichen („Biologie-Notizen ordnen“).' },
+      auftrag: { type: 'string', description: 'Was der Agent tun soll, in ganzen Sätzen und ohne Rückbezug auf den Chat – er kennt das Gespräch nicht.' },
+    },
+    ['titel', 'auftrag'],
   ),
 ]);
 
@@ -629,6 +684,11 @@ const REGELN = {
     laenge('id', e.id, 1, 120, fehler);
     return { id: String(e.id || '').trim() };
   },
+  agent_starten(e, fehler) {
+    laenge('titel', e.titel, 1, 80, fehler);
+    laenge('auftrag', e.auftrag, 10, 4000, fehler);
+    return { titel: String(e.titel || '').trim(), auftrag: String(e.auftrag || '').trim() };
+  },
   projekt_anpassen(e, fehler) {
     laenge('name', e.name, 1, 200, fehler);
     if (e.beschreibung !== undefined) laenge('beschreibung', e.beschreibung, 0, 4000, fehler);
@@ -762,6 +822,8 @@ function nullLogger() {
 function createWerkzeuge({ store, bus, logger } = {}) {
   if (!store || typeof store.create !== 'function') throw new ValidationError('Die Werkzeuge brauchen den Speicher.');
   const log = typeof logger === 'function' ? logger('werkzeuge') : (logger || nullLogger());
+  /** Die Agenten-Laufzeit fuer agent_starten -- kommt nach (laufzeitAnbinden). */
+  let laufzeit = null;
 
   function publish(name, payload) {
     if (!bus || typeof bus.publish !== 'function') return;
@@ -771,33 +833,38 @@ function createWerkzeuge({ store, bus, logger } = {}) {
   /**
    * Eine sichtbare Tätigkeit beginnen: ein `run`-Satz plus Bus-Ereignis.
    *
-   * @param {{chatId?:string|null, messageId?:string|null, rolle:string, titel:string, schritt?:string}} p
+   * `ohneSatz`: kein eigener `run`-Satz -- fuer agent_starten, dessen Lauf
+   * die Agenten-Laufzeit selbst anlegt (sonst stuende er zweimal in "Agenten").
+   *
+   * @param {{chatId?:string|null, messageId?:string|null, rolle:string, titel:string, schritt?:string, ohneSatz?:boolean}} p
    * @returns {{runId:string|null, ereignis:()=>object, schritt:(t:string)=>object,
    *            fertig:(ergebnis:string, produced?:string[])=>object, fehler:(t:string)=>object}}
    */
-  function aktivitaet({ chatId = null, messageId = null, rolle, titel, schritt = '' }) {
+  function aktivitaet({ chatId = null, messageId = null, rolle, titel, schritt = '', ohneSatz = false }) {
     const beginn = Date.now();
     const zustand = { zustand: 'laeuft', schritt, ergebnis: null, schritte: [] };
     let runId = null;
     if (schritt) zustand.schritte.push({ at: new Date(beginn).toISOString(), text: schritt });
-    try {
-      const run = store.create('run', {
-        agentId: AGENT_ID,
-        goal: titel,
-        status: 'running',
-        steps: zustand.schritte.slice(),
-        startedAt: new Date(beginn).toISOString(),
-        chatId,
-        messageId,
-        rolle,
-        titel,
-        quelle: 'claude',
-        dauerMs: 0,
-      });
-      runId = run.id;
-    } catch (err) {
-      // Ohne Lauf-Satz bleibt die Tätigkeit trotzdem sichtbar (Bus, Chat).
-      log.warn(`Lauf-Satz für „${titel}“ nicht angelegt: ${err && err.message}`);
+    if (!ohneSatz) {
+      try {
+        const run = store.create('run', {
+          agentId: AGENT_ID,
+          goal: titel,
+          status: 'running',
+          steps: zustand.schritte.slice(),
+          startedAt: new Date(beginn).toISOString(),
+          chatId,
+          messageId,
+          rolle,
+          titel,
+          quelle: 'claude',
+          dauerMs: 0,
+        });
+        runId = run.id;
+      } catch (err) {
+        // Ohne Lauf-Satz bleibt die Tätigkeit trotzdem sichtbar (Bus, Chat).
+        log.warn(`Lauf-Satz für „${titel}“ nicht angelegt: ${err && err.message}`);
+      }
     }
     const lokaleId = runId || `lauf_${beginn.toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
@@ -1459,7 +1526,7 @@ function createWerkzeuge({ store, bus, logger } = {}) {
       case 'event': return `#/kalender?id=${q}`;
       case 'project': return `#/projects?id=${q}`;
       case 'task': return d.projectId ? `#/projects?id=${encodeURIComponent(d.projectId)}` : '#/projects';
-      case 'memory': return '#/settings?bereich=gedaechtnis';
+      case 'memory': return `#/settings?bereich=gedaechtnis&id=${q}`;
       default: return `#/graph?focus=${q}`;
     }
   }
@@ -1573,6 +1640,44 @@ function createWerkzeuge({ store, bus, logger } = {}) {
   };
   Object.assign(AUSFUEHRUNG, wissenAusfuehrung);
 
+  /*
+   * Der Hintergrund-Agent (agent_starten): ein Lauf der Agenten-Laufzeit
+   * (src/agents/runtime.js) im Vorschlagsmodus -- er aendert nichts, was er
+   * anlegen oder verknuepfen wuerde, wird ein Vorschlag (src/agents/tools.js),
+   * und der Nutzer entscheidet in "Agenten". Der Agent-Satz wird beim ersten
+   * Mal angelegt: angelegt wird er nicht vom Nutzer ("nichts einrichten").
+   */
+  AUSFUEHRUNG.agent_starten = (w, k) => {
+    if (!laufzeit || typeof laufzeit.starten !== 'function') {
+      throw new NeuralError('AGENT_NICHT_DA', 'Hintergrund-Agenten gibt es hier gerade nicht. Erledige es selbst, oder sag dem Nutzer, dass es nicht geht.', { status: 503 });
+    }
+    const agent = hintergrundAgent();
+    const run = laufzeit.starten({
+      agentId: agent.id,
+      goal: w.auftrag,
+      titel: w.titel,
+      rolle: 'hintergrund',
+      chatId: k.chatId || null,
+      messageId: k.messageId || null,
+      vorschlagsmodus: true,
+    });
+    return {
+      inhalt: {
+        ok: true,
+        id: run.id,
+        hinweis: 'Der Agent arbeitet jetzt im Hintergrund und legt Vorschläge ab – geändert wird nichts, bis der Nutzer sie übernimmt. Sag ihm in einem Satz, dass er sie unter „Agenten“ findet; warte nicht auf das Ergebnis.',
+      },
+      ergebnis: `Hintergrund-Agent gestartet: ${kurz(w.titel, 60)}`,
+      produced: [run.id],
+    };
+  };
+
+  function hintergrundAgent() {
+    const da = store.all('agent').find((a) => a.data && a.data.kennung === HINTERGRUND.kennung);
+    if (da) return da;
+    return store.create('agent', { ...HINTERGRUND, permissions: { ...HINTERGRUND.permissions }, tools: [...HINTERGRUND.tools] });
+  }
+
   const terminTitel = (id) => {
     const rec = typeof id === 'string' && id ? store.get(id) : null;
     return rec && rec.type === 'event' ? kurz(rec.data.title, 50) : 'Termin';
@@ -1592,6 +1697,7 @@ function createWerkzeuge({ store, bus, logger } = {}) {
     projekt_anpassen: (w) => `Projekt: ${kurz(w.name, 60)}`,
     wissen_suchen: (w) => `Sucht in deinem Wissen: „${kurz(w.suche, 50)}“`,
     eintrag_lesen: (w) => `Liest: ${eintragKurz(w.id)}`,
+    agent_starten: (w) => `Auftrag: ${kurz(w.titel, 60)}`,
     rueckfrage: (w) => `Rückfrage: ${kurz(w.frage, 60)}`,
   };
 
@@ -1605,6 +1711,7 @@ function createWerkzeuge({ store, bus, logger } = {}) {
     projekt_anpassen: 'Pflegt das Projekt',
     wissen_suchen: 'Durchsucht deine Einträge',
     eintrag_lesen: 'Liest den Eintrag',
+    agent_starten: 'Übergibt den Auftrag',
   };
 
   /**
@@ -1624,10 +1731,11 @@ function createWerkzeuge({ store, bus, logger } = {}) {
     const name = block.name;
     const rolle = ROLLEN[name] || 'planung';
     const pruefung = eingabePruefen(name, block.input, parseFehler);
+    const ohneSatz = OHNE_EIGENEN_LAUF.has(name);
     if (!pruefung.ok) {
       const lauf = aktivitaet({
         chatId: kontext.chatId, messageId: kontext.messageId, rolle,
-        titel: `${ROLLEN_NAME[rolle] || rolle}: Eingabe ungültig`, schritt: 'Prüft die Eingabe',
+        titel: `${ROLLEN_NAME[rolle] || rolle}: Eingabe ungültig`, schritt: 'Prüft die Eingabe', ohneSatz,
       });
       const e = lauf.fehler(`Nicht ausgeführt – die Eingabe war ungültig: ${kurz(pruefung.fehler, 160)}`);
       return { toolResult: ungueltigErgebnis(block.id, pruefung), ereignisse: [e], produced: [], ungueltig: true };
@@ -1635,7 +1743,7 @@ function createWerkzeuge({ store, bus, logger } = {}) {
     const w = pruefung.wert;
     const lauf = aktivitaet({
       chatId: kontext.chatId, messageId: kontext.messageId, rolle,
-      titel: TITEL[name] ? TITEL[name](w) : name, schritt: SCHRITT[name] || '',
+      titel: TITEL[name] ? TITEL[name](w) : name, schritt: SCHRITT[name] || '', ohneSatz,
     });
     const ereignisse = [lauf.ereignis()];
     try {
@@ -1666,11 +1774,14 @@ function createWerkzeuge({ store, bus, logger } = {}) {
     laufAbschliessen,
     pruefen: eingabePruefen,
     titel: (name, w) => (TITEL[name] ? TITEL[name](w) : name),
+    /** Die Agenten-Laufzeit (src/agents/runtime.js), nachgereicht von src/app.js. */
+    laufzeitAnbinden(r) { laufzeit = r || null; },
   };
 }
 
 module.exports = {
   createWerkzeuge,
+  HINTERGRUND,
   DEFINITIONEN,
   ROLLEN,
   ROLLEN_NAME,
