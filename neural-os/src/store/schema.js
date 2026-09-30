@@ -82,6 +82,12 @@ const FIELDS = {
      * alte Chats unveraendert bleiben; geprueft wird im Chat-Dienst.
      */
     stil: { type: 'object', nullable: true },
+    /**
+     * „Mein Wissen“ (Modus 'wissen'): die KI antwortet nur aus den eigenen
+     * Eintraegen, ohne Websuche (src/models/chat.js). Ohne Vorgabe, damit
+     * alte Chats unveraendert bleiben; fehlt es, gilt 'normal'.
+     */
+    modus: { type: 'string', enum: ['normal', 'wissen'] },
   },
   message: {
     chatId: { type: 'string', required: true },

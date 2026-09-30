@@ -174,65 +174,106 @@ export function erkennungStarten({ onText, onEnde, onFehler, sprache = 'de-DE' }
 /**
  * Eine Aufnahme starten (Mikrofon -> Float32 -> WAV). Die Aufnahme endet
  * mit `stopp()` oder nach MAX_SEKUNDEN von selbst (dann ruft sie `onGrenze`).
+ * Laenger als MAX_SEKUNDEN wird die WAV nie -- auch nicht, wenn die Uhr in
+ * einem Tab im Hintergrund zu spaet tickt (der Server nimmt nicht mehr an).
+ * `abbrechen()` waehrend `stopp()` noch wartet: `stopp()` liefert dann
+ * `abgebrochen: true` und nichts zum Hochladen.
  * @param {{onZeit?:(sekunden:number)=>void, onGrenze?:()=>void, maxSekunden?:number}} opts
- * @returns {Promise<{stopp:()=>Promise<{wav:Uint8Array, sekunden:number}>, abbrechen:()=>void}>}
+ * @returns {Promise<{stopp:()=>Promise<{wav:Uint8Array, sekunden:number, abgebrochen:boolean}>, abbrechen:()=>void}>}
  */
 export async function aufnahmeStarten(opts = {}, w = globalThis) {
   const max = Number(opts.maxSekunden) > 0 ? Number(opts.maxSekunden) : MAX_SEKUNDEN;
   const strom = await w.navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
-  const AC = w.AudioContext || w.webkitAudioContext;
-  const ctx = new AC();
-  if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
-    try { await ctx.resume(); } catch { /* laeuft trotzdem an, sobald es darf */ }
-  }
-  const quelle = ctx.createMediaStreamSource(strom);
-  const stuecke = [];
-  let knoten = null;
-  // Bevorzugt ein AudioWorklet (eigene Datei, gleiche Quelle); sonst der
-  // alte ScriptProcessor, den jeder Browser noch hat.
-  if (ctx.audioWorklet && typeof w.AudioWorkletNode === 'function') {
+  let ctx = null;
+  const schliessen = () => {
+    for (const spur of strom.getTracks()) spur.stop();
+    if (!ctx) return;
     try {
-      await ctx.audioWorklet.addModule(new URL('./aufnahme-worklet.js', import.meta.url).href);
-      knoten = new w.AudioWorkletNode(ctx, 'nos-aufnahme');
-      knoten.port.onmessage = (e) => { if (e.data instanceof Float32Array) stuecke.push(e.data); };
-    } catch {
-      knoten = null;
+      const p = ctx.close();
+      if (p && typeof p.catch === 'function') p.catch(() => { /* schon zu */ });
+    } catch { /* schon zu */ }
+  };
+  const stuecke = [];
+  let quelle = null;
+  let knoten = null;
+  try {
+    const AC = w.AudioContext || w.webkitAudioContext;
+    ctx = new AC();
+    if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+      try { await ctx.resume(); } catch { /* laeuft trotzdem an, sobald es darf */ }
     }
+    quelle = ctx.createMediaStreamSource(strom);
+    // Bevorzugt ein AudioWorklet (eigene Datei, gleiche Quelle); sonst der
+    // alte ScriptProcessor, den jeder Browser noch hat.
+    if (ctx.audioWorklet && typeof w.AudioWorkletNode === 'function') {
+      try {
+        await ctx.audioWorklet.addModule(new URL('./aufnahme-worklet.js', import.meta.url).href);
+        knoten = new w.AudioWorkletNode(ctx, 'nos-aufnahme');
+        knoten.port.onmessage = (e) => { if (e.data instanceof Float32Array) stuecke.push(e.data); };
+      } catch {
+        knoten = null;
+      }
+    }
+    if (!knoten) {
+      knoten = ctx.createScriptProcessor(4096, 1, 1);
+      knoten.onaudioprocess = (e) => { stuecke.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+    }
+    quelle.connect(knoten);
+    // Ohne Verbindung zum Ausgang laeuft ein ScriptProcessor in Chromium nicht; er gibt Stille aus.
+    knoten.connect(ctx.destination);
+  } catch (err) {
+    // Das Mikrofon war schon offen: wieder zu, sonst bliebe seine Anzeige an.
+    schliessen();
+    throw err;
   }
-  if (!knoten) {
-    knoten = ctx.createScriptProcessor(4096, 1, 1);
-    knoten.onaudioprocess = (e) => { stuecke.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
-  }
-  quelle.connect(knoten);
-  // Ohne Verbindung zum Ausgang laeuft ein ScriptProcessor in Chromium nicht; er gibt Stille aus.
-  knoten.connect(ctx.destination);
+  const rate = ctx.sampleRate;
   const beginn = Date.now();
   let vorbei = false;
+  let haelt = false;
+  let abgebrochen = false;
   let uhr = null;
   const aufraeumen = () => {
+    if (vorbei) return;
     vorbei = true;
     clearInterval(uhr);
     try { quelle.disconnect(); } catch { /* egal */ }
     try { knoten.disconnect(); } catch { /* egal */ }
-    for (const spur of strom.getTracks()) spur.stop();
-    try { ctx.close(); } catch { /* egal */ }
+    schliessen();
   };
   uhr = setInterval(() => {
     const s = (Date.now() - beginn) / 1000;
     if (typeof opts.onZeit === 'function') opts.onZeit(s);
-    if (s >= max && !vorbei && typeof opts.onGrenze === 'function') opts.onGrenze();
+    if (s >= max && !vorbei && !haelt && typeof opts.onGrenze === 'function') opts.onGrenze();
   }, 250);
+  const leer = () => ({ wav: wavKodieren([], rate), sekunden: 0, abgebrochen: true });
   return {
     async stopp() {
-      if (vorbei) return { wav: wavKodieren([], ctx.sampleRate), sekunden: 0 };
-      const rate = ctx.sampleRate;
+      if (vorbei || haelt) return leer();
+      haelt = true;
       // Was der Worklet noch im Puffer hat, schickt er auf Zuruf.
       if (knoten.port) knoten.port.postMessage('leeren');
       await new Promise((r) => setTimeout(r, 120));
+      if (abgebrochen) return leer();
       aufraeumen();
-      const wav = wavKodieren(stuecke, rate);
-      return { wav, sekunden: (wav.length - 44) / (ZIEL_RATE * 2) };
+      const wav = wavKodieren(bisZur(stuecke, Math.floor(max * rate)), rate);
+      return { wav, sekunden: (wav.length - 44) / (ZIEL_RATE * 2), abgebrochen: false };
     },
-    abbrechen() { if (!vorbei) aufraeumen(); },
+    abbrechen() {
+      abgebrochen = true;
+      aufraeumen();
+    },
   };
+}
+
+/** Die Stuecke bis hoechstens `grenze` Abtastwerte (der Rest faellt weg). */
+export function bisZur(stuecke, grenze) {
+  const out = [];
+  let n = 0;
+  for (const s of stuecke) {
+    if (n >= grenze) break;
+    const rest = grenze - n;
+    out.push(s.length > rest ? s.subarray(0, rest) : s);
+    n += Math.min(s.length, rest);
+  }
+  return out;
 }

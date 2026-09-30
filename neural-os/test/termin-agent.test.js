@@ -108,11 +108,11 @@ test('Die Werkzeugliste steht in der vereinbarten Reihenfolge und ist zwischen z
     const [a, b] = statist.stromAnfragen().map((x) => x.body);
     assert.deepEqual(a.tools.map((t) => t.name), [
       'rueckfrage', 'termin_anlegen', 'termine_lesen', 'termin_aendern', 'termin_loeschen',
-      'notiz_anlegen', 'merken', 'projekt_anpassen', 'web_search', 'web_fetch',
+      'notiz_anlegen', 'merken', 'projekt_anpassen', 'wissen_suchen', 'eintrag_lesen', 'web_search', 'web_fetch',
     ]);
     assert.equal(JSON.stringify(b.tools), JSON.stringify(a.tools), 'die Werkzeuge sind Teil des gecachten Präfixes');
     assert.equal(JSON.stringify(b.system[0]), JSON.stringify(a.system[0]), 'der feste Systemtext auch');
-    for (const t of a.tools.slice(0, 8)) {
+    for (const t of a.tools.slice(0, 10)) {
       assert.equal(t.strict, true, `${t.name}: strict`);
       assert.equal(t.eager_input_streaming, true, `${t.name}: eager_input_streaming`);
     }

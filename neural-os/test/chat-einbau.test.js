@@ -137,6 +137,74 @@ test('Sprechen: das WAV aus dem Browser besteht die Prüfung des Servers (16 kHz
   assert.equal(wavKodieren([], 44100).length, 44);
 });
 
+test('Sprechen: die Aufnahme räumt auf – Mikrofon zu, wenn etwas scheitert; Abbrechen während „Fertig“ lädt nichts hoch; nie länger als 60 s', async () => {
+  const { aufnahmeStarten, bisZur, MAX_SEKUNDEN } = (await laden()).sprechen;
+  const st = [new Float32Array(5), new Float32Array(5), new Float32Array(5)];
+  assert.deepEqual(bisZur(st, 12).map((x) => x.length), [5, 5, 2]);
+  assert.deepEqual(bisZur(st, 5).map((x) => x.length), [5]);
+  assert.deepEqual(bisZur(st, 100).map((x) => x.length), [5, 5, 5]);
+
+  // Ein Browser zum Anfassen: Mikrofon mit einer Spur, AudioContext mit ScriptProcessor.
+  const browser = ({ kaputt = false } = {}) => {
+    const spur = { gestoppt: 0, stop() { this.gestoppt += 1; } };
+    const b = { spur, zu: 0, knoten: null };
+    const ctx = {
+      state: 'running',
+      sampleRate: 16000,
+      destination: {},
+      createMediaStreamSource() {
+        if (kaputt) throw new Error('kein Ton');
+        return { connect() {}, disconnect() {} };
+      },
+      createScriptProcessor() {
+        b.knoten = { connect() {}, disconnect() {}, onaudioprocess: null };
+        return b.knoten;
+      },
+      close() {
+        b.zu += 1;
+        return b.zu > 1 ? Promise.reject(new Error('schon zu')) : Promise.resolve();
+      },
+    };
+    b.w = {
+      navigator: { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [spur] }) } },
+      AudioContext: function AC() { return ctx; },
+    };
+    b.sekundeTon = () => b.knoten.onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(16000).fill(0.1) } });
+    return b;
+  };
+
+  // Scheitert es nach dem Öffnen des Mikrofons, geht es wieder zu.
+  const k = browser({ kaputt: true });
+  await assert.rejects(aufnahmeStarten({}, k.w), /kein Ton/);
+  assert.equal(k.spur.gestoppt, 1, 'die Spur ist aus, die Anzeige des Mikrofons erlischt');
+  assert.equal(k.zu, 1);
+
+  // 70 Sekunden Ton (die Uhr tickte im Hintergrund zu spät): die WAV hat 60.
+  const lang = browser();
+  const a = await aufnahmeStarten({}, lang.w);
+  for (let i = 0; i < 70; i += 1) lang.sekundeTon();
+  const r = await a.stopp();
+  assert.equal(r.abgebrochen, false);
+  assert.equal(r.sekunden, MAX_SEKUNDEN);
+  assert.equal(serverAnhaenge.wavPruefen(Buffer.from(r.wav).toString('base64')).sekunden, MAX_SEKUNDEN, 'der Server nimmt sie an');
+  assert.equal(lang.spur.gestoppt, 1);
+  assert.equal((await a.stopp()).abgebrochen, true, 'ein zweites „Fertig“ liefert nichts');
+  a.abbrechen();
+  assert.equal(lang.zu, 1, 'nicht zweimal geschlossen');
+
+  // Abbrechen (Ansicht verlassen), während „Fertig“ noch den Rest abholt.
+  const weg = browser();
+  const b = await aufnahmeStarten({}, weg.w);
+  weg.sekundeTon();
+  const warten = b.stopp();
+  b.abbrechen();
+  const ergebnis = await warten;
+  assert.equal(ergebnis.abgebrochen, true, 'nichts wird mehr umgeschrieben');
+  assert.equal(ergebnis.sekunden, 0);
+  assert.equal(weg.spur.gestoppt, 1);
+  assert.equal(weg.zu, 1);
+});
+
 test('Sprechen: welcher Weg gilt – Erkennung des Browsers, sonst Aufnahme für Gemini, sonst kein Knopf', async () => {
   const { sprechWeg, erkennungFehlerSatz, erkennungUntauglich } = (await laden()).sprechen;
   const mitMikro = { navigator: { mediaDevices: { getUserMedia() {} } }, AudioContext: function AC() {} };
@@ -260,4 +328,22 @@ test('Vorlesen: Satz für Satz; Pause hält an, Weiter beginnt den Satz neu; ein
   v.stopp();
   assert.equal(v.zustand().id, null);
   assert.equal(v.start('m3', '   '), false, 'nichts zu lesen: kein Spieler');
+});
+
+/* ----------------------------------------------- Quellen je Fassung */
+
+test('Quellen je Fassung: die aktive trägt sie oben am Satz, jede andere in ihrem Kopf', async () => {
+  const { fassungQuellen, fassungInhalt } = (await laden()).chat;
+  const m = {
+    data: {
+      content: 'B.[1]',
+      quellen: [{ titel: 'b', url: 'https://b.example' }],
+      version: 1,
+      versionen: [{ inhalt: 'A.[1]', quellen: [{ titel: 'a', url: 'https://a.example' }] }, { inhalt: 'B.[1]' }, { inhalt: 'C.' }],
+    },
+  };
+  assert.deepEqual(fassungQuellen(m, fassungInhalt(m)).map((q) => q.url), ['https://b.example']);
+  assert.deepEqual(fassungQuellen(m, fassungInhalt(m, 0)).map((q) => q.url), ['https://a.example'], '„[1]“ in Fassung 1 zeigt auf ihre Quelle 1');
+  assert.deepEqual(fassungQuellen(m, fassungInhalt(m, 2)), []);
+  assert.deepEqual(fassungQuellen({ data: {} }, null), []);
 });

@@ -157,6 +157,19 @@ export function fassungInhalt(m, ansicht = null) {
 }
 
 /**
+ * Die Quellen der angesehenen Fassung. Die aktive traegt sie oben am Satz,
+ * jede andere in ihrem Kopf (src/models/fassungen.js fuerOberflaeche) -- so
+ * zeigt "[1]" in einer aelteren Fassung auf deren Quelle 1, nicht auf die der
+ * aktiven.
+ */
+export function fassungQuellen(m, angesehen) {
+  const d = (m && m.data) || {};
+  if (!angesehen || angesehen.aktiv) return Array.isArray(d.quellen) ? d.quellen : [];
+  const v = Array.isArray(d.versionen) ? d.versionen[angesehen.version] : null;
+  return v && Array.isArray(v.quellen) ? v.quellen : [];
+}
+
+/**
  * Der Schluessel einer Insel (Baustein, Ausgabe eines Codeblocks): dieselbe
  * Fassung, dieselbe Blocknummer, derselbe Code -- dann ist es derselbe
  * Knoten, und er wird in den Neubau hinuebergetragen statt neu gebaut.
@@ -182,6 +195,8 @@ function sitzungFuer(chatId) {
       geladen: false,
       /** {controller, antwortId, stoppt} solange ein Strom laeuft */
       lauf: null,
+      /** 'normal' | 'wissen' („Mein Wissen“), sobald der Chat geladen ist. */
+      modus: null,
       /** Wer zuhoert (die eingehaengte Ansicht). */
       abos: new Set(),
     };
@@ -289,7 +304,7 @@ function ereignis(s, typ, p) {
     case 'quelle':
       if (aktiv && p.url) {
         const q = Array.isArray(aktiv.data.quellen) ? aktiv.data.quellen : [];
-        if (!q.some((x) => x.url === p.url)) q.push({ titel: p.titel || p.url, url: p.url, art: p.art || 'zitat' });
+        if (!q.some((x) => x.url === p.url)) q.push({ titel: p.titel || p.url, url: p.url, art: p.art || 'zitat', ...(p.id ? { id: p.id, typ: p.typ || null } : {}) });
         aktiv.data.quellen = q;
       }
       break;
@@ -460,6 +475,12 @@ function istEingabe(el) {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
 }
 
+/** Wie ein Eintrag aus dem eigenen Wissen in der Quellenliste heisst. */
+const EINTRAG_ART = { note: 'Notiz', event: 'Termin', task: 'Aufgabe', project: 'Projekt', memory: 'Gemerkt', file: 'Datei', entity: 'Begriff' };
+function eintragArt(typ) {
+  return EINTRAG_ART[typ] || 'Eintrag';
+}
+
 function hostVon(url) {
   try {
     return new URL(url).host.replace(/^www\./, '');
@@ -609,14 +630,17 @@ export function verweiseVerlinken(wurzel, quellen) {
       if (!q || !q.url) continue;
       if (m.index > pos) teile.push(document.createTextNode(s.slice(pos, m.index)));
       const titel = q.titel || q.url;
+      const inApp = q.art === 'eintrag';
       teile.push(h('a.cv-verweis', {
         href: q.url,
-        target: '_blank',
-        rel: 'noopener noreferrer',
+        target: inApp ? null : '_blank',
+        rel: inApp ? null : 'noopener noreferrer',
         title: `${nr} · ${titel}`,
         'aria-label': `Quelle ${nr}: ${titel}`,
         onClick: (e) => e.stopPropagation(),
-      }, text(String(nr))));
+        // Mit Klammern: markiert und kopiert bleibt es "[1]" -- keine Ziffer
+        // klebt an einer Zahl davor ("42" und "1" waeren sonst "421").
+      }, text(`[${nr}]`)));
       pos = m.index + m[0].length;
       gesetzt += 1;
     }
@@ -676,6 +700,8 @@ function baueAnsicht(container, ctx) {
   const vorschauen = new Set();
   /** Solange Dateien hochgeladen werden, geht nichts Zweites los. */
   let legtAb = false;
+  /** Eine Nachricht ist unterwegs (vom Tippen, bis die Antwort steht): kein zweites Senden. */
+  let sendetGerade = false;
   /**
    * Sprechen (web/lib/sprechen.js): null, oder {weg:'erkennung'|'aufnahme',
    * zustand:'startet'|'hoert'|'schreibt', …}. `gesprochen` merkt sich, dass
@@ -683,6 +709,8 @@ function baueAnsicht(container, ctx) {
    */
   let sprechen = null;
   let gesprochen = false;
+  /** „Mein Wissen“ fuer einen Chat, den es noch nicht gibt (er entsteht mit der ersten Nachricht). */
+  let modusVorgemerkt = 'normal';
   /** Vorlesen: welche Antwort zuletzt las, und ob die Marke im Text sitzt (sonst zeigt der Spieler den Satz). */
   let vorleseVorher = null;
   let markeSitzt = false;
@@ -766,6 +794,14 @@ function baueAnsicht(container, ctx) {
     'aria-label': 'Datei anhängen (Text, Bild oder PDF)',
     onClick: () => dateiWahl.click(),
   }, icon(I.clip));
+  // „Mein Wissen“: die KI antwortet nur aus den eigenen Eintraegen, ohne
+  // Internet (src/models/chat.js, Modus 'wissen'). Gilt je Chat.
+  const modusKnopf = h('button.cv-composer__modus', {
+    type: 'button',
+    title: 'Mein Wissen: nur aus deinen eigenen Einträgen antworten, ohne Internet',
+    'aria-pressed': 'false',
+    onClick: () => modusUmschalten(),
+  }, icon(I.graph), h('span.cv-composer__modus-text', null, text('Mein Wissen')));
   // Das Mikrofon gibt es nur, wenn einer der beiden Wege hier geht
   // (aktualisiereEingabe); sonst ist es gar nicht da.
   const mikro = h('button.cv-composer__mikro', {
@@ -793,7 +829,7 @@ function baueAnsicht(container, ctx) {
     },
   }, icon(SYMBOL_UNTEN));
   const formular = h('form.cv-composer', { onSubmit: (e) => { e.preventDefault(); absenden(); } },
-    clip, feld, mikro, sendKnopf);
+    clip, modusKnopf, feld, mikro, sendKnopf);
   const eingabe = h('div.cv-eingabe', null,
     h('div.cv-eingabe__innen', null, nachUnten, verbindenUnten, sprechZeile, anhangZeile, schnellZeile, formular, dateiWahl));
 
@@ -1410,6 +1446,7 @@ function baueAnsicht(container, ctx) {
     const fs = fassungInhalt(m, u.fassung);
     const angesehen = laeuft ? fassungInhalt(m) : fs;
     const textInhalt = angesehen.aktiv ? inhalt : angesehen.inhalt;
+    const quellenHier = fassungQuellen(m, angesehen);
     const bloecke = codebloecke(textInhalt);
     const marken = [];
     if (angesehen.aktiv) {
@@ -1439,8 +1476,8 @@ function baueAnsicht(container, ctx) {
       // Jede Tabelle sortierbar, ab 7 Zeilen filterbar, mit fester Kopfzeile;
       // ihr Zustand (Sortierung, Filter) liegt ausserhalb des DOM.
       tabellenVerbessern(md, { schluessel: `${m.id}|${angesehen.version}|${teil}` });
-      // "[1]" wird ein Verweis auf die Quelle darunter (Quellen gehoeren zur Antwort).
-      verweiseVerlinken(md, d.quellen);
+      // "[1]" wird ein Verweis auf die Quelle darunter -- die dieser Fassung.
+      verweiseVerlinken(md, quellenHier);
       if (!laeuft) ueberschriftenFragen(md, m, u, teil);
       teil += 1;
       blase.appendChild(md);
@@ -1455,9 +1492,8 @@ function baueAnsicht(container, ctx) {
     // Inseln, die diese Fassung nicht mehr braucht, loslassen.
     for (const key of [...u.inseln.keys()]) if (!benutzt.has(key)) u.inseln.delete(key);
 
-    // 7. Quellen der Websuche.
-    const quellen = Array.isArray(d.quellen) ? d.quellen : [];
-    if (quellen.length && angesehen.aktiv) blase.appendChild(quellenListe(u, quellen));
+    // 7. Quellen (Websuche, eigene Einträge) -- die der angesehenen Fassung.
+    if (quellenHier.length) blase.appendChild(quellenListe(u, quellenHier));
 
     // 8. Wie es endete, ehrlich.
     for (const n of statusZeilen(m, letzte, laeuft)) blase.appendChild(n);
@@ -1961,6 +1997,12 @@ function baueAnsicht(container, ctx) {
       if (q) satz = `Gesucht: „${q[1]}“${a.ergebnis && !fehler ? ` · ${a.ergebnis}` : ''}`;
       else if (l) satz = a.ergebnis && /^Gelesen:/.test(a.ergebnis) ? a.ergebnis : `Gelesen: ${l[1]}`;
       else satz = 'Im Internet gesucht';
+    } else if (a.rolle === 'wissen') {
+      const q = /^Sucht in deinem Wissen:\s*(.*)$/.exec(a.titel || '');
+      const l = /^Liest:\s*(.*)$/.exec(a.titel || '');
+      if (q) satz = `In deinem Wissen gesucht: ${q[1]}${a.ergebnis && !fehler ? ` · ${a.ergebnis}` : ''}`;
+      else if (l) satz = `Gelesen: ${l[1]}`;
+      else satz = a.titel || r.name;
     } else {
       satz = `${a.titel || r.name}${a.ergebnis && !fehler ? ` · ${a.ergebnis}` : ''}`;
     }
@@ -2180,10 +2222,13 @@ function baueAnsicht(container, ctx) {
     const box = h('div.cv-quellen', null,
       h('p.cv-quellen__titel', null, text('Quellen')),
       h('ol.cv-quellen__liste', null, zeige.map((q, i) => h('li', null,
-        h('a.cv-quelle', { href: q.url, target: '_blank', rel: 'noopener noreferrer', title: q.url, onClick: (e) => e.stopPropagation() },
-          h('span.cv-quelle__nr', null, text(`${i + 1}`)),
-          h('span.cv-quelle__titel', null, text(q.titel || q.url)),
-          h('span.cv-quelle__host', null, text(hostVon(q.url))))))));
+        // Ein Eintrag aus dem eigenen Wissen oeffnet sich in der App, eine Webseite im neuen Tab.
+        h('a.cv-quelle', q.art === 'eintrag'
+          ? { href: q.url, title: q.titel || '', dataset: { art: 'eintrag' }, onClick: (e) => e.stopPropagation() }
+          : { href: q.url, target: '_blank', rel: 'noopener noreferrer', title: q.url, onClick: (e) => e.stopPropagation() },
+        h('span.cv-quelle__nr', null, text(`${i + 1}`)),
+        h('span.cv-quelle__titel', null, text(q.titel || q.url)),
+        h('span.cv-quelle__host', null, text(q.art === 'eintrag' ? eintragArt(q.typ) : hostVon(q.url))))))));
     if (quellen.length > 6) {
       box.appendChild(h('button.cv-mehr', {
         type: 'button',
@@ -2357,7 +2402,9 @@ function baueAnsicht(container, ctx) {
       return;
     }
     const blase = verlauf.querySelector(`.cv-msg[data-id="${CSS.escape(z.id)}"] .cv-bubble`);
-    const range = blase ? stelleImText(blase, z.satz) : null;
+    // Nur im Text der Antwort -- nicht im zugeklappten Gedankengang, der oft
+    // dieselben Saetze vorformuliert.
+    const range = blase ? stelleImText(blase, z.satz, { nur: '.cv-md' }) : null;
     hervorheben(range);
     markeSitzt = !!range;
   }
@@ -2453,21 +2500,23 @@ function baueAnsicht(container, ctx) {
       stoppen(s, api);
       return;
     }
-    if (legtAb) return;
+    if (legtAb || sendetGerade) return;
+    // Laeuft das Mikrofon noch: erst fertig sprechen lassen, dann geht es von selbst.
+    if (sprechen) {
+      nachDemSprechenSenden();
+      return;
+    }
     const roh = feld.value.trim();
-    const dateien = anhaenge.filter((a) => a.art === 'bild' || a.art === 'pdf');
-    const texte = anhaenge.filter((a) => a.art === 'text');
-    if (!roh && !anhaenge.length) return;
+    const mitgeschickt = [...anhaenge];
+    const dateien = mitgeschickt.filter((a) => a.art === 'bild' || a.art === 'pdf');
+    const texte = mitgeschickt.filter((a) => a.art === 'text');
+    if (!roh && !mitgeschickt.length) return;
     const inhalt = inhaltMitAnhaengen(roh, texte);
     if (inhalt.length > MAX_ZEICHEN) {
       ctx.toast(`Die Nachricht ist zu lang (${inhalt.length.toLocaleString('de-DE')} Zeichen, erlaubt sind ${MAX_ZEICHEN.toLocaleString('de-DE')}).`, 'error');
       return;
     }
-    const gesendet = await senden(inhalt, { ausFeld: true, dateien });
-    if (gesendet) {
-      anhaenge = [];
-      zeichneAnhaenge();
-    }
+    await senden(inhalt, { ausFeld: true, dateien, mitgeschickt });
   }
 
   /**
@@ -2508,10 +2557,13 @@ function baueAnsicht(container, ctx) {
    * Nachricht -- nie auf Vorrat. Ist Claude nicht verbunden, bleibt der Text
    * im Feld, und die Verbinden-Karte uebernimmt. `dateien` sind Bilder und
    * PDF aus dem Eingabefeld; mit ihnen darf der Text leer sein.
+   * `mitgeschickt`: alles, was dafuer im Eingabefeld angehaengt war -- es
+   * verlaesst das Feld, sobald die Nachricht zu sehen ist, und kommt zurueck,
+   * wenn sie nicht ankam.
    */
-  async function senden(inhalt, { ausFeld = false, dateien = [] } = {}) {
+  async function senden(inhalt, { ausFeld = false, dateien = [], mitgeschickt = [] } = {}) {
     const t = String(inhalt || '').trim();
-    if ((!t && !dateien.length) || (s && s.lauf) || legtAb) return false;
+    if ((!t && !dateien.length) || (s && s.lauf) || legtAb || sendetGerade) return false;
     if (claude && claude.verbunden === false) {
       wartet = ausFeld ? AUS_DEM_FELD : t;
       obenKey = null;
@@ -2520,6 +2572,18 @@ function baueAnsicht(container, ctx) {
       if (f) f.focus();
       return false;
     }
+    // Ab hier ist sie unterwegs -- schon bevor der neue Chat steht. Ein
+    // zweites Enter legte sonst einen zweiten Chat mit denselben Dateien an.
+    sendetGerade = true;
+    try {
+      return await sendenJetzt(t, { ausFeld, dateien, mitgeschickt });
+    } finally {
+      sendetGerade = false;
+      if (lebt) aktualisiereEingabe();
+    }
+  }
+
+  async function sendenJetzt(t, { ausFeld, dateien, mitgeschickt }) {
     // Wurde die Frage gesprochen, wird die Antwort vorgelesen.
     const warGesprochen = ausFeld && gesprochen;
     const vorlesenDanach = warGesprochen && sprechenMoeglich();
@@ -2539,12 +2603,13 @@ function baueAnsicht(container, ctx) {
     }
     if (!chatId) {
       try {
-        const res = await api.post('/chats', {});
+        const res = await api.post('/chats', modusVorgemerkt === 'wissen' ? { modus: 'wissen' } : {});
         chatId = res && res.record ? res.record.id : null;
         if (!chatId) throw new Error('Der Server hat keinen Chat angelegt.');
         neuAngelegt = true;
         verbinden(sitzungFuer(chatId));
         s.geladen = true;
+        s.modus = (res.record.data && res.record.data.modus) || 'normal';
         ctx.replaceRoute(`#/chat?id=${encodeURIComponent(chatId)}`);
       } catch (err) {
         zurueckInsFeld();
@@ -2564,7 +2629,8 @@ function baueAnsicht(container, ctx) {
         return false;
       } finally {
         legtAb = false;
-        aktualisiereEingabe();
+        // Auch nach einem Fehler: "wird abgelegt …" weg, Entfernen geht wieder.
+        zeichneAnhaenge();
       }
     }
     // Sofort zu sehen, bevor der Server antwortet; `nutzer` ersetzt sie.
@@ -2578,15 +2644,28 @@ function baueAnsicht(container, ctx) {
         ...(dateien.length ? { anhaenge: dateien.map((a) => ({ id: a.id, name: a.name, mime: a.mime, size: a.groesse, vorschau: a.url })) } : {}),
       },
     });
+    // Was mitging, verlaesst jetzt das Eingabefeld. Was waehrend der Antwort
+    // dazukommt, bleibt dort fuer die naechste Nachricht.
+    if (mitgeschickt.length) {
+      anhaenge = anhaenge.filter((a) => !mitgeschickt.includes(a));
+      zeichneAnhaenge();
+    }
     folgen = true;
     plane();
+    let fertig = false;
     try {
       const body = { inhalt: t };
       if (ids.length) body.anhaenge = ids;
-      await strom(s, api, `/chats/${encodeURIComponent(s.chatId)}/messages`, body);
+      fertig = await strom(s, api, `/chats/${encodeURIComponent(s.chatId)}/messages`, body);
     } catch (err) {
       s.nachrichten = s.nachrichten.filter((m) => !m._lokal);
       zurueckInsFeld();
+      if (mitgeschickt.length) {
+        // Nicht angekommen: die Anhaenge zurueck ins Feld (schon abgelegte
+        // gehen beim naechsten Versuch nicht noch einmal hoch).
+        anhaenge = [...mitgeschickt.filter((a) => !anhaenge.includes(a)), ...anhaenge];
+        zeichneAnhaenge();
+      }
       if (err && (nichtVerbunden(err) || err.code === 'PIN_NOETIG')) {
         wartet = ausFeld ? AUS_DEM_FELD : t;
         claudeAus(err);
@@ -2614,8 +2693,18 @@ function baueAnsicht(container, ctx) {
       neuAngelegt = false;
       titelHolen();
     }
+    if (fertig) {
+      // Die Nachricht steht jetzt mit den Dateien vom Server da; die
+      // Vorschauen aus dem Eingabefeld braucht niemand mehr.
+      for (const a of mitgeschickt) {
+        if (!a.url) continue;
+        URL.revokeObjectURL(a.url);
+        vorschauen.delete(a.url);
+      }
+    }
     fokusNachAntwort();
-    if (vorlesenDanach) antwortVorlesen();
+    // Wer inzwischen woanders ist, bekommt nichts vorgelesen (dort gibt es keinen Spieler).
+    if (vorlesenDanach && lebt) antwortVorlesen();
     return true;
   }
 
@@ -2680,7 +2769,8 @@ function baueAnsicht(container, ctx) {
 
   function aktualisiereEingabe() {
     const laeuft = !!(s && s.lauf);
-    const bereit = !!(feld.value.trim() || anhaenge.length);
+    // Waehrend der Aufnahme heisst [Senden]: umschreiben und gleich senden.
+    const bereit = !!(feld.value.trim() || anhaenge.length || (sprechen && sprechen.weg === 'aufnahme' && sprechen.zustand === 'hoert'));
     sendKnopf.classList.toggle('is-stopp', laeuft);
     sendKnopf.classList.toggle('is-bereit', !laeuft && bereit);
     const neu = laeuft ? (s.lauf.stoppt ? 'stoppt' : 'stopp') : 'senden';
@@ -2720,8 +2810,14 @@ function baueAnsicht(container, ctx) {
   }));
   // Ein Bild aus der Zwischenablage (Bildschirmfoto) wird ein Anhang.
   offs.push(on(feld, 'paste', (e) => {
-    const dateien = e.clipboardData ? [...(e.clipboardData.files || [])] : [];
+    const cd = e.clipboardData;
+    const dateien = cd ? [...(cd.files || [])] : [];
     if (!dateien.length) return;
+    // Zellen aus Excel oder Numbers kommen als Text UND als Bild davon: dann
+    // gilt der Text. Nur eine kopierte Datei (Text = ihr Name) wird Anhang.
+    let roh = '';
+    try { roh = String(cd.getData('text/plain') || '').trim(); } catch { roh = ''; }
+    if (roh && !dateien.every((d) => d.name && roh.includes(d.name))) return;
     e.preventDefault();
     dateienAufnehmen(dateien);
   }));
@@ -2885,6 +2981,43 @@ function baueAnsicht(container, ctx) {
     dateienAufnehmen(dateien);
   }));
 
+  /* ---------------------------------------------- Mein Wissen */
+
+  function modusAktiv() {
+    return (s ? (s.modus || 'normal') : modusVorgemerkt) === 'wissen';
+  }
+
+  function zeichneModus() {
+    const an = modusAktiv();
+    modusKnopf.setAttribute('aria-pressed', String(an));
+    modusKnopf.classList.toggle('is-an', an);
+    formular.classList.toggle('is-wissen', an);
+    feld.placeholder = an ? 'Frag dein Wissen …' : 'Nachricht eingeben …';
+  }
+
+  /** An oder aus -- fuer diesen Chat (PATCH), oder vorgemerkt fuer den neuen. */
+  async function modusUmschalten() {
+    const neu = modusAktiv() ? 'normal' : 'wissen';
+    if (!s) {
+      modusVorgemerkt = neu;
+      zeichneModus();
+      feld.focus();
+      return;
+    }
+    const vorher = s.modus || 'normal';
+    s.modus = neu;
+    zeichneModus();
+    try {
+      await api.patch(`/chats/${encodeURIComponent(s.chatId)}`, { modus: neu });
+    } catch (err) {
+      s.modus = vorher;
+      zeichneModus();
+      ctx.toast(`Nicht umgeschaltet: ${fehlerSatz(err)}`, 'error');
+      return;
+    }
+    feld.focus();
+  }
+
   /* -------------------------------------------------- Sprechen */
 
   /** "0:07" */
@@ -2909,7 +3042,8 @@ function baueAnsicht(container, ctx) {
       if (sprechen.zustand === 'schreibt') {
         sprechZeile.append(h('span.spinner.cv-spinner', { 'aria-hidden': 'true' }), h('span.cv-sprechen__text', null, text('Schreibt um …')));
       } else {
-        sprechZeit = sprechen.weg === 'aufnahme' ? h('span.cv-sprechen__zeit', null, text(`${minuten(sprechen.sekunden || 0)} / ${minuten(MAX_SEKUNDEN)}`)) : null;
+        // Die Uhr zaehlt viermal je Sekunde: nicht vorlesen lassen (und nicht mit aufnehmen).
+        sprechZeit = sprechen.weg === 'aufnahme' ? h('span.cv-sprechen__zeit', { 'aria-hidden': 'true' }, text(`${minuten(sprechen.sekunden || 0)} / ${minuten(MAX_SEKUNDEN)}`)) : null;
         // append() schriebe ein fehlendes Stueck als Wort "null" hin.
         sprechZeile.append(...[
           h('span.cv-sprechen__punkt', { 'aria-hidden': 'true' }),
@@ -2930,6 +3064,8 @@ function baueAnsicht(container, ctx) {
     }
     const weg = sprechWeg({ transkribieren: !!(claude && claude.transkribieren), nurAufnahme });
     if (!weg) return;
+    // Wer spricht, will nicht gleichzeitig vorgelesen bekommen (das Mikrofon hoerte es mit).
+    if (liestGerade()) vl().stopp();
     vorlesenFreischalten();
     if (weg === 'erkennung') erkennungLos();
     else aufnahmeLos();
@@ -2966,15 +3102,24 @@ function baueAnsicht(container, ctx) {
           sprechen = null;
           zeichneSprechen();
           const code = sitzung.fehler;
-          if (code && !sitzung.erkannt && erkennungUntauglich(code) && aufnahmeGeht()) {
-            // Die Erkennung gibt es hier nur dem Namen nach: stattdessen
-            // aufnehmen, und fuer diese Sitzung dabei bleiben.
+          if (code && !sitzung.erkannt && erkennungUntauglich(code)) {
+            // Die Erkennung gibt es hier nur dem Namen nach: fuer diese
+            // Sitzung nicht mehr anbieten. Mit Google-Schluessel wird
+            // stattdessen aufgenommen; sonst verschwindet der Knopf, statt
+            // bei jedem Tippen nur zu scheitern.
             nurAufnahme = true;
-            aufnahmeLos();
-            return;
+            if (!sitzung.danachSenden && aufnahmeGeht()) {
+              aufnahmeLos();
+              return;
+            }
+            aktualisiereEingabe();
           }
           const satz = code ? erkennungFehlerSatz(code) : null;
           if (satz) ctx.toast(satz, 'info');
+          if (sitzung.danachSenden) {
+            if (lebt) absenden();
+            return;
+          }
           if (lebt) {
             feld.focus();
             feld.setSelectionRange(feld.value.length, feld.value.length);
@@ -2983,8 +3128,8 @@ function baueAnsicht(container, ctx) {
       });
     } catch {
       sprechen = null;
+      nurAufnahme = true;
       if (aufnahmeGeht()) {
-        nurAufnahme = true;
         aufnahmeLos();
         return;
       }
@@ -3033,7 +3178,9 @@ function baueAnsicht(container, ctx) {
     zeichneSprechen();
     let text = '';
     try {
-      const { wav, sekunden } = await sitzung.aufnahme.stopp();
+      const { wav, sekunden, abgebrochen } = await sitzung.aufnahme.stopp();
+      // Waehrenddessen abgebrochen (Ansicht verlassen): nichts hochladen.
+      if (abgebrochen || sprechen !== sitzung) return;
       if (sekunden < 0.3) throw new Error('Die Aufnahme ist zu kurz. Halte das Mikrofon an und sprich.');
       const r = await api.post('/ki/transkribieren', { audio: bytesAlsBase64(wav), ...(cid() ? { chatId: cid() } : {}) }, { timeoutMs: 90000 });
       text = String((r && r.text) || '').trim();
@@ -3056,8 +3203,47 @@ function baueAnsicht(container, ctx) {
     groesseAnpassen();
     aktualisiereEingabe();
     entwurfMerken();
+    if (sitzung.danachSenden) {
+      absenden();
+      return;
+    }
     feld.focus();
     feld.setSelectionRange(feld.value.length, feld.value.length);
+  }
+
+  /**
+   * [Senden], waehrend das Mikrofon noch an ist: erst fertig sprechen lassen
+   * -- die Erkennung liefert ihr letztes Wort, die Aufnahme wird
+   * umgeschrieben --, dann senden. Sonst schriebe ein spaetes Ergebnis den
+   * schon gesendeten Text zurueck ins leere Feld.
+   */
+  function nachDemSprechenSenden() {
+    const sitzung = sprechen;
+    if (!sitzung) return;
+    sitzung.danachSenden = true;
+    if (sitzung.weg === 'erkennung') {
+      if (!sitzung.erkennung) {
+        sprechen = null;
+        zeichneSprechen();
+        absenden();
+        return;
+      }
+      sitzung.erkennung.stopp();
+      // Meldet ein Browser das Ende nie, geht es trotzdem.
+      setTimeout(() => {
+        if (sprechen !== sitzung) return;
+        sprechenAbbrechen();
+        zeichneSprechen();
+        if (lebt) absenden();
+      }, 2500);
+    } else if (sitzung.zustand === 'hoert') {
+      aufnahmeFertig(sitzung);
+    } else if (sitzung.zustand === 'startet') {
+      sprechenAbbrechen();
+      zeichneSprechen();
+      absenden();
+    }
+    // 'schreibt': aufnahmeFertig sendet, sobald der Text da ist.
   }
 
   /** "Fertig": Erkennung anhalten (der Text steht schon da) bzw. Aufnahme umschreiben lassen. */
@@ -3217,6 +3403,8 @@ function baueAnsicht(container, ctx) {
     }
     verbinden(s);
     if (s.titel) ctx.setTitle(s.titel);
+    // Der Modus ist schon bekannt, wenn der Chat in dieser Sitzung offen war.
+    zeichneModus();
     if (s.lauf || s.geladen) plane();
     try {
       const [info] = await Promise.all([
@@ -3229,6 +3417,8 @@ function baueAnsicht(container, ctx) {
         s.titel = titel;
         ctx.setTitle(titel);
       }
+      s.modus = (info && info.record && info.record.data && info.record.data.modus) || 'normal';
+      zeichneModus();
       beobachten();
       fokusNachAntwort();
     } catch (err) {
@@ -3475,7 +3665,7 @@ details[open] > summary > .cv-pfeil { transform: rotate(90deg); }
 }
 
 /* -- Quellen: Verweise im Text und die Liste darunter -- */
-.cv-verweis { display: inline-grid; place-items: center; min-width: 17px; height: 17px; margin: 0 1px; padding: 0 4px; font-size: 10.5px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; color: var(--accent-text); text-decoration: none; vertical-align: 0.35em; background: var(--accent-soft); border-radius: var(--r-full); }
+.cv-verweis { margin: 0 1px; padding: 0 2px; font-size: 0.72em; font-weight: 600; line-height: 0; font-variant-numeric: tabular-nums; color: var(--accent-text); text-decoration: none; vertical-align: super; border-radius: 4px; }
 .cv-verweis:hover { color: var(--accent-fg); background: var(--accent); }
 .cv-verweis:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
 .cv-quellen { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
@@ -3516,6 +3706,14 @@ details[open] > summary > .cv-pfeil { transform: rotate(90deg); }
 .cv-schnell__knopf { min-height: 34px; padding: 0 14px; font: inherit; font-size: var(--fs-sm); color: var(--fg); background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--r-full); cursor: pointer; transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease); }
 .cv-schnell__knopf:hover { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong)); }
 .cv-schnell__knopf:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+/* -- Mein Wissen: der Schalter im Eingabefeld -- */
+.cv-composer__modus { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 40px; padding: 0 12px 0 10px; font: inherit; font-size: var(--fs-sm); color: var(--fg-muted); background: none; border: 1px solid transparent; border-radius: var(--r-full); cursor: pointer; white-space: nowrap; }
+.cv-composer__modus svg { width: 19px; height: 19px; }
+.cv-composer__modus:hover { color: var(--fg); background: var(--surface-3); }
+.cv-composer__modus.is-an { color: var(--accent-text); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.cv-composer__modus:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+.cv-composer.is-wissen { border-color: color-mix(in srgb, var(--accent) 40%, var(--border-strong)); }
 
 /* -- Mikrofon -- */
 .cv-composer__mikro { display: grid; place-items: center; flex: none; width: 40px; height: 40px; padding: 0; color: var(--fg-muted); background: none; border: 0; border-radius: 50%; cursor: pointer; }
@@ -3610,6 +3808,8 @@ details[open] > summary > .cv-pfeil { transform: rotate(90deg); }
 .cv-nachunten:hover { background: var(--surface-4); }
 
 @media (max-width: 760px) {
+  .cv-composer__modus-text { display: none; }
+  .cv-composer__modus { width: 40px; padding: 0; justify-content: center; }
   .cv-galerie--eins .cv-galerie__bild img { max-width: 240px; max-height: 240px; }
   .cv-galerie--viele .cv-galerie__bild img { width: 104px; height: 104px; }
   .cv__spalte { padding: var(--sp-3) var(--sp-2) var(--sp-2); }
@@ -3620,6 +3820,7 @@ details[open] > summary > .cv-pfeil { transform: rotate(90deg); }
   .cv-leer__titel { font-size: var(--fs-2xl); }
 }
 @media (pointer: coarse) {
+  .cv-composer__modus { height: var(--tap-min); }
   .cv-composer__clip, .cv-composer__senden, .cv-composer__mikro, .cv-nachunten, .cv-anhang__weg,
   .cv-spieler__knopf, .cv-spieler__zu { width: var(--tap-min); height: var(--tap-min); }
   .cv-spieler__tempo, .cv-schnell__knopf, .cv-sprechen__fertig { min-height: var(--tap-min); }

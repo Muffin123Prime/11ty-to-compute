@@ -5,7 +5,7 @@
  *   GET  /api/records/:id/verknuepft          (Vertrag B)
  *   GET  /api/graph/universum?tiefe=&thema=    (Vertrag A, F)
  *   POST /api/graph/verbinden, /rueckgaengig, /ablehnen (Vertrag C)
- *   POST /api/graph/zusammenfassung            (ehrlicher Platzhalter)
+ *   POST /api/graph/zusammenfassung            (ohne KI ehrlich ein Satz)
  * und die Ereignisse ueber den Strom /api/events (Vertrag D, E).
  */
 
@@ -250,7 +250,7 @@ test('POST verbinden / rueckgaengig / ablehnen ueber HTTP, Ereignisse ueber /api
   });
 });
 
-test('POST /api/graph/zusammenfassung sagt ehrlich, dass noch keine KI zusammenfasst', async () => {
+test('POST /api/graph/zusammenfassung sagt ehrlich, dass keine KI verbunden ist', async () => {
   await withApp(async ({ api }) => {
     const n = ok(await api.post('/api/records', { type: 'note', data: { title: 'Photosynthese', body: 'Licht.' } }), 'note').record;
     const z = ok(await api.post('/api/graph/zusammenfassung', { id: n.id }), 'zusammenfassung');

@@ -122,3 +122,106 @@ test('Gemini: keine Nummer in einen Codeblock; ohne Belege bleibt der Text, wie 
     assert.equal(r2.ereignisse.filter((e) => e.name === 'inhalt').length, 0);
   }, { mit: 'gemini' });
 });
+
+/* ------------------------------------------- Prüfrunde: Ränder der Marken */
+
+const fassungen = require('../src/models/fassungen');
+const { anfrage } = require('./antwort-hilfe');
+
+test('Claude: keine Nummer in einen Codeblock; endet der zitierte Block mit einem Umbruch, steht sie davor', async () => {
+  await mitKi(async ({ app, base, claude, chatId }) => {
+    const B = claudeStatist.B;
+    claude.weiter(claudeStatist.antwort(
+      B.start(),
+      B.serverWerkzeug(0, 'srvtoolu_c', 'web_search', { query: 'npm' }),
+      B.suchErgebnis(1, 'srvtoolu_c', [{ type: 'web_search_result', url: QA.url, title: QA.titel, encrypted_content: 'e1' }]),
+      B.text(2, 'So startest du es:\n\n```bash\n'),
+      B.text(3, 'npm start', { zitate: [zitat(QA, 'npm start')] }),
+      B.text(4, '\n```\n\n'),
+      B.text(5, 'Der Streik endet am Freitag.\n', { zitate: [zitat(QA, 'Freitag')] }),
+      B.text(6, '```\nnoch Code\n```'),
+      B.ende('end_turn', { server_tool_use: { web_search_requests: 1 } }),
+    ));
+    const r = await strom(base, `/api/chats/${chatId}/messages`, { inhalt: 'Wie starte ich es?' });
+    const rec = app.store.get(r.ereignisse.find((e) => e.name === 'fertig').data.record.id);
+    assert.equal(rec.data.content, 'So startest du es:\n\n```bash\nnpm start\n```\n\nDer Streik endet am Freitag.[1]\n```\nnoch Code\n```');
+    // Die Oberfläche bekam die eingeschobene Nummer als ganzen Text.
+    const inhalt = r.ereignisse.filter((e) => e.name === 'inhalt').map((e) => e.data.content);
+    assert.equal(inhalt.length, 1);
+    assert.equal(inhalt[0], 'So startest du es:\n\n```bash\nnpm start\n```\n\nDer Streik endet am Freitag.[1]\n');
+  });
+});
+
+test('Gemini: endet ein Beleg mit einem Umbruch, steht die Nummer hinter dem Satz, nicht am Anfang der nächsten Zeile', async () => {
+  await mitKi(async ({ app, base, gemini, chatId }) => {
+    const text = 'Der Streik endet am Freitag.\n```\nnpm start\n```';
+    gemini.weiter(geminiStatist.antwort([{
+      candidates: [{
+        content: { role: 'model', parts: [{ text }] },
+        index: 0,
+        groundingMetadata: {
+          groundingChunks: [{ web: { uri: QA.url, title: QA.titel } }],
+          groundingSupports: [{ segment: { text: 'Der Streik endet am Freitag.\n' }, groundingChunkIndices: [0] }],
+        },
+      }],
+    }], geminiStatist.B.ende('STOP')));
+    const r = await strom(base, `/api/chats/${chatId}/messages`, { inhalt: 'Streik?' });
+    const rec = app.store.get(r.ereignisse.find((e) => e.name === 'fertig').data.record.id);
+    assert.equal(rec.data.content, 'Der Streik endet am Freitag.[1]\n```\nnpm start\n```', 'der Zaun bleibt ein Zaun');
+  }, { mit: 'gemini' });
+});
+
+test('ohneVerweise: Nummern raus, aber nicht aus Code, nicht aus Links', () => {
+  assert.equal(
+    fassungen.ohneVerweise('A.[1] B.[1][2] Code `a[1]` und [Link](https://x.de) und [3](https://y.de).\n\n```js\nx[1]\n```\nC.[4]'),
+    'A. B. Code `a[1]` und [Link](https://x.de) und [3](https://y.de).\n\n```js\nx[1]\n```\nC.',
+  );
+  assert.equal(fassungen.ohneVerweise('Ohne Nummern.'), 'Ohne Nummern.');
+  assert.equal(fassungen.ohneVerweise(''), '');
+});
+
+test('Umschreiben einer Markierung bis zur Nummer: die Klammer gehört dazu, kein „]“ bleibt stehen', () => {
+  const t = 'Der Streik endet am Freitag.[1] Mehr weiß ich nicht.';
+  assert.equal(fassungen.stelleFinden(t, 'Der Streik endet am Freitag.[1]').stelle, 'Der Streik endet am Freitag.[1]');
+  assert.equal(fassungen.stelleFinden(t, 'endet am Freitag.1').stelle, 'endet am Freitag.[1]');
+  // Ein Link bleibt ganz, wie bisher.
+  assert.equal(fassungen.stelleFinden('Siehe [die Seite](https://x.de) hier.', 'Siehe die Seite').stelle, 'Siehe [die Seite](https://x.de)');
+});
+
+test('Fassungen: jede behält ihre Quellen; an die KI gehen keine Nummern ohne Quelle', async () => {
+  await mitKi(async ({ base, claude, chatId }) => {
+    const B = claudeStatist.B;
+    const gesucht = (id, q, satz) => claudeStatist.antwort(
+      B.start(),
+      B.serverWerkzeug(0, id, 'web_search', { query: 'Bahn' }),
+      B.suchErgebnis(1, id, [{ type: 'web_search_result', url: q.url, title: q.titel, encrypted_content: `e_${id}` }]),
+      B.text(2, satz, { zitate: [zitat(q, 'x')] }),
+      B.ende('end_turn', { server_tool_use: { web_search_requests: 1 } }),
+    );
+    claude.weiter(gesucht('srvtoolu_a', QA, 'Der Streik endet am Freitag.'));
+    await strom(base, `/api/chats/${chatId}/messages`, { inhalt: 'Streikt die Bahn?' });
+    // Kürzer: eine neue Fassung mit einer anderen Quelle.
+    claude.weiter(gesucht('srvtoolu_b', QB, 'Streik bis Freitag.'));
+    const r = await strom(base, `/api/chats/${chatId}/neu-antworten`, { variante: 'kuerzer' });
+    assert.equal(r.status, 200);
+    const zweite = claude.stromAnfragen()[1].body;
+    const auftrag = JSON.stringify(zweite.messages[zweite.messages.length - 1]);
+    assert.match(auftrag, /Der Streik endet am Freitag\./, 'die bisherige Antwort geht als Vorlage mit');
+    assert.doesNotMatch(auftrag, /Freitag\.\[1\]/, '… ohne ihre Nummer');
+
+    const items = (await anfrage(base, 'GET', `/api/chats/${chatId}/messages`)).json.items;
+    const satz = items.find((m) => m.data.role === 'assistant');
+    assert.equal(satz.data.content, 'Streik bis Freitag.[1]');
+    assert.deepEqual(satz.data.quellen.map((q) => q.url), [QB.url], 'oben: die Quellen der aktiven Fassung');
+    assert.deepEqual(satz.data.versionen[0].quellen, [{ titel: QA.titel, url: QA.url, art: 'zitat' }], 'die ältere bringt ihre eigenen mit');
+    assert.equal(satz.data.versionen[1].quellen, undefined, 'die aktive trägt sie oben, nicht doppelt');
+
+    // Die nächste Frage: die spätere Fassung geht als Text mit -- ohne "[1]".
+    claude.weiter(claudeStatist.antwort(B.start(), B.text(0, 'Gern.'), B.ende('end_turn')));
+    await strom(base, `/api/chats/${chatId}/messages`, { inhalt: 'Danke' });
+    const dritte = claude.stromAnfragen()[2].body;
+    const verlauf = JSON.stringify(dritte.messages);
+    assert.match(verlauf, /Streik bis Freitag\./);
+    assert.doesNotMatch(verlauf, /\[1\]/);
+  });
+});

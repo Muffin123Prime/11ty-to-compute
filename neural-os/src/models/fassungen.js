@@ -201,9 +201,56 @@ function fuerOberflaeche(record) {
   const { versionen, version } = roh.length
     ? { versionen: roh, version: Number.isInteger(d.version) && d.version >= 0 && d.version < roh.length ? d.version : roh.length - 1 }
     : fassungenLesen(record);
-  const liste = versionen.map(kopf);
+  const liste = versionen.map((v, i) => {
+    const k = kopf(v);
+    // Jede andere Fassung bringt ihre Quellen mit (nur Titel und Adresse):
+    // "[1]" in ihrem Text zeigt auf IHRE Quelle 1.
+    if (i !== version && Array.isArray(v._quellen) && v._quellen.length) k.quellen = v._quellen.map(quelleKurz).filter(Boolean);
+    return k;
+  });
   liste[version] = { ...liste[version], inhalt: String(d.content || ''), status: d.status || liste[version].status };
   return { versionen: liste, version };
+}
+
+function quelleKurz(q) {
+  if (!q || typeof q !== 'object' || typeof q.url !== 'string') return null;
+  const out = { titel: String(q.titel || q.url), url: q.url };
+  for (const k of ['art', 'id', 'typ']) if (typeof q[k] === 'string' && q[k]) out[k] = q[k];
+  return out;
+}
+
+/** Was im Text als Verweis auf eine Quelle gilt: "[1]" bis "[99]" -- kein Link "[1](…)". */
+const VERWEIS = /\[\d{1,2}\](?!\()/g;
+/** Code im Fliesstext (`a[1]`) bleibt, wie er ist. */
+const INLINE_CODE = /(`+)[^`]*?\1/g;
+
+/**
+ * Der Text ohne die Nummern der Quellen ("[1]"), ausserhalb von Code. Fuer
+ * alles, was als Text an die KI geht: sie soll keine Nummern nachahmen, zu
+ * denen es keine Quelle gibt. (Umwandeln behaelt sie -- dort bleiben auch
+ * die Quellen.)
+ */
+function ohneVerweise(text) {
+  const s = String(text || '');
+  if (!/\[\d{1,2}\]/.test(s)) return s;
+  const draussen = (t) => {
+    let out = '';
+    let pos = 0;
+    for (const m of t.matchAll(INLINE_CODE)) {
+      out += t.slice(pos, m.index).replace(VERWEIS, '');
+      out += m[0];
+      pos = m.index + m[0].length;
+    }
+    return out + t.slice(pos).replace(VERWEIS, '');
+  };
+  let out = '';
+  let pos = 0;
+  for (const b of codebloecke(s)) {
+    out += draussen(s.slice(pos, b.start));
+    out += s.slice(b.start, b.ende);
+    pos = b.ende;
+  }
+  return out + draussen(s.slice(pos));
 }
 
 /* ------------------------------------------------------------ Antwortstil */
@@ -551,6 +598,10 @@ function stelleFinden(text, auswahl, vorkommen) {
   if (s[ende] === ']' && s[ende + 1] === '(') {
     const zu = s.indexOf(')', ende + 2);
     if (zu > 0) ende = zu + 1;
+  } else if (s[ende] === ']' && /\[\d{1,2}$/.test(s.slice(Math.max(0, ende - 3), ende))) {
+    // Endet die Markierung an einer Quellen-Nummer ("…Freitag.[1"), gehoert
+    // ihre Klammer dazu -- sonst bliebe nach dem Umschreiben ein "]" stehen.
+    ende++;
   }
   // Nie halb in einen Codeblock hinein: sonst zerbricht der Zaun.
   for (const b of codebloecke(s)) {
@@ -583,4 +634,5 @@ module.exports = {
   blockErsetzen,
   vergleichbar,
   stelleFinden,
+  ohneVerweise,
 };

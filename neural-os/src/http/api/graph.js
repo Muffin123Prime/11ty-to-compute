@@ -23,10 +23,10 @@
  *                                -> {edges, neu, bereits, rueckgaengig}
  *   POST /api/graph/rueckgaengig {edges:[ids]}   nimmt genau diese zurueck
  *   POST /api/graph/ablehnen     {from, to:[ids]} merkt sich das Paar
- *   POST /api/graph/zusammenfassung {id}         KI-Zusammenfassung eines
- *                                                Knotens -- ehrlich: solange
- *                                                kein Dienst sie liefert,
- *                                                sagt die Antwort das.
+ *   POST /api/graph/zusammenfassung {id, nurGespeichert?, neu?}
+ *                                -> KI-Zusammenfassung eines Knotens, gemerkt
+ *                                   bis er oder sein Verknuepftes sich
+ *                                   aendert; ohne KI ehrlich ein Satz.
  *
  * "Rueckgaengig" laeuft hier bewusst nicht ueber den Aenderungsverlauf:
  * der nimmt Kanten ausdruecklich nicht auf (src/store/history.js, weil
@@ -55,6 +55,7 @@ const DIRECTIONS = new Set(['in', 'out', 'both']);
 
 /** Der Satz, den die Karte zeigt, solange keine KI zusammenfassen kann. */
 const KI_FEHLT = 'Kommt, sobald eine KI verbunden ist.';
+const KI_LEER = 'Die KI hat diesmal nichts zurückgegeben. Versuch es gleich noch einmal.';
 
 function register(router) {
   router.get('/api/graph/universum', (rc) => {
@@ -122,26 +123,44 @@ function register(router) {
   });
 
   /**
-   * Die KI-Zusammenfassung eines Knotens. Der Chat-Dienst liefert sie ueber
-   * `zusammenfassen({record, verknuepft})` -> {text, modell?}, sobald ein
-   * spaeterer Schritt sie einbaut. Bis dahin sagt die Antwort ehrlich, dass
-   * nichts da ist -- mit 200, damit die Karte den Satz zeigt statt eines
-   * Fehlers, und mit `verfuegbar: false`, damit niemand ihn fuer eine
-   * Zusammenfassung haelt.
+   * Die KI-Zusammenfassung eines Knotens (src/models/zusammenfassen.js, ueber
+   * den Chat-Dienst). `nurGespeichert: true` fragt nie die KI, sondern sagt
+   * nur, ob es schon eine gibt -- so zeigt die Karte beim Oeffnen, was da
+   * ist, ohne eine Anfrage zu verbrauchen. `neu: true` fragt auch dann, wenn
+   * eine gemerkt ist. Ohne verbundene KI kommt 200 mit `verfuegbar: false`
+   * und einem Satz, damit die Karte ihn zeigt statt eines Fehlers und
+   * niemand ihn fuer eine Zusammenfassung haelt.
+   * -> {id, verfuegbar, text, modell, am, gespeichert, kiVerbunden, grund}
    */
   router.post('/api/graph/zusammenfassung', async (rc) => {
     rc.requireCapability('read');
     const store = need(rc.ctx.store, 'Der Speicher');
     const body = asObject(await rc.body());
     const id = requireString(body.id, 'id', { max: 80 });
+    const nurGespeichert = body.nurGespeichert === true;
+    const neu = body.neu === true && !nurGespeichert;
     const record = mustGet(store, id);
+    const leer = (kiVerbunden, grund) => ({ id: record.id, verfuegbar: false, text: null, modell: null, am: null, gespeichert: false, kiVerbunden, grund });
     const dienst = rc.ctx.chat && typeof rc.ctx.chat.zusammenfassen === 'function' ? rc.ctx.chat : null;
-    if (!dienst) return { id: record.id, verfuegbar: false, text: null, grund: KI_FEHLT };
+    if (!dienst) return leer(false, KI_FEHLT);
     const verknuepft = verknuepfungenVon(store, record.id);
-    const ergebnis = await dienst.zusammenfassen({ record, verknuepft });
-    const text = ergebnis && typeof ergebnis.text === 'string' ? ergebnis.text.trim() : '';
-    if (!text) return { id: record.id, verfuegbar: false, text: null, grund: KI_FEHLT };
-    return { id: record.id, verfuegbar: true, text, modell: (ergebnis && ergebnis.modell) || null };
+    const ergebnis = (await dienst.zusammenfassen({ record, verknuepft, nurGespeichert, neu })) || {};
+    const text = typeof ergebnis.text === 'string' ? ergebnis.text.trim() : '';
+    const kiVerbunden = typeof ergebnis.kiVerbunden === 'boolean' ? ergebnis.kiVerbunden : !!text;
+    if (!text) {
+      if (!kiVerbunden) return leer(false, KI_FEHLT);
+      return leer(true, nurGespeichert ? null : KI_LEER);
+    }
+    return {
+      id: record.id,
+      verfuegbar: true,
+      text,
+      modell: ergebnis.modell || null,
+      am: ergebnis.am || null,
+      gespeichert: ergebnis.gespeichert === true,
+      kiVerbunden,
+      grund: null,
+    };
   });
 
   router.get('/api/graph', (rc) => {

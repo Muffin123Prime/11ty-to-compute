@@ -73,6 +73,7 @@ const { createWerkzeuge, DEFINITIONEN, istEigenesWerkzeug, ungueltigErgebnis } =
 const wdh = require('../kalender/wiederholung');
 const fassungen = require('./fassungen');
 const anhaengeMod = require('./anhaenge');
+const zusammenfassenMod = require('./zusammenfassen');
 const {
   NeuralError,
   ValidationError,
@@ -151,6 +152,22 @@ const DARSTELLUNG = [
 ].join('\n');
 
 /**
+ * Der Modus „Mein Wissen“ (docs/UEBERGABE.md 4.3): Die KI antwortet nur aus
+ * dem, was der Nutzer selbst festgehalten hat -- ohne Websuche. Der Satz
+ * steht in der Nutzernachricht des Zuges (wie der Antwortstil), nicht im
+ * Systemtext: so bleibt der gecachte Anfang fuer beide Modi gleich, und im
+ * Verlauf steht, in welchem Modus eine Frage gestellt wurde.
+ */
+const MODUS_WISSEN = '[Modus „Mein Wissen“: Antworte nur aus dem Wissen des Nutzers. Such mit wissen_suchen, lies mit eintrag_lesen, bevor du etwas daraus sagst. Kein Internet, kein Allgemeinwissen als Quelle. Steht in seinem Wissen nichts dazu, sag genau das in einem Satz.]';
+
+/** Die Modi eines Chats. */
+const MODI = Object.freeze(['normal', 'wissen']);
+
+function wissenModus(chat) {
+  return !!(chat && chat.data && chat.data.modus === 'wissen');
+}
+
+/**
  * Der feste Systemtext. Knapp und für ein starkes Modell geschrieben: WAS
  * zu tun ist und WANN, keine Überbelehrung. Kein Datum, keine Uhrzeit, keine
  * Zufallszahl -- sonst ist der Cache bei jeder Anfrage ungültig.
@@ -176,6 +193,8 @@ const SYSTEM_FEST = [
   '- Bestätige danach kurz mit Wochentag, Datum und Uhrzeit (z. B. „Eingetragen: Di., 29.09., 10:00 Uhr.“) statt langer Texte. Nimm den Wochentag aus der Antwort des Werkzeugs (wann).',
   '',
   'Bei Planungen (Reise, Lernplan, Fest, Projekt …) stell zuerst mit rueckfrage die eine Frage, die den Plan am meisten verändert, mit kurzen Antworten zum Antippen. Frag nicht, was schon im Gespräch steht.',
+  '',
+  'Fragt er nach etwas, das er selbst festgehalten haben könnte (Notizen, Termine, Aufgaben, Projekte, Gemerktes), such mit wissen_suchen und lies mit eintrag_lesen nach, statt zu raten.',
   '',
   'Für aktuelle Fakten, Nachrichten, Preise, Öffnungszeiten und alles nach deinem Wissensstand benutze die Websuche. Erfinde nichts; wenn du etwas nicht weißt oder nicht finden kannst, sag es.',
   '',
@@ -384,6 +403,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
 
   /** chatId -> {controller, messageId, startedAt} */
   const inflight = new Map();
+  /** Zusammenfassungen fürs Gehirn, nur im Speicher (src/models/zusammenfassen.js). */
+  const zusammenfassungen = zusammenfassenMod.createGedaechtnis();
 
   /* ------------------------------------------------------------ Sätze */
 
@@ -492,13 +513,15 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
         for (const n of verlauf) out.push(klon(n));
         // Was nach dem letzten vollständigen Schritt noch ankam (Abbruch,
         // Fehler), steht nur im sichtbaren Text. Claude soll es kennen.
-        const rest = String(d.content || '').slice(Number(c.textImVerlauf) || 0).trim();
+        const rest = fassungen.ohneVerweise(String(d.content || '').slice(Number(c.textImVerlauf) || 0)).trim();
         if (rest && (d.status === 'aborted' || d.status === 'failed')) {
           out.push({ role: 'assistant', content: [{ type: 'text', text: `${rest}\n\n[Diese Antwort wurde unterbrochen.]` }] });
         }
         continue;
       }
-      const text = String(d.content || '').trim();
+      // Nur Text (eine spätere Fassung): ohne die Nummern der Quellen -- die
+      // Quellen selbst kennt die KI hier nicht, sie soll keine erfinden.
+      const text = fassungen.ohneVerweise(String(d.content || '')).trim();
       if (!text) continue;
       const zusatz = d.status === 'aborted' || d.status === 'failed' ? '\n\n[Diese Antwort wurde unterbrochen.]' : '';
       out.push({ role: 'assistant', content: [{ type: 'text', text: `${text}${zusatz}` }] });
@@ -674,6 +697,19 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       emit(onEvent, { type: 'quelle', titel: q.titel, url: q.url, art });
     };
 
+    /**
+     * Ein Eintrag aus dem eigenen Wissen als Quelle (eintrag_lesen): mit der
+     * Adresse in der App statt einer Webadresse. Dieselbe Liste und Zaehlung
+     * wie die Websuche.
+     */
+    const eintragQuelle = (q) => {
+      if (!q || typeof q.url !== 'string' || !q.url.startsWith('#/')) return;
+      if (t.quellen.some((x) => x.url === q.url && x.id === q.id)) return;
+      const neu = { titel: String(q.titel || q.id || 'Eintrag').slice(0, 300), url: q.url, art: 'eintrag', id: q.id || null, typ: q.typ || null };
+      t.quellen.push(neu);
+      emit(onEvent, { type: 'quelle', titel: neu.titel, url: neu.url, art: 'eintrag', id: neu.id, typ: neu.typ });
+    };
+
     /*
      * Quellen im Text (docs/ANTWORT-BAUSTEINE.md 6): hinter dem Satz, der
      * sich auf eine Quelle stuetzt, steht ihre Nummer -- "[1]", dieselbe
@@ -708,7 +744,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
         let i = text.indexOf(stueck, suchAb);
         if (i < 0) i = text.indexOf(stueck, ab);
         if (i < 0) continue;
-        const ende = i + stueck.length;
+        // Hinter das letzte Zeichen, nicht hinter einen Zeilenumbruch am Ende.
+        const ende = i + stueck.trimEnd().length;
         if (fassungen.codebloecke(text).some((c) => ende > c.start && ende <= c.ende)) continue;
         const m = marke(n);
         if (text.slice(ende, ende + m.length) === m) {
@@ -780,9 +817,27 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
         && String(e.block.text || '').trim()) {
         // Claude: ein Textblock mit Zitaten ist der Satz, der sich auf sie stuetzt.
         const n = nummernVon(e.block.citations.map((z) => z && z.url));
-        if (n.length) textDazu(marke(n));
+        if (n.length) markeSetzen(marke(n));
       }
     };
+
+    /**
+     * Die Marke hinter das Ende des Textes -- vor Leerraum am Schluss (sonst
+     * stuende sie am Anfang der naechsten Zeile, vor einem Zaun oder einer
+     * Liste), nie in einen Codeblock oder Baustein.
+     */
+    function markeSetzen(m) {
+      const bis = t.text.trimEnd().length;
+      if (!bis) return;
+      if (fassungen.codebloecke(t.text).some((c) => bis > c.start && (!c.closed || bis <= c.ende))) return;
+      if (bis === t.text.length) {
+        textDazu(m);
+        return;
+      }
+      t.text = `${t.text.slice(0, bis)}${m}${t.text.slice(bis)}`;
+      emit(onEvent, { type: 'inhalt', content: t.text });
+      flush(false);
+    }
 
     function sucheBeginnen(block) {
       if (suchen.has(block.id)) return;
@@ -868,6 +923,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
           werkzeuge: DEFINITIONEN,
           nachrichten: mitCachePunkt(mitAnhaengen.nachrichten),
           effort,
+          // „Mein Wissen“: nur eigene Quellen, also keine Websuche.
+          websuche: !wissenModus(chat),
         });
         const rundeAb = t.text.length;
         const r = await claude.senden({
@@ -941,6 +998,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
             }
             if (istEigenesWerkzeug(b.name)) {
               const res = tools.ausfuehren(b, r.eingabeFehler[b.id], { chatId: chat.id, messageId: assistant.id });
+              for (const q of res.quellen || []) eintragQuelle(q);
               const wirkung = wirkungVon(b, res);
               for (const e of res.ereignisse) {
                 agentMelden({ ...e, werkzeug: b.name, ...(e.zustand === 'fertig' && wirkung.length ? { wirkung } : {}) });
@@ -1296,6 +1354,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     const bloecke = [{ type: 'text', text: heute }];
     const stil = fassungen.stilSatz(chat && chat.data && chat.data.stil);
     if (stil) bloecke.push({ type: 'text', text: stil });
+    if (wissenModus(chat)) bloecke.push({ type: 'text', text: MODUS_WISSEN });
     for (const a of anhaenge || []) bloecke.push({ type: 'anhang', id: a.id, name: a.name, mime: a.mime });
     if (String(content || '').trim()) bloecke.push({ type: 'text', text: content });
     return bloecke;
@@ -1476,6 +1535,13 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
     }
   }
 
+  /** Der Modus eines Chats: 'normal' oder 'wissen' („Mein Wissen“). */
+  function modusLesen(roh) {
+    const m = roh === null ? 'normal' : roh;
+    if (!MODI.includes(m)) throw new ValidationError(`Unbekannter Modus „${String(roh).slice(0, 40)}“. Möglich: ${MODI.join(', ')}.`);
+    return m;
+  }
+
   /**
    * Der Stil-Satz in der Frage folgt dem jetzigen Stil des Chats, wenn neu
    * erstellt wird (Regler "stil": dieselbe Frage, neuer Stil). Gespeichert,
@@ -1495,7 +1561,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
   function variantenSatz(variante, bisher) {
     const satz = variante ? fassungen.VARIANTEN[variante] : null;
     if (!satz) return null;
-    const alt = String(bisher || '').trim();
+    const alt = fassungen.ohneVerweise(String(bisher || '')).trim();
     if (!alt) return `[Neu erstellen: ${satz}]`;
     const gekuerzt = alt.length > 12000 ? `${alt.slice(0, 12000)} …` : alt;
     return `[Neu erstellen: ${satz}]\n\nDie bisherige Antwort:\n<<<\n${gekuerzt}\n>>>`;
@@ -2037,36 +2103,35 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
 
   /**
    * Eine kurze Zusammenfassung eines Knotens für die Detailkarte im Gehirn
-   * (POST /api/graph/zusammenfassung). Ohne verbundene KI: `{text:null}` --
-   * die Route sagt dann ehrlich, dass keine da ist.
+   * (POST /api/graph/zusammenfassung, src/models/zusammenfassen.js). Einmal
+   * gefragt, gilt sie, bis sich der Eintrag oder sein Verknüpftes ändert.
+   * `nurGespeichert`: nur nachsehen, nie die KI fragen (die Karte zeigt so
+   * beim Öffnen, was es schon gibt). `neu`: auch dann fragen, wenn eine
+   * gemerkt ist. Ohne verbundene KI: `{text:null}`.
+   * @returns {Promise<{text:string|null, modell?:string, am?:string, gespeichert?:boolean, kiVerbunden:boolean}>}
    */
-  async function zusammenfassen({ record, verknuepft } = {}) {
+  async function zusammenfassen({ record, verknuepft, nurGespeichert = false, neu = false } = {}) {
     let z = null;
     try { z = claude.zustand(); } catch { z = null; }
-    if (!z || !z.verbunden || !record) return { text: null };
-    const d = record.data || {};
-    const titel = String(d.title || d.name || d.text || record.id).slice(0, 300);
-    const text = String(d.body || d.content || d.description || d.text || d.goal || d.result || '').slice(0, 30000);
-    const nachbarn = [];
-    for (const richtung of ['ausgehend', 'eingehend']) {
-      for (const v of ((verknuepft && verknuepft[richtung]) || []).slice(0, 25)) {
-        nachbarn.push(`- ${String(v.title || v.id).slice(0, 120)} (${v.type || 'Satz'}${v.kind ? `, ${v.kind}` : ''})`);
-      }
-    }
-    const bloecke = [
-      { type: 'text', text: `Art: ${record.type}\nTitel: ${titel}` },
-      { type: 'text', text: text.trim() ? `Inhalt:\n<<<\n${text}\n>>>` : 'Inhalt: (leer)' },
-    ];
-    if (nachbarn.length) bloecke.push({ type: 'text', text: `Verknüpft mit:\n${nachbarn.join('\n')}` });
-    bloecke.push({ type: 'text', text: 'Fasse das in zwei bis vier Sätzen zusammen: worum es geht und wie es mit dem Verknüpften zusammenhängt. Nur aus dem, was hier steht.' });
+    const kiVerbunden = !!(z && z.verbunden);
+    if (!record) return { text: null, kiVerbunden };
+    const schluessel = zusammenfassenMod.schluesselVon(record, verknuepft);
+    const gemerkt = neu && !nurGespeichert ? null : zusammenfassungen.holen(schluessel);
+    if (gemerkt) return { ...gemerkt, gespeichert: true, kiVerbunden };
+    if (nurGespeichert || !kiVerbunden) return { text: null, kiVerbunden };
+    const a = zusammenfassenMod.anfrageFuer({ record, verknuepft });
     const r = await einfacherAufruf({
       chat: null,
-      system: 'Du bist die persönliche KI von Neural OS und fasst einen Eintrag aus dem Wissen des Nutzers knapp zusammen. Deutsch, sachlich, ohne Einleitung, nichts erfinden.',
-      nachrichten: [{ role: 'user', content: bloecke }],
-      purpose: `Zusammenfassung von „${titel.slice(0, 60)}“ im Gehirn`,
+      system: a.system,
+      nachrichten: a.nachrichten,
+      purpose: a.purpose,
       maxTokens: 2000,
     });
-    return { text: fassungen.antwortSaeubern(r.text), modell: r.modell };
+    const text = fassungen.antwortSaeubern(r.text);
+    if (!text.trim()) return { text: null, kiVerbunden };
+    const ergebnis = { text, modell: r.modell, am: new Date().toISOString() };
+    zusammenfassungen.ablegen(schluessel, ergebnis);
+    return { ...ergebnis, gespeichert: false, kiVerbunden };
   }
 
   /* ----------------------------------------------------------- Dienst */
@@ -2078,6 +2143,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
         if (data[key] !== undefined) payload[key] = data[key];
       }
       if (data.stil !== undefined) payload.stil = stilLesen(data.stil);
+      if (data.modus !== undefined) payload.modus = modusLesen(data.modus);
       const chat = store.create('chat', payload);
       publish('chat.created', { chatId: chat.id, record: chat });
       return chat;
@@ -2091,6 +2157,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       }
       // Antwortstil (docs 3): {laenge, fachlich, kreativ} 0-100, null = keiner.
       if (patch.stil !== undefined) allowed.stil = stilLesen(patch.stil);
+      if (patch.modus !== undefined) allowed.modus = modusLesen(patch.modus);
       if (!Object.keys(allowed).length) return chat;
       return store.update(chat.id, allowed);
     },

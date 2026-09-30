@@ -62,7 +62,7 @@ const WIRKUNG_TYPEN = new Set(['event', 'note', 'memory', 'project', 'task']);
 const ANHANG_CSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; object-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'";
 
 /** Fields of a chat the interface may set. */
-const CHAT_FIELDS = ['title', 'model', 'network', 'systemPrompt', 'contextNodeIds', 'agentId', 'pinned', 'stil'];
+const CHAT_FIELDS = ['title', 'model', 'network', 'systemPrompt', 'contextNodeIds', 'agentId', 'pinned', 'stil', 'modus'];
 
 /**
  * `data.claude` ist der Mitschnitt für die NÄCHSTE Anfrage an Claude

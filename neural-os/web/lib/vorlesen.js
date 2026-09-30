@@ -250,8 +250,11 @@ export function vorleser(deps = {}) {
 /* Den Satz im Text finden                                              */
 /* ------------------------------------------------------------------ */
 
-/** Was beim Suchen im Text nicht zaehlt (Knoepfe, Leisten, Uhrzeit). */
-const NICHT_TEXT = 'button, summary, .cv-aktionen, .cv-spieler, .cv-zeit, .bs-verlauf, .md-code__head, .md-copycard__head, style, script, svg';
+/**
+ * Was beim Suchen im Text nicht zaehlt: Knoepfe, Leisten, Uhrzeit, der
+ * Gedankengang und die Nummern der Quellen (vorgelesen werden sie nicht).
+ */
+const NICHT_TEXT = 'button, summary, .cv-aktionen, .cv-spieler, .cv-zeit, .cv-denken, .cv-verweis, .bs-verlauf, .md-code__head, .md-copycard__head, style, script, svg';
 
 /**
  * Die Stelle eines Satzes im Text einer Antwort, als Range -- oder null.
@@ -259,7 +262,7 @@ const NICHT_TEXT = 'button, summary, .cv-aktionen, .cv-spieler, .cv-zeit, .bs-ve
  * den Anfang nicht findet (Bausteine lesen sich anders, als sie aussehen),
  * bekommt null, und der Spieler zeigt den Satz selbst.
  */
-export function stelleImText(wurzel, satz) {
+export function stelleImText(wurzel, satz, { nur = null } = {}) {
   if (!wurzel || typeof document === 'undefined' || !satz) return null;
   const knoten = [];
   let flach = '';
@@ -267,6 +270,8 @@ export function stelleImText(wurzel, satz) {
     acceptNode(n) {
       const el = n.parentElement;
       if (!el || el.closest(NICHT_TEXT)) return NodeFilter.FILTER_REJECT;
+      // `nur`: nur Text in diesen Teilen (etwa '.cv-md', der Text einer Antwort).
+      if (nur && !el.closest(nur)) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     },
   });

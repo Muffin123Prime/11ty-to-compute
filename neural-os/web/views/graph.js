@@ -1297,14 +1297,13 @@ function renderCard(self) {
   const dateien = h('div.gh__sec', { hidden: true });
   const vorschlaege = h('div.gh__sec', { hidden: true });
   const themen = h('div.gh__sec', { hidden: true });
-  const ki = h('div.gh__sec', null,
-    h('div.gh__sec-head', null, h('h4.gh__sec-title', null, text('KI-Zusammenfassung'))),
-    h('div', null, h('button.btn.btn--small', { type: 'button', onClick: (event) => zusammenfassen(self, node, event.currentTarget, ki) }, icon(ICON.spark), text('Zusammenfassen'))));
+  const ki = h('div.gh__sec', { hidden: true });
 
   scroll.append(kopf, titel, snip, tags, meta, actions, verknuepft, dateien, vorschlaege, themen, ki);
   dom.card.append(scroll);
 
   ladeVerknuepft(self, node, token, { verknuepft, dateien, vorschlaege, themen, snip });
+  zusammenfassung(self, node, token, ki, { nurGespeichert: true });
 }
 
 async function ladeVerknuepft(self, node, token, teile) {
@@ -1462,28 +1461,60 @@ async function verbinden(self, node, ziele, sec, liste) {
   if (self.selectedId === node.id) renderVorschlaege(self, node, rest, sec);
 }
 
-async function zusammenfassen(self, node, button, sec) {
+/**
+ * Die KI-Zusammenfassung in der Karte. Beim Oeffnen wird nur nachgesehen, ob
+ * es schon eine gibt -- das kostet keine Anfrage an die KI. Gefragt wird erst
+ * auf [Zusammenfassen]. Ohne verbundene KI steht ein Satz da statt eines
+ * Knopfs, der nichts tun kann.
+ */
+async function zusammenfassung(self, node, token, sec, { nurGespeichert = false, neu = false, button = null } = {}) {
   const { ctx } = self;
-  button.disabled = true;
+  if (button) {
+    button.disabled = true;
+    clear(button);
+    button.append(icon(ICON.spark), text('Fasst zusammen …'));
+  }
   let res;
   try {
-    res = await ctx.api.post('/graph/zusammenfassung', { id: node.id }, { timeoutMs: 60000 });
+    res = await ctx.api.post('/graph/zusammenfassung', { id: node.id, nurGespeichert, neu }, { timeoutMs: nurGespeichert ? 8000 : 60000 });
   } catch (err) {
-    if (!self.alive) return;
-    button.disabled = false;
-    if (err && (err.status === 404 || err.status === 501)) res = { verfuegbar: false, grund: 'Kommt, sobald eine KI verbunden ist.' };
-    else {
-      ctx.toast(`Die Zusammenfassung ist gescheitert: ${err && err.message ? err.message : 'unbekannter Fehler'}`, 'error');
+    if (!self.alive || token !== self.kartenToken) return;
+    if (nurGespeichert) {
+      // Nicht einmal das Nachsehen ging: lieber nichts zeigen als etwas Falsches.
+      sec.hidden = true;
       return;
     }
+    ctx.toast(`Die Zusammenfassung ist gescheitert: ${err && err.message ? err.message : 'unbekannter Fehler'}`, 'error');
+    res = null;
   }
-  if (!self.alive || self.selectedId !== node.id) return;
+  if (!self.alive || token !== self.kartenToken || self.selectedId !== node.id) return;
+  if (!res && button) {
+    // Fehlgeschlagen: der Knopf bleibt, wie er war, damit man es noch einmal versuchen kann.
+    button.disabled = false;
+    clear(button);
+    button.append(icon(ICON.spark), text(button.dataset.beschriftung || 'Zusammenfassen'));
+    return;
+  }
   clear(sec);
+  sec.hidden = false;
   sec.append(h('div.gh__sec-head', null, h('h4.gh__sec-title', null, text('KI-Zusammenfassung'))));
-  if (res && res.verfuegbar && typeof res.text === 'string' && res.text.trim()) {
-    sec.append(h('p.gh__ki', null, text(res.text.trim())), res.modell ? h('p.gh__sec-hint', null, text(`Von ${res.modell}.`)) : null);
-  } else {
-    sec.append(h('p.gh__ki.gh__ki--fehlt', null, text((res && res.grund) || 'Kommt, sobald eine KI verbunden ist.')));
+  const inhalt = res && res.verfuegbar && typeof res.text === 'string' ? res.text.trim() : '';
+  if (inhalt) {
+    const woher = [res.modell ? `Von ${res.modell}` : null, res.am ? timeAgo(res.am) : null].filter(Boolean).join(' · ');
+    sec.append(h('p.gh__ki', null, text(inhalt)), woher ? h('p.gh__sec-hint', null, text(`${woher}.`)) : null);
+  } else if (res && res.grund) {
+    sec.append(h('p.gh__ki.gh__ki--fehlt', null, text(res.grund)));
+  }
+  if (res && res.kiVerbunden) {
+    const beschriftung = inhalt ? 'Neu zusammenfassen' : 'Zusammenfassen';
+    const knopf = h(inhalt ? 'button.btn.btn--small.btn--ghost' : 'button.btn.btn--small', {
+      type: 'button',
+      dataset: { beschriftung },
+      onClick: (event) => zusammenfassung(self, node, token, sec, { neu: !!inhalt, button: event.currentTarget }),
+    }, icon(ICON.spark), text(beschriftung));
+    sec.append(h('div', null, knopf));
+  } else if (!inhalt && !(res && res.grund)) {
+    sec.append(h('p.gh__ki.gh__ki--fehlt', null, text('Kommt, sobald eine KI verbunden ist.')));
   }
 }
 

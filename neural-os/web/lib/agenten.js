@@ -19,6 +19,7 @@ export const ROLLEN = Object.freeze({
   notizen: { name: 'Notiz-Agent', kurz: 'Notizen', symbol: 'notes' },
   gedaechtnis: { name: 'Gedächtnis-Agent', kurz: 'Gedächtnis', symbol: 'graph' },
   projekte: { name: 'Projekt-Agent', kurz: 'Projekte', symbol: 'projects' },
+  wissen: { name: 'Wissens-Agent', kurz: 'Wissen', symbol: 'graph' },
 });
 
 const UNBEKANNT = Object.freeze({ name: 'Agent', kurz: 'Agent', symbol: 'agents' });

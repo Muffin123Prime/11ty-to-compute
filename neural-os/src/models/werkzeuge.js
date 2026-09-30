@@ -50,6 +50,8 @@ const ROLLEN = Object.freeze({
   notiz_anlegen: 'notizen',
   merken: 'gedaechtnis',
   projekt_anpassen: 'projekte',
+  wissen_suchen: 'wissen',
+  eintrag_lesen: 'wissen',
   web_search: 'recherche',
   web_fetch: 'recherche',
 });
@@ -60,8 +62,29 @@ const ROLLEN_NAME = Object.freeze({
   notizen: 'Notizen',
   gedaechtnis: 'Gedächtnis',
   projekte: 'Projekte',
+  wissen: 'Wissen',
   recherche: 'Recherche',
 });
+
+/*
+ * Das eigene Wissen (wissen_suchen, eintrag_lesen): welche Satzarten dazu
+ * gehoeren und wie sie auf Deutsch heissen. Chats, Nachrichten, Laeufe,
+ * Freigaben und Zugaenge gehoeren NICHT dazu -- sie sind Betrieb, kein Wissen,
+ * und ein Zugang darf nie in eine Antwort geraten.
+ */
+const WISSEN_ARTEN = Object.freeze({
+  notiz: 'note',
+  termin: 'event',
+  aufgabe: 'task',
+  projekt: 'project',
+  gemerkt: 'memory',
+  datei: 'file',
+  begriff: 'entity',
+});
+const ART_VON_TYP = Object.freeze(Object.fromEntries(Object.entries(WISSEN_ARTEN).map(([art, typ]) => [typ, art])));
+const WISSEN_TYPEN = Object.freeze(Object.values(WISSEN_ARTEN));
+/** So viel Text eines Eintrags geht hoechstens an die KI. */
+const MAX_EINTRAG_ZEICHEN = 20000;
 
 /* ------------------------------------------------------ Definitionen */
 
@@ -123,8 +146,9 @@ const ERINNERUNG_MINUTEN = Object.freeze([...wdh.ERINNERUNGEN]);
  * Die Definitionen, wie sie an Claude gehen. Reihenfolge und Wortlaut sind
  * Teil des gecachten Präfixes: nicht pro Anfrage verändern. Die Reihenfolge
  * ist fest vereinbart (Vertrag F): rueckfrage, termin_anlegen, termine_lesen,
- * termin_aendern, termin_loeschen, notiz_anlegen, merken, projekt_anpassen --
- * danach hängt der Anbieter web_search und web_fetch an.
+ * termin_aendern, termin_loeschen, notiz_anlegen, merken, projekt_anpassen,
+ * wissen_suchen, eintrag_lesen -- danach hängt der Anbieter web_search und
+ * web_fetch an (nicht im Modus „Mein Wissen“).
  */
 const DEFINITIONEN = Object.freeze([
   werkzeug(
@@ -267,6 +291,32 @@ const DEFINITIONEN = Object.freeze([
       aufgaben: { type: 'array', items: { type: 'string' }, description: 'Nächste Schritte als kurze Aufgaben.' },
     },
     ['name'],
+  ),
+  werkzeug(
+    'wissen_suchen',
+    'Durchsucht das eigene Wissen des Nutzers: seine Notizen, Termine, Aufgaben, Projekte, gemerkten Fakten, Dateien und Begriffe. '
+      + 'Benutze es, wenn der Nutzer nach etwas fragt, das er selbst festgehalten haben könnte („was hab ich über … notiert“, '
+      + '„wann war nochmal …“, „was weiß ich schon über …“), und immer im Modus „Mein Wissen“. '
+      + 'Liefert Treffer mit id, Art, Titel und einem Auszug. Lies mit eintrag_lesen, was du verwenden willst, bevor du daraus antwortest.',
+    {
+      suche: { type: 'string', description: 'Suchwörter, wie der Nutzer sie sagen würde („Photosynthese Blatt“). "Wort in Anführungszeichen" sucht genau diese Folge.' },
+      arten: {
+        type: 'array',
+        items: { type: 'string', enum: Object.keys(WISSEN_ARTEN) },
+        description: 'Nur diese Arten. Weglassen für alle.',
+      },
+      anzahl: { type: 'integer', description: 'Wie viele Treffer höchstens, 1 bis 20. Weglassen = 8.' },
+    },
+    ['suche'],
+  ),
+  werkzeug(
+    'eintrag_lesen',
+    'Liest einen Eintrag aus dem eigenen Wissen des Nutzers vollständig: Titel, Inhalt, Datum, Schlagworte. '
+      + 'Die id kommt aus wissen_suchen (oder termine_lesen). Was du so liest, erscheint unter der Antwort als Quelle.',
+    {
+      id: { type: 'string', description: 'Die id des Eintrags.' },
+    },
+    ['id'],
   ),
 ]);
 
@@ -564,6 +614,20 @@ const REGELN = {
   merken(e, fehler) {
     laenge('fakt', e.fakt, 3, 500, fehler);
     return { fakt: String(e.fakt || '').trim() };
+  },
+  wissen_suchen(e, fehler) {
+    laenge('suche', e.suche, 1, 300, fehler);
+    let anzahl = 8;
+    if (e.anzahl !== undefined && e.anzahl !== null) {
+      if (e.anzahl < 1 || e.anzahl > 20) fehler.push('„anzahl“ muss zwischen 1 und 20 liegen.');
+      else anzahl = e.anzahl;
+    }
+    const arten = Array.isArray(e.arten) ? [...new Set(e.arten)] : [];
+    return { suche: String(e.suche || '').trim(), arten, anzahl };
+  },
+  eintrag_lesen(e, fehler) {
+    laenge('id', e.id, 1, 120, fehler);
+    return { id: String(e.id || '').trim() };
   },
   projekt_anpassen(e, fehler) {
     laenge('name', e.name, 1, 200, fehler);
@@ -1378,9 +1442,144 @@ function createWerkzeuge({ store, bus, logger } = {}) {
     },
   };
 
+  /* ------------------------------------------------ eigenes Wissen */
+
+  /** Der Titel eines Eintrags, wie ein Mensch ihn erkennt. */
+  function eintragTitel(rec) {
+    const d = (rec && rec.data) || {};
+    return String(d.title || d.name || d.text || (rec && rec.id) || '').replace(/\s+/g, ' ').trim();
+  }
+
+  /** Wo der Eintrag in der App steht (dieselben Adressen wie web/lib/agenten.js). */
+  function eintragAdresse(rec) {
+    const q = encodeURIComponent(rec.id);
+    const d = rec.data || {};
+    switch (rec.type) {
+      case 'note': return `#/notes?id=${q}`;
+      case 'event': return `#/kalender?id=${q}`;
+      case 'project': return `#/projects?id=${q}`;
+      case 'task': return d.projectId ? `#/projects?id=${encodeURIComponent(d.projectId)}` : '#/projects';
+      case 'memory': return '#/settings?bereich=gedaechtnis';
+      default: return `#/graph?focus=${q}`;
+    }
+  }
+
+  /** Das Datum, das zu einem Eintrag gehoert: beim Termin der Beginn, sonst die letzte Aenderung. */
+  function eintragDatum(rec) {
+    const d = rec.data || {};
+    if (rec.type === 'event') return String(d.start || '').slice(0, 16) || null;
+    if (rec.type === 'task' && d.due) return String(d.due).slice(0, 10);
+    return String(rec.updatedAt || rec.createdAt || '').slice(0, 10) || null;
+  }
+
+  /** Der ganze lesbare Inhalt eines Eintrags -- je Art das, was ihn ausmacht. */
+  function eintragText(rec) {
+    const d = rec.data || {};
+    const teile = [];
+    const dazu = (label, wert) => {
+      const t = typeof wert === 'string' ? wert.trim() : '';
+      if (t) teile.push(label ? `${label}: ${t}` : t);
+    };
+    switch (rec.type) {
+      case 'event':
+        dazu('Beginn', d.start);
+        dazu('Ende', d.end);
+        dazu('Ort', d.location);
+        dazu('', d.body);
+        break;
+      case 'task':
+        dazu('Status', d.status);
+        dazu('Fällig', d.due);
+        dazu('', d.body);
+        break;
+      case 'project':
+        dazu('Status', d.status);
+        dazu('', d.description);
+        break;
+      case 'memory':
+        dazu('', d.text);
+        break;
+      case 'file':
+        dazu('', d.text);
+        break;
+      case 'entity':
+        dazu('', d.description);
+        break;
+      default:
+        dazu('', d.body);
+    }
+    return teile.join('\n');
+  }
+
+  const wissenAusfuehrung = {
+    wissen_suchen(w) {
+      const typen = w.arten.length ? w.arten.map((a) => WISSEN_ARTEN[a]) : WISSEN_TYPEN;
+      let gefunden;
+      try {
+        gefunden = store.search(w.suche, { types: typen, limit: w.anzahl });
+      } catch (err) {
+        throw new NeuralError('SUCHE_GESCHEITERT', `Die Suche ging nicht: ${asNeuralError(err).message}`, { status: 500 });
+      }
+      const treffer = (gefunden.items || [])
+        .filter((t) => t && t.record && WISSEN_TYPEN.includes(t.record.type))
+        .map((t) => ({
+          id: t.record.id,
+          art: ART_VON_TYP[t.record.type],
+          titel: kurz(eintragTitel(t.record), 120),
+          // Der Index markiert Treffer mit Steuerzeichen; die KI braucht nur den Text.
+          auszug: kurz(String(t.snippet || '').replace(/[\u0001\u0002]/g, ''), 300),
+          datum: eintragDatum(t.record),
+        }));
+      return {
+        inhalt: {
+          ok: true,
+          treffer,
+          gesamt: Number(gefunden.total) || treffer.length,
+          hinweis: treffer.length
+            ? 'Lies mit eintrag_lesen, was du verwenden willst, bevor du daraus antwortest.'
+            : 'Nichts gefunden. Versuche andere Wörter – oder sag dem Nutzer ehrlich, dass sein Wissen dazu nichts enthält.',
+        },
+        ergebnis: treffer.length ? `${treffer.length} ${treffer.length === 1 ? 'Treffer' : 'Treffer'}` : 'Nichts gefunden',
+        produced: [],
+      };
+    },
+
+    eintrag_lesen(w) {
+      const rec = store.get(w.id);
+      if (!rec || !WISSEN_TYPEN.includes(rec.type)) {
+        throw new NeuralError('NOT_FOUND', `Einen Eintrag „${kurz(w.id, 60)}“ gibt es im Wissen des Nutzers nicht. Hol dir die id mit wissen_suchen.`, { status: 404 });
+      }
+      const titel = eintragTitel(rec);
+      const voll = eintragText(rec);
+      const gekuerzt = voll.length > MAX_EINTRAG_ZEICHEN;
+      const d = rec.data || {};
+      return {
+        inhalt: {
+          ok: true,
+          id: rec.id,
+          art: ART_VON_TYP[rec.type],
+          titel,
+          inhalt: gekuerzt ? `${voll.slice(0, MAX_EINTRAG_ZEICHEN)}\n… (gekürzt)` : voll,
+          datum: eintragDatum(rec),
+          schlagworte: Array.isArray(d.tags) ? d.tags.slice(0, 20) : [],
+          ...(gekuerzt ? { gekuerzt: true } : {}),
+        },
+        ergebnis: `Gelesen: ${kurz(titel, 60)}`,
+        produced: [],
+        // Was die KI liest, steht unter der Antwort als Quelle -- mit der Adresse in der App.
+        quellen: [{ titel: kurz(titel, 200) || rec.id, url: eintragAdresse(rec), art: 'eintrag', id: rec.id, typ: rec.type }],
+      };
+    },
+  };
+  Object.assign(AUSFUEHRUNG, wissenAusfuehrung);
+
   const terminTitel = (id) => {
     const rec = typeof id === 'string' && id ? store.get(id) : null;
     return rec && rec.type === 'event' ? kurz(rec.data.title, 50) : 'Termin';
+  };
+  const eintragKurz = (id) => {
+    const rec = typeof id === 'string' && id ? store.get(id) : null;
+    return rec && WISSEN_TYPEN.includes(rec.type) ? kurz(eintragTitel(rec), 60) : 'Eintrag';
   };
 
   const TITEL = {
@@ -1391,6 +1590,8 @@ function createWerkzeuge({ store, bus, logger } = {}) {
     notiz_anlegen: (w) => `Notiz: ${kurz(w.titel, 60)}`,
     merken: (w) => `Merkt sich: ${kurz(w.fakt, 60)}`,
     projekt_anpassen: (w) => `Projekt: ${kurz(w.name, 60)}`,
+    wissen_suchen: (w) => `Sucht in deinem Wissen: „${kurz(w.suche, 50)}“`,
+    eintrag_lesen: (w) => `Liest: ${eintragKurz(w.id)}`,
     rueckfrage: (w) => `Rückfrage: ${kurz(w.frage, 60)}`,
   };
 
@@ -1402,6 +1603,8 @@ function createWerkzeuge({ store, bus, logger } = {}) {
     notiz_anlegen: 'Schreibt die Notiz',
     merken: 'Merkt es sich',
     projekt_anpassen: 'Pflegt das Projekt',
+    wissen_suchen: 'Durchsucht deine Einträge',
+    eintrag_lesen: 'Liest den Eintrag',
   };
 
   /**
@@ -1442,6 +1645,7 @@ function createWerkzeuge({ store, bus, logger } = {}) {
         toolResult: { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(r.inhalt) },
         ereignisse,
         produced: r.produced,
+        quellen: Array.isArray(r.quellen) ? r.quellen : [],
       };
     } catch (err) {
       const e = asNeuralError(err);
@@ -1470,6 +1674,8 @@ module.exports = {
   DEFINITIONEN,
   ROLLEN,
   ROLLEN_NAME,
+  WISSEN_ARTEN,
+  WISSEN_TYPEN,
   AGENT_ID,
   eingabePruefen,
   ungueltigErgebnis,
