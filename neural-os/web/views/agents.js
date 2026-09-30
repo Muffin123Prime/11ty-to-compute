@@ -74,6 +74,8 @@ function baue(container, ctx) {
   let geladen = false;
   /** runId -> aufgeklappt */
   const offen = new Set();
+  /** runId -> die Unterzeile eines laufenden Laufs (die Uhr schreibt dort hinein). */
+  const unterzeilen = new Map();
   /** Titel angelegter Saetze, einmal geholt. */
   const titel = new Map();
   const wunsch = ctx.route && ctx.route.params ? ctx.route.params.id || null : null;
@@ -177,21 +179,45 @@ function baue(container, ctx) {
   function zeichne() {
     if (!lebt) return;
     // Neu gebaut wird alles; die Leseposition bleibt, wo sie war -- sonst
-    // spraenge die Ansicht bei jedem Schritt eines Agenten nach oben.
+    // spraenge die Ansicht bei jedem Schritt eines Agenten nach oben. Und der
+    // Fokus bleibt auf demselben Knopf (Übernehmen, Erlauben …), sonst
+    // verloere ihn jeder, der mit der Tastatur arbeitet.
     const rolle0 = container.scrollTop;
     const hoehe0 = root.offsetHeight;
+    const fokus = fokusMerken();
     root.style.minHeight = `${hoehe0}px`;
     try {
       zeichneInnen();
     } finally {
       root.style.minHeight = '';
       container.scrollTop = rolle0;
+      fokusWieder(fokus);
     }
+  }
+
+  /** Welcher Knopf den Fokus hat -- als Ort (Zeile + Beschriftung), der den Neubau ueberlebt. */
+  function fokusMerken() {
+    const el = document.activeElement;
+    if (!el || !root.contains(el) || el === root) return null;
+    const zeile = el.closest('[data-vorschlag], [data-freigabe], [data-run]');
+    if (!zeile) return null;
+    const art = zeile.hasAttribute('data-vorschlag') ? 'data-vorschlag' : (zeile.hasAttribute('data-freigabe') ? 'data-freigabe' : 'data-run');
+    return { art, id: zeile.getAttribute(art), tag: el.tagName, text: (el.textContent || '').trim() };
+  }
+
+  function fokusWieder(f) {
+    if (!f) return;
+    const zeile = root.querySelector(`[${f.art}="${CSS.escape(f.id)}"]`);
+    if (!zeile) return;
+    const kandidaten = [...zeile.querySelectorAll(f.tag.toLowerCase())];
+    const ziel = kandidaten.find((k) => (k.textContent || '').trim() === f.text) || null;
+    if (ziel && typeof ziel.focus === 'function') ziel.focus({ preventScroll: true });
   }
 
   function zeichneInnen() {
     const jetzt = Date.now();
     const offenVorher = new Set(offen);
+    unterzeilen.clear();
     clear(root);
 
     const alle = [...laeufe.values()].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
@@ -265,21 +291,31 @@ function baue(container, ctx) {
     root.appendChild(verlauf);
   }
 
-  function laufZeile(r, jetzt, offenVorher) {
+  /** "Sucht in deinen Notizen · Hintergrund-Agent · seit 12 s · 14:03" */
+  function unterzeileText(r, jetzt) {
     const d = r.data || {};
     const ro = rolle(d.rolle);
     const z = sicht(r, jetzt);
     const ms = dauer(r, jetzt);
-    const istOffen = offenVorher.has(r.id);
-    const pill = h('span.agv__pill', { class: `is-${z}` },
-      z === 'laeuft' ? h('span.dot.dot--accent.dot--live') : icon(z === 'fehler' ? I.alert : (z === 'zurueck' ? I.refresh : (z === 'unterbrochen' ? I.info : I.check))),
-      text(ZUSTAND_TEXT[z] || z));
     const sub = [
       d.rolle ? ro.name : (d.agentId && d.agentId !== 'claude' ? 'Agent' : ro.name),
       z === 'laeuft' ? (ms !== null ? `seit ${dauerText(ms)}` : '') : (ms !== null ? dauerText(ms) : ''),
       uhrzeit(r.createdAt),
     ].filter(Boolean).join(' · ');
     const aktuellerSchritt = z === 'laeuft' && Array.isArray(d.steps) && d.steps.length ? schrittText(d.steps[d.steps.length - 1]) : '';
+    return aktuellerSchritt ? `${aktuellerSchritt} · ${sub}` : sub;
+  }
+
+  function laufZeile(r, jetzt, offenVorher) {
+    const d = r.data || {};
+    const ro = rolle(d.rolle);
+    const z = sicht(r, jetzt);
+    const istOffen = offenVorher.has(r.id);
+    const pill = h('span.agv__pill', { class: `is-${z}` },
+      z === 'laeuft' ? h('span.dot.dot--accent.dot--live') : icon(z === 'fehler' ? I.alert : (z === 'zurueck' ? I.refresh : (z === 'unterbrochen' ? I.info : I.check))),
+      text(ZUSTAND_TEXT[z] || z));
+    const subEl = h('span.agv__sub', null, text(unterzeileText(r, jetzt)));
+    if (z === 'laeuft') unterzeilen.set(r.id, subEl);
 
     const det = h('details.agv__lauf', {
       'data-run': r.id,
@@ -299,7 +335,7 @@ function baue(container, ctx) {
       h('span.tile__avatar.agv__avatar', { 'aria-hidden': 'true' }, icon(I[ro.symbol] || I.agents)),
       h('span.agv__main', null,
         h('span.agv__lauftitel', null, text(d.titel || d.goal || ro.name)),
-        h('span.agv__sub', null, text(aktuellerSchritt ? `${aktuellerSchritt} · ${sub}` : sub))),
+        subEl),
       pill));
     det.appendChild(laufDetails(r, z));
     if (istOffen && Array.isArray(d.producedIds) && d.producedIds.length) titelHolen(d.producedIds);
@@ -342,9 +378,29 @@ function baue(container, ctx) {
     if (d.vorschlagsmodus) {
       const offenHier = vorschlaege.filter((v) => v.data && v.data.runId === r.id).length;
       const gesamtHier = Number(d.vorschlaege) || 0;
-      box.appendChild(h('p.agv__hinweis', null, text(offenHier
-        ? `${offenHier === 1 ? 'Ein Vorschlag wartet' : `${offenHier} Vorschläge warten`} oben unter „Vorschläge“. Geändert hat dieser Agent nichts.`
-        : (gesamtHier ? 'Über alle Vorschläge ist entschieden.' : 'Dieser Agent ändert nichts; er hat keinen Vorschlag gemacht.'))));
+      let hinweis;
+      if (offenHier) hinweis = `${offenHier === 1 ? 'Ein Vorschlag wartet' : `${offenHier} Vorschläge warten`} oben unter „Vorschläge“. Geändert hat dieser Agent nichts.`;
+      else if (z === 'laeuft') hinweis = 'Arbeitet noch. Was er vorschlägt, steht dann oben unter „Vorschläge“ – geändert wird nichts.';
+      else hinweis = gesamtHier ? 'Über alle Vorschläge ist entschieden.' : 'Dieser Agent ändert nichts; er hat keinen Vorschlag gemacht.';
+      box.appendChild(h('p.agv__hinweis', null, text(hinweis)));
+    }
+    // Ein Agent der Laufzeit (nicht eine Taetigkeit im Chat) laesst sich anhalten.
+    const abbrechbar = z === 'laeuft' && d.agentId && d.agentId !== 'claude';
+    if (abbrechbar) {
+      box.appendChild(h('div.agv__aktionen', null,
+        h('button.btn.btn--small', {
+          type: 'button',
+          onClick: async (e) => {
+            e.currentTarget.disabled = true;
+            try {
+              await api.post(`/runs/${encodeURIComponent(r.id)}/abort`, {});
+              ctx.toast('Angehalten.', 'info');
+            } catch (err) {
+              ctx.toast(`Nicht angehalten: ${(err && err.message) || 'unbekannter Fehler'}`, 'error');
+              if (e.currentTarget) e.currentTarget.disabled = false;
+            }
+          },
+        }, text('Abbrechen'))));
     }
     if (d.chatId) {
       box.appendChild(h('div.agv__aktionen', null,
@@ -456,7 +512,7 @@ function baue(container, ctx) {
             }
           },
         }, text(label));
-        return h('li.agv__freigabe', null,
+        return h('li.agv__freigabe', { 'data-freigabe': a.id },
           h('span.agv__main', null,
             h('span.agv__lauftitel', null, text(d.summary || 'Ein Agent bittet um eine Freigabe.')),
             d.payload && d.payload.tool ? h('span.agv__sub', null, text(`Werkzeug: ${d.payload.tool}`)) : null),
@@ -514,10 +570,25 @@ function baue(container, ctx) {
       vorschlagBald = setTimeout(vorschlaegeNeu, 200);
     }));
   }
-  // Laufende Dauern zaehlen sichtbar mit -- nur, wenn etwas laeuft.
+  // Laufende Dauern zaehlen sichtbar mit -- nur die Zeile unter dem Titel,
+  // an Ort und Stelle: ein Neubau jede Sekunde nahm Knoepfen den Fokus und
+  // verschluckte Klicks, die gerade dazwischen fielen.
   const tick = setInterval(() => {
     const jetzt = Date.now();
-    if ([...laeufe.values()].some((r) => sicht(r, jetzt) === 'laeuft')) zeichne();
+    for (const [id, el] of unterzeilen) {
+      const r = laeufe.get(id);
+      if (!el.isConnected || !r) {
+        unterzeilen.delete(id);
+        continue;
+      }
+      if (sicht(r, jetzt) !== 'laeuft') {
+        // Liegengeblieben oder fertig: dann doch einmal neu (die Pille wechselt).
+        neuZeichnen();
+        continue;
+      }
+      const t = unterzeileText(r, jetzt);
+      if (el.textContent !== t) el.textContent = t;
+    }
   }, 1000);
 
   function start() {

@@ -168,6 +168,19 @@ function anbieterState(ctx) {
   }
 }
 
+/**
+ * Was die Oberflaeche beim Laden braucht, um wie zuletzt auszusehen: Design
+ * und Seitenleisten (config.ui.design / .seiten, geschrieben von der
+ * Oberflaeche ueber PATCH /api/config). Sie reisen mit dem Stick.
+ */
+function uiState(config) {
+  const ui = (config && config.ui) || {};
+  return {
+    design: ['light', 'dark', 'system'].includes(ui.design) ? ui.design : null,
+    seiten: ui.seiten && typeof ui.seiten === 'object' && !Array.isArray(ui.seiten) ? ui.seiten : null,
+  };
+}
+
 /** `{id, name}` dieser KI, frisch gelesen (nach einer Umbenennung gilt sofort der neue Name). */
 function kiState(ctx) {
   const ki = ctx.ki;
@@ -209,6 +222,8 @@ function register(router) {
       // Welche KI antwortet? Der Tab merkt sich die Kennung und schickt sie
       // ab dann mit (X-Neural-OS); der Name steht oben in der Oberfläche.
       ki: kiState(ctx),
+      // Design und Seitenleisten (config.ui), damit ein anderer Rechner aussieht wie zuletzt.
+      ui: uiState(config),
       // Der KI-Anbieter (nicht die Identität): wer antwortet, und ob er kann.
       anbieter: anbieterState(ctx),
       network: networkState(ctx),

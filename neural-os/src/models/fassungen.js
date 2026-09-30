@@ -228,20 +228,27 @@ const INLINE_CODE = /(`+)[^`]*?\1/g;
  * Der Text ohne die Nummern der Quellen ("[1]"), ausserhalb von Code. Fuer
  * alles, was als Text an die KI geht: sie soll keine Nummern nachahmen, zu
  * denen es keine Quelle gibt. (Umwandeln behaelt sie -- dort bleiben auch
- * die Quellen.)
+ * die Quellen.) `anzahl`: wie viele Quellen die Antwort hat -- nur "[1]" bis
+ * "[anzahl]" sind Verweise; ein "Schritt [2]" in einer Antwort ohne Quellen
+ * bleibt stehen.
  */
-function ohneVerweise(text) {
+function ohneVerweise(text, anzahl) {
   const s = String(text || '');
-  if (!/\[\d{1,2}\]/.test(s)) return s;
+  const n = Number(anzahl);
+  if (!(n > 0) || !/\[\d{1,2}\]/.test(s)) return s;
+  const weg = (t) => t.replace(VERWEIS, (m) => {
+    const nr = Number(m.slice(1, -1));
+    return nr >= 1 && nr <= n ? '' : m;
+  });
   const draussen = (t) => {
     let out = '';
     let pos = 0;
     for (const m of t.matchAll(INLINE_CODE)) {
-      out += t.slice(pos, m.index).replace(VERWEIS, '');
+      out += weg(t.slice(pos, m.index));
       out += m[0];
       pos = m.index + m[0].length;
     }
-    return out + t.slice(pos).replace(VERWEIS, '');
+    return out + weg(t.slice(pos));
   };
   let out = '';
   let pos = 0;

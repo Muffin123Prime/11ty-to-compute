@@ -139,6 +139,8 @@ function register(router) {
     const id = requireString(body.id, 'id', { max: 80 });
     const nurGespeichert = body.nurGespeichert === true;
     const neu = body.neu === true && !nurGespeichert;
+    // Nachsehen genuegt Lesen; die KI fragen kostet Anfragen -- das darf nur, wer chatten darf.
+    if (!nurGespeichert) rc.requireCapability('chat');
     const record = mustGet(store, id);
     const leer = (kiVerbunden, grund) => ({ id: record.id, verfuegbar: false, text: null, modell: null, am: null, gespeichert: false, kiVerbunden, grund });
     const dienst = rc.ctx.chat && typeof rc.ctx.chat.zusammenfassen === 'function' ? rc.ctx.chat : null;

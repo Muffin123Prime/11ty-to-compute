@@ -61,6 +61,7 @@ import {
   mitteilungSchalten,
   mitteilungMoeglich,
 } from '../lib/erinnerung.js';
+import * as lokal from '../lib/lokal.js';
 
 /* ------------------------------------------------------------------ */
 /* Reine Datumsfunktionen (ohne DOM)                                   */
@@ -624,7 +625,8 @@ export function rangeFor(mode, cursor, listeTage = 60, heute = cursor) {
 /* ------------------------------------------------------------------ */
 
 const STYLE_ID = 'nos-kalender-view';
-const MODE_KEY = 'neural-os:kalender-ansicht';
+/** In lib/lokal.js, mit der Kennung dieser KI davor. */
+const MODE_KEY = 'kalender-ansicht';
 const MODES = [['tag', 'Tag', 'D'], ['woche', 'Woche', 'W'], ['monat', 'Monat', 'M'], ['liste', 'Liste', 'L']];
 const WEEKDAYS = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
 const LISTE_SCHRITT = 60;
@@ -1376,18 +1378,12 @@ function ensureStyle() {
 }
 
 function readMode() {
-  try {
-    const m = localStorage.getItem(MODE_KEY);
-    return MODES.some(([id]) => id === m) ? m : 'monat';
-  } catch {
-    return 'monat';
-  }
+  const m = lokal.lesen(MODE_KEY, null);
+  return MODES.some(([id]) => id === m) ? m : 'monat';
 }
 
 function writeMode(mode) {
-  try {
-    localStorage.setItem(MODE_KEY, mode);
-  } catch { /* privat surfen: dann eben nicht gemerkt */ }
+  lokal.schreiben(MODE_KEY, mode);
 }
 
 function fmt(day, opts) {

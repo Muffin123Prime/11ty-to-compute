@@ -702,7 +702,10 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
         ...(typeof opts.messageId === 'string' && opts.messageId ? { messageId: opts.messageId } : {}),
         ...(typeof opts.titel === 'string' && opts.titel.trim() ? { titel: opts.titel.trim().slice(0, 120) } : {}),
         ...(typeof opts.rolle === 'string' && opts.rolle ? { rolle: opts.rolle } : {}),
-        ...(opts.vorschlagsmodus === true ? { vorschlagsmodus: true } : {}),
+        // Auch ein Agent, der selbst im Vorschlagsmodus ist (der Hintergrund-
+        // Agent, von Hand oder nach Zeitplan gestartet): dann weiss die
+        // Oberflaeche es und zaehlt seine Vorschlaege.
+        ...(opts.vorschlagsmodus === true || permissionsMod.agentData(agent).vorschlagsmodus === true ? { vorschlagsmodus: true } : {}),
       });
 
       if (typeof opts.parentRunId === 'string' && opts.parentRunId) {
@@ -727,20 +730,29 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
       state.timer = timer;
       active.set(run.id, state);
 
-      const started = store.update(run.id, { status: 'running', startedAt: new Date().toISOString() });
+      let started;
+      try {
+        started = store.update(run.id, { status: 'running', startedAt: new Date().toISOString() });
+      } catch (err) {
+        // Sonst bliebe der Platz belegt, bis Neural OS neu startet.
+        clearTimeout(timer);
+        active.delete(run.id);
+        throw err;
+      }
       const wer = {
         titel: run.data.titel || null,
         chatId: run.data.chatId || null,
         vorschlagsmodus: run.data.vorschlagsmodus === true,
       };
       publish('run.started', { runId: run.id, agentId, goal, maxSteps: perms.maxSteps, maxSeconds: perms.maxSeconds, ...wer });
-      /** Wie viele Vorschlaege dieser Lauf abgelegt hat (Vorschlagsmodus). */
+      /** Wie viele Vorschlaege dieser Lauf abgelegt hat -- alle und die noch offenen (Vorschlagsmodus). */
       const vorschlaegeZaehlen = () => {
         if (!wer.vorschlagsmodus) return undefined;
         try {
-          return store.all('suggestion').filter((x) => x.data && x.data.runId === run.id).length;
+          const alle = store.all('suggestion').filter((x) => x.data && x.data.runId === run.id);
+          return { alle: alle.length, offen: alle.filter((x) => x.data.status === 'open').length };
         } catch {
-          return 0;
+          return { alle: 0, offen: 0 };
         }
       };
 
@@ -759,7 +771,7 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
             producedIds: outcome.produced,
             stopReason: outcome.stopReason,
             model: outcome.model,
-            ...(vorschlaege !== undefined ? { vorschlaege } : {}),
+            ...(vorschlaege !== undefined ? { vorschlaege: vorschlaege.alle } : {}),
           });
           appendTranscript(run.id, {
             kind: 'run.finished',
@@ -773,7 +785,8 @@ function createAgentRuntime({ store, registry, toolbox, approvals, gate, bus, co
           publish('run.finished', {
             runId: run.id, agentId, status: outcome.status, stopReason: outcome.stopReason,
             usedNetwork: outcome.usedNetwork, result: outcome.result,
-            ...wer, ...(vorschlaege !== undefined ? { vorschlaege } : {}),
+            // Die Meldung sagt, wie viele noch warten (entschieden werden kann schon waehrend des Laufs).
+            ...wer, ...(vorschlaege !== undefined ? { vorschlaege: vorschlaege.offen } : {}),
           });
           return record;
         })

@@ -281,7 +281,8 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       // mitten in eine Messung fallen.
       serviceWorkers: 'block',
     });
-    await c.addInitScript((thema) => { try { localStorage.setItem('neural-os:theme', thema); } catch { /* egal */ } }, hell ? 'light' : 'dark');
+    // Gemerkt wird je KI (web/lib/lokal.js): neural-os:<kiId>:design.
+    await c.addInitScript(([k, thema]) => { try { localStorage.setItem(k, thema); } catch { /* egal */ } }, [`neural-os:${app.ki.id}:design`, hell ? 'light' : 'dark']);
     if (ohneClipboard) {
       // So sieht Safari auf dem iPad Neural OS ueber http://<LAN-IP>: ohne
       // sicheren Kontext gibt es navigator.clipboard gar nicht.

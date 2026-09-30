@@ -18,11 +18,44 @@
  * The `X-Neural-OS: 1` header on mutating requests is the client half of the
  * server's CSRF defence (`src/http/auth.js`): a cross-site form post cannot set
  * a custom header, so its absence identifies a request the UI did not make.
+ *
+ * Sobald die Kennung dieser KI bekannt ist (`kiSetzen`, aus /api/status),
+ * steht sie in JEDER Anfrage in diesem Kopf -- auch in GET und im
+ * Ereignisstrom. Antwortet dahinter eine andere KI (ein alter Tab, ein
+ * anderer Stick auf derselben Adresse), kommt 409 KI_GEWECHSELT, und die
+ * Seite laedt neu: sie zeigt nie das Wissen einer anderen KI.
  */
 
 const API_PREFIX = '/api';
 const DEFAULT_TIMEOUT_MS = 30000;
 const SAFE_METHODS = new Set(['GET', 'HEAD']);
+const KENNUNG = /^[A-Za-z0-9_-]{1,80}$/;
+
+/** Die Kennung dieser KI (null, bis /api/status sie nennt). */
+let kiKennung = null;
+
+/** Ab jetzt traegt jede Anfrage die Kennung dieser KI. */
+export function kiSetzen(id) {
+  kiKennung = typeof id === 'string' && KENNUNG.test(id) ? id : null;
+  return kiKennung;
+}
+
+/** Der Wert fuer X-Neural-OS: die Kennung, sonst "1" (nur ein Zeichen fuer "von der Oberflaeche"). */
+function kopfWert() {
+  return kiKennung || '1';
+}
+
+let neuGeladen = false;
+/** Eine andere KI antwortet: neu laden, statt ihr Wissen in dieser Seite zu zeigen. */
+function kiGewechselt() {
+  if (neuGeladen) return;
+  neuGeladen = true;
+  try {
+    window.location.reload();
+  } catch {
+    /* ohne window (Node-Tests) gibt es nichts neu zu laden */
+  }
+}
 
 export class ApiError extends Error {
   /**
@@ -147,6 +180,7 @@ async function errorFromResponse(response) {
     { status: response.status, details: (error && error.details) ?? null },
   );
   if (apiError.status === 401 && apiError.code === 'PIN_NOETIG') meldePinNoetig(apiError);
+  if (apiError.status === 409 && apiError.code === 'KI_GEWECHSELT') kiGewechselt();
   return apiError;
 }
 
@@ -173,7 +207,7 @@ async function request(method, path, body, opts = {}) {
   const url = withQuery(resolveUrl(path), opts.query);
   const upper = method.toUpperCase();
   const headers = { Accept: 'application/json', ...(opts.headers || {}) };
-  if (!SAFE_METHODS.has(upper)) headers['X-Neural-OS'] = '1';
+  if (kiKennung || !SAFE_METHODS.has(upper)) headers['X-Neural-OS'] = kopfWert();
 
   let payload;
   if (body !== undefined && body !== null) {
@@ -356,7 +390,7 @@ async function stream(path, opts = {}) {
   const { body, onEvent, signal, method = 'POST' } = opts;
   if (typeof onEvent !== 'function') throw new TypeError('stream(): onEvent fehlt.');
   const url = resolveUrl(path);
-  const headers = { Accept: 'text/event-stream', 'X-Neural-OS': '1' };
+  const headers = { Accept: 'text/event-stream', 'X-Neural-OS': kopfWert() };
   let payload;
   if (body !== undefined && body !== null) {
     headers['Content-Type'] = 'application/json';
@@ -443,7 +477,7 @@ function events(onEvent, opts = {}) {
     setState('connecting');
     try {
       const response = await fetch(url, {
-        headers: { Accept: 'text/event-stream' },
+        headers: { Accept: 'text/event-stream', ...(kiKennung ? { 'X-Neural-OS': kiKennung } : {}) },
         signal: controller.signal,
         credentials: 'same-origin',
         cache: 'no-store',
@@ -514,6 +548,7 @@ export const api = {
   request,
   stream,
   events,
+  kiSetzen,
 };
 
 export default api;

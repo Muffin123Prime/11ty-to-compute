@@ -37,9 +37,11 @@
 
 import { renderMarkdown, extractPlain, extractLinks, setzeHaken } from '../lib/markdown.js';
 import { createNoteEditor } from '../lib/editor.js';
+import * as lokal from '../lib/lokal.js';
 
 const STYLE_ID = 'nos-notes-wall';
-const MODUS_KEY = 'neural-os:notizen:modus';
+/** In lib/lokal.js, mit der Kennung dieser KI davor. */
+const MODUS_KEY = 'notizen-modus';
 const LADE_LIMIT = 600;
 const MAX_TAG_CHIPS = 14;
 
@@ -737,7 +739,7 @@ export default {
     const I = { ...GLYPH, note: icons.notes, chat: icons.chat, agent: icons.agents, plus: icons.plus, search: icons.search, check: icons.check, pen: icons.pen, close: icons.close, graph: icons.graph, info: icons.info };
 
     let modus = 'wand';
-    try { modus = localStorage.getItem(MODUS_KEY) === 'liste' ? 'liste' : 'wand'; } catch { /* privat: dann die Wand */ }
+    modus = lokal.lesen(MODUS_KEY, 'wand') === 'liste' ? 'liste' : 'wand';
     const params = (ctx.route && ctx.route.params) || {};
     if (params.modus === 'liste' || params.modus === 'wand') modus = params.modus;
 
@@ -891,7 +893,7 @@ export default {
           title: label,
           onClick: () => {
             st.modus = key;
-            try { localStorage.setItem(MODUS_KEY, key); } catch { /* dann eben nur fuer jetzt */ }
+            lokal.schreiben(MODUS_KEY, key);
             render();
           },
         }, icon(I[glyph]), text(label)));

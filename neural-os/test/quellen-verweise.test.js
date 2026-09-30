@@ -171,13 +171,18 @@ test('Gemini: endet ein Beleg mit einem Umbruch, steht die Nummer hinter dem Sat
   }, { mit: 'gemini' });
 });
 
-test('ohneVerweise: Nummern raus, aber nicht aus Code, nicht aus Links', () => {
+test('ohneVerweise: Nummern raus, aber nicht aus Code, nicht aus Links – und nur die, zu denen es eine Quelle gibt', () => {
   assert.equal(
-    fassungen.ohneVerweise('A.[1] B.[1][2] Code `a[1]` und [Link](https://x.de) und [3](https://y.de).\n\n```js\nx[1]\n```\nC.[4]'),
+    fassungen.ohneVerweise('A.[1] B.[1][2] Code `a[1]` und [Link](https://x.de) und [3](https://y.de).\n\n```js\nx[1]\n```\nC.[4]', 4),
     'A. B. Code `a[1]` und [Link](https://x.de) und [3](https://y.de).\n\n```js\nx[1]\n```\nC.',
   );
-  assert.equal(fassungen.ohneVerweise('Ohne Nummern.'), 'Ohne Nummern.');
-  assert.equal(fassungen.ohneVerweise(''), '');
+  assert.equal(fassungen.ohneVerweise('Ohne Nummern.', 3), 'Ohne Nummern.');
+  assert.equal(fassungen.ohneVerweise('', 3), '');
+  // Eine Antwort ohne Quellen: "Schritt [2]" ist Text, kein Verweis.
+  assert.equal(fassungen.ohneVerweise('Dann Schritt [2].', 0), 'Dann Schritt [2].');
+  assert.equal(fassungen.ohneVerweise('Dann Schritt [2].'), 'Dann Schritt [2].');
+  // Mit einer Quelle: nur [1] ist ein Verweis.
+  assert.equal(fassungen.ohneVerweise('Belegt.[1] Siehe Schritt [2].', 1), 'Belegt. Siehe Schritt [2].');
 });
 
 test('Umschreiben einer Markierung bis zur Nummer: die Klammer gehört dazu, kein „]“ bleibt stehen', () => {

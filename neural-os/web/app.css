@@ -501,6 +501,22 @@ mark {
   white-space: nowrap;
 }
 
+/* Darunter der Name dieser KI -- jeder Stick ist eine eigene. */
+.rail__marke {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rail__ki {
+  overflow: hidden;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rail__collapse {
   margin-left: auto;
   width: 32px;
@@ -633,9 +649,63 @@ mark {
 }
 
 .rail__foot {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   margin-top: auto;
   padding-top: 12px;
 }
+
+.rail__foot > .rail__status { flex: 1 1 auto; min-width: 0; }
+
+/* [Beenden]: klein neben dem Status, mit Wort -- ein Ein/Aus ohne Wort raet man nicht. */
+.rail__beenden {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 12px;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  background: none;
+  border: 0;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+
+.rail__beenden:hover:not(:disabled) {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--surface-3) 70%, transparent);
+}
+
+.rail__beenden:disabled { cursor: progress; opacity: 0.7; }
+.rail__beenden svg { width: 18px; height: 18px; }
+
+/* Aus: Verbindung weg oder beendet. Deckt ALLES zu -- von der KI bleibt nichts sichtbar. */
+.aus {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.aus__inhalt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 34rem;
+  text-align: center;
+}
+
+.aus__marke { width: 40px; height: 40px; color: var(--fg-muted); }
+.aus__titel { margin: 8px 0 0; font-size: var(--fs-lg); font-weight: 600; color: var(--fg); }
+.aus__satz { margin: 0; color: var(--fg-muted); }
 
 /* Der Status unten links. Er sagt nur, was /api/status wirklich meldet. */
 .rail__status {

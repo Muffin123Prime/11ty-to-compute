@@ -1469,16 +1469,41 @@ async function verbinden(self, node, ziele, sec, liste) {
  */
 async function zusammenfassung(self, node, token, sec, { nurGespeichert = false, neu = false, button = null } = {}) {
   const { ctx } = self;
+  void token;
+  // Laeuft fuer diesen Eintrag schon eine Anfrage an die KI (die Karte wurde
+  // inzwischen neu gezeichnet, weil sich im Wissen etwas tat), wartet die neue
+  // Karte auf genau diese Antwort -- statt nachzusehen, nichts zu finden und
+  // [Zusammenfassen] anzubieten, das dann ein zweites Mal fragte.
+  if (!self.zfLaeuft) self.zfLaeuft = new Map();
+  const laeuft = nurGespeichert ? self.zfLaeuft.get(node.id) : null;
   if (button) {
     button.disabled = true;
     clear(button);
     button.append(icon(ICON.spark), text('Fasst zusammen …'));
   }
+  if (laeuft) {
+    clear(sec);
+    sec.hidden = false;
+    sec.append(h('div.gh__sec-head', null, h('h4.gh__sec-title', null, text('KI-Zusammenfassung'))),
+      h('div', null, h('button.btn.btn--small', { type: 'button', disabled: true }, icon(ICON.spark), text('Fasst zusammen …'))));
+  }
   let res;
   try {
-    res = await ctx.api.post('/graph/zusammenfassung', { id: node.id, nurGespeichert, neu }, { timeoutMs: nurGespeichert ? 8000 : 60000 });
+    if (laeuft) {
+      res = await laeuft.catch(() => ({ verfuegbar: false, text: null, kiVerbunden: true, grund: null }));
+    } else if (nurGespeichert) {
+      res = await ctx.api.post('/graph/zusammenfassung', { id: node.id, nurGespeichert: true }, { timeoutMs: 8000 });
+    } else {
+      const anfrage = ctx.api.post('/graph/zusammenfassung', { id: node.id, neu }, { timeoutMs: 60000 });
+      self.zfLaeuft.set(node.id, anfrage);
+      try {
+        res = await anfrage;
+      } finally {
+        if (self.zfLaeuft.get(node.id) === anfrage) self.zfLaeuft.delete(node.id);
+      }
+    }
   } catch (err) {
-    if (!self.alive || token !== self.kartenToken) return;
+    if (!self.alive || !sec.isConnected) return;
     if (nurGespeichert) {
       // Nicht einmal das Nachsehen ging: lieber nichts zeigen als etwas Falsches.
       sec.hidden = true;
@@ -1487,7 +1512,8 @@ async function zusammenfassung(self, node, token, sec, { nurGespeichert = false,
     ctx.toast(`Die Zusammenfassung ist gescheitert: ${err && err.message ? err.message : 'unbekannter Fehler'}`, 'error');
     res = null;
   }
-  if (!self.alive || token !== self.kartenToken || self.selectedId !== node.id) return;
+  // Nur in die Karte, die noch steht und denselben Eintrag zeigt.
+  if (!self.alive || !sec.isConnected || self.selectedId !== node.id) return;
   if (!res && button) {
     // Fehlgeschlagen: der Knopf bleibt, wie er war, damit man es noch einmal versuchen kann.
     button.disabled = false;

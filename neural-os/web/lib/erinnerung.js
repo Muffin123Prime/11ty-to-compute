@@ -21,6 +21,7 @@
  */
 
 import { h, text, icon } from './dom.js';
+import * as lokal from './lokal.js';
 
 const STYLE_ID = 'nos-erinnerung';
 /**
@@ -29,9 +30,10 @@ const STYLE_ID = 'nos-erinnerung';
  * faellige Erinnerung also wieder da, statt still verloren zu gehen. Eine
  * Mitteilung des Betriebssystems kommt dagegen nur einmal.
  */
-const ERLEDIGT_KEY = 'neural-os:erinnerungen-erledigt';
-const MITGETEILT_KEY = 'neural-os:erinnerungen-mitgeteilt';
-const MITTEILUNG_KEY = 'neural-os:erinnerung-mitteilung';
+// Namen in lib/lokal.js (dort mit der Kennung dieser KI davor).
+const ERLEDIGT_KEY = 'erinnerungen-erledigt';
+const MITGETEILT_KEY = 'erinnerungen-mitgeteilt';
+const MITTEILUNG_KEY = 'erinnerung-mitteilung';
 
 /** Die Stufen, die das Formular anbietet (Vertrag A). null = keine. */
 export const ERINNERUNG_OPTIONEN = [null, 0, 5, 10, 15, 30, 60, 120, 1440];
@@ -155,14 +157,12 @@ export function wannText(startMs, jetzt) {
 /* ------------------------------------------------------------------ */
 
 function lies(key) {
-  try { return localStorage.getItem(key); } catch { return null; }
+  return lokal.lesen(key, null);
 }
 
 function schreib(key, value) {
-  try {
-    if (value === null) localStorage.removeItem(key);
-    else localStorage.setItem(key, value);
-  } catch { /* privat surfen: dann eben nicht gemerkt */ }
+  if (value === null) lokal.loeschen(key);
+  else lokal.schreiben(key, value);
 }
 
 /** Kann dieser Browser Mitteilungen ueberhaupt? */

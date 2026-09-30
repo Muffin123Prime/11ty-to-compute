@@ -52,6 +52,7 @@
 
 import { h, text, clear, on, icon, cx, debounce } from '../lib/dom.js';
 import { api as defaultApi, ApiError } from '../lib/api.js';
+import * as lokal from '../lib/lokal.js';
 import { renderMarkdown, extractPlain, kopieren } from '../lib/markdown.js';
 import { rolle, wirkungZeilen, uhrzeit, dauerText } from '../lib/agenten.js';
 import {
@@ -82,7 +83,6 @@ import {
 /* ------------------------------------------------------------------ */
 
 const STYLE_ID = 'nos-chat-view';
-const ENTWURF = 'neural-os:chat-entwurf:';
 /** Serverseitige Obergrenze (src/http/api/chat.js), hier gespiegelt, um frueh zu warnen. */
 const MAX_ZEICHEN = 200000;
 /** Eine angehaengte Datei darf hoechstens so viel Text mitbringen. */
@@ -304,7 +304,11 @@ function ereignis(s, typ, p) {
     case 'quelle':
       if (aktiv && p.url) {
         const q = Array.isArray(aktiv.data.quellen) ? aktiv.data.quellen : [];
-        if (!q.some((x) => x.url === p.url)) q.push({ titel: p.titel || p.url, url: p.url, art: p.art || 'zitat', ...(p.id ? { id: p.id, typ: p.typ || null } : {}) });
+        // Wie der Server: dieselbe Adresse mit anderer Kennung ist eine andere
+        // Quelle (zwei Aufgaben desselben Projekts fuehren zum selben Projekt).
+        if (!q.some((x) => x.url === p.url && (x.id || null) === (p.id || null))) {
+          q.push({ titel: p.titel || p.url, url: p.url, art: p.art || 'zitat', ...(p.id ? { id: p.id, typ: p.typ || null } : {}) });
+        }
         aktiv.data.quellen = q;
       }
       break;
@@ -458,14 +462,14 @@ async function stoppen(s, api) {
 /* Kleinigkeiten                                                       */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Der Entwurf im Eingabefeld: nur fuer diesen Tab (siehe
+ * lib/lokal.js) -- auf dem Laptop bleibt kein Text zurueck, wenn er zu ist.
+ */
 function speicher(art, key, value) {
-  try {
-    if (art === 'lesen') return window.localStorage.getItem(key);
-    if (art === 'loeschen') window.localStorage.removeItem(key);
-    else window.localStorage.setItem(key, value);
-  } catch {
-    /* privates Fenster, voller Speicher: der Entwurf ist eine Bequemlichkeit */
-  }
+  if (art === 'lesen') return lokal.entwurf.lesen(key);
+  if (art === 'loeschen') lokal.entwurf.loeschen(key);
+  else lokal.entwurf.schreiben(key, value);
   return null;
 }
 
@@ -2001,7 +2005,8 @@ function baueAnsicht(container, ctx) {
       const q = /^Sucht in deinem Wissen:\s*(.*)$/.exec(a.titel || '');
       const l = /^Liest:\s*(.*)$/.exec(a.titel || '');
       if (q) satz = `In deinem Wissen gesucht: ${q[1]}${a.ergebnis && !fehler ? ` · ${a.ergebnis}` : ''}`;
-      else if (l) satz = `Gelesen: ${l[1]}`;
+      // Ging das Lesen nicht, war es auch nicht „gelesen“.
+      else if (l) satz = fehler ? `Nicht gelesen: ${l[1]}` : `Gelesen: ${l[1]}`;
       else satz = a.titel || r.name;
     } else {
       satz = `${a.titel || r.name}${a.ergebnis && !fehler ? ` · ${a.ergebnis}` : ''}`;
@@ -2600,7 +2605,7 @@ function baueAnsicht(container, ctx) {
       feld.value = '';
       gesprochen = false;
       groesseAnpassen();
-      speicher('loeschen', ENTWURF + (chatId || 'neu'));
+      speicher('loeschen', chatId || 'neu');
     }
     if (!chatId) {
       try {
@@ -2824,7 +2829,7 @@ function baueAnsicht(container, ctx) {
   }));
 
   const entwurfMerken = debounce(() => {
-    const key = ENTWURF + (chatId || 'neu');
+    const key = chatId || 'neu';
     if (feld.value.trim()) speicher('schreiben', key, feld.value);
     else speicher('loeschen', key);
   }, 300);
@@ -3390,7 +3395,7 @@ function baueAnsicht(container, ctx) {
 
   async function start() {
     aktualisiereEingabe();
-    const entwurf = speicher('lesen', ENTWURF + (chatId || 'neu'));
+    const entwurf = speicher('lesen', chatId || 'neu');
     if (entwurf) {
       feld.value = entwurf;
       groesseAnpassen();
@@ -3460,7 +3465,7 @@ function baueAnsicht(container, ctx) {
       try { off(); } catch { /* weiter */ }
     }
     // Was im Feld stand, bleibt fuer das naechste Mal.
-    const key = ENTWURF + (chatId || 'neu');
+    const key = chatId || 'neu';
     if (feld.value.trim()) speicher('schreiben', key, feld.value);
   }
 

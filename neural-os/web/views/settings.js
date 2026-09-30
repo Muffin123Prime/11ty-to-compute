@@ -50,6 +50,7 @@ export default {
   async mount(container, ctx) {
     ensureStyle();
     abbauen();
+    const params0 = (ctx.route && ctx.route.params) || {};
     const self = {
       ctx,
       api: ctx.api,
@@ -68,7 +69,9 @@ export default {
         ipad: null,         // {link, bis, verbunden?:string, seit:number}
         busy: new Set(),
         pinMeldung: null,
-        gedaechtnisAlle: false,
+        // Ein Sprung zu einem bestimmten Eintrag (etwa von „Gemerkt“ im Chat):
+        // dann alle zeigen, damit auch ein aelterer dasteht.
+        gedaechtnisAlle: params0.bereich === 'gedaechtnis' && !!params0.id,
         allesVergessenFragen: false,
       },
     };
@@ -195,6 +198,7 @@ function geruestBauen(self) {
   self.dom.fortgeschritten = h('div.setv__body');
   self.container.appendChild(h('div.page.setv', null,
     self.dom.hinweis,
+    gruppe(self, 'name', { titel: 'Name dieser KI', symbol: I.brand || I.cloud, satz: 'Steht oben in der App und auf anderen Sticks („Anderer Stick: …“).' }),
     gruppe(self, 'ki', { titel: 'KI', symbol: I.brand || I.cloud, satz: 'Gemini (kostenlos) oder Claude. Antwortet, sucht im Internet, denkt mit.' }),
     gruppe(self, 'gedaechtnis', { titel: 'Gedächtnis', symbol: SYMBOLE.gedaechtnis, satz: 'Was sich die KI über dich gemerkt hat. Sie liest es bei jeder Antwort mit.' }),
     gruppe(self, 'schutz', { titel: 'Schutz', symbol: I.lock, satz: 'Eine PIN, damit niemand liest, wer den Stick findet.' }),
@@ -211,6 +215,7 @@ function geruestBauen(self) {
 
 function allesZeichnen(self) {
   zeichneHinweis(self);
+  zeichneName(self);
   zeichneKi(self);
   zeichneGedaechtnis(self);
   zeichneSchutz(self);
@@ -343,6 +348,66 @@ function zumBereich(self, key, id = null) {
     try { ziel.scrollIntoView({ block: eintrag ? 'center' : 'start', behavior: 'smooth' }); } catch { ziel.scrollIntoView(); }
   }, 60);
   setTimeout(() => ziel.classList.remove('is-ziel'), 2600);
+}
+
+/* ------------------------------------------------------------------ */
+/* Name dieser KI (docs/STICK-BAUPLAN.md 1.8, Paket W2)                */
+/* ------------------------------------------------------------------ */
+
+function zeichneName(self) {
+  const { body } = self.dom.name;
+  clear(body);
+  const st = self.daten.status;
+  const ki = st && st.ki ? st.ki : null;
+  status(self, 'name', null, ki && ki.name ? ki.name : '');
+  if (!ki) {
+    body.appendChild(nichtAbrufbar(self.fehler.status, 'Der Name ließ sich nicht lesen'));
+    return;
+  }
+  if (!besitzer(self)) {
+    body.appendChild(satz('Ändern geht nur am Laptop, auf dem diese KI läuft.', '.meta'));
+    return;
+  }
+  const meldung = h('p.setv__meldung', { role: 'status' });
+  const feld = h('input.input', {
+    type: 'text',
+    value: ki.name || '',
+    maxlength: '60',
+    autocomplete: 'off',
+    spellcheck: 'false',
+    'aria-label': 'Name dieser KI',
+    onKeydown: (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        speichern();
+      }
+    },
+  });
+  const speichern = async () => {
+    const wert = feld.value.trim();
+    if (!wert) {
+      meldung.textContent = 'Der Name darf nicht leer sein.';
+      meldung.className = 'setv__meldung is-danger';
+      return;
+    }
+    try {
+      const r = await self.api.post('/ki/name', { name: wert }, { timeoutMs: 10000 });
+      if (!self.alive) return;
+      if (self.daten.status) self.daten.status = { ...self.daten.status, ki: (r && r.ki) || { ...ki, name: wert } };
+      // Oben in der Schale sofort der neue Name.
+      if (self.ctx.state && typeof self.ctx.state.set === 'function') self.ctx.state.set('kiName', wert);
+      self.ctx.toast(`Diese KI heißt jetzt „${wert}“.`, 'success');
+      zeichneName(self);
+    } catch (err) {
+      if (!self.alive) return;
+      meldung.textContent = fehlerText(err);
+      meldung.className = 'setv__meldung is-danger';
+    }
+  };
+  body.appendChild(h('div.setv__zeile', null,
+    h('label.setv__feld.setv__feld--breit', null, h('span.label', null, text('Name dieser KI')), feld),
+    knopf(self, 'Speichern', speichern, { art: '.btn--primary', schluessel: 'ki-name' })));
+  body.appendChild(meldung);
 }
 
 /* ------------------------------------------------------------------ */
@@ -847,10 +912,10 @@ function zeichnePinEinrichten(self, body) {
     return;
   }
   let feldEl;
-  // Voreingestellt AN: wer eine PIN einrichtet, sitzt fast immer am eigenen
-  // Laptop. Ein nicht gemerkter Rechner braucht beim Start den PIN-Bildschirm
-  // (Stick-Bauplan, Paket V); den gibt es noch nicht.
-  const merken = merkenSchalter(self, true);
+  // Nicht voreingestellt: ein nicht gemerkter Rechner fragt beim Start im
+  // Browser nach der PIN (der Vorraum, Stick-Bauplan Paket V). Merken ist
+  // eine Entscheidung fuer den eigenen Laptop -- nicht fuer den der Schule.
+  const merken = merkenSchalter(self, false);
   const fertig = async () => {
     const wert = feldEl.querySelector('input').value;
     if (wert !== p.erste) {
@@ -885,7 +950,6 @@ function zeichnePinEinrichten(self, body) {
   body.appendChild(merken.el);
   body.appendChild(meldung);
   body.appendChild(satz('Wichtig: Ohne die PIN kommt niemand mehr an die Daten – auch du nicht. Schreib sie dir auf und leg den Zettel nicht zum Stick.', '.is-warn'));
-  body.appendChild(satz('Noch nicht fertig: Beim Start im Browser nach der PIN fragen kann Neural OS noch nicht. Bis das kommt, startet ein Stick mit PIN nur an gemerkten Rechnern – deshalb ist „merken“ hier voreingestellt.', '.meta'));
 }
 
 function zeichnePinAendern(self, body, wort) {
@@ -1171,7 +1235,7 @@ function zeichneDarstellung(self) {
           zeichneDarstellung(self);
         },
       }, text(wort)))),
-    h('span.meta', null, text('Gilt sofort, für diesen Browser.'))));
+    h('span.meta', null, text('Gilt sofort – und auf jedem Rechner, an dem diese KI läuft.'))));
 }
 
 /* ------------------------------------------------------------------ */

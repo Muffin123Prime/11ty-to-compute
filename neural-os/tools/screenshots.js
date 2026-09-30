@@ -70,8 +70,8 @@ const VIEWS = [
   ['network', 'netz'], ['stick', 'stick'],
 ];
 
-/** Hell ist eine Wahl, keine Systemvorgabe: dunkel ist die Voreinstellung. */
-const THEMA = 'neural-os:theme';
+/** Hell ist eine Wahl, keine Systemvorgabe: dunkel ist die Voreinstellung. Gemerkt je KI (web/lib/lokal.js). */
+const THEMA = () => `neural-os:${app.ki.id}:design`;
 
 let n = 0;
 const gemacht = [];
@@ -135,7 +135,7 @@ async function los(page, base, view, warten = 1000) {
       colorScheme: theme,
       hasTouch: !!opts.finger,
     });
-    await c.addInitScript(([k, t]) => { try { localStorage.setItem(k, t); } catch { /* egal */ } }, [THEMA, theme]);
+    await c.addInitScript(([k, t]) => { try { localStorage.setItem(k, t); } catch { /* egal */ } }, [THEMA(), theme]);
     const p = await c.newPage();
     p.on('pageerror', (e) => konsole.push(`${theme}: ${e.message.slice(0, 100)}`));
     p.on('console', (m) => { if (m.type() === 'error') konsole.push(`${theme}: ${m.text().slice(0, 100)}`); });
@@ -428,14 +428,14 @@ async function los(page, base, view, warten = 1000) {
     // Kalender hell, und auf dem iPad des Nutzers (quer, mit dem Finger).
     for (const [mode, name] of [['woche', 'woche'], ['monat', 'monat']]) {
       const { c, p } = await mach('light');
-      await p.addInitScript((m) => { try { localStorage.setItem('neural-os:kalender-ansicht', m); } catch { /* egal */ } }, mode);
+      await p.addInitScript(([k, m]) => { try { localStorage.setItem(k, m); } catch { /* egal */ } }, [`neural-os:${app.ki.id}:kalender-ansicht`, mode]);
       await los(p, base, 'kalender', 1400);
       await step(`Kalender: ${name} (hell)`, async () => { await shot(p, `kalender-${name}-hell`); });
       await c.close();
     }
     for (const [mode, name] of [['woche', 'woche'], ['monat', 'monat'], ['tag', 'tag'], ['liste', 'liste']]) {
       const { c, p } = await mach('dark', { breite: 1180, hoehe: 820, finger: true });
-      await p.addInitScript((m) => { try { localStorage.setItem('neural-os:kalender-ansicht', m); } catch { /* egal */ } }, mode);
+      await p.addInitScript(([k, m]) => { try { localStorage.setItem(k, m); } catch { /* egal */ } }, [`neural-os:${app.ki.id}:kalender-ansicht`, mode]);
       await los(p, base, 'kalender', 1400);
       await step(`Kalender: ${name} (iPad quer)`, async () => { await shot(p, `ipad-quer-kalender-${name}-dunkel`); });
       await c.close();

@@ -213,6 +213,12 @@ function register(router) {
    * Statuscode. Danach gibt es keinen Statuscode mehr -- deshalb ist
    * `fertig` garantiert das letzte Ereignis.
    */
+  /** Darf, wer fragt, Agenten starten (agent_starten)? Der Besitzer immer, ein Zugang nur mit dem Recht `agents`. */
+  function darfAgenten(rc) {
+    const id = rc.identity || {};
+    return id.kind === 'owner' || id.permissions === 'all' || !!(id.permissions && id.permissions.agents === true);
+  }
+
   async function strom(rc, record, starten, vorab) {
     const chat = chatService(rc);
     vorab(chat);
@@ -265,7 +271,7 @@ function register(router) {
     const record = getChatRecord(rc, rc.params.id);
     const effort = typeof body.effort === 'string' ? body.effort : undefined;
     return strom(rc, record, (chat, signal, onEvent) => chat.send({
-      chatId: record.id, content, anhaenge, effort, signal, onEvent,
+      chatId: record.id, content, anhaenge, effort, signal, onEvent, darfAgenten: darfAgenten(rc),
     }), (chat) => {
       if (typeof chat.send !== 'function') need(null, 'Das Senden von Nachrichten');
       if (anhaenge.length && typeof chat.anhaengePruefen === 'function') chat.anhaengePruefen(record.id, anhaenge);
@@ -307,7 +313,7 @@ function register(router) {
     const messageId = typeof body.messageId === 'string' && body.messageId ? body.messageId : undefined;
     const record = getChatRecord(rc, rc.params.id);
     return strom(rc, record, (svc, signal, onEvent) => svc.neuAntworten({
-      chatId: record.id, signal, onEvent, effort, variante, stil: body.stil, messageId,
+      chatId: record.id, signal, onEvent, effort, variante, stil: body.stil, messageId, darfAgenten: darfAgenten(rc),
     }), () => {
       if (variante !== undefined && (typeof variante !== 'string' || !Object.prototype.hasOwnProperty.call(fassungen.VARIANTEN, variante))) {
         throw new ValidationError(`Unbekannte Variante „${String(variante).slice(0, 40)}“. Möglich: ${Object.keys(fassungen.VARIANTEN).join(', ')}.`);
@@ -463,7 +469,7 @@ function register(router) {
     const record = getChatRecord(rc, rc.params.id);
     const messageId = rc.params.messageId;
     return strom(rc, record, (svc, signal, onEvent) => svc.bearbeiten({
-      chatId: record.id, messageId, content, signal, onEvent,
+      chatId: record.id, messageId, content, signal, onEvent, darfAgenten: darfAgenten(rc),
       effort: typeof body.effort === 'string' ? body.effort : undefined,
     }), () => {
       const m = chat.messages(record.id).items.find((x) => x.id === messageId);
@@ -580,7 +586,7 @@ function register(router) {
       throw new NeuralError('RUECKFRAGE_ERLEDIGT', 'Diese Rückfrage ist schon erledigt.', { status: 409 });
     }
     return strom(rc, record, (svc, signal, onEvent) => svc.antworten({
-      chatId: record.id, id, antwort, signal, onEvent,
+      chatId: record.id, id, antwort, signal, onEvent, darfAgenten: darfAgenten(rc),
       effort: typeof body.effort === 'string' ? body.effort : undefined,
     }), () => {
       zugangPruefen(rc);

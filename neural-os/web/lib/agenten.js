@@ -158,7 +158,8 @@ export const ARTEN = Object.freeze({
   memory: { wort: 'Gemerkt', symbol: 'graph', oeffnen: 'Im Gedächtnis zeigen' },
   project: { wort: 'Projekt', symbol: 'projects', oeffnen: 'Projekt öffnen' },
   task: { wort: 'Aufgabe', symbol: 'check', oeffnen: 'Zum Projekt' },
-  run: { wort: 'Hintergrund-Agent', symbol: 'agents', oeffnen: 'Ansehen' },
+  // Ein Lauf: ein Hintergrund-Agent aus dem Chat oder ein Agent, den ein anderer startete.
+  run: { wort: 'Agent', symbol: 'agents', oeffnen: 'Ansehen' },
 });
 
 /**

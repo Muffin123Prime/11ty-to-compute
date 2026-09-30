@@ -133,7 +133,8 @@ async function main() {
     // dem System gar nicht -- "hell" hiesse sonst, zweimal dunkel zu pruefen.
     for (const theme of ['light', 'dark']) {
       const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, colorScheme: theme });
-      await context.addInitScript((t) => { try { localStorage.setItem('neural-os:theme', t); } catch { /* egal */ } }, theme);
+      // Gemerkt wird je KI (web/lib/lokal.js): neural-os:<kiId>:design.
+      await context.addInitScript(([k, t]) => { try { localStorage.setItem(k, t); } catch { /* egal */ } }, [`neural-os:${app.ki.id}:design`, theme]);
       const problems = [];
       for (const view of ALL_VIEWS) {
         const page = await context.newPage();
@@ -644,7 +645,7 @@ function pruefeMarken() {
  * Chat, und der Zustand bleibt. Geprueft wird am Zustand des Dokuments und an
  * gemessenen Breiten, nicht an einem Bild.
  */
-async function pruefeSchale(page, base, store) {
+async function pruefeSchale(page, base, store, app) {
   const warte = (ms) => page.waitForTimeout(ms);
   const zustand = () => page.evaluate(() => {
     const shell = document.querySelector('.shell');
@@ -665,7 +666,7 @@ async function pruefeSchale(page, base, store) {
 
   // Sauber anfangen: nichts Gemerktes aus einem frueheren Lauf.
   await page.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
-  await page.evaluate(() => { try { localStorage.removeItem('neural-os:seiten'); } catch { /* egal */ } });
+  await page.evaluate((k) => { try { localStorage.removeItem(k); } catch { /* egal */ } }, `neural-os:${app.ki.id}:seiten`);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await warte(1000);
   await dismissWelcome(page);

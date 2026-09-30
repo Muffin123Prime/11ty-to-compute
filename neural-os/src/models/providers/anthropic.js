@@ -318,8 +318,46 @@ function anfrageBauen(p) {
   if (!Array.isArray(p.nachrichten) || !p.nachrichten.length) {
     throw new ValidationError('Es wurden keine Nachrichten an Claude übergeben.');
   }
-  body.messages = p.nachrichten;
+  body.messages = p.websuche === false ? ohneServerSuche(p.nachrichten) : p.nachrichten;
   return { body, betas };
+}
+
+/** Bloecke der Websuche, die Anthropic selbst ausfuehrt (server tools). */
+const SUCH_BLOECKE = new Set(['server_tool_use', 'web_search_tool_result', 'web_fetch_tool_result']);
+
+/**
+ * Ohne Websuche (Modus „Mein Wissen“) steht sie auch nicht in `tools`.
+ * Fruehere Zuege desselben Chats koennen aber Suchbloecke tragen -- ohne das
+ * Werkzeug dazu ist nicht sicher, dass Anthropic die Anfrage annimmt. Also
+ * gehen diese Bloecke dann nicht mit, und Textbloecke verlieren ihre Zitate
+ * (die auf die Suchergebnisse zeigen); ihr Text bleibt.
+ */
+function ohneServerSuche(nachrichten) {
+  let anders = false;
+  const out = nachrichten.map((n) => {
+    if (!n || n.role !== 'assistant' || !Array.isArray(n.content)) return n;
+    let hier = false;
+    const content = [];
+    for (const b of n.content) {
+      if (b && SUCH_BLOECKE.has(b.type)) {
+        hier = true;
+        continue;
+      }
+      if (b && b.type === 'text' && Array.isArray(b.citations)) {
+        const { citations, ...rest } = b;
+        void citations;
+        content.push(rest);
+        hier = true;
+        continue;
+      }
+      content.push(b);
+    }
+    if (!hier) return n;
+    anders = true;
+    // Eine Antwort, die nur aus der Suche bestand, braucht trotzdem einen Block.
+    return { ...n, content: content.length ? content : [{ type: 'text', text: '…' }] };
+  });
+  return anders ? out : nachrichten;
 }
 
 function koepfe(apiKey, betas) {

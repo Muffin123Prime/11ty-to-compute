@@ -27,14 +27,21 @@
 
 import { h, text, clear, on, list, icon, cx, frag, timeAgo, formatNumber, formatDate, debounce, snippet } from './lib/dom.js';
 import { api, ApiError } from './lib/api.js';
+import * as lokal from './lib/lokal.js';
 
 const APP_VERSION = '2';
+/**
+ * Was sich dieser Browser merkt -- Namen in lib/lokal.js, dort mit der
+ * Kennung dieser KI davor (zwei Sticks am selben Laptop sehen nichts
+ * voneinander). Design und Seitenleisten stehen ausserdem in config.ui und
+ * reisen so mit dem Stick zu jedem Rechner.
+ */
 const STORAGE = {
-  theme: 'neural-os:theme',
-  chat: 'neural-os:active-chat',
+  theme: 'design',
+  chat: 'aktiver-chat',
   // Eingeklappt oder offen, je Bildschirmklasse: wer auf dem Laptop die
   // rechte Spalte zuklappt, will sie deshalb nicht auch auf dem iPad zu haben.
-  seiten: 'neural-os:seiten',
+  seiten: 'seiten',
 };
 
 /* ------------------------------------------------------------------ */
@@ -42,6 +49,8 @@ const STORAGE = {
 /* ------------------------------------------------------------------ */
 
 const ICONS = {
+  // Ein/Aus: Neural OS beenden (der Tresor ist dann zu, der Stick kann raus).
+  power: '<path d="M10 3.2v6.2"/><path d="M6.1 5.6a6.2 6.2 0 1 0 7.8 0"/>',
   // Das Zeichen der App: eine Umlaufbahn (das System) und ein Knoten in ihrer
   // Mitte, der ueber den Rand hinaus eine Verbindung haelt (das Neuron). Es
   // steht auch in tools/make-icons.js (MARK) und im Favicon in index.html --
@@ -260,6 +269,9 @@ export function tileHead({ icon: markup, title, count, meta, href } = {}) {
 /* ------------------------------------------------------------------ */
 
 function createShell() {
+  // Die Kennung dieser KI kommt erst mit /api/status; bis dahin gilt die, deren
+  // Vorlieben hier schon liegen -- damit Design und Seiten nicht aufblitzen.
+  lokal.vorlaeufig();
   const state = createState({
     status: null,
     statusStale: true,
@@ -289,6 +301,9 @@ function createShell() {
   let currentView = null;
   let renderedRoute = null;
   let eventStream = null;
+  /** null | {art:'weg'} (Verbindung weg) | {art:'beendet', danach} -- dann deckt „Neural OS ist aus.“ alles zu. */
+  let aus = null;
+  let ausUhr = null;
 
   /* ---------------------------------------------------------------- */
   /* Live-Ereignisse vom Server                                        */
@@ -328,6 +343,7 @@ function createShell() {
     try {
       const status = await api.get('/status', { timeoutMs: 8000 });
       if (zumVorraum(status)) return status;
+      kiUebernehmen(status);
       state.set('status', status);
       state.set('statusStale', false);
       state.set('statusError', null);
@@ -464,6 +480,9 @@ function createShell() {
       });
     }
 
+    // Umbenannt (Einstellungen, auch an einem anderen Geraet): oben sofort der neue Name.
+    if (type === 'ki.umbenannt' && payload && typeof payload.name === 'string') state.set('kiName', payload.name.trim() || null);
+
     if (type === 'vault.locked') toast('Der Tresor wurde gesperrt.', 'info');
     if (type === 'vault.unlocked') toast('Der Tresor ist entsperrt.', 'success');
   }
@@ -486,6 +505,179 @@ function createShell() {
     }
     const route = state.get('route');
     if (!route || route.view !== parseRoute(ziel).view) navigate(ziel);
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Aus: Verbindung weg oder beendet (docs/STICK-BAUPLAN.md 1.4, W1)   */
+  /* ---------------------------------------------------------------- */
+
+  /** Laeuft Neural OS vom Stick? (status.portable: Objekt, im Vorraum ein Wahrheitswert) */
+  function vomStick() {
+    const st = state.get('status');
+    return !!(st && st.portable);
+  }
+
+  /**
+   * Ist der Ereignisstrom laenger als 5 s weg, ist Neural OS aus (Stick
+   * gezogen, beendet, abgestuerzt): dann verdeckt eine Seite alles -- von der
+   * KI bleibt nichts sichtbar. Kommt die Verbindung wieder (Laptop war im
+   * Ruhezustand), geht sie weg.
+   */
+  function verbindungBeobachten(verbunden) {
+    if (verbunden) {
+      clearTimeout(ausUhr);
+      ausUhr = null;
+      if (aus && aus.art === 'weg') ausZeigen(null);
+      return;
+    }
+    if (ausUhr || aus) return;
+    ausUhr = setTimeout(() => {
+      ausUhr = null;
+      // Fehlt nur die PIN, laeuft Neural OS -- dann ist es nicht aus.
+      if (!state.get('connected') && !state.get('pin')) ausZeigen({ art: 'weg' });
+    }, 5000);
+  }
+
+  function ausZeigen(wie) {
+    aus = wie;
+    let box = document.getElementById('aus');
+    if (!wie) {
+      if (box) box.remove();
+      if (dom.shell) dom.shell.inert = false;
+      tabTitel();
+      return;
+    }
+    if (!box) {
+      box = h('div.aus#aus', { role: 'alert' });
+      document.body.appendChild(box);
+    }
+    clear(box);
+    const stick = vomStick();
+    let titel;
+    let satz;
+    if (wie.art === 'beendet') {
+      titel = stick
+        ? (wie.danach === 'auswerfen' ? 'Gespeichert. Stick im Finder auswerfen.' : 'Gespeichert. Stick kann raus.')
+        : 'Gespeichert. Neural OS ist aus.';
+      satz = stick ? null : 'Zum Öffnen „Neural OS starten“ doppelklicken.';
+    } else {
+      titel = 'Neural OS ist aus.';
+      satz = stick ? 'Zum Öffnen den Starter auf dem Stick doppelklicken.' : 'Zum Öffnen „Neural OS starten“ doppelklicken.';
+    }
+    box.append(h('div.aus__inhalt', null,
+      icon(ICONS.brand, { class: 'aus__marke' }),
+      h('p.aus__titel', null, text(titel)),
+      satz ? h('p.aus__satz', null, text(satz)) : null));
+    // Nichts darunter bleibt bedienbar oder vorlesbar.
+    if (dom.shell) dom.shell.inert = true;
+    tabTitel();
+  }
+
+  /** [Beenden]: POST /api/system/beenden (gleicht ab, speichert, beendet), dann der Endtext. */
+  let beendetGerade = false;
+  async function beenden() {
+    if (beendetGerade) return;
+    beendetGerade = true;
+    if (dom.beenden) {
+      dom.beenden.disabled = true;
+      dom.beenden.querySelector('.rail__beenden-label').textContent = 'Wird gespeichert …';
+    }
+    let r = null;
+    try {
+      r = await api.post('/system/beenden', {}, { timeoutMs: 60000 });
+    } catch (err) {
+      beendetGerade = false;
+      if (dom.beenden) {
+        dom.beenden.disabled = false;
+        dom.beenden.querySelector('.rail__beenden-label').textContent = 'Beenden';
+      }
+      toast(`Beenden ging nicht: ${err && err.message ? err.message : 'unbekannter Fehler'}`, 'error');
+      return;
+    }
+    if (eventStream) {
+      const stream = eventStream;
+      eventStream = null;
+      stream.close();
+    }
+    clearTimeout(ausUhr);
+    ausUhr = null;
+    ausZeigen({ art: 'beendet', danach: r && r.danach });
+  }
+
+  /** Ist dieses Geraet das, auf dem Neural OS laeuft? Ein iPad sieht kein [Beenden]. */
+  async function besitzerPruefen() {
+    try {
+      const r = await api.get('/ipad', { timeoutMs: 8000 });
+      if (dom.beenden) dom.beenden.hidden = !!(r && r.besitzer === false);
+    } catch {
+      /* unbekannt: der Knopf bleibt, der Server sagt beim Tippen, was geht */
+    }
+  }
+
+  function kiNameZeigen(name) {
+    if (!dom.kiName) return;
+    dom.kiName.hidden = !name;
+    dom.kiName.textContent = name || '';
+    if (dom.rail) {
+      const brand = dom.rail.querySelector('.rail__brand');
+      if (brand) brand.setAttribute('aria-label', name ? `${name} – neuer Chat` : 'Neural OS – neuer Chat');
+    }
+    tabTitel();
+  }
+
+  /**
+   * Welche KI antwortet (status.ki): ab jetzt traegt jede Anfrage ihre
+   * Kennung (X-Neural-OS; ein Tab einer anderen KI bekommt 409 und laedt
+   * neu), der Browser merkt sich nur noch unter ihr, und ihr Name steht
+   * oben. Kam eine andere KI als vermutet, gelten deren Vorlieben.
+   */
+  function kiUebernehmen(status) {
+    const ki = status && status.ki && typeof status.ki.id === 'string' ? status.ki : null;
+    if (ki) {
+      api.kiSetzen(ki.id);
+      if (lokal.kiSetzen(ki.id)) {
+        uiVomServer = true;
+        try {
+          state.set('theme', readTheme());
+          state.set('seiten', { ...storedSides(currentMode()), modus: currentMode() });
+          applySides();
+        } finally {
+          uiVomServer = false;
+        }
+      }
+      state.set('kiName', typeof ki.name === 'string' && ki.name.trim() ? ki.name.trim() : null);
+    }
+    uiAnwenden(status && status.ui);
+  }
+
+  /** Design und Seitenleisten aus config.ui (sie reisen mit dem Stick). */
+  let uiVomServer = false;
+  let uiGesehen = false;
+  function uiAnwenden(ui) {
+    if (!ui || typeof ui !== 'object') return;
+    uiVomServer = true;
+    try {
+      if (['light', 'dark', 'system'].includes(ui.design)) state.set('theme', ui.design);
+      // Die Seiten nur beim ersten Mal: danach gilt, was hier geklickt wird.
+      if (!uiGesehen && ui.seiten && typeof ui.seiten === 'object') {
+        uiGesehen = true;
+        lokal.schreibenJson(STORAGE.seiten, ui.seiten);
+        const mode = currentMode();
+        state.set('seiten', { ...storedSides(mode), modus: mode });
+        applySides();
+      }
+    } finally {
+      uiVomServer = false;
+    }
+  }
+
+  /** Eine Vorliebe auch auf dem Stick ablegen (config.ui). Ein iPad darf das nicht -- dann bleibt sie hier. */
+  const uiSpeichernBald = debounce((patch) => {
+    api.patch('/config', { ui: patch }, { timeoutMs: 8000 }).catch(() => {});
+  }, 600);
+  function uiSpeichern(patch) {
+    if (uiVomServer) return;
+    uiSpeichernBald(patch);
   }
 
   /**
@@ -521,6 +713,7 @@ function createShell() {
         const connected = connState === 'open';
         state.set('connected', connected);
         state.set('connectionInfo', { state: connState, ...info });
+        verbindungBeobachten(connected);
         if (connected) {
           state.set('pin', null);
           // Nach einer Unterbrechung kann eine Aenderung verpasst sein.
@@ -575,6 +768,7 @@ function createShell() {
     }
     all[mode] = { links: sides.links, rechts: sides.rechts };
     writeStored(STORAGE.seiten, JSON.stringify(all));
+    uiSpeichern({ seiten: all });
   }
 
   function applySides() {
@@ -671,7 +865,10 @@ function createShell() {
       onClick: startNewChat,
     },
     icon(ICONS.brand, { class: 'rail__brand-mark' }),
-    h('span.rail__wordmark', { 'aria-hidden': 'true' }, text('Neural OS')));
+    h('span.rail__marke', null,
+      h('span.rail__wordmark', { 'aria-hidden': 'true' }, text('Neural OS')),
+      // Jeder Stick ist eine eigene KI -- ihr Name steht oben (status.ki.name).
+      dom.kiName = h('span.rail__ki', { hidden: true })));
 
     dom.collapseLeft = h('button.icon-button.rail__collapse', {
       type: 'button',
@@ -716,11 +913,20 @@ function createShell() {
       },
     });
 
+    // [Beenden]: speichern, gleichen, beenden -- danach kann der Stick raus.
+    // Nur am Geraet selbst (ein verbundenes iPad darf das nicht).
+    dom.beenden = h('button.rail__beenden', {
+      type: 'button',
+      title: 'Beenden – alles wird gespeichert, danach kann der Stick raus',
+      'aria-label': 'Neural OS beenden',
+      onClick: () => beenden(),
+    }, icon(ICONS.power), h('span.rail__beenden-label', null, text('Beenden')));
+
     rail.appendChild(h('div.rail__inner', null,
       h('div.rail__head', null, brand, dom.collapseLeft),
       nav,
       dom.recent,
-      h('div.rail__foot', null, dom.statusButton)));
+      h('div.rail__foot', null, dom.statusButton, dom.beenden)));
   }
 
   function renderRecent() {
@@ -804,7 +1010,25 @@ function createShell() {
       clear(dom.routeTitle);
       dom.routeTitle.appendChild(text(title));
     }
-    document.title = title === 'Neural OS' ? 'Neural OS' : `${title} · Neural OS`;
+    tabTitel();
+  }
+
+  /**
+   * Der Titel des Tabs: Bereich und Name der KI -- NIE der Titel eines Chats
+   * oder einer Notiz. Er steht im Verlauf des Browsers und in der Taskleiste
+   * eines fremden Rechners (docs/STICK-BAUPLAN.md, Paket W1).
+   */
+  function tabTitel() {
+    const name = state.get('kiName') || 'Neural OS';
+    if (aus) {
+      document.title = 'Neural OS';
+      return;
+    }
+    const route = state.get('route');
+    const view = route ? VIEWS.find((v) => v.id === route.view) : null;
+    // „Neuer Chat“ ist der Knopf in der Leiste; der Bereich heisst „Chat“.
+    const bereich = view ? (view.id === 'chat' ? 'Chat' : view.title) : '';
+    document.title = bereich && bereich !== name ? `${bereich} · ${name}` : name;
   }
 
   function setHeadActions(nodes) {
@@ -2074,10 +2298,12 @@ function createShell() {
       throw new Error('Das Grundgerüst der Seite fehlt (index.html wurde nicht vollständig geladen).');
     }
 
+    state.on('kiName', (name) => kiNameZeigen(name));
     applyTheme(state.get('theme'));
     state.on('theme', (theme) => {
       applyTheme(theme);
       writeStored(STORAGE.theme, theme);
+      uiSpeichern({ design: theme });
     });
 
     try {
@@ -2161,7 +2387,9 @@ function createShell() {
       if (document.visibilityState === 'visible') refreshStatus();
     }, 60000);
 
-    registerServiceWorker();
+    // Erst jetzt ist bekannt, ob Neural OS vom Stick laeuft.
+    serviceWorkerFuer(state.get('status'));
+    besitzerPruefen();
     import('./lib/erinnerung.js').then((m) => m.starteErinnerungen({ api, bus, navigate })).catch((err) => console.warn('[neural-os] Erinnerungen nicht verfügbar:', err && err.message));
 
     on(window, 'beforeunload', () => {
@@ -2359,30 +2587,17 @@ function isMac() {
   return /mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent || '');
 }
 
-/** localStorage kann werfen (privates Fenster, abgeschalteter Speicher). */
+/** Ueber lib/lokal.js: mit der Kennung dieser KI, und nie Inhalt. */
 function readStored(key, fallback) {
-  try {
-    const value = window.localStorage.getItem(key);
-    return value === null ? fallback : value;
-  } catch {
-    return fallback;
-  }
+  return lokal.lesen(key, fallback);
 }
 
 function writeStored(key, value) {
-  try {
-    window.localStorage.setItem(key, value);
-  } catch {
-    /* ohne Speicher ueberlebt die Vorliebe nur den Neustart nicht */
-  }
+  lokal.schreiben(key, value);
 }
 
 function removeStored(key) {
-  try {
-    window.localStorage.removeItem(key);
-  } catch {
-    /* siehe oben */
-  }
+  lokal.loeschen(key);
 }
 
 /** Dunkel ist die Voreinstellung; hell und "System" nur, wenn gewaehlt. */
@@ -2399,6 +2614,39 @@ function readTheme() {
  * Stand. Beim allerersten Besuch uebernimmt der Worker nur dieselben Dateien;
  * das ist kein Grund zum Neuladen.
  */
+/**
+ * Laeuft Neural OS vom Stick (status.portable), gibt es keinen Service
+ * Worker: sonst laege die Schale im Zwischenspeicher des fremden Rechners,
+ * und ein zweiter Stick unter derselben Adresse bekaeme sie. Ein Worker von
+ * frueher wird abgemeldet und sein Zwischenspeicher geloescht
+ * (docs/STICK-BAUPLAN.md, Paket W1). Zu Hause bleibt alles wie bisher.
+ */
+function serviceWorkerFuer(status) {
+  const portabel = !!(status && status.portable);
+  if (!portabel) {
+    registerServiceWorker();
+    return;
+  }
+  serviceWorkerWeg();
+}
+
+function serviceWorkerWeg() {
+  try {
+    if ('serviceWorker' in navigator && typeof navigator.serviceWorker.getRegistrations === 'function') {
+      navigator.serviceWorker.getRegistrations()
+        .then((alle) => Promise.all(alle.map((r) => r.unregister())))
+        .catch(() => {});
+    }
+    if (typeof caches !== 'undefined' && typeof caches.keys === 'function') {
+      caches.keys()
+        .then((namen) => Promise.all(namen.filter((n) => n.startsWith('neural-os-shell-')).map((n) => caches.delete(n))))
+        .catch(() => {});
+    }
+  } catch {
+    /* nichts da, was weg muesste */
+  }
+}
+
 function registerServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
   if (!/^https?:$/.test(window.location.protocol)) return;
