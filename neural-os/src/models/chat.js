@@ -674,6 +674,57 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       emit(onEvent, { type: 'quelle', titel: q.titel, url: q.url, art });
     };
 
+    /*
+     * Quellen im Text (docs/ANTWORT-BAUSTEINE.md 6): hinter dem Satz, der
+     * sich auf eine Quelle stuetzt, steht ihre Nummer -- "[1]", dieselbe
+     * Zaehlung wie die Liste unter der Antwort. Die Oberflaeche macht daraus
+     * einen antippbaren Verweis; als Text bleibt es lesbar (Kopieren,
+     * Suche). An Claude geht weiter der rohe Block (t.verlauf), nie die Marke.
+     */
+    const nummernVon = (urls) => {
+      const out = [];
+      for (const u of urls) {
+        const i = typeof u === 'string' ? t.quellen.findIndex((q) => q.url === u) : -1;
+        if (i >= 0 && !out.includes(i + 1)) out.push(i + 1);
+      }
+      return out;
+    };
+    const marke = (nummern) => nummern.map((n) => `[${n}]`).join('');
+    /**
+     * Gemini nennt seine Belege erst am Ende (groundingSupports: welcher
+     * Textteil sich auf welche Fundstelle stuetzt). Die Marken kommen dann
+     * hinter genau diese Textteile -- nur in dem, was diese Runde schrieb,
+     * nie in einen Codeblock -- und der ganze Text geht als `inhalt` neu an
+     * die Oberflaeche.
+     */
+    const belegeEinsetzen = (belege, ab) => {
+      let text = t.text;
+      let suchAb = ab;
+      let geaendert = false;
+      for (const b of belege) {
+        const n = nummernVon(Array.isArray(b.urls) ? b.urls : []);
+        const stueck = String(b.text || '');
+        if (!n.length || !stueck.trim()) continue;
+        let i = text.indexOf(stueck, suchAb);
+        if (i < 0) i = text.indexOf(stueck, ab);
+        if (i < 0) continue;
+        const ende = i + stueck.length;
+        if (fassungen.codebloecke(text).some((c) => ende > c.start && ende <= c.ende)) continue;
+        const m = marke(n);
+        if (text.slice(ende, ende + m.length) === m) {
+          suchAb = ende + m.length;
+          continue;
+        }
+        text = `${text.slice(0, ende)}${m}${text.slice(ende)}`;
+        suchAb = ende + m.length;
+        geaendert = true;
+      }
+      if (!geaendert) return;
+      t.text = text;
+      emit(onEvent, { type: 'inhalt', content: t.text });
+      flush(true);
+    };
+
     const agentMelden = (e) => {
       if (!e) return;
       const i = t.agenten.findIndex((a) => a.id === e.id);
@@ -694,9 +745,14 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       emit(onEvent, { type: 'agent', ...e });
     };
 
+    // Welcher Block zuletzt begann: folgt Text auf Text, ist es derselbe Absatz.
+    let letzterBlock = null;
     const beiEreignis = (e) => {
       if (e.art === 'start' && e.block) {
-        if (e.block.type === 'text' && t.text && !/\s$/.test(t.text)) textDazu('\n\n');
+        // Ein Textblock nach einem Werkzeug, einer Suche oder einem Gedanken
+        // beginnt einen neuen Absatz. Folgt Text direkt auf Text -- Claude
+        // teilt einen Absatz an jedem Zitat in Bloecke --, geht der Satz weiter.
+        if (e.block.type === 'text' && t.text && !/\s$/.test(t.text) && letzterBlock !== 'text') textDazu('\n\n');
         if (e.block.type === 'thinking' && t.denken && !/\s$/.test(t.denken)) {
           t.denken += '\n\n';
           emit(onEvent, { type: 'denken', delta: '\n\n' });
@@ -705,6 +761,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
           emit(onEvent, { type: 'hinweis', satz: 'Ein Ersatzmodell von Anthropic hat diese Antwort übernommen.' });
         }
         if (/_tool_result$/.test(e.block.type || '') && e.block.tool_use_id) sucheBeenden(e.block);
+        if (e.index !== -1) letzterBlock = e.block.type;
         return;
       }
       if (e.art === 'text') {
@@ -719,6 +776,11 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
         quelleDazu(e.zitat.title || e.zitat.document_title, e.zitat.url, 'zitat');
       } else if (e.art === 'ende' && e.block && e.block.type === 'server_tool_use') {
         sucheBeginnen(e.block);
+      } else if (e.art === 'ende' && e.block && e.block.type === 'text' && Array.isArray(e.block.citations) && e.block.citations.length
+        && String(e.block.text || '').trim()) {
+        // Claude: ein Textblock mit Zitaten ist der Satz, der sich auf sie stuetzt.
+        const n = nummernVon(e.block.citations.map((z) => z && z.url));
+        if (n.length) textDazu(marke(n));
       }
     };
 
@@ -807,6 +869,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
           nachrichten: mitCachePunkt(mitAnhaengen.nachrichten),
           effort,
         });
+        const rundeAb = t.text.length;
         const r = await claude.senden({
           ...gebaut,
           gate,
@@ -815,6 +878,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
           signal: controller.signal,
           beiEreignis,
         });
+        if (Array.isArray(r.belege) && r.belege.length) belegeEinsetzen(r.belege, rundeAb);
         statsAddieren(t.stats, r.usage);
         t.modellAntwort = r.modell || t.modellAntwort;
 

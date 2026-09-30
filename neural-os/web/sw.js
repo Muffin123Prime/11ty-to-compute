@@ -27,7 +27,7 @@
  * sees no new worker and keeps the old cache.
  */
 
-const VERSION = 'v9';
+const VERSION = 'v10';
 const CACHE_NAME = `neural-os-shell-${VERSION}`;
 
 /**
@@ -60,6 +60,10 @@ const SHELL_ASSETS = [
   './lib/tabelle.js',
   './lib/diagramm.js',
   './lib/sandkasten.js',
+  // Rund um die Antwort: Bilder und PDF, Sprechen, Vorlesen.
+  './lib/anhaenge.js',
+  './lib/sprechen.js',
+  './lib/vorlesen.js',
   './lib/bausteine/index.js',
   './lib/bausteine/gemeinsam.js',
   './lib/bausteine/zustand.js',

@@ -32,6 +32,9 @@ const path = require('node:path');
 const http = require('node:http');
 const { createApp, seedIfEmpty } = require('../src/app');
 const { B, sse } = require('../test/claude-statist');
+const geminiStatist = require('../test/gemini-statist');
+const { anfrage } = require('../test/antwort-hilfe');
+const anhaengeServer = require('../src/models/anhaenge');
 const { findPlaywright, findChromium } = require('./lib/browser');
 
 const G = '\u001b[32m'; const R = '\u001b[31m'; const Y = '\u001b[33m';
@@ -142,6 +145,38 @@ function textMitPause(index, teil1, ms, teil2) {
 }
 const zug = (teile, pauseMs) => ({ sse: teile.flat(), pauseMs });
 
+/**
+ * Ein PNG aus Rauschen: laesst sich nicht packen, ist also so gross, wie es
+ * Pixel hat (1800×1400 ≈ 7,6 MB) -- wie ein Foto vom Handy, das ueber der
+ * Grenze von 5 MB liegt.
+ */
+function pngRauschen(breite, hoehe) {
+  const zlib = require('node:zlib');
+  const crypto = require('node:crypto');
+  const zeile = breite * 3 + 1;
+  const roh = crypto.randomBytes(zeile * hoehe);
+  for (let y = 0; y < hoehe; y += 1) roh[y * zeile] = 0;
+  const stueck = (typ, daten) => {
+    const laenge = Buffer.alloc(4);
+    laenge.writeUInt32BE(daten.length);
+    const td = Buffer.concat([Buffer.from(typ, 'latin1'), daten]);
+    const pruef = Buffer.alloc(4);
+    pruef.writeUInt32BE(zlib.crc32(td) >>> 0);
+    return Buffer.concat([laenge, td, pruef]);
+  };
+  const kopf = Buffer.alloc(13);
+  kopf.writeUInt32BE(breite, 0);
+  kopf.writeUInt32BE(hoehe, 4);
+  kopf[8] = 8; // Bit je Kanal
+  kopf[9] = 2; // RGB
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    stueck('IHDR', kopf),
+    stueck('IDAT', zlib.deflateSync(roh, { level: 1 })),
+    stueck('IEND', Buffer.alloc(0)),
+  ]);
+}
+
 /* ------------------------------------------------------------- Pruefen */
 
 const ergebnisse = [];
@@ -208,8 +243,10 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     process.exit(2);
   }
   const statist = await langsamerStatist();
+  // Gemini nur fuer das Umschreiben von Sprache (7c); es antwortet weiter Claude.
+  const gemini = await geminiStatist.starten();
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'neural-os-chatbeweis-'));
-  const app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false, claudeBasis: statist.url });
+  const app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false, claudeBasis: statist.url, geminiBasis: gemini.url });
   await seedIfEmpty(app);
   if (typeof app.loadModules === 'function') await app.loadModules({}).catch(() => {});
   const server = await app.listen();
@@ -218,17 +255,24 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
 
   const { chromium: browserTyp } = await import(pw);
   const exe = findChromium();
-  const browser = await browserTyp.launch(exe ? { executablePath: exe } : {});
+  // Ein kuenstliches Mikrofon (Chromium spielt einen Ton ein), ohne Rueckfrage:
+  // so laesst sich die Aufnahme fuer Gemini (7c) wirklich aufnehmen.
+  const browser = await browserTyp.launch({
+    ...(exe ? { executablePath: exe } : {}),
+    args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
+  });
   const konsole = [];
 
-  async function neueSeite({ breite = 1440, hoehe = 900, finger = false, rechte = true, ohneClipboard = false, hell = false } = {}) {
+  async function neueSeite({
+    breite = 1440, hoehe = 900, finger = false, rechte = true, ohneClipboard = false, hell = false, erkennung = null, stimme = false, mikrofon = false,
+  } = {}) {
     const c = await browser.newContext({
       viewport: { width: breite, height: hoehe },
       colorScheme: hell ? 'light' : 'dark',
       hasTouch: finger,
       isMobile: false,
       deviceScaleFactor: finger ? 2 : 1,
-      permissions: rechte ? ['clipboard-read', 'clipboard-write'] : [],
+      permissions: [...(rechte ? ['clipboard-read', 'clipboard-write'] : []), ...(mikrofon ? ['microphone'] : [])],
       // Der Service Worker laedt die Seite beim ersten Besuch einmal neu
       // (controllerchange, web/app.js). Das ist gewollt, wuerde hier aber
       // mitten in eine Messung fallen.
@@ -245,6 +289,81 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
           const el = document.activeElement;
           window.__kopiert = el && typeof el.value === 'string' ? el.value.slice(el.selectionStart, el.selectionEnd) : String(document.getSelection());
         }, true);
+      });
+    }
+    if (erkennung === 'gut' || erkennung === 'kaputt') {
+      // Eine nachgebaute Spracherkennung: Chromium hier hat keinen Google-Dienst.
+      // 'gut' liefert erst Zwischentext, dann den fertigen Satz; 'kaputt' meldet
+      // sofort "network" -- so wie Opera, das die Erkennung nur dem Namen nach hat.
+      await c.addInitScript((art) => {
+        window.__erkennung = { gestartet: 0, gestoppt: 0 };
+        class FalscheErkennung {
+          start() {
+            window.__erkennung.gestartet += 1;
+            if (art === 'kaputt') {
+              setTimeout(() => { if (this.onerror) this.onerror({ error: 'network' }); if (this.onend) this.onend(); }, 60);
+              return;
+            }
+            const ergebnis = (t, fertig) => ({ results: [Object.assign([{ transcript: t, confidence: 0.92 }], { isFinal: fertig })] });
+            this.uhren = [
+              setTimeout(() => { if (this.onresult) this.onresult(ergebnis('Wie wird', false)); }, 250),
+              setTimeout(() => { if (this.onresult) this.onresult(ergebnis('Wie wird das Wetter morgen?', true)); }, 800),
+            ];
+          }
+          stop() {
+            window.__erkennung.gestoppt += 1;
+            setTimeout(() => { if (this.onend) this.onend(); }, 40);
+          }
+          abort() {
+            for (const u of this.uhren || []) clearTimeout(u);
+            setTimeout(() => { if (this.onend) this.onend(); }, 10);
+          }
+        }
+        window.webkitSpeechRecognition = FalscheErkennung;
+        window.SpeechRecognition = undefined;
+      }, erkennung);
+    } else if (erkennung === 'keine') {
+      await c.addInitScript(() => {
+        window.webkitSpeechRecognition = undefined;
+        window.SpeechRecognition = undefined;
+      });
+    }
+    if (stimme) {
+      // Eine nachgebaute Sprachausgabe: merkt sich jede Aeusserung; ein Satz
+      // endet erst, wenn die Pruefung window.__satzEnde() ruft.
+      await c.addInitScript(() => {
+        window.__gesprochen = [];
+        window.__abbrueche = 0;
+        const offen = () => window.__gesprochen.filter((u) => !u.fertig);
+        class Aeusserung {
+          constructor(t) { this.text = t; this.rate = 1; this.volume = 1; }
+        }
+        const synth = {
+          speaking: false,
+          pending: false,
+          speak(u) { window.__gesprochen.push(u); },
+          cancel() {
+            window.__abbrueche += 1;
+            for (const u of offen()) {
+              u.fertig = true;
+              if (u.onerror) u.onerror({ error: 'interrupted' });
+            }
+          },
+          pause() {},
+          resume() {},
+          getVoices: () => [],
+          addEventListener() {},
+          removeEventListener() {},
+        };
+        Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true, writable: true });
+        window.SpeechSynthesisUtterance = Aeusserung;
+        window.__satzEnde = () => {
+          const u = offen().filter((x) => String(x.text).trim()).pop();
+          if (!u) return null;
+          u.fertig = true;
+          if (u.onend) u.onend();
+          return u.text;
+        };
       });
     }
     const p = await c.newPage();
@@ -337,8 +456,9 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       ], 14),
       zug([
         B.start(),
-        textLang(0, 'Gerne. Ich analysiere den aktuellen Stand, identifiziere die nächsten Schritte und erstelle eine kompakte Zusammenfassung für dich.\n\n- [x] Projektkontext analysiert\n- [x] Relevante Aufgaben identifiziert\n- [x] Termine und Ressourcen geprüft\n- [x] Zusammenfassung erstellt'),
-        B.text(1, '', { zitate: [{ type: 'web_search_result_location', url: 'https://www.example.org/produktlaunch-checkliste', title: 'Produktlaunch: die Checkliste für 2026', cited_text: 'Checkliste', encrypted_index: 'e1' }] }),
+        // Stockt mitten im Satz: so bleibt "Schreibt die Antwort …" eine Weile zu sehen.
+        textMitPause(0, 'Gerne. Ich analysiere den aktuellen Stand, ', 1600, 'identifiziere die nächsten Schritte und erstelle eine kompakte Zusammenfassung für dich.\n\n- [x] Projektkontext analysiert\n- [x] Relevante Aufgaben identifiziert\n- [x] Termine und Ressourcen geprüft\n- [x] Zusammenfassung erstellt'),
+        B.text(1, '\n\nLaut der Checkliste gehört ein Review vor jeden Launch.', { zitate: [{ type: 'web_search_result_location', url: 'https://www.example.org/produktlaunch-checkliste', title: 'Produktlaunch: die Checkliste für 2026', cited_text: 'Checkliste', encrypted_index: 'e1' }] }),
         B.ende('end_turn'),
       ], 22),
     );
@@ -353,6 +473,14 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       String(kachelAktiv || '').replace(/\s+/g, ' ').slice(0, 110));
     check(/#\/chat\?id=chat_/.test(p.url()), 'Der Chat entsteht mit der ersten Nachricht (Adresse #/chat?id=…)', p.url().split('#')[1]);
     await foto(p, 'sucht-im-internet-1440');
+    // Live-Fortschritt aus den echten Ereignissen: was erledigt ist, mit Haken; dann "Schreibt die Antwort …".
+    await p.locator('.cv-live--schreibt').waitFor({ timeout: 12000 });
+    const erledigt = (await p.locator('.cv-fortschritt .cv-live.is-fertig').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim());
+    check(erledigt.length === 4 && /^Gesucht: „Produktlaunch Marktanalyse Trends 2026“ · 2 Treffer$/.test(erledigt[0])
+      && /^Termin eingetragen · .*09:00 · Produkt-Review$/.test(erledigt[1]) && /^Notiz angelegt/.test(erledigt[2]) && /^Projekt angelegt/.test(erledigt[3]),
+    'Während die Antwort kommt: jeder erledigte Schritt mit Haken („Gesucht: …“, „Termin eingetragen …“, „Notiz angelegt …“, „Projekt angelegt …“)', erledigt.join(' | ').slice(0, 160));
+    check(/Schreibt die Antwort …/.test(await p.locator('.cv-live--schreibt').innerText()), 'und zuletzt „Schreibt die Antwort …“, solange der Text kommt');
+    await foto(p, 'schreibt-die-antwort-1440');
     await strom(p);
     const chatA = chatIdAus(p);
     await p.waitForTimeout(700);
@@ -364,7 +492,14 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     check(/Termin eingetragen/.test(termKarte) && /09:00/.test(termKarte) && /Produkt-Review/.test(termKarte),
       'Termin-Karte: „Termin eingetragen · <Tag> · 09:00 · Produkt-Review“ mit Öffnen und Rückgängig', termKarte);
     check(await antwortA.locator('.cv-quellen .cv-quelle').count() >= 1, 'Die Quellen der Websuche stehen als kleine Liste unter der Antwort');
+    const verweis = antwortA.locator('.cv-md a.cv-verweis');
+    check(await verweis.count() === 1 && (await verweis.innerText()).trim() === '1'
+      && (await verweis.getAttribute('href')) === 'https://www.example.org/produktlaunch-checkliste' && (await verweis.getAttribute('target')) === '_blank'
+      && /Review vor jeden Launch\.1$/.test((await antwortA.locator('.cv-md p', { hasText: 'Laut der Checkliste' }).innerText()).trim()),
+    'Hinter dem zitierten Satz steht die Nummer seiner Quelle – antippbar, öffnet sie in einem neuen Tab', String(await verweis.getAttribute('href')));
     check(await antwortA.locator('.cv-denken summary').count() === 1, 'Der Gedankengang ist einklappbar („Gedankengang“)');
+    check(await antwortA.locator('.cv-fortschritt').count() === 0 && /^4 Arbeitsschritte · Recherche, Kalender, Notizen, Projekte$/.test((await antwortA.locator('.cv-schritte > summary').innerText()).trim()),
+      'Danach ist der Fortschritt eingeklappt zu „4 Arbeitsschritte · Recherche, Kalender, Notizen, Projekte“', (await antwortA.locator('.cv-schritte > summary').innerText()).trim());
     const vorschlaege = await p.locator('.cv-vorschlaege button').count();
     check(vorschlaege === 0, 'Keine geratenen Vorschlags-Knöpfe mehr – nächste Schritte bietet die KI selbst an (Baustein aktionen)', String(vorschlaege));
     const kal = (await p.locator('.tile[data-tile="kalender"]').innerText().catch(() => '')).replace(/\s+/g, ' ');
@@ -1072,6 +1207,128 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     statist.weiter(antwortMd('Gern – bis morgen.'));
     await fragen('Danke, das reicht für heute.');
     check(await bs('regler').getByRole('button', { name: 'Übernehmen' }).count() === 1 && !/Loslassen übernimmt/.test(await bs('regler').innerText()), 'Der Regler einer älteren Antwort bietet ehrlich [Übernehmen] als Nachricht an – neu erstellen lässt sich nur die letzte Antwort');
+
+    /* ============================ 5d · Bilder und PDF anhängen */
+    console.log(`\n${BO}5d · Bilder und PDF: anhängen, Schnellaktionen, an die KI, groß ansehen${X}`);
+    // Echte Dateien, im Browser selbst gebaut: ein Aufgabenblatt als PNG, ein Arbeitsblatt als PDF.
+    const werkstatt = await browser.newPage({ viewport: { width: 640, height: 400 } });
+    await werkstatt.setContent('<body style="margin:0;background:#fff;font:32px system-ui,sans-serif;color:#111"><div style="padding:36px"><b>Aufgabe 1</b><br>12 + 30 = ?<br><br><b>Aufgabe 2</b><br>7 · 8 = ?</div></body>');
+    const aufgabePng = await werkstatt.screenshot({ type: 'png' });
+    await werkstatt.setContent('<body style="font:18px system-ui,sans-serif"><h1>Arbeitsblatt Brüche</h1><h2>Kapitel 1: Kürzen</h2><p>Ein Bruch wird gekürzt, indem man Zähler und Nenner durch dieselbe Zahl teilt.</p><h2 style="page-break-before:always">Kapitel 2: Erweitern</h2><p>Beim Erweitern werden Zähler und Nenner mit derselben Zahl malgenommen.</p></body>');
+    const blattPdf = await werkstatt.pdf({ format: 'A5' });
+    const farbBild = async (hex, wort) => {
+      await werkstatt.setViewportSize({ width: 320, height: 240 });
+      await werkstatt.setContent(`<body style="margin:0;background:${hex};display:grid;place-items:center;height:100vh;font:48px system-ui,sans-serif;color:#fff">${wort}</body>`);
+      return werkstatt.screenshot({ type: 'png' });
+    };
+    const bildEins = await farbBild('#c0392b', 'Eins');
+    const bildZwei = await farbBild('#27ae60', 'Zwei');
+    const bildDrei = await farbBild('#2f7cf6', 'Drei');
+    await werkstatt.close();
+
+    await p.locator('.rail__brand').click();
+    await p.locator('.cv-leer__titel').waitFor({ timeout: 5000 });
+    const dateiFeld = p.locator('.cv-eingabe input[type="file"]');
+    const annahme = String(await dateiFeld.getAttribute('accept'));
+    check(annahme.includes('image/png') && annahme.includes('application/pdf') && annahme.includes('.md'), 'Die Büroklammer nimmt Text, Bilder und PDF', annahme.slice(0, 90));
+    await dateiFeld.setInputFiles([
+      { name: 'aufgabe.png', mimeType: 'image/png', buffer: aufgabePng },
+      { name: 'arbeitsblatt.pdf', mimeType: 'application/pdf', buffer: blattPdf },
+    ]);
+    await p.locator('.cv-anhang[data-art="pdf"]').waitFor({ timeout: 5000 });
+    const feldVorschau = await p.locator('.cv-anhang[data-art="bild"] img').evaluate((img) => img.complete && img.naturalWidth > 0);
+    const feldText = (await p.locator('.cv-anhaenge').innerText()).replace(/\s+/g, ' ');
+    check(feldVorschau && /aufgabe\.png/.test(feldText) && /arbeitsblatt\.pdf/.test(feldText), 'Am Eingabefeld: das Bild als kleine Vorschau, das PDF als Karte – mit Name und Größe', feldText.slice(0, 100));
+    const schnell = (await p.locator('.cv-schnell__knopf').allInnerTexts()).map((t) => t.trim());
+    check(schnell.join(' · ') === 'Erklären · Aufgaben lösen · Text erkennen · Zusammenfassen · Wichtigste Begriffe · Kapitel',
+      'Danach passende Schnellaktionen: fürs Bild Erklären, Aufgaben lösen, Text erkennen; fürs PDF Zusammenfassen, Wichtigste Begriffe, Kapitel', schnell.join(' · '));
+    await foto(p, 'anhaenge-am-feld-1440');
+    await p.locator('.cv-composer__feld').fill('x');
+    check(await p.locator('.cv-schnell').isHidden(), 'Steht etwas im Feld, gehen sie weg – dann gilt, was dort steht');
+    await p.locator('.cv-composer__feld').fill('');
+    statist.weiter(antwortMd('Aufgabe 1: 12 + 30 = **42**. Aufgabe 2: 7 · 8 = **56**. Das Arbeitsblatt erklärt Kürzen und Erweitern.'));
+    const vorAnhang = statist.anfragen.length;
+    await p.locator('.cv-schnell__knopf', { hasText: 'Aufgaben lösen' }).click();
+    await warteBis(() => p.locator('.cv-composer__senden.is-stopp').count(), { timeout: 10000 });
+    await strom(p);
+    await p.waitForTimeout(400);
+    const chatAnhang = chatIdAus(p);
+    const frageAnhang = nachrichten(chatAnhang).find((m) => m.data.role === 'user');
+    check(!!frageAnhang && /^Löse die Aufgaben auf dem Bild/.test(frageAnhang.data.content) && (frageAnhang.data.anhaenge || []).map((a) => a.name).join(',') === 'aufgabe.png,arbeitsblatt.pdf',
+      '„Aufgaben lösen“ schickt genau diesen Auftrag mit beiden Dateien (im Tresor: zwei Anhänge an der Nachricht)', frageAnhang && `${frageAnhang.data.content.slice(0, 50)} · ${(frageAnhang.data.anhaenge || []).length} Anhänge`);
+    const imTresor = store.all('file').filter((f) => f.data.chatId === chatAnhang);
+    check(imTresor.length === 2 && imTresor.every((f) => f.data.quelle === 'chat'), 'Die Dateien liegen im Tresor, zum Chat gehörig', imTresor.map((f) => `${f.data.name} (${f.data.mime})`).join(', '));
+    const anfrageAnhang = statist.anfragen.slice(vorAnhang).find((b) => b && b.stream);
+    const bloecke = anfrageAnhang ? anfrageAnhang.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])) : [];
+    const bildBlock = bloecke.find((b) => b.type === 'image');
+    const pdfBlock = bloecke.find((b) => b.type === 'document');
+    check(!!bildBlock && bildBlock.source.media_type === 'image/png' && Buffer.from(bildBlock.source.data, 'base64').equals(aufgabePng)
+      && !!pdfBlock && pdfBlock.source.media_type === 'application/pdf' && Buffer.from(pdfBlock.source.data, 'base64').equals(blattPdf),
+    'An „Anthropic“ gingen das Bild (image) und das PDF (document) – Byte für Byte die angehängten Dateien', `${bildBlock ? 'image' : '—'} + ${pdfBlock ? 'document' : '—'}`);
+    const eigeneAnhang = p.locator('.cv-msg--user').last();
+    const galerieSrc = await eigeneAnhang.locator('.cv-galerie img').evaluate((img) => (img.complete && img.naturalWidth > 0 ? img.getAttribute('src') : null));
+    check(/^\/api\/chats\/chat_[^/]+\/anhaenge\/file_/.test(String(galerieSrc)), 'In der Nachricht: das Bild als Vorschau, geladen vom Server', String(galerieSrc));
+    const pdfLink = eigeneAnhang.locator('.cv-pdf a', { hasText: 'Anzeigen' });
+    const pdfHref = await pdfLink.getAttribute('href');
+    const pdfAntwort = await p.evaluate(async (u) => { const r = await fetch(u); return { status: r.status, typ: r.headers.get('content-type'), bytes: (await r.arrayBuffer()).byteLength }; }, pdfHref);
+    check((await pdfLink.getAttribute('target')) === '_blank' && pdfAntwort.status === 200 && pdfAntwort.typ === 'application/pdf' && pdfAntwort.bytes === blattPdf.length,
+      'Das PDF ist eine Karte mit [Anzeigen]: ein neuer Tab mit genau diesem PDF', `${pdfAntwort.status} ${pdfAntwort.typ}, ${pdfAntwort.bytes} Bytes`);
+    await insBild(eigeneAnhang);
+    await foto(p, 'anhaenge-in-der-nachricht-1440');
+    // Leuchtkasten: antippen vergroessert, Esc schliesst, der Fokus kehrt zurueck.
+    await eigeneAnhang.locator('.cv-galerie__bild').click();
+    await p.locator('.lk').waitFor({ timeout: 3000 });
+    const lkBild = await p.locator('.lk__bild').evaluate((img) => ({ breit: img.getBoundingClientRect().width, ok: img.complete && img.naturalWidth > 0 }));
+    check(lkBild.ok && lkBild.breit > 500 && /aufgabe\.png/.test(await p.locator('.lk__titel').innerText()), 'Antippen öffnet den Leuchtkasten: das Bild groß, mit Namen', `${Math.round(lkBild.breit)} px breit`);
+    await foto(p, 'leuchtkasten-1440');
+    await p.keyboard.press('Escape');
+    check(await p.locator('.lk').count() === 0 && await p.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('cv-galerie__bild')),
+      'Esc schließt ihn, der Fokus ist wieder am Bild');
+
+    // Mehrere Bilder, ein zu grosses Foto und eines aus der Zwischenablage.
+    const riesig = pngRauschen(1800, 1400);
+    await dateiFeld.setInputFiles([
+      { name: 'eins.png', mimeType: 'image/png', buffer: bildEins },
+      { name: 'zwei.png', mimeType: 'image/png', buffer: bildZwei },
+      { name: 'foto-gross.png', mimeType: 'image/png', buffer: riesig },
+    ]);
+    await warteBis(async () => (await p.locator('.cv-anhang[data-art="bild"]').count()) === 3, { timeout: 15000 });
+    const nachGross = (await p.locator('.cv-anhaenge').innerText()).replace(/\s+/g, ' ');
+    check(/foto-gross\.jpg/.test(nachGross) && !/foto-gross\.png/.test(nachGross), `Ein Foto über 5 MB (${(riesig.length / 1048576).toFixed(1).replace('.', ',')} MB) wird verkleinert statt abgelehnt`, nachGross.slice(0, 120));
+    await p.locator('.cv-composer__feld').evaluate((feld, b64) => {
+      const bytes = Uint8Array.from(atob(b64), (z) => z.charCodeAt(0));
+      const dt = new DataTransfer();
+      dt.items.add(new File([bytes], 'eingefuegt.png', { type: 'image/png' }));
+      feld.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    }, bildDrei.toString('base64'));
+    await warteBis(async () => (await p.locator('.cv-anhang[data-art="bild"]').count()) === 4, { timeout: 5000 });
+    check(await p.locator('.cv-anhang[data-art="bild"]').count() === 4 && /eingefuegt\.png/.test(await p.locator('.cv-anhaenge').innerText()), 'Strg+V mit einem Bild in der Zwischenablage hängt es an');
+    await dateiFeld.setInputFiles([{ name: 'archiv.zip', mimeType: 'application/zip', buffer: Buffer.from('PK\u0003\u0004nichts') }]);
+    const zipSatz = await warteBis(async () => (await p.locator('.toast').allInnerTexts().catch(() => [])).find((x) => /archiv\.zip/.test(x)) || null, { timeout: 3000 });
+    check(!!zipSatz && /Möglich sind Textdateien, Bilder \(PNG, JPG, WEBP, GIF\) und PDF\./.test(zipSatz), 'Eine ZIP-Datei wird mit einem Satz abgelehnt, statt still zu fehlen', String(zipSatz).replace(/\s+/g, ' '));
+    await p.locator('.cv-composer__feld').fill('Welche Farben siehst du?');
+    statist.weiter(antwortMd('Rot, Grün, buntes Rauschen und Blau.'));
+    await p.keyboard.press('Enter');
+    await warteBis(() => p.locator('.cv-composer__senden.is-stopp').count(), { timeout: 15000 });
+    await strom(p);
+    await p.waitForTimeout(400);
+    const vierBilder = p.locator('.cv-msg--user').last();
+    check(await vierBilder.locator('.cv-galerie--viele .cv-galerie__bild').count() === 4, 'Vier Bilder in einer Nachricht stehen als Reihe zum Wischen (Karussell)');
+    const grossImTresor = store.all('file').find((f) => f.data.chatId === chatAnhang && f.data.name === 'foto-gross.jpg');
+    check(!!grossImTresor && grossImTresor.data.mime === 'image/jpeg' && grossImTresor.data.size <= 5 * 1024 * 1024,
+      'Das große Foto liegt als JPEG unter 5 MB im Tresor', grossImTresor && `${(grossImTresor.data.size / 1048576).toFixed(2).replace('.', ',')} MB`);
+    await insBild(vierBilder);
+    await foto(p, 'mehrere-bilder-1440');
+    await vierBilder.locator('.cv-galerie__bild').nth(1).click();
+    await p.locator('.lk').waitFor({ timeout: 3000 });
+    check(/zwei\.png · 2 von 4/.test(await p.locator('.lk__titel').innerText()), 'Der Leuchtkasten kennt alle Bilder der Nachricht („zwei.png · 2 von 4“)', (await p.locator('.lk__titel').innerText()).trim());
+    await p.keyboard.press('ArrowRight');
+    check(/foto-gross\.jpg · 3 von 4/.test(await p.locator('.lk__titel').innerText()), '→ blättert weiter', (await p.locator('.lk__titel').innerText()).trim());
+    await p.locator('.lk__pfeil--links').click();
+    check(/2 von 4/.test(await p.locator('.lk__titel').innerText()), '‹ blättert zurück');
+    await foto(p, 'leuchtkasten-mehrere-1440');
+    await p.locator('.lk__knopf', { hasText: 'Schließen' }).click();
+    check(await p.locator('.lk').count() === 0, '[Schließen] schließt ihn');
     await c.close();
 
     /* ============================ 6 · Kopieren ohne navigator.clipboard */
@@ -1197,6 +1454,128 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       await c5.close();
     }
 
+    /* ============================ 7c · Sprechen und Vorlesen */
+    console.log(`\n${BO}7c · Sprechen statt Tippen, und die Antwort wird vorgelesen${X}`);
+    {
+      // A · Die Erkennung des Browsers: der Text steht schon beim Sprechen im Feld.
+      const { c: c6, p: p6 } = await neueSeite({ erkennung: 'gut', stimme: true });
+      await p6.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+      await p6.locator('.cv-leer__titel').waitFor({ timeout: 8000 });
+      const mikro6 = p6.locator('.cv-composer__mikro');
+      await mikro6.waitFor({ state: 'visible', timeout: 5000 });
+      check(await mikro6.isVisible(), 'Im Eingabefeld ist ein Mikrofon: dieser Browser erkennt Sprache');
+      await mikro6.click();
+      await p6.locator('.cv-sprechen', { hasText: 'Ich höre zu' }).waitFor({ timeout: 3000 });
+      check((await mikro6.getAttribute('aria-pressed')) === 'true' && /is-an/.test(String(await mikro6.getAttribute('class'))), 'Antippen: „Ich höre zu …“, und das Mikrofon leuchtet');
+      const zwischen = await warteBis(async () => ((await p6.locator('.cv-composer__feld').inputValue()) === 'Wie wird' ? 'Wie wird' : null), { timeout: 3000 });
+      check(zwischen === 'Wie wird', 'Schon während des Sprechens steht der Zwischentext im Feld', String(zwischen));
+      await foto(p6, 'sprechen-hoert-zu-1440');
+      await warteBis(async () => (await p6.locator('.cv-composer__feld').inputValue()) === 'Wie wird das Wetter morgen?', { timeout: 3000 });
+      await p6.locator('.cv-sprechen button', { hasText: 'Fertig' }).click();
+      await p6.locator('.cv-sprechen').waitFor({ state: 'hidden', timeout: 3000 });
+      check((await p6.locator('.cv-composer__feld').inputValue()) === 'Wie wird das Wetter morgen?' && (await p6.evaluate(() => window.__erkennung.gestoppt)) === 1,
+        '[Fertig] hält die Erkennung an; der Satz steht im Feld, gesendet ist noch nichts');
+      statist.weiter(zug([B.start(), textLang(0, 'Morgen wird es sonnig. Am Nachmittag ziehen ein paar Wolken auf. Es bleibt trocken.'), B.ende('end_turn')], 4));
+      await p6.locator('.cv-composer__feld').press('Enter');
+      await warteBis(() => p6.locator('.cv-composer__senden.is-stopp').count(), { timeout: 8000 });
+      await p6.waitForFunction(() => !document.querySelector('.cv-composer__senden.is-stopp'), null, { timeout: 15000 });
+      const spieler = p6.locator('.cv-spieler');
+      await spieler.waitFor({ timeout: 5000 });
+      const gelesen = await p6.evaluate(() => window.__gesprochen.filter((u) => String(u.text).trim()).map((u) => u.text));
+      check(gelesen[0] === 'Morgen wird es sonnig.', 'Die Frage war gesprochen – also wird die Antwort vorgelesen, Satz für Satz', gelesen.join(' | '));
+      check(/Satz 1 von 3/.test(await spieler.innerText()) && /1×/.test(await spieler.innerText()) && (await spieler.getByRole('button', { name: 'Pause' }).count()) === 1,
+        'Unter der Antwort steht der Spieler: ⏸, Tempo „1×“, „Satz 1 von 3“', (await spieler.innerText()).replace(/\s+/g, ' '));
+      const marke = () => p6.evaluate(() => {
+        const hl = typeof CSS !== 'undefined' && CSS.highlights ? CSS.highlights.get('nos-vorlesen') : null;
+        return hl ? [...hl].map((r) => r.toString()).join('') : null;
+      });
+      check((await marke()) === 'Morgen wird es sonnig.', 'Der gerade gelesene Satz ist im Text hervorgehoben (ohne den Text anzufassen)', String(await marke()));
+      await foto(p6, 'vorlesen-spieler-1440');
+      await p6.evaluate(() => window.__satzEnde());
+      await warteBis(async () => /Satz 2 von 3/.test(await spieler.innerText()), { timeout: 2000 });
+      check((await marke()) === 'Am Nachmittag ziehen ein paar Wolken auf.' && /Satz 2 von 3/.test(await spieler.innerText()),
+        'Ist ein Satz zu Ende, kommt der nächste – die Marke wandert mit', String(await marke()));
+      const vorPause = await p6.evaluate(() => window.__gesprochen.length);
+      await spieler.getByRole('button', { name: 'Pause' }).click();
+      check((await spieler.getByRole('button', { name: 'Weiterlesen' }).count()) === 1
+        && (await p6.evaluate((n) => window.__gesprochen.length === n && window.__abbrueche > 0, vorPause)),
+      '⏸ hält an – die Stimme wird wirklich abgebrochen, und es kommt kein weiterer Satz');
+      await spieler.getByRole('button', { name: 'Weiterlesen' }).click();
+      const nachWeiter = await p6.evaluate(() => window.__gesprochen[window.__gesprochen.length - 1].text);
+      check(nachWeiter === 'Am Nachmittag ziehen ein paar Wolken auf.', '▶ liest den angehaltenen Satz von vorn', nachWeiter);
+      await spieler.locator('.cv-spieler__tempo').click();
+      const tempoJetzt = await p6.evaluate(() => { const u = window.__gesprochen[window.__gesprochen.length - 1]; return { text: u.text, rate: u.rate }; });
+      check(/1,25×/.test(await spieler.innerText()) && tempoJetzt.rate === 1.25 && tempoJetzt.text === 'Am Nachmittag ziehen ein paar Wolken auf.',
+        'Tempo antippen: „1,25×“ – der laufende Satz beginnt neu im neuen Tempo', `${tempoJetzt.rate}× · ${tempoJetzt.text}`);
+      await p6.evaluate(() => window.__satzEnde());
+      await p6.evaluate(() => window.__satzEnde());
+      await spieler.waitFor({ state: 'detached', timeout: 3000 });
+      check((await p6.locator('.cv-spieler').count()) === 0 && (await marke()) === null, 'Nach dem letzten Satz verschwindet der Spieler, und die Marke ist weg');
+      await letzteAntwort(p6).hover();
+      await letzteAntwort(p6).getByRole('button', { name: 'Vorlesen', exact: true }).click();
+      await p6.locator('.cv-spieler').waitFor({ timeout: 3000 });
+      check(/Satz 1 von 3/.test(await p6.locator('.cv-spieler').innerText()) && /1,25×/.test(await p6.locator('.cv-spieler').innerText()),
+        '[Vorlesen] unter der Antwort startet den Spieler von vorn; das Tempo bleibt, wie gewählt');
+      await p6.locator('.cv-spieler').getByRole('button', { name: 'Vorlesen beenden' }).click();
+      await p6.locator('.cv-spieler').waitFor({ state: 'detached', timeout: 3000 }).catch(() => {});
+      check((await p6.locator('.cv-spieler').count()) === 0 && (await p6.evaluate(() => window.__abbrueche)) > 0, '✕ beendet das Vorlesen (die Stimme verstummt)');
+      await c6.close();
+
+      // B · Ohne Erkennung im Browser: aufnehmen, Gemini schreibt um -- aber nur mit Google-Schluessel.
+      const { c: c7, p: p7 } = await neueSeite({ erkennung: 'keine', mikrofon: true });
+      await p7.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+      await p7.locator('.cv-leer__titel').waitFor({ timeout: 8000 });
+      await p7.waitForTimeout(600);
+      const mikro7 = p7.locator('.cv-composer__mikro');
+      check(await mikro7.isHidden(), 'Ohne Spracherkennung und ohne Google-Schlüssel gibt es kein Mikrofon (kein toter Knopf)');
+      const verbunden = await anfrage(base, 'POST', '/api/ki/gemini/schluessel', { schluessel: gemini.schluessel });
+      check(verbunden.status === 200 && app.kiDienst.zustand().aktiv === 'claude', 'Gemini wird dazu verbunden; antworten tut weiter Claude', `HTTP ${verbunden.status}`);
+      await mikro7.waitFor({ state: 'visible', timeout: 6000 });
+      check(await mikro7.isVisible(), 'Kaum ist Gemini verbunden, ist das Mikrofon da – ohne Neuladen');
+      gemini.weiterOhneStrom({ text: 'Trag mir morgen um neun den Zahnarzt ein.\n' });
+      await mikro7.click();
+      await p7.locator('.cv-sprechen__zeit').waitFor({ timeout: 6000 });
+      await p7.waitForTimeout(1700);
+      const zeitText = (await p7.locator('.cv-sprechen__zeit').innerText()).trim();
+      check(/^0:0[12] \/ 1:00$/.test(zeitText) && /Ich höre zu/.test(await p7.locator('.cv-sprechen').innerText()), 'Während der Aufnahme: „Ich höre zu …“, und die Zeit läuft mit (höchstens 1:00)', zeitText);
+      await foto(p7, 'aufnahme-laeuft-1440');
+      const vorGemini = gemini.anfragen.length;
+      await p7.locator('.cv-sprechen button', { hasText: 'Fertig' }).click();
+      await warteBis(async () => (await p7.locator('.cv-composer__feld').inputValue()) === 'Trag mir morgen um neun den Zahnarzt ein.', { timeout: 12000 });
+      check((await p7.locator('.cv-composer__feld').inputValue()) === 'Trag mir morgen um neun den Zahnarzt ein.', '[Fertig]: Gemini schreibt die Aufnahme um, der Text steht im Feld – gesendet ist noch nichts');
+      const aufnahmeAnfrage = gemini.anfragen.slice(vorGemini).find((a) => !a.stream && a.body && JSON.stringify(a.body).includes('inlineData'));
+      const tonTeil = aufnahmeAnfrage ? aufnahmeAnfrage.body.contents[0].parts.find((x) => x.inlineData) : null;
+      let dauer = null;
+      try { dauer = tonTeil ? anhaengeServer.wavPruefen(tonTeil.inlineData.data).sekunden : null; } catch { dauer = null; }
+      check(!!tonTeil && tonTeil.inlineData.mimeType === 'audio/wav' && dauer > 1 && dauer < 4, 'An Gemini ging eine echte Aufnahme vom Mikrofon, als WAV, das der Server prüft', dauer ? `${dauer.toFixed(1).replace('.', ',')} s` : 'keine');
+      await c7.close();
+
+      // C · Die Erkennung gibt es nur dem Namen nach (Opera): der Chat nimmt von selbst auf.
+      const { c: c8, p: p8 } = await neueSeite({ erkennung: 'kaputt', mikrofon: true });
+      await p8.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+      await p8.locator('.cv-leer__titel').waitFor({ timeout: 8000 });
+      const mikro8 = p8.locator('.cv-composer__mikro');
+      await mikro8.waitFor({ state: 'visible', timeout: 6000 });
+      gemini.weiterOhneStrom({ text: 'Hallo aus Opera.' }, { text: 'Zweiter Versuch.' });
+      await mikro8.click();
+      await p8.locator('.cv-sprechen__zeit').waitFor({ timeout: 6000 });
+      check((await p8.evaluate(() => window.__erkennung.gestartet)) === 1, 'Meldet die Erkennung des Browsers „network“ (wie Opera), nimmt der Chat stattdessen auf – ohne Zutun');
+      await p8.waitForTimeout(800);
+      await p8.locator('.cv-sprechen button', { hasText: 'Fertig' }).click();
+      await warteBis(async () => (await p8.locator('.cv-composer__feld').inputValue()) === 'Hallo aus Opera.', { timeout: 12000 });
+      check((await p8.locator('.cv-composer__feld').inputValue()) === 'Hallo aus Opera.', 'und Gemini schreibt es um');
+      await p8.locator('.cv-composer__feld').fill('');
+      await mikro8.click();
+      await p8.locator('.cv-sprechen__zeit').waitFor({ timeout: 6000 });
+      check((await p8.evaluate(() => window.__erkennung.gestartet)) === 1, 'Beim nächsten Mal nimmt er gleich auf – die taube Erkennung wird nicht noch einmal versucht');
+      await p8.waitForTimeout(700);
+      await p8.locator('.cv-composer__feld').press('Enter');
+      await warteBis(async () => (await p8.locator('.cv-composer__feld').inputValue()) === 'Zweiter Versuch.', { timeout: 12000 });
+      check((await p8.locator('.cv-composer__feld').inputValue()) === 'Zweiter Versuch.' && (await p8.locator('.cv-sprechen').isHidden()),
+        'Enter während der Aufnahme heißt „fertig gesprochen“ – umgeschrieben wird, gesendet nicht');
+      await c8.close();
+    }
+
     /* ======================================= 8 · Ansicht Agenten */
     console.log(`\n${BO}8 · Ansicht „Agenten“: Hintergrundaktivität${X}`);
     {
@@ -1251,6 +1630,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
   await browser.close();
   await app.close();
   await statist.close();
+  await gemini.close();
   fs.rmSync(home, { recursive: true, force: true });
 
   const gut = ergebnisse.filter((e) => e.ok).length;

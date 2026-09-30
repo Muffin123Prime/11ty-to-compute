@@ -540,6 +540,9 @@ async function senden({
     suchen: [],
     quellen: new Map(),
     sucheGemeldet: false,
+    /** groundingSupports: welcher Textteil sich auf welche Fundstellen stuetzt (fuer die Nummern im Text). */
+    belege: [],
+    belegSchluessel: new Set(),
   };
   const teil = () => z.bloecke.filter(Boolean);
 
@@ -617,6 +620,18 @@ async function senden({
       z.bloecke.forEach((b, i) => { if (b && b.type === 'text') index = i; });
       melden({ art: 'zitat', index, zitat: { type: 'web_search_result_location', url: q.url, title: q.title } });
     });
+    const stuetzen = Array.isArray(meta.groundingSupports) ? meta.groundingSupports : [];
+    for (const st of stuetzen) {
+      const text = st && st.segment && typeof st.segment.text === 'string' ? st.segment.text : '';
+      const urls = (Array.isArray(st && st.groundingChunkIndices) ? st.groundingChunkIndices : [])
+        .map((i) => chunks[i] && chunks[i].web && chunks[i].web.uri)
+        .filter((u) => typeof u === 'string');
+      if (!text.trim() || !urls.length) continue;
+      const schluessel = `${text}\u0000${urls.join(' ')}`;
+      if (z.belegSchluessel.has(schluessel)) continue;
+      z.belegSchluessel.add(schluessel);
+      z.belege.push({ text, urls });
+    }
   };
 
   const verarbeiten = (d) => {
@@ -707,6 +722,7 @@ async function senden({
     stopDetails: z.blockReason || (z.finishReason && z.finishReason !== 'STOP') ? { finishReason: z.finishReason, blockReason: z.blockReason } : null,
     usage: verbrauchAus(z),
     eingabeFehler: z.eingabeFehler,
+    belege: z.belege,
     ms: Date.now() - begonnen,
   };
 }

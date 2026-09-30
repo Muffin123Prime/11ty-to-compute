@@ -66,6 +66,16 @@ import {
   schnittSicher, codebloecke, spracheErkennen, ausfuehrbar, wortUnterschied, geaenderteStelle, lesbar, zitat,
   codeFrage, stellenFrage, stellenAuftrag, abschnittFrage, NEU_VARIANTEN, UMWANDELN, STELLEN_AKTIONEN, SPRACHEN, fassungsName,
 } from '../lib/antwort-hilfen.js';
+import {
+  dateiArt, schnellAktionen, anhangUrl, alsBase64, bildVorbereiten, leuchtkasten, leuchtkastenZu, mb,
+  MAX_PDF_BYTES, MAX_JE_NACHRICHT, MOEGLICH,
+} from '../lib/anhaenge.js';
+import {
+  vorleser, vorlesenMoeglich, sprechText, stelleImText, hervorheben, hervorhebenMoeglich, MARKE as VORLESE_MARKE,
+} from '../lib/vorlesen.js';
+import {
+  sprechWeg, erkennungStarten, aufnahmeStarten, erkennungFehlerSatz, erkennungUntauglich, bytesAlsBase64, MAX_SEKUNDEN,
+} from '../lib/sprechen.js';
 
 /* ------------------------------------------------------------------ */
 /* Konstanten                                                          */
@@ -93,7 +103,8 @@ const STARTER = [
   { label: 'Prompt schreiben', symbol: 'pen', text: 'Schreib mir einen Prompt für ' },
 ];
 
-const TEXTDATEI = /\.(txt|md|markdown|csv|tsv|json|log|js|mjs|cjs|ts|py|html?|css|xml|ya?ml|ini|toml|sh|bat|ics|vcf|srt|tex|sql)$/i;
+/** Was die Dateiauswahl anbietet: Text, Bilder und PDF (lib/anhaenge.js prueft genauer). */
+const DATEI_ARTEN = 'text/*,.md,.markdown,.csv,.tsv,.json,.log,.js,.mjs,.ts,.py,.html,.css,.xml,.yml,.yaml,.ini,.toml,.sh,.bat,.ics,.sql,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif,application/pdf,.pdf';
 
 const SYMBOL_STOPP = '<rect x="5.6" y="5.6" width="8.8" height="8.8" rx="1.8" fill="currentColor" stroke="none"/>';
 const SYMBOL_UNTEN = '<path d="M10 4.4v11M5.4 10.8 10 15.4l4.6-4.6"/>';
@@ -111,6 +122,11 @@ const SYMBOL_STIFT = '<path d="M12.8 4.2 15.8 7.2 7.4 15.6H4.4v-3z"/><path d="m1
 const SYMBOL_ERKLAEREN = '<circle cx="10" cy="10" r="7.2"/><path d="M8 8a2.1 2.1 0 1 1 3 1.9c-.6.3-1 .8-1 1.5v.4M10 14.1h.01"/>';
 const SYMBOL_FEHLER = '<path d="M7.4 6.6a2.6 2.6 0 0 1 5.2 0M6.6 8.4h6.8v3.4a3.4 3.4 0 0 1-6.8 0z"/><path d="M10 8.4v6.6M6.6 10.6H4M16 10.6h-2.6M6.8 13.8l-2.2 1.6M13.2 13.8l2.2 1.6M6.8 7.4 5 5.8M13.2 7.4 15 5.8"/>';
 const SYMBOL_FRAGE_DAZU = '<path d="M4 5.6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-3.4 2.8v-2.8H6a2 2 0 0 1-2-2z"/>';
+const SYMBOL_MIKRO = '<rect x="7.4" y="2.8" width="5.2" height="9.2" rx="2.6"/><path d="M4.8 9.6a5.2 5.2 0 0 0 10.4 0M10 14.8v2.6"/>';
+const SYMBOL_PAUSE = '<rect x="5.6" y="4.6" width="2.9" height="10.8" rx="1" fill="currentColor" stroke="none"/><rect x="11.5" y="4.6" width="2.9" height="10.8" rx="1" fill="currentColor" stroke="none"/>';
+const SYMBOL_ABSPIELEN = '<path d="M6.6 4.4v11.2l8.8-5.6z" fill="currentColor" stroke="none"/>';
+const SYMBOL_PDF = '<path d="M5.4 2.7h5.9l3.9 3.9v9.1a1.6 1.6 0 0 1-1.6 1.6H5.4a1.6 1.6 0 0 1-1.6-1.6V4.3a1.6 1.6 0 0 1 1.6-1.6z"/><path d="M11.1 2.9v3.9h3.9"/><path d="M6.6 13.6h1.1a1 1 0 0 0 0-2H6.6v3.2M10.2 11.6v3.2h.7a1.6 1.6 0 0 0 0-3.2zM13.6 14.8v-3.2h1.4M13.6 13.2h1.1" stroke-width="1.1"/>';
+const SYMBOL_ERLEDIGT = '<path d="m5 10.4 3.2 3.2 6.8-7.4"/>';
 
 /** Schnelle, kurze Pruefsumme eines Texts (Schluessel fuer Inseln und Tabellen). */
 function pruefsumme(wert) {
@@ -510,56 +526,105 @@ function zustandsSpeicher(api, chatId, m, version, beiFehler) {
 /* Vorlesen                                                            */
 /* ------------------------------------------------------------------ */
 
-let sprichtId = null;
-const sprechAbos = new Set();
+/**
+ * Der eine Vorleser der Seite (web/lib/vorlesen.js): Es liest immer nur eine
+ * Antwort, Satz fuer Satz, und das Tempo gilt fuer die ganze Sitzung. Er
+ * lebt auf Modulebene wie die Sitzungen; die Ansicht haengt sich an.
+ */
+let vorleserDerSeite = null;
 
-function sprechenMoeglich() {
-  return typeof window !== 'undefined' && 'speechSynthesis' in window && typeof window.SpeechSynthesisUtterance === 'function';
+function vl() {
+  if (!vorleserDerSeite && vorlesenMoeglich()) vorleserDerSeite = vorleser();
+  return vorleserDerSeite;
 }
 
-function sprechZustand(id) {
-  sprichtId = id;
-  for (const fn of [...sprechAbos]) fn();
+function sprechenMoeglich() {
+  return vorlesenMoeglich();
+}
+
+/** Welche Antwort gerade vorgelesen wird (oder null). */
+function liestGerade() {
+  return vorleserDerSeite ? vorleserDerSeite.zustand().id : null;
 }
 
 /**
- * Vorlesen mit deutscher Stimme. In Saetzen, nicht am Stueck: Chromium
- * bricht eine einzelne lange Aeusserung nach etwa 15 Sekunden still ab.
+ * Sprechen: gibt es die Erkennung des Browsers hier nur dem Namen nach
+ * (Opera, Chromium ohne Google-Dienst), bleibt es fuer den Rest der Sitzung
+ * bei der Aufnahme, die Gemini umschreibt (web/lib/sprechen.js).
  */
-function vorlesen(id, inhalt) {
-  const synth = window.speechSynthesis;
-  if (sprichtId === id) {
-    synth.cancel();
-    sprechZustand(null);
-    return;
+let nurAufnahme = false;
+
+/** "0,75×", "1×", "1,5×" */
+function tempoText(t) {
+  return `${String(t).replace('.', ',')}×`;
+}
+
+/**
+ * Was vorgelesen wird: die Text-Fassung der Bausteine (nie JSON), ohne
+ * Codebloecke -- Code Zeichen fuer Zeichen hoert niemand gern --, ohne
+ * Aufzaehlungszeichen und Tabellenstriche.
+ */
+export function vorleseText(inhalt) {
+  const md = markdownOhneUi(String(inhalt || ''));
+  let ohneCode = '';
+  let pos = 0;
+  for (const b of codebloecke(md)) {
+    ohneCode += `${md.slice(pos, b.start)}\n`;
+    pos = b.ende;
   }
-  synth.cancel();
-  // Bausteine als ihre Text-Fassung, nie als JSON.
-  const klar = extractPlain(markdownOhneUi(inhalt)).replace(/\s+/g, ' ').trim();
-  if (!klar) return;
-  const saetze = klar.match(/[^.!?…]+[.!?…]*\s*/g) || [klar];
-  const stuecke = [];
-  let puffer = '';
-  for (const satz of saetze) {
-    if ((puffer + satz).length > 220 && puffer) {
-      stuecke.push(puffer);
-      puffer = '';
-    }
-    puffer += satz;
-  }
-  if (puffer.trim()) stuecke.push(puffer);
-  const stimme = (synth.getVoices() || []).find((v) => /^de([-_]|$)/i.test(v.lang)) || null;
-  stuecke.forEach((stueck, i) => {
-    const u = new window.SpeechSynthesisUtterance(stueck.trim());
-    u.lang = 'de-DE';
-    if (stimme) u.voice = stimme;
-    if (i === stuecke.length - 1) {
-      u.onend = () => { if (sprichtId === id) sprechZustand(null); };
-    }
-    u.onerror = () => { if (sprichtId === id) sprechZustand(null); };
-    synth.speak(u);
+  ohneCode += md.slice(pos);
+  // Die Nummern der Quellen ("[1]") liest niemand vor.
+  return sprechText(extractPlain(ohneCode).replace(/\[\d{1,2}\]/g, ''));
+}
+
+/** Was im Text als Verweis auf eine Quelle gilt: "[1]" bis "[99]". */
+const VERWEIS = /\[(\d{1,2})\]/g;
+
+/**
+ * "[1]" im Text einer Antwort wird ein kleiner Verweis auf Quelle 1 (neuer
+ * Tab) -- dieselbe Zaehlung wie die Liste unter der Antwort. Nur im Fliesstext:
+ * nicht in Code, nicht in Links, nicht in Bausteinen; eine Nummer ohne
+ * Quelle bleibt, was sie ist (Text).
+ */
+export function verweiseVerlinken(wurzel, quellen) {
+  const liste = Array.isArray(quellen) ? quellen : [];
+  if (!wurzel || !liste.length || typeof document === 'undefined') return 0;
+  const laeufer = document.createTreeWalker(wurzel, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) {
+      const el = n.parentElement;
+      if (!el || el.closest('code, pre, a, button, .bs, .md-code, .cv-code, .md-copycard')) return NodeFilter.FILTER_REJECT;
+      return /\[\d{1,2}\]/.test(n.nodeValue || '') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+    },
   });
-  sprechZustand(id);
+  const knoten = [];
+  for (let n = laeufer.nextNode(); n; n = laeufer.nextNode()) knoten.push(n);
+  let gesetzt = 0;
+  for (const n of knoten) {
+    const s = n.nodeValue || '';
+    const teile = [];
+    let pos = 0;
+    for (const m of s.matchAll(VERWEIS)) {
+      const nr = Number(m[1]);
+      const q = liste[nr - 1];
+      if (!q || !q.url) continue;
+      if (m.index > pos) teile.push(document.createTextNode(s.slice(pos, m.index)));
+      const titel = q.titel || q.url;
+      teile.push(h('a.cv-verweis', {
+        href: q.url,
+        target: '_blank',
+        rel: 'noopener noreferrer',
+        title: `${nr} · ${titel}`,
+        'aria-label': `Quelle ${nr}: ${titel}`,
+        onClick: (e) => e.stopPropagation(),
+      }, text(String(nr))));
+      pos = m.index + m[0].length;
+      gesetzt += 1;
+    }
+    if (!teile.length) continue;
+    if (pos < s.length) teile.push(document.createTextNode(s.slice(pos)));
+    n.replaceWith(...teile);
+  }
+  return gesetzt;
 }
 
 /* ------------------------------------------------------------------ */
@@ -589,7 +654,9 @@ function baueAnsicht(container, ctx) {
   let lebt = true;
   let claude = null; // Zustand der KI aus GET /api/ki: {aktiv, name, verbunden, grundCode, grund, netz, …} oder null (unbekannt)
   let claudeGeprueft = false;
-  let wartet = null; // Text, der nach dem Verbinden gesendet wird
+  let wartet = null; // Text, der nach dem Verbinden gesendet wird (oder AUS_DEM_FELD)
+  /** Merkzeichen fuer `wartet`: nach dem Verbinden das Eingabefeld samt Anhaengen senden. */
+  const AUS_DEM_FELD = {};
   // Die Verbinden-Karte wird neu gebaut, sobald sich der Claude-Zustand
   // aendert (Netzmodus, Tresor ...). Schluessel und Fehlersatz ueberleben das
   // hier -- nur im Speicher dieses Tabs, nie im Browser-Speicher.
@@ -597,7 +664,28 @@ function baueAnsicht(container, ctx) {
   let verbindenFehler = null; // {anbieter, satz}
   let verbindet = false;
   let folgen = true;
+  /**
+   * Was im Eingabefeld angehaengt ist: Textdateien (ihr Inhalt geht als Text
+   * mit) und Bilder/PDF (sie werden beim Senden abgelegt, POST …/anhaenge,
+   * und gehen mit ihrer Kennung). Bilder tragen eine Vorschau (blob:).
+   * Textdatei: {art:'text', name, text, groesse}
+   * Bild/PDF:  {art:'bild'|'pdf', name, mime, groesse, datei, url, id, chatId, laedt}
+   */
   let anhaenge = [];
+  /** Vorschau-Adressen (blob:), die beim Verlassen freigegeben werden. */
+  const vorschauen = new Set();
+  /** Solange Dateien hochgeladen werden, geht nichts Zweites los. */
+  let legtAb = false;
+  /**
+   * Sprechen (web/lib/sprechen.js): null, oder {weg:'erkennung'|'aufnahme',
+   * zustand:'startet'|'hoert'|'schreibt', …}. `gesprochen` merkt sich, dass
+   * der Text im Feld gesprochen wurde -- dann wird die Antwort vorgelesen.
+   */
+  let sprechen = null;
+  let gesprochen = false;
+  /** Vorlesen: welche Antwort zuletzt las, und ob die Marke im Text sitzt (sonst zeigt der Spieler den Satz). */
+  let vorleseVorher = null;
+  let markeSitzt = false;
   /** Zustand der Oberflaeche je Nachricht: auf-/zugeklappt, Auswahl … */
   const ui = new Map();
   const knoten = new Map(); // id -> {node, sig}
@@ -670,16 +758,28 @@ function baueAnsicht(container, ctx) {
     type: 'file',
     multiple: true,
     hidden: true,
-    accept: 'text/*,.md,.markdown,.csv,.tsv,.json,.log,.js,.mjs,.ts,.py,.html,.css,.xml,.yml,.yaml,.ini,.toml,.sh,.bat,.ics,.sql',
+    accept: DATEI_ARTEN,
   });
   const clip = h('button.cv-composer__clip', {
     type: 'button',
-    title: 'Textdatei anhängen',
-    'aria-label': 'Textdatei anhängen',
+    title: 'Datei anhängen (Text, Bild oder PDF)',
+    'aria-label': 'Datei anhängen (Text, Bild oder PDF)',
     onClick: () => dateiWahl.click(),
   }, icon(I.clip));
+  // Das Mikrofon gibt es nur, wenn einer der beiden Wege hier geht
+  // (aktualisiereEingabe); sonst ist es gar nicht da.
+  const mikro = h('button.cv-composer__mikro', {
+    type: 'button',
+    hidden: true,
+    title: 'Sprechen',
+    'aria-label': 'Sprechen',
+    'aria-pressed': 'false',
+    onClick: () => sprechenUmschalten(),
+  }, icon(SYMBOL_MIKRO));
   const sendKnopf = h('button.cv-composer__senden', { type: 'submit', 'aria-label': 'Senden', title: 'Senden (Enter)' }, icon(I.send));
   const anhangZeile = h('div.cv-anhaenge', { hidden: true });
+  const schnellZeile = h('div.cv-schnell', { hidden: true, role: 'group', 'aria-label': 'Was soll die KI mit den Anhängen tun?' });
+  const sprechZeile = h('div.cv-sprechen', { hidden: true, role: 'status', 'aria-live': 'polite' });
   const verbindenUnten = h('div.cv-eingabe__verbinden', { hidden: true });
   const nachUnten = h('button.cv-nachunten', {
     type: 'button',
@@ -693,9 +793,9 @@ function baueAnsicht(container, ctx) {
     },
   }, icon(SYMBOL_UNTEN));
   const formular = h('form.cv-composer', { onSubmit: (e) => { e.preventDefault(); absenden(); } },
-    clip, feld, sendKnopf);
+    clip, feld, mikro, sendKnopf);
   const eingabe = h('div.cv-eingabe', null,
-    h('div.cv-eingabe__innen', null, nachUnten, verbindenUnten, anhangZeile, formular, dateiWahl));
+    h('div.cv-eingabe__innen', null, nachUnten, verbindenUnten, sprechZeile, anhangZeile, schnellZeile, formular, dateiWahl));
 
   root.append(scroller, eingabe);
   container.appendChild(root);
@@ -789,6 +889,8 @@ function baueAnsicht(container, ctx) {
     if (folgen || ersteZeichnung) ansEnde(false);
     ersteZeichnung = false;
     nachUnten.hidden = folgen || !liste.length;
+    // Eine neu gebaute Antwort hat neue Textknoten: die Marke des Vorlesens neu setzen.
+    if (liestGerade()) vorleseMarke(vl().zustand());
   }
 
   function signatur(m, u, letzte, laeuft, aktiv) {
@@ -796,8 +898,9 @@ function baueAnsicht(container, ctx) {
     return JSON.stringify([
       m.updatedAt, d.status, (d.content || '').length, (d.denken || '').length, d.agenten, d.rueckfragen,
       d.rueckfrageOffen, (d.quellen || []).length, d.error, d.abgeschnitten, m._hinweise, m._stop, m._lokal,
-      letzte, laeuft, aktiv, u.v, sprichtId === m.id, !!claude && claude.verbunden,
+      letzte, laeuft, aktiv, u.v, liestGerade() === m.id, !!claude && claude.verbunden,
       d.version, Array.isArray(d.versionen) ? d.versionen.length : 0, u.fassung, u.vergleich, u.abschnitt,
+      Array.isArray(d.anhaenge) ? d.anhaenge.length : 0,
     ]);
   }
 
@@ -1025,6 +1128,8 @@ function baueAnsicht(container, ctx) {
             }
             const z = await api.post(`/ki/${anbieter}/schluessel`, { schluessel: wert }, { timeoutMs: 45000 });
             claude = { ...z };
+            // GET /api/ki sagt zusaetzlich, ob das Mikrofon ueber Gemini umschreiben kann.
+            claudeBald();
             schluesselEntwurf[anbieter] = '';
             eingabeFeld.value = '';
             ctx.toast(`${A.name} ist verbunden.`, 'success');
@@ -1034,7 +1139,9 @@ function baueAnsicht(container, ctx) {
             if (wartet) {
               const t = wartet;
               wartet = null;
-              senden(t);
+              // Was im Feld stand (samt Anhaengen), geht jetzt so ab, wie es dort steht.
+              if (t === AUS_DEM_FELD) absenden();
+              else senden(t);
             } else {
               feld.focus();
             }
@@ -1095,6 +1202,7 @@ function baueAnsicht(container, ctx) {
 
   function baueEigene(m, u) {
     const inhalt = String(m.data.content || '');
+    const dateien = Array.isArray(m.data.anhaenge) ? m.data.anhaenge : [];
     const zeile = h('div.cv-msg.cv-msg--user', { 'data-id': m.id, onClick: (e) => antippen(e, m.id) });
     const spalteN = h('div.cv-msg__spalte');
     if (u.bearbeiten) {
@@ -1102,26 +1210,33 @@ function baueAnsicht(container, ctx) {
       zeile.appendChild(spalteN);
       return zeile;
     }
-    const lang = inhalt.length > LANG_ZEICHEN || inhalt.split('\n').length > LANG_ZEILEN;
-    const blase = h('div.cv-bubble.cv-bubble--user', { class: lang && !u.voll ? 'is-lang' : '' },
-      h('div.cv-bubble__text', null, text(inhalt)));
-    if (lang) {
-      blase.appendChild(h('button.cv-mehr', {
-        type: 'button',
-        onClick: (e) => {
-          e.stopPropagation();
-          u.voll = !u.voll;
-          neuZeichnen(m.id);
-        },
-      }, text(u.voll ? 'Weniger zeigen' : 'Ganz anzeigen')));
-    }
-    blase.appendChild(h('span.cv-zeit', null,
+    // Bilder und PDF stehen ueber dem Text, wie sie mitgeschickt wurden.
+    if (dateien.length) spalteN.appendChild(anhangGalerie(dateien));
+    const zeit = h('span.cv-zeit', null,
       m.data.bearbeitetAm ? h('span.cv-zeit__zusatz', null, text('bearbeitet · ')) : null,
-      text(m._lokal ? 'sendet …' : uhrzeit(m.createdAt))));
-    spalteN.appendChild(blase);
+      text(m._lokal ? 'sendet …' : uhrzeit(m.createdAt)));
+    if (inhalt.trim()) {
+      const lang = inhalt.length > LANG_ZEICHEN || inhalt.split('\n').length > LANG_ZEILEN;
+      const blase = h('div.cv-bubble.cv-bubble--user', { class: lang && !u.voll ? 'is-lang' : '' },
+        h('div.cv-bubble__text', null, text(inhalt)));
+      if (lang) {
+        blase.appendChild(h('button.cv-mehr', {
+          type: 'button',
+          onClick: (e) => {
+            e.stopPropagation();
+            u.voll = !u.voll;
+            neuZeichnen(m.id);
+          },
+        }, text(u.voll ? 'Weniger zeigen' : 'Ganz anzeigen')));
+      }
+      blase.appendChild(zeit);
+      spalteN.appendChild(blase);
+    } else {
+      spalteN.appendChild(zeit);
+    }
     if (!m._lokal) {
       spalteN.appendChild(h('div.cv-aktionen', { role: 'toolbar', 'aria-label': 'Nachricht' },
-        kopierAktion(() => inhalt, 'Nachricht kopieren'),
+        inhalt.trim() ? kopierAktion(() => inhalt, 'Nachricht kopieren') : null,
         s && s.lauf ? null : aktion(I.pen, 'Bearbeiten', () => {
           u.bearbeiten = true;
           u.entwurf = inhalt;
@@ -1202,6 +1317,48 @@ function baueAnsicht(container, ctx) {
     }
   }
 
+  /**
+   * Die Anhaenge einer eigenen Nachricht: ein Bild gross, mehrere als
+   * Reihe zum Wischen (Karussell); Antippen oeffnet den Leuchtkasten mit
+   * allen Bildern der Nachricht. Ein PDF ist eine Karte mit [Anzeigen]
+   * (neuer Tab, der Betrachter des Browsers). Vor dem Ablegen zeigt die
+   * vorlaeufige Nachricht die Vorschau aus dem Speicher des Browsers.
+   */
+  function anhangGalerie(dateien) {
+    const chat = cid();
+    const quelle = (a) => a.vorschau || (a.id && chat ? anhangUrl(chat, a.id) : null);
+    const bilder = dateien.filter((a) => a && /^image\//.test(String(a.mime || '')));
+    const pdfs = dateien.filter((a) => a && a.mime === 'application/pdf');
+    const box = h('div.cv-dateien');
+    if (bilder.length) {
+      const liste = bilder.map((a) => ({ src: quelle(a), name: a.name || 'Bild' }));
+      box.appendChild(h('div.cv-galerie', { class: bilder.length === 1 ? 'cv-galerie--eins' : 'cv-galerie--viele' },
+        bilder.map((a, i) => (liste[i].src
+          ? h('button.cv-galerie__bild', {
+            type: 'button',
+            title: `${liste[i].name} – vergrößern`,
+            'aria-label': `Bild vergrößern: ${liste[i].name}`,
+            onClick: (e) => {
+              e.stopPropagation();
+              leuchtkasten({ bilder: liste, start: i });
+            },
+          }, h('img', { src: liste[i].src, alt: liste[i].name, loading: 'lazy', decoding: 'async', draggable: 'false' }))
+          : h('span.cv-galerie__fehlt', null, text(liste[i].name))))));
+    }
+    for (const a of pdfs) {
+      const url = a.id && chat ? anhangUrl(chat, a.id) : null;
+      box.appendChild(h('div.cv-pdf', null,
+        h('span.cv-pdf__symbol', { 'aria-hidden': 'true' }, icon(SYMBOL_PDF)),
+        h('span.cv-pdf__text', null,
+          h('span.cv-pdf__name', null, text(a.name || 'Dokument.pdf')),
+          h('span.cv-pdf__groesse', null, text(`PDF · ${groesse(Number(a.size) || 0)}`))),
+        url
+          ? h('a.btn.btn--small.cv-pdf__anzeigen', { href: url, target: '_blank', rel: 'noopener noreferrer', onClick: (e) => e.stopPropagation() }, text('Anzeigen'))
+          : h('span.cv-pdf__laedt', null, text('wird abgelegt …'))));
+    }
+    return box;
+  }
+
   /* ---------------------------------------------------- Antwort */
 
   function baueAntwort(m, u, letzte, aktiv) {
@@ -1230,11 +1387,14 @@ function baueAnsicht(container, ctx) {
       blase.appendChild(det);
     }
 
-    // 2. Was gerade passiert: eine ruhige Zeile je laufendem Agenten.
-    const laufend = laeuft ? agenten.filter((a) => a.zustand === 'laeuft' && !(a.rolle === 'planung' && fragen.some((f) => f.zustand === 'offen'))) : [];
-    for (const a of laufend) blase.appendChild(liveZeile(a));
-    if (laeuft && !inhalt.trim() && !laufend.length && !(d.denken && String(d.denken).trim())) {
-      blase.appendChild(h('p.cv-live', null, h('span.dot.dot--accent.dot--live'), h('span.cv-live__text', null, text('Denkt nach …'))));
+    // 2. Was gerade passiert (Live-Fortschritt, docs/ANTWORT-BAUSTEINE.md 6),
+    // aus den echten Ereignissen dieses Zuges: erledigte Schritte mit Haken
+    // ("Termin eingetragen …"), laufende mit Punkt ("Sucht im Internet …"),
+    // und solange Text kommt "Schreibt die Antwort …". Danach klappt alles
+    // zu "3 Arbeitsschritte" (3.).
+    if (laeuft) {
+      const live = fortschritt(d, agenten, fragen, inhalt);
+      if (live) blase.appendChild(live);
     }
 
     // 3. Die Arbeitsschritte, zugeklappt: wer war beteiligt, mit welchem Ergebnis.
@@ -1279,6 +1439,8 @@ function baueAnsicht(container, ctx) {
       // Jede Tabelle sortierbar, ab 7 Zeilen filterbar, mit fester Kopfzeile;
       // ihr Zustand (Sortierung, Filter) liegt ausserhalb des DOM.
       tabellenVerbessern(md, { schluessel: `${m.id}|${angesehen.version}|${teil}` });
+      // "[1]" wird ein Verweis auf die Quelle darunter (Quellen gehoeren zur Antwort).
+      verweiseVerlinken(md, d.quellen);
       if (!laeuft) ueberschriftenFragen(md, m, u, teil);
       teil += 1;
       blase.appendChild(md);
@@ -1309,6 +1471,7 @@ function baueAnsicht(container, ctx) {
 
     const spalteN = h('div.cv-msg__spalte', null, blase);
     if (!laeuft && (textInhalt.trim() || angesehen.anzahl > 1)) spalteN.appendChild(antwortAktionen(m, letzte, angesehen));
+    if (liestGerade() === m.id && vl()) spalteN.appendChild(spielerZeile());
     if (!laeuft && u.vergleich) spalteN.appendChild(vergleichKarte(m, u, angesehen));
     // Geratene Vorschlags-Chips gibt es nicht mehr: Naechste Schritte bietet die
     // KI selbst ueber den Baustein "aktionen" an (docs/ANTWORT-BAUSTEINE.md, 6.).
@@ -1784,6 +1947,58 @@ function baueAnsicht(container, ctx) {
       h('span.dot.dot--accent.dot--live', { 'aria-hidden': 'true' }));
   }
 
+  /** Ein erledigter Schritt, in der Vergangenheit erzaehlt ("Gesucht: …", "Termin eingetragen · …"). */
+  function erledigtZeile(a) {
+    const r = rolle(a.rolle);
+    const fehler = a.zustand === 'fehler';
+    const w = Array.isArray(a.wirkung) && a.wirkung.length ? wirkungZeilen(a.wirkung)[0] : null;
+    let satz;
+    if (w) {
+      satz = w.detail ? `${w.label} · ${w.detail}` : w.label;
+    } else if (a.rolle === 'recherche') {
+      const q = /^Sucht:\s*(.*)$/.exec(a.titel || '');
+      const l = /^Liest:\s*(.*)$/.exec(a.titel || '');
+      if (q) satz = `Gesucht: „${q[1]}“${a.ergebnis && !fehler ? ` · ${a.ergebnis}` : ''}`;
+      else if (l) satz = a.ergebnis && /^Gelesen:/.test(a.ergebnis) ? a.ergebnis : `Gelesen: ${l[1]}`;
+      else satz = 'Im Internet gesucht';
+    } else {
+      satz = `${a.titel || r.name}${a.ergebnis && !fehler ? ` · ${a.ergebnis}` : ''}`;
+    }
+    if (fehler && a.ergebnis) satz += ` · ${a.ergebnis}`;
+    return h('p.cv-live.is-fertig', { class: cx({ 'is-fehler': fehler }), 'data-rolle': a.rolle || '' },
+      h('span.cv-live__symbol', { 'aria-hidden': 'true' }, icon(fehler ? I.alert : SYMBOL_ERLEDIGT)),
+      h('span.cv-live__text', null, text(satz)));
+  }
+
+  /**
+   * Die Liste waehrend der Antwort: jeder Agent dieses Zuges in der
+   * Reihenfolge, in der er ansprang. Die Planung, die auf eine Rueckfrage
+   * wartet, zeigt ihre eigene Karte und steht hier nicht.
+   */
+  function fortschritt(d, agenten, fragen, inhalt) {
+    const denkt = !!(d.denken && String(d.denken).trim());
+    const frageOffen = fragen.some((f) => f.zustand === 'offen');
+    const aufFrage = (a) => a.rolle === 'planung' && frageOffen && a.zustand === 'laeuft';
+    const zeilen = [];
+    for (const a of agenten) {
+      if (aufFrage(a)) continue;
+      zeilen.push(a.zustand === 'laeuft' ? liveZeile(a) : erledigtZeile(a));
+    }
+    const arbeitet = agenten.some((a) => a.zustand === 'laeuft' && !aufFrage(a));
+    if (!arbeitet && !frageOffen) {
+      if (inhalt.trim()) {
+        zeilen.push(h('p.cv-live.cv-live--schreibt', null,
+          h('span.cv-live__symbol', { 'aria-hidden': 'true' }, icon(SYMBOL_STIFT)),
+          h('span.cv-live__text', null, text('Schreibt die Antwort …')),
+          h('span.dot.dot--accent.dot--live', { 'aria-hidden': 'true' })));
+      } else if (!denkt) {
+        // Mit Gedankengang sagt es dessen Zeile ("Denkt nach …", 1.).
+        zeilen.push(h('p.cv-live', null, h('span.dot.dot--accent.dot--live'), h('span.cv-live__text', null, text('Denkt nach …'))));
+      }
+    }
+    return zeilen.length ? h('div.cv-fortschritt', null, zeilen) : null;
+  }
+
   function schritte(m, u, agenten) {
     const fehler = agenten.filter((a) => a.zustand === 'fehler').length;
     const namen = [...new Set(agenten.map((a) => rolle(a.rolle).kurz))];
@@ -2052,17 +2267,134 @@ function baueAnsicht(container, ctx) {
     const u = uiVon(m.id);
     const inhalt = () => markdownOhneUi(fs.inhalt);
     const ruhig = !(s && s.lauf);
+    const liest = liestGerade() === m.id;
     return h('div.cv-aktionen', { role: 'toolbar', 'aria-label': 'Antwort' },
       kopierAktion(inhalt, 'Antwort kopieren'),
       letzte && ruhig ? aktion(SYMBOL_NEU, 'Neu erstellen', (k) => neuMenue(k, m), { menue: true }) : null,
       ruhig && fs.inhalt.trim() ? aktion(SYMBOL_ZAUBER, 'Umwandeln', (k) => umwandelnMenue(k, m), { menue: true }) : null,
       sprechenMoeglich() && fs.inhalt.trim()
-        ? aktion(SYMBOL_LAUT, sprichtId === m.id ? 'Vorlesen beenden' : 'Vorlesen', () => vorlesen(m.id, fs.inhalt), {
-          klasse: sprichtId === m.id ? 'is-an' : '',
-          gedrueckt: sprichtId === m.id,
-        })
+        ? aktion(SYMBOL_LAUT, liest ? 'Vorlesen beenden' : 'Vorlesen', () => {
+          if (liest) vl().stopp();
+          else vorlesenStarten(m, fs.inhalt);
+        }, { klasse: liest ? 'is-an' : '', gedrueckt: liest })
         : null,
       fs.anzahl > 1 ? fassungsLeiste(m, u, fs) : null);
+  }
+
+  /* ------------------------------------------------------ Vorlesen */
+
+  function vorlesenStarten(m, inhalt) {
+    const v = vl();
+    if (!v) return;
+    if (!v.start(m.id, vorleseText(inhalt))) ctx.toast('Hier gibt es nichts vorzulesen.', 'info');
+  }
+
+  /**
+   * Der kleine Spieler unter der Antwort, die gerade vorgelesen wird:
+   * ▶/⏸, Tempo, "Satz 3 von 12", Beenden. Er zeichnet sich selbst neu,
+   * wenn der Vorleser weiterliest -- die Antwort bleibt dabei stehen (ein
+   * Neubau je Satz verloere eine Markierung, einen offenen Reiter …).
+   */
+  function spielerZeile() {
+    const v = vl();
+    const knopf = h('button.cv-spieler__knopf', {
+      type: 'button',
+      onClick: (e) => {
+        e.stopPropagation();
+        if (v.zustand().spielt) v.pause();
+        else v.weiter();
+      },
+    });
+    const tempo = h('button.cv-spieler__tempo', {
+      type: 'button',
+      title: 'Tempo ändern',
+      onClick: (e) => {
+        e.stopPropagation();
+        v.naechstesTempo();
+      },
+    });
+    const stand = h('span.cv-spieler__stand');
+    const satz = h('span.cv-spieler__satz', { hidden: true });
+    const zu = h('button.cv-spieler__zu', {
+      type: 'button',
+      title: 'Vorlesen beenden',
+      'aria-label': 'Vorlesen beenden',
+      onClick: (e) => {
+        e.stopPropagation();
+        v.stopp();
+      },
+    }, icon(SYMBOL_SCHLIESSEN));
+    const zeile = h('div.cv-spieler', { role: 'group', 'aria-label': 'Vorlesen' }, knopf, tempo, stand, satz, zu);
+    let artVorher = null;
+    zeile._aktualisieren = (z) => {
+      const art = z.spielt ? 'pause' : 'weiter';
+      if (art !== artVorher) {
+        artVorher = art;
+        knopf.replaceChildren(icon(z.spielt ? SYMBOL_PAUSE : SYMBOL_ABSPIELEN));
+        knopf.setAttribute('aria-label', z.spielt ? 'Pause' : 'Weiterlesen');
+        knopf.title = z.spielt ? 'Pause' : 'Weiterlesen';
+      }
+      tempo.textContent = tempoText(z.tempo);
+      tempo.setAttribute('aria-label', `Tempo ${tempoText(z.tempo)} – ändern`);
+      stand.textContent = z.anzahl ? `Satz ${z.index + 1} von ${z.anzahl}` : '';
+      // Kann der Browser den Satz im Text nicht hervorheben, steht er hier.
+      satz.textContent = z.satz || '';
+      satz.hidden = markeSitzt || !z.satz;
+    };
+    zeile._aktualisieren(v.zustand());
+    return zeile;
+  }
+
+  /** Den gerade gelesenen Satz im Text der Antwort hervorheben. */
+  function vorleseMarke(z) {
+    if (!hervorhebenMoeglich()) {
+      markeSitzt = false;
+      return;
+    }
+    if (!z || !z.id || !z.satz) {
+      hervorheben(null);
+      markeSitzt = false;
+      return;
+    }
+    const blase = verlauf.querySelector(`.cv-msg[data-id="${CSS.escape(z.id)}"] .cv-bubble`);
+    const range = blase ? stelleImText(blase, z.satz) : null;
+    hervorheben(range);
+    markeSitzt = !!range;
+  }
+
+  /** Was der Vorleser meldet: anderer Satz, Pause, Tempo, Ende. */
+  function vorleseAbo(z) {
+    if (!lebt) return;
+    if (z.id !== vorleseVorher) {
+      // Eine Antwort bekommt ihren Spieler, die vorige verliert ihn.
+      if (vorleseVorher) neuZeichnen(vorleseVorher);
+      if (z.id) neuZeichnen(z.id);
+      vorleseVorher = z.id;
+    }
+    vorleseMarke(z);
+    for (const zeile of verlauf.querySelectorAll('.cv-spieler')) if (zeile._aktualisieren) zeile._aktualisieren(z);
+  }
+
+  /** Nach einer gesprochenen Frage: die fertige Antwort vorlesen. */
+  function antwortVorlesen() {
+    const id = letzteAntwortId();
+    const m = id && s ? nachricht(s, id) : null;
+    if (!m || m.data.status === 'failed' || !String(m.data.content || '').trim()) return;
+    vorlesenStarten(m, m.data.content);
+  }
+
+  /**
+   * Safari spricht nur, wenn das erste Sprechen aus einem Tippen kam. Die
+   * Antwort auf eine gesprochene Frage kommt Sekunden spaeter -- deshalb
+   * beim Tippen aufs Mikrofon einmal still "sprechen".
+   */
+  function vorlesenFreischalten() {
+    if (!sprechenMoeglich() || liestGerade()) return;
+    try {
+      const u = new window.SpeechSynthesisUtterance(' ');
+      u.volume = 0;
+      window.speechSynthesis.speak(u);
+    } catch { /* dann eben nicht */ }
   }
 
   /**
@@ -2106,9 +2438,10 @@ function baueAnsicht(container, ctx) {
     plane();
   }
 
-  function inhaltMitAnhaengen(textInhalt) {
+  /** Textdateien gehen als Text mit (in einem Zaun, der laenger ist als jeder darin). */
+  function inhaltMitAnhaengen(textInhalt, texte) {
     let out = textInhalt;
-    for (const a of anhaenge) {
+    for (const a of texte) {
       const z = zaun(a.text);
       out += `${out ? '\n\n' : ''}**Anhang: ${a.name}**\n${z}\n${a.text}\n${z}`;
     }
@@ -2120,14 +2453,17 @@ function baueAnsicht(container, ctx) {
       stoppen(s, api);
       return;
     }
+    if (legtAb) return;
     const roh = feld.value.trim();
+    const dateien = anhaenge.filter((a) => a.art === 'bild' || a.art === 'pdf');
+    const texte = anhaenge.filter((a) => a.art === 'text');
     if (!roh && !anhaenge.length) return;
-    const inhalt = inhaltMitAnhaengen(roh);
+    const inhalt = inhaltMitAnhaengen(roh, texte);
     if (inhalt.length > MAX_ZEICHEN) {
       ctx.toast(`Die Nachricht ist zu lang (${inhalt.length.toLocaleString('de-DE')} Zeichen, erlaubt sind ${MAX_ZEICHEN.toLocaleString('de-DE')}).`, 'error');
       return;
     }
-    const gesendet = await senden(inhalt, { ausFeld: true });
+    const gesendet = await senden(inhalt, { ausFeld: true, dateien });
     if (gesendet) {
       anhaenge = [];
       zeichneAnhaenge();
@@ -2135,24 +2471,69 @@ function baueAnsicht(container, ctx) {
   }
 
   /**
+   * Bilder und PDF ablegen (POST …/anhaenge), bevor die Nachricht geht: sie
+   * nimmt nur ihre Kennungen mit. Was schon in DIESEM Chat abgelegt wurde
+   * (ein frueherer, gescheiterter Versuch), wird nicht noch einmal geschickt.
+   * @returns {Promise<string[]>} die Kennungen, in der Reihenfolge der Dateien
+   */
+  async function dateienAblegen(dateien) {
+    const ids = [];
+    for (const a of dateien) {
+      if (a.id && a.chatId === s.chatId) {
+        ids.push(a.id);
+        continue;
+      }
+      a.laedt = true;
+      zeichneAnhaenge();
+      try {
+        const daten = await alsBase64(a.datei);
+        const r = await api.post(`/chats/${encodeURIComponent(s.chatId)}/anhaenge`, { name: a.name, mime: a.mime, daten }, { timeoutMs: 180000 });
+        const neu = r && r.anhang;
+        if (!neu || !neu.id) throw new Error('Der Server hat die Datei nicht angenommen.');
+        a.id = neu.id;
+        a.chatId = s.chatId;
+        ids.push(neu.id);
+      } catch (err) {
+        throw new Error(`„${a.name}“: ${fehlerSatz(err)}`);
+      } finally {
+        a.laedt = false;
+      }
+    }
+    zeichneAnhaenge();
+    return ids;
+  }
+
+  /**
    * Eine Nachricht senden. Der neue Chat entsteht erst hier, mit der ersten
    * Nachricht -- nie auf Vorrat. Ist Claude nicht verbunden, bleibt der Text
-   * im Feld, und die Verbinden-Karte uebernimmt.
+   * im Feld, und die Verbinden-Karte uebernimmt. `dateien` sind Bilder und
+   * PDF aus dem Eingabefeld; mit ihnen darf der Text leer sein.
    */
-  async function senden(inhalt, { ausFeld = false } = {}) {
+  async function senden(inhalt, { ausFeld = false, dateien = [] } = {}) {
     const t = String(inhalt || '').trim();
-    if (!t || (s && s.lauf)) return false;
+    if ((!t && !dateien.length) || (s && s.lauf) || legtAb) return false;
     if (claude && claude.verbunden === false) {
-      wartet = t;
+      wartet = ausFeld ? AUS_DEM_FELD : t;
       obenKey = null;
       plane();
       const f = container.querySelector('.cv-verbinden input');
       if (f) f.focus();
       return false;
     }
+    // Wurde die Frage gesprochen, wird die Antwort vorgelesen.
+    const warGesprochen = ausFeld && gesprochen;
+    const vorlesenDanach = warGesprochen && sprechenMoeglich();
     const feldVorher = feld.value;
+    const zurueckInsFeld = () => {
+      if (!ausFeld) return;
+      feld.value = feldVorher;
+      gesprochen = warGesprochen;
+      groesseAnpassen();
+      aktualisiereEingabe();
+    };
     if (ausFeld) {
       feld.value = '';
+      gesprochen = false;
       groesseAnpassen();
       speicher('loeschen', ENTWURF + (chatId || 'neu'));
     }
@@ -2166,29 +2547,53 @@ function baueAnsicht(container, ctx) {
         s.geladen = true;
         ctx.replaceRoute(`#/chat?id=${encodeURIComponent(chatId)}`);
       } catch (err) {
-        if (ausFeld) feld.value = feldVorher;
-        groesseAnpassen();
+        zurueckInsFeld();
         ctx.toast(`Der Chat ließ sich nicht anlegen: ${fehlerSatz(err)}`, 'error');
         return false;
       }
     }
+    let ids = [];
+    if (dateien.length) {
+      legtAb = true;
+      aktualisiereEingabe();
+      try {
+        ids = await dateienAblegen(dateien);
+      } catch (err) {
+        zurueckInsFeld();
+        ctx.toast(`Nicht gesendet: ${err.message}`, 'error');
+        return false;
+      } finally {
+        legtAb = false;
+        aktualisiereEingabe();
+      }
+    }
     // Sofort zu sehen, bevor der Server antwortet; `nutzer` ersetzt sie.
-    s.nachrichten.push({ id: `lokal_${Date.now()}`, _lokal: true, createdAt: new Date().toISOString(), data: { role: 'user', content: t } });
+    s.nachrichten.push({
+      id: `lokal_${Date.now()}`,
+      _lokal: true,
+      createdAt: new Date().toISOString(),
+      data: {
+        role: 'user',
+        content: t,
+        ...(dateien.length ? { anhaenge: dateien.map((a) => ({ id: a.id, name: a.name, mime: a.mime, size: a.groesse, vorschau: a.url })) } : {}),
+      },
+    });
     folgen = true;
     plane();
     try {
-      await strom(s, api, `/chats/${encodeURIComponent(s.chatId)}/messages`, { inhalt: t });
+      const body = { inhalt: t };
+      if (ids.length) body.anhaenge = ids;
+      await strom(s, api, `/chats/${encodeURIComponent(s.chatId)}/messages`, body);
     } catch (err) {
       s.nachrichten = s.nachrichten.filter((m) => !m._lokal);
-      if (ausFeld) {
-        feld.value = feldVorher;
-        groesseAnpassen();
-      }
-      if (err && (err.code === 'CLAUDE_NICHT_VERBUNDEN' || err.code === 'PIN_NOETIG')) {
-        wartet = t;
+      zurueckInsFeld();
+      if (err && (nichtVerbunden(err) || err.code === 'PIN_NOETIG')) {
+        wartet = ausFeld ? AUS_DEM_FELD : t;
         claudeAus(err);
-        if (neuAngelegt && !s.nachrichten.length) {
+        if (neuAngelegt && !s.nachrichten.length && !ids.length) {
           // Ein leerer Chat, den niemand wollte, soll nicht in "Zuletzt" stehen.
+          // (Mit abgelegten Dateien bleibt er: sie gehoeren zu ihm, und der
+          // naechste Versuch nimmt sie von dort.)
           api.del(`/records/${encodeURIComponent(s.chatId)}`).catch(() => {});
           const alt = s;
           trennen();
@@ -2210,6 +2615,7 @@ function baueAnsicht(container, ctx) {
       titelHolen();
     }
     fokusNachAntwort();
+    if (vorlesenDanach) antwortVorlesen();
     return true;
   }
 
@@ -2286,10 +2692,15 @@ function baueAnsicht(container, ctx) {
       sendKnopf.setAttribute('aria-label', label);
       sendKnopf.title = laeuft ? 'Antwort anhalten' : 'Senden (Enter)';
     }
-    sendKnopf.disabled = laeuft ? !!s.lauf.stoppt : !bereit;
+    sendKnopf.disabled = laeuft ? !!s.lauf.stoppt : (!bereit || legtAb);
+    // Das Mikrofon: nur, wenn einer der beiden Wege hier geht (oder gerade laeuft).
+    mikro.hidden = !sprechen && !sprechWeg({ transkribieren: !!(claude && claude.transkribieren), nurAufnahme });
+    zeichneSchnell();
   }
 
   offs.push(on(feld, 'input', () => {
+    // Wer das Feld leert, faengt neu an: dann ist nichts mehr gesprochen.
+    if (!feld.value.trim()) gesprochen = false;
     groesseAnpassen();
     aktualisiereEingabe();
     entwurfMerken();
@@ -2300,7 +2711,19 @@ function baueAnsicht(container, ctx) {
     // eine Antwort laeuft, macht Enter nichts (Stopp ist ein eigener Knopf).
     e.preventDefault();
     if (s && s.lauf) return;
+    // Waehrend das Mikrofon zuhoert, heisst Enter "fertig gesprochen".
+    if (sprechen) {
+      sprechenBeenden();
+      return;
+    }
     absenden();
+  }));
+  // Ein Bild aus der Zwischenablage (Bildschirmfoto) wird ein Anhang.
+  offs.push(on(feld, 'paste', (e) => {
+    const dateien = e.clipboardData ? [...(e.clipboardData.files || [])] : [];
+    if (!dateien.length) return;
+    e.preventDefault();
+    dateienAufnehmen(dateien);
   }));
 
   const entwurfMerken = debounce(() => {
@@ -2315,47 +2738,128 @@ function baueAnsicht(container, ctx) {
     clear(anhangZeile);
     anhangZeile.hidden = !anhaenge.length;
     anhaenge.forEach((a, i) => {
-      anhangZeile.appendChild(h('span.cv-anhang', null,
-        icon(I.notes),
-        h('span.cv-anhang__name', null, text(a.name)),
-        h('span.cv-anhang__groesse', null, text(groesse(a.groesse))),
-        h('button.cv-anhang__weg', {
-          type: 'button',
-          'aria-label': `${a.name} entfernen`,
-          title: 'Entfernen',
-          onClick: () => {
-            anhaenge.splice(i, 1);
-            zeichneAnhaenge();
-            aktualisiereEingabe();
-          },
-        }, icon(SYMBOL_SCHLIESSEN))));
+      const weg = h('button.cv-anhang__weg', {
+        type: 'button',
+        'aria-label': `${a.name} entfernen`,
+        title: 'Entfernen',
+        disabled: legtAb,
+        onClick: () => {
+          const [raus] = anhaenge.splice(i, 1);
+          if (raus && raus.url) {
+            URL.revokeObjectURL(raus.url);
+            vorschauen.delete(raus.url);
+          }
+          zeichneAnhaenge();
+        },
+      }, icon(SYMBOL_SCHLIESSEN));
+      const unter = a.laedt ? 'wird abgelegt …' : groesse(a.groesse);
+      if (a.art === 'bild') {
+        anhangZeile.appendChild(h('span.cv-anhang.cv-anhang--bild', { class: cx({ 'is-laedt': a.laedt }), 'data-art': 'bild' },
+          h('img.cv-anhang__bild', { src: a.url, alt: '' }),
+          h('span.cv-anhang__name', null, text(a.name)),
+          h('span.cv-anhang__groesse', null, text(unter)),
+          weg));
+      } else if (a.art === 'pdf') {
+        anhangZeile.appendChild(h('span.cv-anhang.cv-anhang--pdf', { class: cx({ 'is-laedt': a.laedt }), 'data-art': 'pdf' },
+          icon(SYMBOL_PDF),
+          h('span.cv-anhang__name', null, text(a.name)),
+          h('span.cv-anhang__groesse', null, text(unter)),
+          weg));
+      } else {
+        anhangZeile.appendChild(h('span.cv-anhang', { 'data-art': 'text' },
+          icon(I.notes),
+          h('span.cv-anhang__name', null, text(a.name)),
+          h('span.cv-anhang__groesse', null, text(groesse(a.groesse))),
+          weg));
+      }
     });
     aktualisiereEingabe();
   }
 
+  /**
+   * Nach dem Anhaengen von Bildern oder PDF: was die KI damit tun soll, als
+   * Knoepfe (lib/anhaenge.js schnellAktionen). Ein Tippen sendet genau
+   * diesen Auftrag mit den Dateien. Sobald im Feld etwas steht, gehen sie
+   * weg -- dann gilt, was dort steht.
+   */
+  let schnellKey = '';
+  function zeichneSchnell() {
+    const dateien = anhaenge.filter((a) => a.art === 'bild' || a.art === 'pdf');
+    const zeigen = dateien.length > 0 && !feld.value.trim() && !(s && s.lauf) && !legtAb && !sprechen;
+    const aktionen = zeigen ? schnellAktionen(dateien) : [];
+    const key = aktionen.map((a) => a.id).join('|');
+    if (key === schnellKey) return;
+    schnellKey = key;
+    clear(schnellZeile);
+    schnellZeile.hidden = !aktionen.length;
+    for (const sa of aktionen) {
+      schnellZeile.appendChild(h('button.cv-schnell__knopf', {
+        type: 'button',
+        dataset: { id: sa.id },
+        onClick: () => {
+          if (legtAb || (s && s.lauf)) return;
+          feld.value = sa.text;
+          groesseAnpassen();
+          absenden();
+        },
+      }, text(sa.label)));
+    }
+  }
+
+  /**
+   * Dateien ins Eingabefeld: Text wird gelesen (geht als Text mit), Bilder
+   * und PDF bleiben Dateien, bis gesendet wird. Ein zu grosses Foto wird
+   * verkleinert (lib/anhaenge.js bildVorbereiten).
+   */
   async function dateienAufnehmen(dateien) {
     const abgelehnt = [];
     for (const datei of dateien) {
-      const textArtig = (datei.type && datei.type.startsWith('text/')) || /json|xml|javascript|csv/.test(datei.type || '') || TEXTDATEI.test(datei.name);
-      if (!textArtig) {
-        abgelehnt.push(datei.name);
+      const art = dateiArt(datei);
+      if (!art.art) {
+        abgelehnt.push(datei.name || 'Datei');
         continue;
       }
-      try {
-        let inhalt = await datei.text();
-        let gekuerzt = false;
-        if (inhalt.length > MAX_ANHANG) {
-          inhalt = inhalt.slice(0, MAX_ANHANG);
-          gekuerzt = true;
+      if (art.art === 'text') {
+        try {
+          let inhalt = await datei.text();
+          let gekuerzt = false;
+          if (inhalt.length > MAX_ANHANG) {
+            inhalt = inhalt.slice(0, MAX_ANHANG);
+            gekuerzt = true;
+          }
+          anhaenge.push({ art: 'text', name: datei.name, text: inhalt, groesse: datei.size });
+          if (gekuerzt) ctx.toast(`„${datei.name}“ ist sehr lang; mitgeschickt werden die ersten ${MAX_ANHANG.toLocaleString('de-DE')} Zeichen.`, 'info');
+        } catch (err) {
+          ctx.toast(`„${datei.name}“ ließ sich nicht lesen: ${err && err.message}`, 'error');
         }
-        anhaenge.push({ name: datei.name, text: inhalt, groesse: datei.size });
-        if (gekuerzt) ctx.toast(`„${datei.name}“ ist sehr lang; mitgeschickt werden die ersten ${MAX_ANHANG.toLocaleString('de-DE')} Zeichen.`, 'info');
+        continue;
+      }
+      if (anhaenge.filter((a) => a.art !== 'text').length >= MAX_JE_NACHRICHT) {
+        ctx.toast(`Höchstens ${MAX_JE_NACHRICHT} Bilder und PDFs je Nachricht.`, 'info');
+        break;
+      }
+      const name = datei.name || (art.art === 'pdf' ? 'dokument.pdf' : 'bild');
+      try {
+        let fertig;
+        if (art.art === 'bild') {
+          fertig = await bildVorbereiten(datei, { name, mime: art.mime });
+        } else {
+          if (datei.size > MAX_PDF_BYTES) throw new Error(`„${name}“ ist zu groß (${mb(datei.size)} MB, erlaubt sind ${mb(MAX_PDF_BYTES)} MB).`);
+          fertig = { datei, name, mime: art.mime };
+        }
+        if (!fertig.datei.size) throw new Error(`„${name}“ ist leer.`);
+        const url = art.art === 'bild' ? URL.createObjectURL(fertig.datei) : null;
+        if (url) vorschauen.add(url);
+        anhaenge.push({
+          art: art.art, name: fertig.name, mime: fertig.mime, groesse: fertig.datei.size, datei: fertig.datei, url, id: null, chatId: null, laedt: false,
+        });
+        if (fertig.mime === 'image/gif' && claude && claude.aktiv === 'gemini') ctx.toast('Gemini kann GIF-Bilder nicht lesen.', 'info');
       } catch (err) {
-        ctx.toast(`„${datei.name}“ ließ sich nicht lesen: ${err && err.message}`, 'error');
+        ctx.toast((err && err.message) || `„${name}“ ließ sich nicht anhängen.`, 'error');
       }
     }
     if (abgelehnt.length) {
-      ctx.toast(`Nur Textdateien lassen sich anhängen. Bilder und PDFs schickt Neural OS noch nicht an die KI (${abgelehnt.join(', ')}).`, 'info', { timeout: 8000 });
+      ctx.toast(`Nicht angehängt: ${abgelehnt.join(', ')}. ${MOEGLICH}`, 'info', { timeout: 8000 });
     }
     zeichneAnhaenge();
     feld.focus();
@@ -2380,6 +2884,210 @@ function baueAnsicht(container, ctx) {
     e.preventDefault();
     dateienAufnehmen(dateien);
   }));
+
+  /* -------------------------------------------------- Sprechen */
+
+  /** "0:07" */
+  function minuten(sekunden) {
+    const n = Math.max(0, Math.floor(sekunden));
+    return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`;
+  }
+
+  /** Die Zeile ueber dem Eingabefeld, solange das Mikrofon an ist, und der Knopf selbst. */
+  let sprechZeit = null;
+  function zeichneSprechen() {
+    const an = !!sprechen;
+    mikro.classList.toggle('is-an', an && sprechen.zustand !== 'schreibt');
+    mikro.setAttribute('aria-pressed', String(an));
+    mikro.setAttribute('aria-label', an ? 'Sprechen beenden' : 'Sprechen');
+    mikro.title = an ? 'Sprechen beenden' : 'Sprechen';
+    mikro.disabled = !!(sprechen && sprechen.zustand === 'schreibt');
+    clear(sprechZeile);
+    sprechZeit = null;
+    sprechZeile.hidden = !an;
+    if (an) {
+      if (sprechen.zustand === 'schreibt') {
+        sprechZeile.append(h('span.spinner.cv-spinner', { 'aria-hidden': 'true' }), h('span.cv-sprechen__text', null, text('Schreibt um …')));
+      } else {
+        sprechZeit = sprechen.weg === 'aufnahme' ? h('span.cv-sprechen__zeit', null, text(`${minuten(sprechen.sekunden || 0)} / ${minuten(MAX_SEKUNDEN)}`)) : null;
+        // append() schriebe ein fehlendes Stueck als Wort "null" hin.
+        sprechZeile.append(...[
+          h('span.cv-sprechen__punkt', { 'aria-hidden': 'true' }),
+          h('span.cv-sprechen__text', null, text(sprechen.zustand === 'startet' ? 'Mikrofon wird geöffnet …' : 'Ich höre zu …')),
+          sprechZeit,
+          h('button.btn.btn--small.cv-sprechen__fertig', { type: 'button', onClick: () => sprechenBeenden() }, text('Fertig')),
+        ].filter(Boolean));
+      }
+    }
+    aktualisiereEingabe();
+  }
+
+  /** Das Mikrofon an oder aus. */
+  function sprechenUmschalten() {
+    if (sprechen) {
+      sprechenBeenden();
+      return;
+    }
+    const weg = sprechWeg({ transkribieren: !!(claude && claude.transkribieren), nurAufnahme });
+    if (!weg) return;
+    vorlesenFreischalten();
+    if (weg === 'erkennung') erkennungLos();
+    else aufnahmeLos();
+  }
+
+  /** Kann die Aufnahme (Gemini) einspringen? */
+  function aufnahmeGeht() {
+    return sprechWeg({ transkribieren: !!(claude && claude.transkribieren), nurAufnahme: true }) === 'aufnahme';
+  }
+
+  /** Weg 1: die Erkennung des Browsers; der Text steht schon waehrend des Sprechens im Feld. */
+  function erkennungLos() {
+    const vorher = feld.value;
+    const sitzung = { weg: 'erkennung', zustand: 'hoert', vorher: vorher && !/\s$/.test(vorher) ? `${vorher} ` : vorher, erkannt: false, fehler: null };
+    sprechen = sitzung;
+    try {
+      sitzung.erkennung = erkennungStarten({
+        onText: (fertig, vorlaeufig) => {
+          if (sprechen !== sitzung) return;
+          const t = [fertig, vorlaeufig].filter(Boolean).join(' ');
+          if (!t) return;
+          sitzung.erkannt = true;
+          feld.value = sitzung.vorher + t;
+          gesprochen = true;
+          groesseAnpassen();
+          aktualisiereEingabe();
+          entwurfMerken();
+        },
+        onFehler: (code) => {
+          if (sprechen === sitzung) sitzung.fehler = code;
+        },
+        onEnde: () => {
+          if (sprechen !== sitzung) return;
+          sprechen = null;
+          zeichneSprechen();
+          const code = sitzung.fehler;
+          if (code && !sitzung.erkannt && erkennungUntauglich(code) && aufnahmeGeht()) {
+            // Die Erkennung gibt es hier nur dem Namen nach: stattdessen
+            // aufnehmen, und fuer diese Sitzung dabei bleiben.
+            nurAufnahme = true;
+            aufnahmeLos();
+            return;
+          }
+          const satz = code ? erkennungFehlerSatz(code) : null;
+          if (satz) ctx.toast(satz, 'info');
+          if (lebt) {
+            feld.focus();
+            feld.setSelectionRange(feld.value.length, feld.value.length);
+          }
+        },
+      });
+    } catch {
+      sprechen = null;
+      if (aufnahmeGeht()) {
+        nurAufnahme = true;
+        aufnahmeLos();
+        return;
+      }
+      ctx.toast('Die Spracherkennung ließ sich nicht starten.', 'error');
+    }
+    zeichneSprechen();
+  }
+
+  /** Weg 2: aufnehmen (WAV), Gemini schreibt um (POST /api/ki/transkribieren). */
+  async function aufnahmeLos() {
+    const sitzung = { weg: 'aufnahme', zustand: 'startet', sekunden: 0 };
+    sprechen = sitzung;
+    zeichneSprechen();
+    let a;
+    try {
+      a = await aufnahmeStarten({
+        onZeit: (sek) => {
+          if (sprechen !== sitzung) return;
+          sitzung.sekunden = sek;
+          if (sprechZeit) sprechZeit.textContent = `${minuten(sek)} / ${minuten(MAX_SEKUNDEN)}`;
+        },
+        onGrenze: () => { if (sprechen === sitzung) aufnahmeFertig(sitzung); },
+      });
+    } catch (err) {
+      if (sprechen === sitzung) sprechen = null;
+      zeichneSprechen();
+      const name = err && err.name;
+      ctx.toast(name === 'NotAllowedError' || name === 'SecurityError'
+        ? 'Das Mikrofon ist nicht erlaubt. Erlaube es oben in der Adressleiste.'
+        : (name === 'NotFoundError' ? 'Kein Mikrofon gefunden.' : 'Das Mikrofon ließ sich nicht öffnen.'), 'error');
+      return;
+    }
+    if (sprechen !== sitzung) {
+      // Waehrend das Mikrofon aufging, wurde abgebrochen.
+      a.abbrechen();
+      return;
+    }
+    sitzung.aufnahme = a;
+    sitzung.zustand = 'hoert';
+    zeichneSprechen();
+  }
+
+  async function aufnahmeFertig(sitzung) {
+    if (!sitzung || sprechen !== sitzung || sitzung.zustand !== 'hoert') return;
+    sitzung.zustand = 'schreibt';
+    zeichneSprechen();
+    let text = '';
+    try {
+      const { wav, sekunden } = await sitzung.aufnahme.stopp();
+      if (sekunden < 0.3) throw new Error('Die Aufnahme ist zu kurz. Halte das Mikrofon an und sprich.');
+      const r = await api.post('/ki/transkribieren', { audio: bytesAlsBase64(wav), ...(cid() ? { chatId: cid() } : {}) }, { timeoutMs: 90000 });
+      text = String((r && r.text) || '').trim();
+    } catch (err) {
+      if (sprechen === sitzung) sprechen = null;
+      zeichneSprechen();
+      if (lebt) ctx.toast(`Nicht umgeschrieben: ${fehlerSatz(err)}`, 'error');
+      return;
+    }
+    if (sprechen === sitzung) sprechen = null;
+    zeichneSprechen();
+    if (!lebt) return;
+    if (!text) {
+      ctx.toast('Nichts verstanden. Tippe noch einmal aufs Mikrofon und sprich.', 'info');
+      return;
+    }
+    const vorher = feld.value;
+    feld.value = `${vorher}${vorher && !/\s$/.test(vorher) ? ' ' : ''}${text}`;
+    gesprochen = true;
+    groesseAnpassen();
+    aktualisiereEingabe();
+    entwurfMerken();
+    feld.focus();
+    feld.setSelectionRange(feld.value.length, feld.value.length);
+  }
+
+  /** "Fertig": Erkennung anhalten (der Text steht schon da) bzw. Aufnahme umschreiben lassen. */
+  function sprechenBeenden() {
+    const sitzung = sprechen;
+    if (!sitzung) return;
+    if (sitzung.weg === 'erkennung') {
+      if (sitzung.erkennung) sitzung.erkennung.stopp();
+      else {
+        sprechen = null;
+        zeichneSprechen();
+      }
+    } else if (sitzung.zustand === 'hoert') {
+      aufnahmeFertig(sitzung);
+    } else if (sitzung.zustand === 'startet') {
+      sprechen = null;
+      zeichneSprechen();
+    }
+  }
+
+  /** Beim Verlassen: alles aus, nichts wird mehr umgeschrieben. */
+  function sprechenAbbrechen() {
+    const sitzung = sprechen;
+    sprechen = null;
+    if (!sitzung) return;
+    try {
+      if (sitzung.erkennung) sitzung.erkennung.abbrechen();
+      if (sitzung.aufnahme) sitzung.aufnahme.abbrechen();
+    } catch { /* schon aus */ }
+  }
 
   /* -------------------------------------------------- Tastatur */
 
@@ -2474,12 +3182,9 @@ function baueAnsicht(container, ctx) {
     claudeBald();
   }));
 
-  sprechAbos.add(sprechAbo);
-  function sprechAbo() {
-    if (!lebt) return;
-    for (const m of (s ? s.nachrichten : [])) if (m.data.role === 'assistant') uiVon(m.id).v += 1;
-    plane();
-  }
+  // Der Vorleser meldet jeden Satz, Pause, Tempo und das Ende (vorleseAbo).
+  const vorleseAbmelden = vl() ? vl().abonnieren(vorleseAbo) : null;
+  if (liestGerade()) vorleseVorher = liestGerade();
 
   /** Laeuft auf einem anderen Geraet eine Antwort, wird nachgesehen, bis sie fertig ist. */
   let beobachter = null;
@@ -2550,7 +3255,14 @@ function baueAnsicht(container, ctx) {
     for (const z of zustaende.values()) {
       try { z.jetzt(); } catch { /* weiter */ }
     }
-    sprechAbos.delete(sprechAbo);
+    // Vorlesen und Mikrofon gehoeren zu dieser Ansicht: ohne sie keine Knoepfe, also aus.
+    if (vorleseAbmelden) vorleseAbmelden();
+    if (vl()) vl().stopp();
+    hervorheben(null);
+    sprechenAbbrechen();
+    leuchtkastenZu();
+    for (const url of vorschauen) URL.revokeObjectURL(url);
+    vorschauen.clear();
     entwurfMerken.cancel();
     claudeBald.cancel();
     for (const off of offs) {
@@ -2759,9 +3471,13 @@ details[open] > summary > .cv-pfeil { transform: rotate(90deg); }
 }
 @media (prefers-reduced-motion: reduce) {
   .cv-md .is-geaendert { animation: none; background: var(--accent-soft); }
+  .cv-composer__mikro.is-an, .cv-sprechen__punkt { animation: none; }
 }
 
-/* -- Quellen -- */
+/* -- Quellen: Verweise im Text und die Liste darunter -- */
+.cv-verweis { display: inline-grid; place-items: center; min-width: 17px; height: 17px; margin: 0 1px; padding: 0 4px; font-size: 10.5px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; color: var(--accent-text); text-decoration: none; vertical-align: 0.35em; background: var(--accent-soft); border-radius: var(--r-full); }
+.cv-verweis:hover { color: var(--accent-fg); background: var(--accent); }
+.cv-verweis:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
 .cv-quellen { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 .cv-quellen__titel { margin: 0 0 8px; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--fg-subtle); }
 .cv-quellen__liste { display: flex; flex-direction: column; gap: 3px; margin: 0; padding: 0; list-style: none; }
@@ -2770,6 +3486,71 @@ details[open] > summary > .cv-pfeil { transform: rotate(90deg); }
 .cv-quelle__nr { flex: none; min-width: 16px; color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
 .cv-quelle__titel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cv-quelle__host { flex: none; font-size: var(--fs-xs); color: var(--fg-subtle); }
+
+/* -- Anhaenge in der eigenen Nachricht: Bilder, PDF -- */
+.cv-dateien { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; max-width: 100%; margin-bottom: 8px; }
+.cv-galerie { display: flex; gap: 8px; max-width: 100%; }
+.cv-galerie--viele { overflow-x: auto; scroll-snap-type: x mandatory; overscroll-behavior-x: contain; padding-bottom: 4px; }
+.cv-galerie__bild { position: relative; flex: none; padding: 0; overflow: hidden; background: var(--surface-3); border: 1px solid var(--border); border-radius: var(--r-3); cursor: zoom-in; scroll-snap-align: start; }
+.cv-galerie__bild img { display: block; }
+/* Feste Grenzen in px (nicht %): nur so richtet sich der Knopf nach dem Bild und nicht umgekehrt. */
+.cv-galerie--eins .cv-galerie__bild { max-width: 100%; }
+.cv-galerie--eins .cv-galerie__bild img { width: auto; height: auto; max-width: 360px; max-height: 320px; }
+.cv-galerie--viele .cv-galerie__bild img { width: 132px; height: 132px; object-fit: cover; }
+.cv-galerie__bild:hover { border-color: var(--border-strong); }
+.cv-galerie__bild:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+.cv-galerie__fehlt { display: grid; place-items: center; width: 132px; height: 96px; padding: 8px; font-size: var(--fs-xs); color: var(--fg-subtle); text-align: center; background: var(--surface-3); border: 1px dashed var(--border-strong); border-radius: var(--r-3); overflow-wrap: anywhere; }
+.cv-pdf { display: flex; align-items: center; gap: 12px; width: min(340px, 100%); padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-3); }
+.cv-pdf__symbol { display: grid; place-items: center; flex: none; width: 38px; height: 38px; color: var(--accent-text); background: var(--accent-soft); border-radius: var(--r-2); }
+.cv-pdf__symbol svg { width: 20px; height: 20px; }
+.cv-pdf__text { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
+.cv-pdf__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); color: var(--fg); }
+.cv-pdf__groesse, .cv-pdf__laedt { font-size: var(--fs-xs); color: var(--fg-subtle); }
+
+/* -- Anhaenge und Schnellaktionen am Eingabefeld -- */
+.cv-anhang--bild { padding-left: 4px; }
+.cv-anhang__bild { flex: none; width: 30px; height: 30px; object-fit: cover; border-radius: 8px; }
+.cv-anhang--pdf svg:first-child { color: var(--accent-text); }
+.cv-anhang.is-laedt { opacity: 0.72; }
+.cv-schnell { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.cv-schnell__knopf { min-height: 34px; padding: 0 14px; font: inherit; font-size: var(--fs-sm); color: var(--fg); background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--r-full); cursor: pointer; transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease); }
+.cv-schnell__knopf:hover { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong)); }
+.cv-schnell__knopf:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+/* -- Mikrofon -- */
+.cv-composer__mikro { display: grid; place-items: center; flex: none; width: 40px; height: 40px; padding: 0; color: var(--fg-muted); background: none; border: 0; border-radius: 50%; cursor: pointer; }
+.cv-composer__mikro:hover { color: var(--fg); background: var(--surface-3); }
+.cv-composer__mikro svg { width: 21px; height: 21px; }
+.cv-composer__mikro.is-an { color: var(--accent-fg); background: var(--accent); animation: cv-hoert 1.6s ease-in-out infinite; }
+.cv-composer__mikro:disabled { cursor: default; opacity: 0.6; }
+.cv-composer__mikro:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+@keyframes cv-hoert { 0%, 100% { box-shadow: 0 0 0 0 var(--accent-ring); } 50% { box-shadow: 0 0 0 7px transparent; } }
+.cv-sprechen { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; padding: 6px 6px 6px 14px; font-size: var(--fs-sm); color: var(--fg); background: var(--surface-2); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); border-radius: var(--r-full); }
+.cv-sprechen__punkt { flex: none; width: 9px; height: 9px; background: var(--danger); border-radius: 50%; animation: cv-punkt 1.2s ease-in-out infinite; }
+@keyframes cv-punkt { 50% { opacity: 0.3; } }
+.cv-sprechen__text { flex: 1 1 auto; min-width: 0; }
+.cv-sprechen__zeit { font-size: var(--fs-xs); color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
+
+/* -- Vorlese-Spieler -- */
+.cv-spieler { display: flex; align-items: center; gap: 8px; max-width: 100%; margin-top: 6px; padding: 4px 4px 4px 4px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-full); }
+.cv-spieler__knopf, .cv-spieler__zu { display: grid; place-items: center; flex: none; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; cursor: pointer; }
+.cv-spieler__knopf { color: var(--accent-fg); background: var(--accent); }
+.cv-spieler__knopf:hover { background: var(--accent-hover); }
+.cv-spieler__zu { color: var(--fg-subtle); background: none; }
+.cv-spieler__zu:hover { color: var(--fg); background: var(--surface-3); }
+.cv-spieler__knopf svg, .cv-spieler__zu svg { width: 15px; height: 15px; }
+.cv-spieler__tempo { flex: none; min-width: 52px; height: 28px; padding: 0 9px; font: inherit; font-size: var(--fs-xs); font-variant-numeric: tabular-nums; color: var(--fg); background: none; border: 1px solid var(--border-strong); border-radius: var(--r-full); cursor: pointer; }
+.cv-spieler__tempo:hover { background: var(--surface-3); }
+.cv-spieler__stand { flex: none; font-size: var(--fs-xs); color: var(--fg-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cv-spieler__satz { flex: 1 1 auto; min-width: 0; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xs); color: var(--fg-subtle); }
+.cv-spieler button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+::highlight(${VORLESE_MARKE}) { background-color: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--fg); }
+
+/* -- Live-Fortschritt waehrend der Antwort -- */
+.cv-fortschritt { display: flex; flex-direction: column; gap: 6px; margin: 0 0 12px; }
+.cv-fortschritt .cv-live { margin: 0; }
+.cv-live.is-fertig, .cv-live.is-fertig .cv-live__symbol { color: var(--fg-subtle); }
+.cv-live.is-fehler, .cv-live.is-fehler .cv-live__symbol { color: var(--danger); }
 
 /* -- Wie es endete -- */
 .cv-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 0; font-size: var(--fs-sm); color: var(--fg-subtle); }
@@ -2829,6 +3610,8 @@ details[open] > summary > .cv-pfeil { transform: rotate(90deg); }
 .cv-nachunten:hover { background: var(--surface-4); }
 
 @media (max-width: 760px) {
+  .cv-galerie--eins .cv-galerie__bild img { max-width: 240px; max-height: 240px; }
+  .cv-galerie--viele .cv-galerie__bild img { width: 104px; height: 104px; }
   .cv__spalte { padding: var(--sp-3) var(--sp-2) var(--sp-2); }
   .cv-eingabe { padding: 0 var(--sp-2) var(--sp-2); }
   .cv-msg { gap: 10px; }
@@ -2837,7 +3620,9 @@ details[open] > summary > .cv-pfeil { transform: rotate(90deg); }
   .cv-leer__titel { font-size: var(--fs-2xl); }
 }
 @media (pointer: coarse) {
-  .cv-composer__clip, .cv-composer__senden, .cv-nachunten, .cv-anhang__weg { width: var(--tap-min); height: var(--tap-min); }
+  .cv-composer__clip, .cv-composer__senden, .cv-composer__mikro, .cv-nachunten, .cv-anhang__weg,
+  .cv-spieler__knopf, .cv-spieler__zu { width: var(--tap-min); height: var(--tap-min); }
+  .cv-spieler__tempo, .cv-schnell__knopf, .cv-sprechen__fertig { min-height: var(--tap-min); }
   .cv-aktion { min-width: var(--tap-min); height: var(--tap-min); }
   .cv-mehr, .cv-quelle { min-height: var(--tap-min); }
   .cv-quelle { align-items: center; }
