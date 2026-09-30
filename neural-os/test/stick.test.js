@@ -186,6 +186,11 @@ function makeZip(entries) {
   return Buffer.concat([...locals, centralBuf, eocd]);
 }
 
+/** Die Probleme eines Sticks ohne FEHLT_WINDOWS/FEHLT_MAC und Hinweise -- fuer Sticks, die ohne Netz angelegt wurden. */
+function nurFehlt(problems) {
+  return (problems || []).filter((p) => !/^FEHLT_/.test(p.code) && p.level !== 'info' && p.level !== 'warn');
+}
+
 /* ------------------------------------------------------------ the tests */
 
 test('prepare legt das vollstaendige Stick-Layout an', async () => {
@@ -197,40 +202,56 @@ test('prepare legt das vollstaendige Stick-Layout an', async () => {
     const result = await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
 
     assert.equal(result.root, path.resolve(stick.home));
+    assert.equal(result.basis, path.join(stick.home, 'Inhalt'));
+    assert.equal(result.aufbau, 'inhalt');
     assert.ok(result.files > 0, 'es wurden Dateien kopiert');
     assert.ok(result.bytes > 0);
 
+    // Bauplan 1.1 / 2.10.4: in der Wurzel nur Inhalt, LIESMICH und die zwei
+    // Starter; alles andere im Inhalt. Die Spotlight-Sperre ist unsichtbar.
+    const sichtbar = fs.readdirSync(stick.home).filter((n) => !n.startsWith('.')).sort();
+    assert.deepEqual(sichtbar, ['Inhalt', 'LIESMICH.txt', 'Neural OS starten - Mac.command', 'Neural OS starten - Windows.bat']);
+    assert.ok(fs.existsSync(path.join(stick.home, '.metadata_never_index')), '.metadata_never_index fehlt');
+    for (const n of fs.readdirSync(stick.home)) assert.ok(!/[()&!%]/.test(n), `Sonderzeichen im Namen: ${n}`);
     for (const rel of [
-      'neural-os.portable',
-      'LIESMICH.txt',
-      'app/bin/neural-os.js',
-      'app/src/app.js',
-      'app/web/index.html',
-      'data',
-      'sync',
-      'Neural OS starten.bat',
-      'Neural OS starten.command',
-      'Neural OS starten.sh',
+      'Inhalt/neural-os.portable',
+      'Inhalt/app/bin/neural-os.js',
+      'Inhalt/app/src/app.js',
+      'Inhalt/app/web/index.html',
+      'Inhalt/data',
+      'Inhalt/data/config.json',
+      'Inhalt/sync',
+      'Inhalt/Starter fuer Linux.sh',
     ]) {
       assert.ok(fs.existsSync(path.join(stick.home, rel)), `${rel} fehlt auf dem Stick`);
     }
+    for (const alt of ['Neural OS starten.bat', 'Neural OS starten.command', 'Neural OS starten.sh']) {
+      assert.ok(!fs.existsSync(path.join(stick.home, alt)), `alter Starter ${alt} liegt in der Wurzel`);
+    }
 
     // The batch file needs CRLF, the shell scripts need their shebang.
-    const bat = fs.readFileSync(path.join(stick.home, 'Neural OS starten.bat'), 'utf8');
+    const bat = fs.readFileSync(path.join(stick.home, 'Neural OS starten - Windows.bat'), 'utf8');
     assert.ok(bat.includes('\r\n'), 'die .bat muss CRLF-Zeilenenden haben');
     assert.ok(bat.includes('chcp 65001'), 'die .bat muss die Konsole auf UTF-8 stellen');
-    for (const name of ['Neural OS starten.sh', 'Neural OS starten.command']) {
+    for (const name of ['Inhalt/Starter fuer Linux.sh', 'Neural OS starten - Mac.command']) {
       const script = fs.readFileSync(path.join(stick.home, name), 'utf8');
       assert.ok(script.startsWith('#!/bin/sh'), `${name} braucht eine Shebang-Zeile`);
       assert.ok(!script.includes('\r\n'), `${name} darf keine CRLF-Zeilenenden haben`);
       assert.ok((fs.statSync(path.join(stick.home, name)).mode & 0o111) !== 0, `${name} muss ausfuehrbar sein`);
     }
-    assert.ok(fs.readFileSync(path.join(stick.home, 'Neural OS starten.command'), 'utf8').includes('xattr -d com.apple.quarantine'),
+    assert.ok(fs.readFileSync(path.join(stick.home, 'Neural OS starten - Mac.command'), 'utf8').includes('xattr -d com.apple.quarantine'),
       'der macOS-Starter muss das Quarantaene-Merkmal entfernen');
 
+    // Die LIESMICH: genau die fuenf Zeilen aus Bauplan 1.1, sonst nichts.
     const readme = fs.readFileSync(path.join(stick.home, 'LIESMICH.txt'), 'utf8');
-    assert.match(readme, /--safe/);
-    assert.match(readme, /Verschluesselung/);
+    assert.deepEqual(readme.replace(/\r\n$/, '').split('\r\n'), [
+      'Windows:  "Neural OS starten - Windows" doppelklicken.',
+      'Mac:      "Neural OS starten - Mac" doppelklicken.',
+      'Fertig:   in der App auf "Beenden".',
+      'Deine Daten liegen im Ordner "Inhalt". Sichern = ganzen Stick kopieren.',
+      'Geht etwas nicht, steht der Grund im Fenster, das dann offen bleibt.',
+    ]);
+    assert.ok(!/Festplatte|Rechtsklick/.test(readme), 'die alten Ratschlaege sind weg');
   } finally {
     stick.cleanup();
     src.cleanup();
@@ -246,9 +267,10 @@ test('der Marker macht den Stick fuer detectPortable() erkennbar', async () => {
 
     // This is what the running app does on the foreign PC: it starts in app/
     // and walks up until it finds the marker.
-    const detected = paths.detectPortable(path.join(stick.home, 'app'));
+    const detected = paths.detectPortable(path.join(stick.home, 'Inhalt', 'app'));
     assert.ok(detected, 'detectPortable() muss den Stick erkennen');
-    assert.equal(detected.dataDir, path.resolve(stick.home, 'data'));
+    assert.equal(detected.dataDir, path.resolve(stick.home, 'Inhalt', 'data'));
+    assert.equal(detected.root, path.resolve(stick.home, 'Inhalt'));
     assert.equal(detected.info.neuralOsPortable, true);
   } finally {
     stick.cleanup();
@@ -281,7 +303,7 @@ test('die Laufzeit des laufenden Systems wird ohne Netz kopiert und laeuft', asy
     assert.equal(run.stdout.trim(), process.version);
 
     const check = await tool.verify(stick.home);
-    assert.equal(check.ok, true, `verify meldet Probleme: ${JSON.stringify(check.problems)}`);
+    assert.deepEqual(nurFehlt(check.problems), [], `verify meldet Probleme: ${JSON.stringify(check.problems)}`);
     assert.ok(check.freeBytes === null || check.freeBytes > 0);
   } finally {
     stick.cleanup();
@@ -298,7 +320,7 @@ test('update erneuert den Quelltext und laesst data/ voellig unangetastet', asyn
     await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
 
     // Put a realistic data set on the stick: vault log, config, secrets, blobs.
-    const dataDir = path.join(stick.home, 'data');
+    const dataDir = path.join(stick.home, 'Inhalt', 'data');
     const put = (rel, content) => {
       const file = path.join(dataDir, rel);
       fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -310,7 +332,7 @@ test('update erneuert den Quelltext und laesst data/ voellig unangetastet', asyn
     put('vault/files/aa/aabbcc', 'blob');
     put('secrets.json', '{"wrappedKey":"x"}');
     put('audit.jsonl', '{"kind":"network.allow"}\n');
-    const syncDir = path.join(stick.home, 'sync');
+    const syncDir = path.join(stick.home, 'Inhalt', 'sync');
     fs.writeFileSync(path.join(syncDir, 'postfach.json'), '{"peer":"laptop"}');
 
     const before = snapshotDir(dataDir);
@@ -327,8 +349,8 @@ test('update erneuert den Quelltext und laesst data/ voellig unangetastet', asyn
     assert.ok(result.files > 0);
     assert.equal(result.dataDir, path.resolve(dataDir));
 
-    assert.match(fs.readFileSync(path.join(stick.home, 'app/src/app.js'), 'utf8'), /neu: true/);
-    assert.ok(fs.existsSync(path.join(stick.home, 'app/src/neu.js')), 'neue Quelldateien muessen ankommen');
+    assert.match(fs.readFileSync(path.join(stick.home, 'Inhalt', 'app/src/app.js'), 'utf8'), /neu: true/);
+    assert.ok(fs.existsSync(path.join(stick.home, 'Inhalt', 'app/src/neu.js')), 'neue Quelldateien muessen ankommen');
 
     assert.deepEqual(snapshotDir(dataDir), before, 'update() hat den Datenordner veraendert');
     assert.deepEqual(snapshotDir(syncDir), syncBefore, 'update() hat den Sync-Ordner veraendert');
@@ -346,11 +368,11 @@ test('update entfernt Dateien, die es im Quelltext nicht mehr gibt', async () =>
     fs.writeFileSync(path.join(src.home, 'src/alt.js'), "'use strict';\n");
     const tool = createStick({});
     await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
-    assert.ok(fs.existsSync(path.join(stick.home, 'app/src/alt.js')));
+    assert.ok(fs.existsSync(path.join(stick.home, 'Inhalt', 'app/src/alt.js')));
 
     fs.unlinkSync(path.join(src.home, 'src/alt.js'));
     await tool.update(stick.home, { sourceRoot: src.home });
-    assert.ok(!fs.existsSync(path.join(stick.home, 'app/src/alt.js')),
+    assert.ok(!fs.existsSync(path.join(stick.home, 'Inhalt', 'app/src/alt.js')),
       'app/ wird ersetzt, nicht ueberlagert - sonst bleiben alte Module liegen');
   } finally {
     stick.cleanup();
@@ -367,7 +389,7 @@ test('verify erkennt einen beschaedigten Stick und sagt, was zu tun ist', async 
     await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
 
     // Half a copy: one load-bearing file gone.
-    fs.unlinkSync(path.join(stick.home, 'app/src/kernel/paths.js'));
+    fs.unlinkSync(path.join(stick.home, 'Inhalt', 'app/src/kernel/paths.js'));
     const broken = await tool.verify(stick.home);
     assert.equal(broken.ok, false);
     const incomplete = broken.problems.find((p) => p.code === 'APP_INCOMPLETE');
@@ -376,7 +398,7 @@ test('verify erkennt einen beschaedigten Stick und sagt, was zu tun ist', async 
     assert.ok(incomplete.fix && incomplete.fix.length > 10, 'jedes Problem braucht einen Loesungshinweis');
 
     // Marker gone: the app would silently write to ~/.neural-os instead.
-    fs.unlinkSync(path.join(stick.home, 'neural-os.portable'));
+    fs.unlinkSync(path.join(stick.home, 'Inhalt', 'neural-os.portable'));
     const noMarker = await tool.verify(stick.home);
     assert.ok(noMarker.problems.some((p) => p.code === 'MARKER_MISSING'));
 
@@ -409,9 +431,9 @@ test('ein mittendrin abgezogener Stick wird erkannt und repariert', async () => 
 
     // Exactly the state a yank between the two renames leaves behind:
     // the old app/ parked under its temporary name, no app/ at all.
-    fs.renameSync(path.join(stick.home, 'app'), path.join(stick.home, '.app.old-deadbeef'));
-    fs.mkdirSync(path.join(stick.home, '.app.tmp-cafebabe'));
-    fs.writeFileSync(path.join(stick.home, '.app.tmp-cafebabe/halb.js'), 'x');
+    fs.renameSync(path.join(stick.home, 'Inhalt', 'app'), path.join(stick.home, 'Inhalt', '.app.old-deadbeef'));
+    fs.mkdirSync(path.join(stick.home, 'Inhalt', '.app.tmp-cafebabe'));
+    fs.writeFileSync(path.join(stick.home, 'Inhalt', '.app.tmp-cafebabe/halb.js'), 'x');
 
     const broken = await tool.verify(stick.home);
     assert.equal(broken.ok, false);
@@ -420,10 +442,10 @@ test('ein mittendrin abgezogener Stick wird erkannt und repariert', async () => 
     assert.match(problem.fix, /aktualisieren/i);
 
     // The repair puts the complete previous version back and drops the scrap.
-    const repaired = cleanStale(stick.home);
+    const repaired = cleanStale(path.join(stick.home, 'Inhalt'));
     assert.deepEqual(repaired.restored, ['app']);
     assert.deepEqual(repaired.removed, ['.app.tmp-cafebabe']);
-    assert.ok(fs.existsSync(path.join(stick.home, 'app/bin/neural-os.js')));
+    assert.ok(fs.existsSync(path.join(stick.home, 'Inhalt', 'app/bin/neural-os.js')));
 
     const after = await tool.verify(stick.home);
     assert.ok(!after.problems.some((p) => p.code === 'INTERRUPTED_COPY'), 'die Reste sind weg');
@@ -475,7 +497,7 @@ test('die Ausschlussliste haelt Daten und Ballast vom Stick fern', async () => {
     const tool = createStick({});
     await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
 
-    const app = path.join(stick.home, 'app');
+    const app = path.join(stick.home, 'Inhalt', 'app');
     for (const rel of [
       'node_modules', '.git', 'vault', 'data', 'exports', 'runs', 'trash',
       'audit.jsonl', 'secrets.json', 'debug.log', 'src/.DS_Store', 'src/nested/deep.log',
@@ -494,56 +516,97 @@ test('die Ausschlussliste haelt Daten und Ballast vom Stick fern', async () => {
   }
 });
 
-test('prepare sichert den Datenbestand mit und ueberschreibt nie einen vorhandenen', async () => {
-  const stick = tempHome('stick-vault');
+test('[Neue KI]: Marker und config.json tragen dieselbe Kennung, der Port liegt in 20000-29999; ein belegtes data/ heisst KI_VORHANDEN; die Rohkopie gibt es nicht mehr', async () => {
+  const stick = tempHome('stick-neue-ki');
   const src = tempHome('stick-src10');
   const home = tempHome('stick-home');
   try {
     makeSource(src.home);
     fs.mkdirSync(path.join(home.home, 'vault/log'), { recursive: true });
     fs.writeFileSync(path.join(home.home, 'vault/log/00001.jsonl'), '{"seq":1}\n');
-    fs.writeFileSync(path.join(home.home, 'config.json'), '{"network":{"mode":"offline"}}');
-    fs.writeFileSync(path.join(home.home, '.lock'), String(process.pid));
-    // A .log in a home directory is the user's own file, not build noise:
-    // a backup that silently drops files is not a backup.
-    fs.writeFileSync(path.join(home.home, 'mein-protokoll.log'), 'wichtig');
-
     const tool = createStick({});
-    const result = await tool.prepare(stick.home, {
-      sourceRoot: src.home,
-      includeRuntimes: false,
-      includeVault: true,
-      sourceHome: home.home,
-    });
-    assert.ok(result.files > 0);
-    assert.equal(fs.readFileSync(path.join(stick.home, 'data/vault/log/00001.jsonl'), 'utf8'), '{"seq":1}\n');
-    assert.ok(fs.existsSync(path.join(stick.home, 'data/config.json')));
-    // A stale lock file from another machine would block the next start.
-    assert.ok(!fs.existsSync(path.join(stick.home, 'data/.lock')), '.lock darf nicht mitwandern');
-    assert.equal(fs.readFileSync(path.join(stick.home, 'data/mein-protokoll.log'), 'utf8'), 'wichtig',
-      'eine Sicherung darf keine Datei des Nutzers stillschweigend weglassen');
 
-    // A second run must refuse rather than overwrite what is already there.
+    // Die Rohkopie (Befunde 11 und 13) ist weg: ein alter Aufruf bekommt den Satz, nichts wird geschrieben.
     await assert.rejects(
-      () => tool.prepare(stick.home, {
-        sourceRoot: src.home, includeRuntimes: false, includeVault: true, sourceHome: home.home,
-      }),
+      () => tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false, includeVault: true, sourceHome: home.home }),
       (err) => {
-        // 409 statt 500, aus demselben Grund wie beim vollen Stick: "da liegen
-        // schon Daten" ist der Zustand des Sticks, kein Defekt dieses Servers.
-        // Wer bisher auf StorageError geprueft hat, verliert nichts.
-        assert.equal(err.code, 'STICK_DATA_PRESENT');
-        assert.equal(err.status, 409);
-        assert.ok(err instanceof StorageError);
-        assert.match(err.message, /bereits ein Datenbestand/);
+        assert.equal(err.status, 400);
+        assert.equal(err.message, 'Gibt es nicht mehr. Stattdessen: Mit dieser KI gekoppelt.');
         return true;
       },
     );
-    assert.equal(fs.readFileSync(path.join(stick.home, 'data/vault/log/00001.jsonl'), 'utf8'), '{"seq":1}\n');
+    assert.deepEqual(fs.readdirSync(stick.home), [], 'trotz Absage wurde etwas geschrieben');
+
+    const result = await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false, ki: 'neu' });
+    assert.match(result.ki.id, /^dev_[0-9a-f]{24}$/);
+    assert.ok(result.ki.port >= 20000 && result.ki.port <= 29999, `Port ${result.ki.port}`);
+    assert.ok(result.ki.name && result.ki.name.length > 0);
+
+    const basis = path.join(stick.home, 'Inhalt');
+    const marker = JSON.parse(fs.readFileSync(path.join(basis, 'neural-os.portable'), 'utf8'));
+    const config = JSON.parse(fs.readFileSync(path.join(basis, 'data', 'config.json'), 'utf8'));
+    assert.equal(marker.kiId, result.ki.id);
+    assert.equal(marker.name, result.ki.name);
+    assert.ok(marker.createdAt, 'createdAt fehlt im Marker');
+    assert.equal(config.sync.deviceId, marker.kiId, 'Marker und config.json nennen verschiedene KIs');
+    assert.equal(config.sync.deviceName, marker.name);
+    assert.equal(config.server.port, result.ki.port);
+    assert.equal(config.server.port, require('../src/kernel/identitaet').kiPort(marker.kiId));
+    // Nichts von dieser Installation reist mit: kein Tresor, kein Abgleich-Stand, keine Freigaben.
+    assert.deepEqual(fs.readdirSync(path.join(basis, 'data')), ['config.json']);
+
+    // Die Kennung ist jedes Mal neu: zwei Sticks sind nie Zwillinge.
+    const zweiter = tempHome('stick-neue-ki-2');
+    try {
+      const r2 = await tool.prepare(zweiter.home, { sourceRoot: src.home, includeRuntimes: false });
+      assert.notEqual(r2.ki.id, result.ki.id);
+    } finally {
+      zweiter.cleanup();
+    }
+
+    // [Neue KI] auf einen Stick, auf dem schon eine wohnt: der Satz aus 1.6, und die alte bleibt still erhalten.
+    const vorher = snapshotDir(path.join(basis, 'data'));
+    await assert.rejects(
+      () => tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false, ki: 'neu' }),
+      (err) => {
+        assert.equal(err.code, 'KI_VORHANDEN');
+        assert.equal(err.status, 409);
+        assert.equal(err.message, 'Auf diesem Stick wohnt schon eine KI.');
+        return true;
+      },
+    );
+    assert.deepEqual(snapshotDir(path.join(basis, 'data')), vorher, 'die vorhandene KI wurde angefasst');
+    // Dieselbe Absage in der Vorschau, wortgleich.
+    const v = tool.preview(stick.home, { action: 'prepare', sourceRoot: src.home, includeRuntimes: false });
+    assert.ok(v.blockers.some((b) => b.code === 'KI_VORHANDEN' && b.message === 'Auf diesem Stick wohnt schon eine KI.'), JSON.stringify(v.blockers));
+    assert.equal(v.marker.kiId, result.ki.id);
   } finally {
     stick.cleanup();
     src.cleanup();
     home.cleanup();
+  }
+});
+
+test('der Name der neuen KI: gewuenscht, sonst vom Datentraeger, sonst "KI XXXX"; ein unbrauchbarer Name wird abgelehnt', async () => {
+  const src = tempHome('stick-src-name');
+  const medien = tempHome('stick-medien-name');
+  try {
+    makeSource(src.home);
+    const tool = createStick({});
+    const a = path.join(medien.home, 'a');
+    const r = await tool.prepare(a, { sourceRoot: src.home, includeRuntimes: false, name: '  Lena  ' });
+    assert.equal(r.ki.name, 'Lena');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(a, 'Inhalt', 'neural-os.portable'), 'utf8')).name, 'Lena');
+    const b = path.join(medien.home, 'b');
+    const r2 = await tool.prepare(b, { sourceRoot: src.home, includeRuntimes: false });
+    assert.match(r2.ki.name, /^KI [0-9A-F]{4}$/);
+    await assert.rejects(
+      () => tool.prepare(path.join(medien.home, 'c'), { sourceRoot: src.home, includeRuntimes: false, name: 'x'.repeat(61) }),
+      (err) => err.code === 'VALIDATION_FAILED',
+    );
+  } finally {
+    src.cleanup();
+    medien.cleanup();
   }
 });
 
@@ -631,7 +694,7 @@ test('eine blockierte Schleuse liefert eine Erklaerung, keinen rohen Fehler', as
       },
     );
     // Nothing was written for the platform that could not be fetched.
-    assert.ok(!fs.existsSync(path.join(stick.home, 'runtime', foreign)));
+    assert.ok(!fs.existsSync(path.join(stick.home, 'Inhalt', 'runtime', foreign)));
 
     // The same denial inside prepare() is a warning, not a failure: the stick
     // is still complete for the machine it was made on.
@@ -708,9 +771,9 @@ test('addRuntime prueft die Pruefsumme und entpackt die tar.gz', async () => {
 
     assert.equal(added.platform, platform);
     assert.equal(added.version, version);
-    const written = fs.readFileSync(path.join(stick.home, 'runtime', platform, 'node'));
+    const written = fs.readFileSync(path.join(stick.home, 'Inhalt', 'runtime', platform, 'node'));
     assert.ok(written.equals(binary), 'die entpackte Binaerdatei muss byteweise stimmen');
-    assert.equal(fs.readFileSync(path.join(stick.home, 'runtime', platform, 'node-version.txt'), 'utf8').trim(), version);
+    assert.equal(fs.readFileSync(path.join(stick.home, 'Inhalt', 'runtime', platform, 'node-version.txt'), 'utf8').trim(), version);
 
     // Every request must have gone through the gate with the narrow limits.
     assert.equal(gate.calls.length, 2);
@@ -756,7 +819,7 @@ test('eine falsche Pruefsumme landet NICHT auf dem Stick', async () => {
         return true;
       },
     );
-    assert.ok(!fs.existsSync(path.join(stick.home, 'runtime', platform, 'node')),
+    assert.ok(!fs.existsSync(path.join(stick.home, 'Inhalt', 'runtime', platform, 'node')),
       'eine Datei mit falscher Pruefsumme darf nicht geschrieben werden');
 
     // Same for an archive that is not listed in SHASUMS256.txt at all.
@@ -799,7 +862,7 @@ test('der ZIP-Leser holt node.exe aus einem Windows-Archiv', async () => {
     const tool = createStick({ gate });
     await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
     await tool.addRuntime(stick.home, platform);
-    const written = fs.readFileSync(path.join(stick.home, 'runtime', platform, 'node.exe'));
+    const written = fs.readFileSync(path.join(stick.home, 'Inhalt', 'runtime', platform, 'node.exe'));
     assert.ok(written.equals(binary));
 
     // And the reader on its own, including the "not in there" answer.
@@ -839,7 +902,7 @@ test('detectPlatforms zaehlt nur echte Laufzeiten', async () => {
     await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
     assert.deepEqual(tool.detectPlatforms(stick.home), []);
 
-    const runtime = path.join(stick.home, 'runtime');
+    const runtime = path.join(stick.home, 'Inhalt', 'runtime');
     fs.mkdirSync(path.join(runtime, 'darwin-arm64'), { recursive: true });
     fs.writeFileSync(path.join(runtime, 'darwin-arm64', 'node'), 'x'.repeat(100));
     fs.writeFileSync(path.join(runtime, 'darwin-arm64', 'node-version.txt'), 'v22.11.0\n');
@@ -896,13 +959,13 @@ test('ein echter Stick laesst sich aus dem echten Quelltext bauen', async () => 
     const result = await tool.prepare(stick.home, { includeRuntimes: false });
     assert.ok(result.files > 50, 'der echte Quelltext hat mehr als 50 Dateien');
     for (const rel of ['app/bin/neural-os.js', 'app/src/net/gate.js', 'app/src/portable/stick.js', 'app/web/app.js']) {
-      assert.ok(fs.existsSync(path.join(stick.home, rel)), `${rel} fehlt`);
+      assert.ok(fs.existsSync(path.join(stick.home, 'Inhalt', rel)), `${rel} fehlt`);
     }
-    assert.ok(!fs.existsSync(path.join(stick.home, 'app/node_modules')));
-    assert.ok(!fs.existsSync(path.join(stick.home, 'app/.git')));
+    assert.ok(!fs.existsSync(path.join(stick.home, 'Inhalt', 'app/node_modules')));
+    assert.ok(!fs.existsSync(path.join(stick.home, 'Inhalt', 'app/.git')));
 
     // The copied CLI must be a loadable program, not a truncated file.
-    const run = spawnSync(process.execPath, [path.join(stick.home, 'app/bin/neural-os.js'), 'version'], {
+    const run = spawnSync(process.execPath, [path.join(stick.home, 'Inhalt', 'app/bin/neural-os.js'), 'version'], {
       encoding: 'utf8', timeout: 30000,
     });
     assert.equal(run.status, 0, `der kopierte Starter laeuft nicht: ${run.stderr}`);
@@ -993,7 +1056,7 @@ test('ein Abbruch stoppt die Kopie und laesst den alten Stand stehen', async () 
     makeHeavySource(src.home, { files: 60 });
     const tool = createStick({});
     await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
-    const alt = snapshotDir(path.join(stick.home, 'app'));
+    const alt = snapshotDir(path.join(stick.home, 'Inhalt', 'app'));
 
     const controller = new AbortController();
     let gesehen = 0;
@@ -1015,7 +1078,7 @@ test('ein Abbruch stoppt die Kopie und laesst den alten Stand stehen', async () 
 
     // Die zweistufige Umbenennung haelt ihr Versprechen: app/ ist weder halb
     // noch weg, sondern unveraendert der vollstaendige Stand von vorher.
-    assert.deepEqual(snapshotDir(path.join(stick.home, 'app')), alt);
+    assert.deepEqual(snapshotDir(path.join(stick.home, 'Inhalt', 'app')), alt);
     const reste = fs.readdirSync(stick.home).filter((n) => /^\.app\.(tmp|old)-/.test(n));
     assert.deepEqual(reste, [], `nach dem Abbruch blieb liegen: ${reste.join(', ')}`);
 
@@ -1135,45 +1198,321 @@ test('zwei Vorgaenge auf demselben Stick schliessen einander aus', async () => {
   }
 });
 
-test('ein abgebrochener Datenbestand bleibt nicht als halbe Sicherung liegen', async () => {
-  const stick = tempHome('stick-halbe-sicherung');
-  const src = tempHome('stick-src31');
-  const heim = tempHome('stick-heim');
+test('prepare ohne includeRuntimes: Windows, Mac (Apple-Chip) und Mac (Intel) kommen aus dem Attrappen-Gate auf den Stick', async () => {
+  const stick = tempHome('stick-ziel-lz');
+  const src = tempHome('stick-src-ziel-lz');
   try {
     makeSource(src.home);
-    // Ein Datenbestand, gross genug, um mittendrin abgebrochen zu werden.
-    const blob = Buffer.alloc(512 * 1024, 5);
-    for (let i = 0; i < 60; i++) fs.writeFileSync(path.join(heim.home, `notiz-${i}.bin`), blob);
-    const tool = createStick({});
-
-    const controller = new AbortController();
-    await assert.rejects(
-      () => tool.prepare(stick.home, {
-        sourceRoot: src.home,
-        sourceHome: heim.home,
-        includeVault: true,
-        includeRuntimes: false,
-        signal: controller.signal,
-        onProgress(p) { if (p.label === 'data' && p.copied >= 1) controller.abort(); },
-      }),
-      (err) => err.code === 'ABORTED',
-    );
-
-    // Eine halbe Sicherung sieht aus wie eine ganze: genau das darf nicht
-    // liegenbleiben, sonst vertraut ihr jemand.
-    const geblieben = fs.readdirSync(path.join(stick.home, 'data'));
-    assert.deepEqual(geblieben, [], `halbe Sicherung geblieben: ${geblieben.join(', ')}`);
-
-    // Und danach laeuft dieselbe Sicherung vollstaendig durch.
-    const fertig = await tool.prepare(stick.home, {
-      sourceRoot: src.home, sourceHome: heim.home, includeVault: true, includeRuntimes: false,
-    });
-    assert.ok(fertig.files > 60);
-    assert.equal(fs.readdirSync(path.join(stick.home, 'data')).length, 60);
+    const ziel = ['win-x64', 'darwin-arm64', 'darwin-x64'];
+    const andere = ziel.filter((p) => p !== LOCAL_PLATFORM);
+    const { routes, binaries } = laufzeitArchive(andere);
+    const gate = fakeGate(routes);
+    const tool = createStick({ gate });
+    const r = await tool.prepare(stick.home, { sourceRoot: src.home });
+    assert.deepEqual(r.fehlend, [], JSON.stringify(r.fehlend));
+    for (const p of ziel) {
+      const spec = require('../src/portable/stick').PLATFORMS[p];
+      const datei = path.join(stick.home, 'Inhalt', 'runtime', p, spec.file);
+      assert.ok(fs.existsSync(datei), `runtime/${p} fehlt`);
+      if (p !== LOCAL_PLATFORM) assert.ok(fs.readFileSync(datei).equals(binaries[p]), `${p}: falscher Inhalt`);
+    }
+    assert.ok(r.runtimes.some((x) => x.platform === LOCAL_PLATFORM && x.source === 'lokal'), 'die eigene Laufzeit kam nicht ohne Netz');
+    // Nur nodejs.org, nur der Bereich stick:runtime -- fuer jede geholte Laufzeit zweimal.
+    assert.equal(gate.calls.length, andere.length * 2);
+    assert.ok(gate.calls.every((c) => c.init.scope === 'stick:runtime' && /^https:\/\/nodejs\.org\//.test(c.url)));
+    const pruefung = await tool.verify(stick.home);
+    assert.equal(pruefung.ok, true, JSON.stringify(pruefung.problems));
+    assert.deepEqual(pruefung.startklar, { hier: true, windows: true, mac: true });
   } finally {
     stick.cleanup();
     src.cleanup();
+  }
+});
+
+test('Laufzeitquellen: der eigene Stick und der Zwischenspeicher kommen vor nodejs.org, und ein Download landet im Zwischenspeicher', async () => {
+  const eigener = tempHome('stick-lz-eigener');
+  const ziel = tempHome('stick-lz-ziel');
+  const heim = tempHome('stick-lz-heim');
+  const src = tempHome('stick-lz-src');
+  try {
+    makeSource(src.home);
+    const fremde = ['win-x64', 'darwin-arm64', 'darwin-x64'].filter((p) => p !== LOCAL_PLATFORM);
+    const { PLATFORMS } = require('../src/portable/stick');
+
+    // 1) Der eigene Stick traegt eine Laufzeit: sie wird kopiert, ohne Netz.
+    const vomStick = fremde[0];
+    const eigeneBasis = path.join(eigener.home, 'Inhalt');
+    fs.mkdirSync(path.join(eigeneBasis, 'runtime', vomStick), { recursive: true });
+    fs.writeFileSync(path.join(eigeneBasis, 'neural-os.portable'), JSON.stringify({ neuralOsPortable: true }));
+    fs.writeFileSync(path.join(eigeneBasis, 'runtime', vomStick, PLATFORMS[vomStick].file), 'vom eigenen Stick');
+    fs.writeFileSync(path.join(eigeneBasis, 'runtime', vomStick, 'node-version.txt'), 'v0.0.0\n');
+    // 2) Der Zwischenspeicher der Heim-Installation hat eine zweite, in der richtigen Version.
+    const ausCache = fremde[1];
+    const cache = path.join(heim.home, 'laufzeiten', ausCache);
+    fs.mkdirSync(cache, { recursive: true });
+    fs.writeFileSync(path.join(cache, PLATFORMS[ausCache].file), 'aus dem Zwischenspeicher');
+    fs.writeFileSync(path.join(cache, 'node-version.txt'), `${process.version}\n`);
+    // 3) Fuer alles andere: nodejs.org (Attrappe), die nur die dritte kennt.
+    const rest = fremde.slice(2);
+    const { routes, binaries } = laufzeitArchive(rest);
+    const gate = fakeGate(routes);
+
+    const tool = createStick({ gate, paths: { home: heim.home }, portable: { root: eigeneBasis } });
+    const r = await tool.prepare(ziel.home, { sourceRoot: src.home });
+    assert.deepEqual(r.fehlend, [], JSON.stringify(r.fehlend));
+    const quelle = Object.fromEntries(r.runtimes.map((x) => [x.platform, x.source]));
+    assert.equal(quelle[vomStick], 'eigener-stick');
+    assert.equal(quelle[ausCache], 'zwischenspeicher');
+    for (const p of rest) assert.equal(quelle[p], 'nodejs.org');
+    assert.equal(fs.readFileSync(path.join(ziel.home, 'Inhalt', 'runtime', vomStick, PLATFORMS[vomStick].file), 'utf8'), 'vom eigenen Stick');
+    assert.equal(fs.readFileSync(path.join(ziel.home, 'Inhalt', 'runtime', ausCache, PLATFORMS[ausCache].file), 'utf8'), 'aus dem Zwischenspeicher');
+    for (const p of rest) assert.ok(fs.readFileSync(path.join(ziel.home, 'Inhalt', 'runtime', p, PLATFORMS[p].file)).equals(binaries[p]));
+    // nodejs.org wurde nur fuer den Rest gefragt.
+    assert.equal(gate.calls.length, rest.length * 2, gate.calls.map((c) => c.url).join('\n'));
+    // Ein Download wird nicht zwischengespeichert, solange die Instanz vom Stick laeuft (dort ist runtime/ der Vorrat) ...
+    for (const p of rest) assert.equal(fs.existsSync(path.join(heim.home, 'laufzeiten', p)), false);
+
+    // ... von der Heim-Installation aus schon: der naechste Stick bekommt sie ohne Netz.
+    const zweiter = tempHome('stick-lz-ziel2');
+    const dritter = tempHome('stick-lz-ziel3');
+    try {
+      const heimisch = createStick({ gate: fakeGate(laufzeitArchive(fremde).routes), paths: { home: heim.home }, portable: null });
+      const r2 = await heimisch.prepare(zweiter.home, { sourceRoot: src.home });
+      assert.deepEqual(r2.fehlend, []);
+      for (const p of fremde) {
+        assert.ok(fs.existsSync(path.join(heim.home, 'laufzeiten', p, PLATFORMS[p].file)), `${p} liegt nicht im Zwischenspeicher`);
+        assert.equal(fs.readFileSync(path.join(heim.home, 'laufzeiten', p, 'node-version.txt'), 'utf8').trim(), process.version);
+      }
+      const ohneNetz = createStick({ paths: { home: heim.home }, portable: null });
+      const r3 = await ohneNetz.prepare(dritter.home, { sourceRoot: src.home });
+      assert.deepEqual(r3.fehlend, [], JSON.stringify(r3.fehlend));
+      for (const p of fremde) assert.equal(r3.runtimes.find((x) => x.platform === p).source, 'zwischenspeicher');
+    } finally {
+      zweiter.cleanup();
+      dritter.cleanup();
+    }
+  } finally {
+    eigener.cleanup();
+    ziel.cleanup();
     heim.cleanup();
+    src.cleanup();
+  }
+});
+
+test('verify: ohne darwin-* ist es FEHLT_MAC, ohne win-* FEHLT_WINDOWS -- mit den Saetzen aus 1.8; mit allen dreien ist der Stick in Ordnung', async () => {
+  const stick = tempHome('stick-fehlt');
+  const src = tempHome('stick-src-fehlt');
+  try {
+    makeSource(src.home);
+    const { PLATFORMS } = require('../src/portable/stick');
+    const tool = createStick({});
+    await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
+    const lege = (p) => {
+      const dir = path.join(stick.home, 'Inhalt', 'runtime', p);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, PLATFORMS[p].file), 'x');
+    };
+    const weg = (p) => fs.rmSync(path.join(stick.home, 'Inhalt', 'runtime', p), { recursive: true, force: true });
+    const codes = async () => (await tool.verify(stick.home)).problems.filter((p) => /^FEHLT_/.test(p.code));
+
+    lege('win-x64');
+    if (LOCAL_PLATFORM) lege(LOCAL_PLATFORM);
+    let f = await codes();
+    assert.deepEqual(f.map((p) => p.code), ['FEHLT_MAC']);
+    assert.equal(f[0].level, 'error');
+    assert.equal(f[0].message, 'Läuft bisher nur an Windows.');
+    assert.equal(f[0].fix, 'Für Mac holen');
+
+    weg('win-x64');
+    lege('darwin-arm64');
+    f = await codes();
+    assert.deepEqual(f.map((p) => p.code), ['FEHLT_WINDOWS']);
+    assert.equal(f[0].message, 'Läuft bisher nur am Mac.');
+    assert.equal(f[0].fix, 'Für Windows holen');
+
+    lege('win-x64');
+    lege('darwin-x64');
+    const ok = await tool.verify(stick.home);
+    assert.deepEqual(ok.problems.filter((p) => /^FEHLT_/.test(p.code)), []);
+    assert.equal(ok.ok, true, JSON.stringify(ok.problems));
+    assert.equal(ok.startklar.windows, true);
+    assert.equal(ok.startklar.mac, true);
+    assert.equal(ok.ki.id, JSON.parse(fs.readFileSync(path.join(stick.home, 'Inhalt', 'neural-os.portable'), 'utf8')).kiId);
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('Begleitdateien: "._.app.old-deadbeef" in der Wurzel ist kein Rest -- verify ohne INTERRUPTED_COPY, nach update kein "_.app", und ".DS_Store" kommt nie ins Programm', async () => {
+  const stick = tempHome('stick-begleit');
+  const src = tempHome('stick-src-begleit');
+  try {
+    makeSource(src.home);
+    fs.writeFileSync(path.join(src.home, 'src', '._app.js'), 'AppleDouble');
+    fs.writeFileSync(path.join(src.home, 'Thumbs.db'), 'x');
+    const tool = createStick({});
+    await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
+    const basis = path.join(stick.home, 'Inhalt');
+    assert.ok(!fs.existsSync(path.join(basis, 'app', 'src', '._app.js')), 'die AppleDouble-Datei wurde ins Programm kopiert');
+    assert.ok(!fs.existsSync(path.join(basis, 'app', 'Thumbs.db')));
+
+    // Was macOS auf einem exFAT-Stick neben jeden Ordner legt (belegt, win-mac v4):
+    fs.writeFileSync(path.join(stick.home, '._.app.old-deadbeef'), 'AppleDouble');
+    fs.writeFileSync(path.join(basis, '._.app.old-deadbeef'), 'AppleDouble');
+    fs.writeFileSync(path.join(basis, '.DS_Store'), 'x');
+    const v = await tool.verify(stick.home);
+    assert.ok(!v.problems.some((p) => p.code === 'INTERRUPTED_COPY'), JSON.stringify(v.problems));
+    assert.deepEqual(tool.preview(stick.home, { action: 'update', sourceRoot: src.home }).stale, []);
+
+    await tool.update(stick.home, { sourceRoot: src.home });
+    assert.ok(!fs.existsSync(path.join(stick.home, '_.app')), 'aus der Begleitdatei wurde ein Ordner "_.app"');
+    assert.ok(!fs.existsSync(path.join(basis, '_.app')), 'aus der Begleitdatei wurde ein Ordner "_.app"');
+    assert.ok(fs.existsSync(path.join(basis, '._.app.old-deadbeef')), 'die Begleitdatei wurde weggeraeumt, als waere sie ein Rest');
+    // Ein echter Rest wird weiterhin erkannt und weggeraeumt.
+    fs.mkdirSync(path.join(basis, '.app.tmp-cafebabe'));
+    assert.ok((await tool.verify(stick.home)).problems.some((p) => p.code === 'INTERRUPTED_COPY'));
+    await tool.update(stick.home, { sourceRoot: src.home });
+    assert.ok(!fs.existsSync(path.join(basis, '.app.tmp-cafebabe')));
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('"Programm auf dem Stick ist älter." [Erneuern]: verify, einrichtenPlan und findeLaufwerke sagen es, update behebt es', async () => {
+  const medien = tempHome('stick-medien-alt');
+  const src = tempHome('stick-src-alt');
+  try {
+    makeSource(src.home);
+    const stickMod = require('../src/portable/stick');
+    const ziel = path.join(medien.home, 'USB');
+    const tool = createStick({});
+    await tool.prepare(ziel, { sourceRoot: src.home, includeRuntimes: false });
+    const pkg = path.join(ziel, 'Inhalt', 'app', 'package.json');
+    fs.writeFileSync(pkg, JSON.stringify({ name: 'neural-os', version: '0.0.1' }));
+
+    const v = await tool.verify(ziel);
+    const alt = v.problems.find((p) => p.code === 'PROGRAMM_AELTER');
+    assert.ok(alt, JSON.stringify(v.problems));
+    assert.equal(alt.message, 'Programm auf dem Stick ist älter.');
+    assert.equal(alt.fix, 'Erneuern');
+    assert.equal(v.version, '0.0.1');
+    assert.equal(tool.einrichtenPlan(ziel, {}).aelter, true);
+    const lw = await stickMod.findeLaufwerke({ platform: 'linux', wurzeln: [medien.home], einhaengepunkt: () => true });
+    assert.equal(lw.laufwerke.length, 1);
+    assert.equal(lw.laufwerke[0].istStick, true);
+    assert.equal(lw.laufwerke[0].aufbau, 'inhalt');
+    assert.equal(lw.laufwerke[0].aelter, true);
+    assert.equal(lw.laufwerke[0].version, '0.0.1');
+    assert.match(lw.laufwerke[0].ki.id, /^dev_/);
+
+    // [Erneuern] ist update(): danach ist die Version die des Quelltexts.
+    // (Die Attrappe traegt dieselbe Version wie das Repository, deshalb kein "aelter" mehr.)
+    fs.writeFileSync(path.join(src.home, 'package.json'), JSON.stringify({ name: 'neural-os', version: require('../package.json').version }));
+    await tool.update(ziel, { sourceRoot: src.home });
+    assert.ok(!(await tool.verify(ziel)).problems.some((p) => p.code === 'PROGRAMM_AELTER'));
+    assert.equal(tool.einrichtenPlan(ziel, {}).aelter, false);
+  } finally {
+    medien.cleanup();
+    src.cleanup();
+  }
+});
+
+test('Mac: die Zeile aus /sbin/mount fuer die Wurzel -- bei apfs oder hfs "Windows sieht diesen Stick nicht."', async () => {
+  const stick = tempHome('stick-apfs');
+  const src = tempHome('stick-src-apfs');
+  try {
+    makeSource(src.home);
+    const echt = fs.realpathSync.native(stick.home);
+    const mount = [
+      '/dev/disk1s1 on / (apfs, local, journaled)',
+      `/dev/disk4s1 on ${echt} (apfs, local, nodev, nosuid, journaled, noowners)`,
+      '/dev/disk5s1 on /Volumes/LENA (exfat, local, nodev, nosuid, noowners)',
+    ].join('\n');
+    const ausfuehren = async (cmd) => (cmd === '/sbin/mount' ? { code: 0, stdout: `${mount}\n`, stderr: '', error: null } : { code: 1, stdout: '', stderr: '', error: 'ENOENT' });
+    const tool = createStick({ platform: 'darwin', ausfuehren });
+    const r = await tool.prepare(stick.home, { sourceRoot: src.home, includeRuntimes: false });
+    assert.equal(r.dateisystem, 'apfs');
+    assert.deepEqual(r.hinweise.map((h) => h.satz), ['Windows sieht diesen Stick nicht.']);
+    assert.ok(r.warnings.includes('Windows sieht diesen Stick nicht.'));
+    const v = await tool.verify(stick.home);
+    assert.ok(v.problems.some((p) => p.code === 'KEIN_WINDOWS' && p.message === 'Windows sieht diesen Stick nicht.'), JSON.stringify(v.problems));
+    assert.equal(v.filesystem.name, 'apfs');
+
+    // Ein exFAT-Stick bekommt keinen Hinweis; NTFS liest der Mac nur.
+    const stickMod = require('../src/portable/stick');
+    assert.equal(stickMod.dateisystemHinweis('exfat'), null);
+    assert.equal(stickMod.dateisystemHinweis('msdos'), null);
+    assert.equal(stickMod.dateisystemHinweis('hfs').satz, 'Windows sieht diesen Stick nicht.');
+    assert.equal(stickMod.dateisystemHinweis('ntfs').code, 'NUR_LESEN_MAC');
+    assert.equal(stickMod.dateisystemHinweis('FUSE (z. B. exfat-fuse, ntfs-3g)'), null);
+    // Nicht am Mac: mount wird gar nicht gefragt.
+    let gefragt = 0;
+    const linux = createStick({ platform: 'linux', ausfuehren: async () => { gefragt++; return { code: 0, stdout: mount }; } });
+    await linux.verify(stick.home);
+    assert.equal(gefragt, 0);
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
+test('alter Aufbau (alles in der Wurzel): update erneuert an Ort und Stelle, verschiebt data/ nie, tauscht die alten Starter, legt kein "Inhalt" an', async () => {
+  const stick = tempHome('stick-alt-aufbau');
+  const src = tempHome('stick-src-alt-aufbau');
+  try {
+    makeSource(src.home);
+    const stickMod = require('../src/portable/stick');
+    // So sieht ein Stick von vor Paket R aus.
+    fs.mkdirSync(path.join(stick.home, 'app', 'src'), { recursive: true });
+    fs.writeFileSync(path.join(stick.home, 'app', 'package.json'), JSON.stringify({ name: 'neural-os', version: '0.0.1' }));
+    fs.mkdirSync(path.join(stick.home, 'data'), { recursive: true });
+    fs.writeFileSync(path.join(stick.home, 'data', 'config.json'), '{"sync":{"deviceId":"dev_000000000000000000000001"}}');
+    fs.writeFileSync(path.join(stick.home, 'neural-os.portable'), JSON.stringify({ neuralOsPortable: true, dataDir: 'data', appDir: 'app', createdAt: '2026-01-01T00:00:00.000Z', kiId: 'dev_000000000000000000000001' }));
+    for (const alt of ['Neural OS starten.bat', 'Neural OS starten.command', 'Neural OS starten.sh']) fs.writeFileSync(path.join(stick.home, alt), 'alt');
+
+    const lage = stickMod.aufbauVon(stick.home);
+    assert.deepEqual(lage, { wurzel: path.resolve(stick.home), basis: path.resolve(stick.home), aufbau: 'alt', istStick: true });
+    // Dieselbe Antwort fuer einen neuen Stick, egal ob Wurzel oder Inhalt gefragt wird.
+    const neu = tempHome('stick-neu-aufbau');
+    try {
+      await createStick({}).prepare(neu.home, { sourceRoot: src.home, includeRuntimes: false });
+      const vonWurzel = stickMod.aufbauVon(neu.home);
+      const vonInhalt = stickMod.aufbauVon(path.join(neu.home, 'Inhalt'));
+      assert.deepEqual(vonWurzel, vonInhalt);
+      assert.equal(vonWurzel.aufbau, 'inhalt');
+      assert.equal(vonWurzel.basis, path.join(path.resolve(neu.home), 'Inhalt'));
+      // Die laufende App kennt nur den Inhalt-Ordner; verify und update nehmen ihn genauso.
+      const v = await createStick({}).verify(path.join(neu.home, 'Inhalt'));
+      assert.equal(v.root, path.resolve(neu.home));
+      assert.equal(v.layout.readme.exists, true);
+    } finally {
+      neu.cleanup();
+    }
+
+    const tool = createStick({});
+    const daten = snapshotDir(path.join(stick.home, 'data'));
+    const r = await tool.update(stick.home, { sourceRoot: src.home });
+    assert.equal(r.aufbau, 'alt');
+    assert.ok(!fs.existsSync(path.join(stick.home, 'Inhalt')), 'ein bestehender Stick wurde umgebaut');
+    assert.deepEqual(snapshotDir(path.join(stick.home, 'data')), daten, 'data/ wurde angefasst');
+    assert.ok(fs.existsSync(path.join(stick.home, 'app', 'bin', 'neural-os.js')));
+    for (const alt of ['Neural OS starten.bat', 'Neural OS starten.command', 'Neural OS starten.sh']) {
+      assert.ok(!fs.existsSync(path.join(stick.home, alt)), `${alt} liegt noch da`);
+    }
+    for (const n of ['Neural OS starten - Windows.bat', 'Neural OS starten - Mac.command', 'Starter fuer Linux.sh', 'LIESMICH.txt']) {
+      assert.ok(fs.existsSync(path.join(stick.home, n)), `${n} fehlt`);
+    }
+    const marker = JSON.parse(fs.readFileSync(path.join(stick.home, 'neural-os.portable'), 'utf8'));
+    assert.equal(marker.kiId, 'dev_000000000000000000000001', 'die KI des alten Sticks wurde ersetzt');
+    const v = await tool.verify(stick.home);
+    assert.equal(v.aufbau, 'alt');
+    assert.ok(!v.problems.some((p) => p.code === 'LAUNCHER_MISSING' || p.code === 'PROGRAMM_AELTER'), JSON.stringify(v.problems));
+    assert.equal(tool.einrichtenPlan(stick.home, {}).fall, 'erneuern');
+  } finally {
+    stick.cleanup();
+    src.cleanup();
   }
 });
 
@@ -1249,7 +1588,7 @@ test('die Rechtefrage beantwortet verify aus den Zeugen, nicht durch Schreiben',
     assert.ok(!gut.problems.some((p) => p.code === 'NO_PERMISSIONS' || p.code === 'PERMISSIONS_UNKNOWN'));
 
     // Genau das tut ein exFAT-Treiber: der gesetzte Modus kommt nicht zurueck.
-    fs.chmodSync(path.join(stick.home, 'data'), 0o777);
+    fs.chmodSync(path.join(stick.home, 'Inhalt', 'data'), 0o777);
     const ohneRechte = await tool.verify(stick.home);
     assert.equal(ohneRechte.filesystem.enforcesModes, false);
     const warnung = ohneRechte.problems.find((p) => p.code === 'NO_PERMISSIONS');
@@ -1279,12 +1618,6 @@ test('auch die Fehler aus der Fehlertaxonomie sind ganze deutsche Saetze', async
     const faelle = [
       () => tool.prepare(stick.home, { sourceRoot: path.join(src.home, 'gibt-es-nicht') }),
       () => tool.update(path.join(stick.home, 'auch-nicht'), { sourceRoot: src.home }),
-      () => tool.prepare(stick.home, {
-        sourceRoot: src.home,
-        includeRuntimes: false,
-        includeVault: true,
-        sourceHome: path.join(src.home, 'kein-zuhause'),
-      }),
     ];
     for (const fall of faelle) {
       await assert.rejects(fall, (err) => {
@@ -1630,26 +1963,31 @@ test('ein langer Vorgang kommt als Ereignisstrom, und die Absage kommt davor', a
       .filter((v) => Number.isFinite(v));
     assert.ok(prozente.length >= 2, `zu wenige Prozentmeldungen fuer einen Balken: ${prozente.length}`);
     assert.equal(prozente[prozente.length - 1], 100);
-    assert.ok(fs.existsSync(path.join(ziel, 'neural-os.portable')), 'Marker fehlt');
-    assert.ok(fs.existsSync(path.join(ziel, 'app', 'bin', 'neural-os.js')), 'Programm fehlt');
+    assert.ok(fs.existsSync(path.join(ziel, 'Inhalt', 'neural-os.portable')), 'Marker fehlt');
+    assert.ok(fs.existsSync(path.join(ziel, 'Inhalt', 'app', 'bin', 'neural-os.js')), 'Programm fehlt');
 
     // Die Pruefung haengt hinter einem GET und darf deshalb nichts schreiben.
     const vorherMtime = fs.statSync(ziel).mtimeMs;
     const pruefung = await req('GET', `/api/stick/verify?path=${encodeURIComponent(ziel)}`);
     assert.equal(pruefung.status, 200, pruefung.text);
-    assert.equal(pruefung.json.ok, true, JSON.stringify(pruefung.json.problems));
+    assert.deepEqual(nurFehlt(pruefung.json.problems), [], JSON.stringify(pruefung.json.problems));
     assert.equal(pruefung.json.filesystem.probed, false);
+    assert.equal(pruefung.json.aufbau, 'inhalt');
     assert.equal(fs.statSync(ziel).mtimeMs, vorherMtime);
 
     // Und jetzt der Punkt: was vorher entscheidbar ist, wird VOR dem ersten
     // Byte entschieden -- als Statuscode, nicht als halber Ereignisstrom.
-    const mitDaten = await req('POST', '/api/stick/prepare', { path: ziel, includeVault: true });
-    assert.equal(mitDaten.status, 200, mitDaten.text);
-    const nochmal = await req('POST', '/api/stick/prepare', { path: ziel, includeVault: true });
+    // Auf dem Stick wohnt seit eben eine KI; ein zweites [Neue KI] ist 409.
+    const nochmal = await req('POST', '/api/stick/prepare', { path: ziel, ki: 'neu' });
     assert.equal(nochmal.status, 409, nochmal.text);
-    assert.equal(nochmal.json.error.code, 'STICK_DATA_PRESENT');
+    assert.equal(nochmal.json.error.code, 'KI_VORHANDEN');
+    assert.equal(nochmal.json.error.message, 'Auf diesem Stick wohnt schon eine KI.');
     assert.equal(nochmal.events.length, 0, 'es wurde doch ein Ereignisstrom geoeffnet');
-    assert.match(nochmal.json.error.message, /bereits ein Datenbestand/);
+    // Die Rohkopie gibt es nicht mehr: 400 mit dem Satz aus Bauplan 2.10.3.
+    const roh = await req('POST', '/api/stick/prepare', { path: ziel, includeVault: true });
+    assert.equal(roh.status, 400, roh.text);
+    assert.equal(roh.json.error.message, 'Gibt es nicht mehr. Stattdessen: Mit dieser KI gekoppelt.');
+    assert.equal(roh.events.length, 0);
   });
 });
 
@@ -1671,7 +2009,7 @@ test('zwei Anfragen auf denselben Stick ergeben 409, nicht zwei halbe Sticks', a
 
     // Der Stick hat es unbeschadet ueberstanden -- genau das schuetzt die Sperre.
     const danach = await req('GET', `/api/stick/verify?path=${encodeURIComponent(ziel)}`);
-    assert.equal(danach.json.ok, true, JSON.stringify(danach.json.problems));
+    assert.deepEqual(nurFehlt(danach.json.problems), [], JSON.stringify(danach.json.problems));
   });
 });
 
@@ -1748,16 +2086,18 @@ test('einrichten: ein leerer Stick bekommt Programm, Laufzeiten und das Wissen',
     const prozente = [];
     const saetze = [];
     const r = await tool.einrichten(stick.home, {
-      sourceRoot: src.home, sourceHome: home.home, plattformen: andere,
+      sourceRoot: src.home, plattformen: andere,
       onProgress: (e) => { prozente.push(e.percent); saetze.push(e.message); },
     });
     assert.equal(r.fall, 'neu');
-    assert.equal(r.wissen, 'kopiert');
+    // Kein Wissen reist mit (die Rohkopie ist weg): der Stick bekommt eine eigene KI.
+    assert.equal(r.wissen, 'neu');
+    assert.match(r.ki.id, /^dev_[0-9a-f]{24}$/);
     assert.deepEqual(r.fehlend, []);
-    assert.equal(fs.readFileSync(path.join(stick.home, 'data', 'notiz.txt'), 'utf8'), 'mein Wissen');
+    assert.deepEqual(fs.readdirSync(path.join(stick.home, 'Inhalt', 'data')), ['config.json'], 'nur die Identitaet liegt in data/');
     for (const p of andere) {
       const spec = require('../src/portable/stick').PLATFORMS[p];
-      assert.ok(fs.readFileSync(path.join(stick.home, 'runtime', p, spec.file)).equals(binaries[p]), `${p} fehlt`);
+      assert.ok(fs.readFileSync(path.join(stick.home, 'Inhalt', 'runtime', p, spec.file)).equals(binaries[p]), `${p} fehlt`);
       assert.ok(r.laufzeiten.includes(p));
     }
     assert.ok(r.laufzeiten.includes(LOCAL_PLATFORM), 'die Laufzeit dieses Rechners fehlt');
@@ -1769,12 +2109,11 @@ test('einrichten: ein leerer Stick bekommt Programm, Laufzeiten und das Wissen',
     assert.ok(prozente.filter((p) => p > 0 && p < 100).length >= 3, `zu wenige Zwischenstaende: ${prozente.join(',')}`);
     assert.ok(saetze.every((m) => !/\d+ %/.test(String(m))), `Prozent im Satz: ${saetze.find((m) => /\d+ %/.test(String(m)))}`);
 
-    // Die LIESMICH redet nicht mehr von einem Modell, sondern von Claude.
+    // Die LIESMICH redet nicht von einem Modell -- sie hat nur die fuenf Zeilen.
     const liesmich = fs.readFileSync(path.join(stick.home, 'LIESMICH.txt'), 'utf8');
     assert.ok(!/Sprachmodell|Ollama|models/i.test(liesmich), 'die LIESMICH spricht noch vom Modell');
-    assert.match(liesmich, /Claude verbinden/);
-    assert.match(liesmich, /Beenden & abziehen/);
-    assert.equal(fs.existsSync(path.join(stick.home, 'models')), false, 'ein models/-Ordner wird nicht mehr angelegt');
+    assert.equal(liesmich.trim().split(/\r?\n/).length, 5);
+    assert.equal(fs.existsSync(path.join(stick.home, 'Inhalt', 'models')), false, 'ein models/-Ordner wird nicht mehr angelegt');
   } finally {
     stick.cleanup();
     src.cleanup();
@@ -1790,18 +2129,19 @@ test('einrichten: liegt schon Wissen auf dem Stick, bleibt es unberuehrt', async
     makeSource(src.home);
     fs.writeFileSync(path.join(home.home, 'notiz.txt'), 'vom Laptop');
     const tool = createStick({});
-    await tool.einrichten(stick.home, { sourceRoot: src.home, sourceHome: home.home, andereSysteme: false });
+    const erst = await tool.einrichten(stick.home, { sourceRoot: src.home, andereSysteme: false });
     // Auf einem anderen Rechner weitergeschrieben:
-    fs.writeFileSync(path.join(stick.home, 'data', 'notiz.txt'), 'auf dem fremden Rechner geaendert');
-    const vorher = snapshotDir(path.join(stick.home, 'data'));
+    fs.writeFileSync(path.join(stick.home, 'Inhalt', 'data', 'notiz.txt'), 'auf dem fremden Rechner geaendert');
+    const vorher = snapshotDir(path.join(stick.home, 'Inhalt', 'data'));
     fs.writeFileSync(path.join(src.home, 'src', 'neu.js'), '// neu\n');
 
     assert.equal(tool.einrichtenPlan(stick.home, {}).fall, 'erneuern');
-    const r = await tool.einrichten(stick.home, { sourceRoot: src.home, sourceHome: home.home, andereSysteme: false });
+    const r = await tool.einrichten(stick.home, { sourceRoot: src.home, andereSysteme: false });
     assert.equal(r.fall, 'erneuern');
     assert.equal(r.wissen, 'blieb');
-    assert.deepEqual(snapshotDir(path.join(stick.home, 'data')), vorher, 'das Wissen auf dem Stick wurde angefasst');
-    assert.ok(fs.existsSync(path.join(stick.home, 'app', 'src', 'neu.js')), 'das Programm wurde nicht erneuert');
+    assert.equal(r.ki.id, erst.ki.id, 'die KI auf dem Stick bleibt dieselbe');
+    assert.deepEqual(snapshotDir(path.join(stick.home, 'Inhalt', 'data')), vorher, 'das Wissen auf dem Stick wurde angefasst');
+    assert.ok(fs.existsSync(path.join(stick.home, 'Inhalt', 'app', 'src', 'neu.js')), 'das Programm wurde nicht erneuert');
   } finally {
     stick.cleanup();
     src.cleanup();
@@ -1815,12 +2155,15 @@ test('einrichten: ohne Netz ist der Stick trotzdem fertig und sagt, was fehlt', 
   try {
     makeSource(src.home);
     const tool = createStick({}); // keine Schleuse
-    const r = await tool.einrichten(stick.home, { sourceRoot: src.home, mitWissen: false, plattformen: ['win-x64', 'darwin-x64'] });
+    const r = await tool.einrichten(stick.home, { sourceRoot: src.home, plattformen: ['win-x64', 'darwin-x64'] });
     const erwartet = ['win-x64', 'darwin-x64'].filter((p) => p !== LOCAL_PLATFORM);
     assert.deepEqual(r.fehlend.map((f) => f.platform), erwartet);
     assert.ok(r.fehlend.every((f) => f.grund && f.grund.length > 20), 'ein fehlender Grund ist keine Auskunft');
+    // Die Ansicht zeigt nur den einen Satz (1.8), der Grund bleibt fuers Protokoll.
+    assert.ok(r.fehlend.every((f) => f.satz === 'Ohne Internet geht das nicht.'), JSON.stringify(r.fehlend));
     const pruefung = await tool.verify(stick.home);
-    assert.equal(pruefung.ok, true, JSON.stringify(pruefung.problems));
+    // Fertig heisst: kein anderer Fehler; was fehlt, sagt verify als FEHLT_*.
+    assert.deepEqual(nurFehlt(pruefung.problems), [], JSON.stringify(pruefung.problems));
   } finally {
     stick.cleanup();
     src.cleanup();
@@ -1833,14 +2176,14 @@ test('einrichten: der eigene Stick bekommt nur fehlende Laufzeiten, das Programm
   try {
     makeSource(src.home);
     const tool = createStick({});
-    await tool.einrichten(stick.home, { sourceRoot: src.home, mitWissen: false, andereSysteme: false });
-    const app = snapshotDir(path.join(stick.home, 'app'));
+    await tool.einrichten(stick.home, { sourceRoot: src.home, andereSysteme: false });
+    const app = snapshotDir(path.join(stick.home, 'Inhalt', 'app'));
     const andere = ['darwin-arm64'].filter((p) => p !== LOCAL_PLATFORM);
     const { routes } = laufzeitArchive(andere);
     const mitSchleuse = createStick({ gate: fakeGate(routes) });
     const r = await mitSchleuse.einrichten(stick.home, { eigenerStick: stick.home, plattformen: andere });
     assert.equal(r.fall, 'eigener');
-    assert.deepEqual(snapshotDir(path.join(stick.home, 'app')), app, 'das laufende Programm wurde ueberschrieben');
+    assert.deepEqual(snapshotDir(path.join(stick.home, 'Inhalt', 'app')), app, 'das laufende Programm wurde ueberschrieben');
     for (const p of andere) assert.ok(r.laufzeiten.includes(p));
   } finally {
     stick.cleanup();
@@ -1941,10 +2284,12 @@ test('auswerfen: Windows ueber die Shell, nie das Systemlaufwerk, sonst ehrlich'
  * Eine ganze Anwendung (createApp), weil "Jetzt sichern" die Sicherung und
  * "Beenden" den ganzen Abbau braucht -- nicht nur den Server.
  */
-async function withApp(fn) {
+async function withApp(fn, opts = {}) {
   const { createApp, seedIfEmpty } = require('../src/app');
   const home = tempHome('stick-app');
-  const app = await createApp({ home: home.home, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false });
+  const { vorher, ...appOpts } = opts;
+  if (typeof vorher === 'function') await vorher(home.home);
+  const app = await createApp({ home: home.home, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false, ...appOpts });
   await seedIfEmpty(app);
   const server = await app.listen();
   const base = `http://127.0.0.1:${server.server.address().port}`;
@@ -1989,14 +2334,17 @@ test('HTTP: Laufwerke, Plan und ein Klick "Stick vorbereiten" mit einmaliger Erl
       assert.ok(arten.includes('fertig'), `kein Abschluss: ${arten.join(',')} ${lauf.text.slice(0, 300)}`);
       const fertig = lauf.events.find((e) => e.event === 'fertig').data;
       assert.equal(fertig.fall, 'neu');
-      assert.equal(fertig.wissen, 'kopiert');
+      assert.equal(fertig.wissen, 'neu');
+      assert.match(fertig.ki.id, /^dev_[0-9a-f]{24}$/);
+      assert.notEqual(fertig.ki.id, app.identitaet.id, 'der neue Stick traegt die Kennung dieser KI (Befund 11)');
+      assert.equal(fertig.gekoppelt, null);
       assert.ok(fertig.laufzeiten.includes(LOCAL_PLATFORM));
       for (const p of andere) assert.ok(fertig.laufzeiten.includes(p), `${p} fehlt: ${JSON.stringify(fertig.fehlend)}`);
       assert.deepEqual(fertig.fehlend, []);
       const prozente = lauf.events.filter((e) => e.event === 'fortschritt').map((e) => e.data.percent);
       assert.equal(prozente[prozente.length - 1], 100);
       for (let i = 1; i < prozente.length; i++) assert.ok(prozente[i] >= prozente[i - 1]);
-      assert.ok(fs.readdirSync(path.join(ziel, 'data')).length > 0, 'das Wissen kam nicht mit');
+      assert.deepEqual(fs.readdirSync(path.join(ziel, 'Inhalt', 'data')), ['config.json'], 'in data/ liegt mehr als die Identitaet');
 
       const freigaben = app.store.all ? app.store.all('grant') : app.store.list('grant').items;
       const unsere = freigaben.filter((g) => g.data.scope === stickMod.RUNTIME_SCOPE);
@@ -2012,6 +2360,16 @@ test('HTTP: Laufwerke, Plan und ein Klick "Stick vorbereiten" mit einmaliger Erl
         .filter((g) => g.data.scope === stickMod.RUNTIME_SCOPE);
       assert.equal(danach.length, 1);
       assert.equal(nochmal.events.find((e) => e.event === 'fertig').data.fall, 'erneuern');
+
+      // [Neue KI] auf den belegten Stick (1.6): der Satz, kein Strom, und die
+      // KI auf dem Stick bleibt, wie sie ist. [Erneuern] ist der Aufruf ohne `ki`.
+      const belegt = await req('POST', '/api/stick/einrichten', { path: ziel, ki: 'neu', andereSysteme: false });
+      assert.equal(belegt.status, 409, belegt.text);
+      assert.equal(belegt.json.error.code, 'KI_VORHANDEN');
+      assert.equal(belegt.json.error.message, 'Auf diesem Stick wohnt schon eine KI.');
+      assert.equal(belegt.events.length, 0, 'es wurde doch ein Strom geoeffnet');
+      const konfig = JSON.parse(fs.readFileSync(path.join(ziel, 'Inhalt', 'data', 'config.json'), 'utf8'));
+      assert.equal(konfig.sync.deviceId, fertig.ki.id, 'die KI auf dem Stick wurde ersetzt');
     } finally {
       medien.cleanup();
     }
@@ -2097,6 +2455,315 @@ test('HTTP: "Beenden & abziehen" speichert, antwortet, und schliesst erst danach
       stick.cleanup();
     }
   });
+});
+
+
+/* -------------------------------- Befund 11: [Mit dieser KI gekoppelt] */
+
+/** Die Kopplung von A aus gesehen und was auf dem neuen Stick liegt -- fuer beide PIN-Faelle gleich. */
+function pruefeGekoppelt(app, ziel, fertig) {
+  const basis = path.join(ziel, 'Inhalt');
+  assert.equal(fertig.fall, 'neu');
+  assert.match(fertig.ki.id, /^dev_[0-9a-f]{24}$/);
+  // Befund 11: keine geklonte Kennung ...
+  assert.notEqual(fertig.ki.id, app.identitaet.id, 'der neue Stick traegt die Kennung dieser KI');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(basis, 'neural-os.portable'), 'utf8')).kiId, fertig.ki.id);
+  // ... kein Paarschluessel und kein Abgleich-Stand dieser Installation auf dem neuen Stick ...
+  const inData = fs.readdirSync(path.join(basis, 'data'));
+  assert.ok(!inData.includes('kopplungen.json'), 'kopplungen.json dieser KI liegt auf dem neuen Stick');
+  assert.ok(!inData.includes('sync-folder.json'), 'der Abgleich-Stand dieser KI liegt auf dem neuen Stick');
+  assert.ok(!inData.includes('vault'), 'der Tresor dieser KI wurde kopiert');
+  // ... sondern ein Angebot und das Postfach von A, wie beim Koppeln (K1).
+  assert.ok(fs.existsSync(path.join(basis, 'sync', 'koppeln', `${app.identitaet.id}.angebot`)), 'kein Angebot auf dem neuen Stick');
+  assert.ok(fs.existsSync(path.join(basis, 'sync', app.identitaet.id, 'manifest.json')), 'A hat sein Postfach nicht auf den neuen Stick gelegt');
+  assert.ok(fertig.gekoppelt, 'die Antwort nennt den Partner nicht');
+  assert.equal(fertig.gekoppelt.id, fertig.ki.id);
+  assert.equal(fertig.gekoppelt.zustand, 'wartet', '"Lena übernimmt beim nächsten Start"');
+  const st = app.kopplung.status();
+  assert.equal(st.partner.length, 1);
+  assert.equal(st.partner[0].id, fertig.ki.id);
+  assert.equal(st.partner[0].name, fertig.ki.name);
+  return basis;
+}
+
+/** Den neuen Stick starten, wie bin/neural-os.js es taete, und die Kopplung annehmen. */
+async function starteNeuenStick(basis, { pin } = {}) {
+  const { createApp } = require('../src/app');
+  return createApp({
+    home: path.join(basis, 'data'),
+    appDir: path.join(basis, 'app'),
+    port: 0,
+    host: '127.0.0.1',
+    logLevel: 'error',
+    harden: false,
+    passphrase: pin,
+    kopplung: { automatisch: false, einhaengepunkte: () => [] },
+  });
+}
+
+test('HTTP [Mit dieser KI gekoppelt] ohne PIN: neue Kennung, kein Paarschluessel und kein Abgleich-Stand auf dem neuen Stick (Befund 11); der neue Stick uebernimmt beim ersten Start', async () => {
+  await withApp(async ({ app, req }) => {
+    const medien = tempHome('stick-gekoppelt');
+    const ziel = path.join(medien.home, 'LENA');
+    fs.mkdirSync(ziel);
+    app.stick = createStick({ paths: app.paths, config: app.config });
+    app.identitaet.umbenennen('Max');
+    const note = app.store.create('note', { title: 'Nur auf A', body: 'reist per Kopplung' });
+    let appB = null;
+    try {
+      const selbst = await req('GET', '/api/stick');
+      assert.equal(selbst.json.pinNoetig, false);
+      assert.equal(selbst.json.koppelnMoeglich, true);
+
+      const lauf = await req('POST', '/api/stick/einrichten', { path: ziel, ki: 'gekoppelt', andereSysteme: false });
+      assert.equal(lauf.status, 200, lauf.text);
+      const arten = lauf.events.map((e) => e.event);
+      assert.ok(arten.includes('fertig') && !arten.includes('fehler'), lauf.text.slice(0, 600));
+      const fertig = lauf.events.find((e) => e.event === 'fertig').data;
+      const basis = pruefeGekoppelt(app, ziel, fertig);
+      assert.deepEqual(fs.readdirSync(path.join(basis, 'data')).sort(), ['config.json']);
+      // Ohne PIN reist das Angebot im Klartext -- es gibt keinen Tresor, der es siegeln koennte.
+      const angebot = JSON.parse(fs.readFileSync(path.join(basis, 'sync', 'koppeln', `${app.identitaet.id}.angebot`), 'utf8'));
+      assert.equal(angebot.versiegelt, undefined);
+      assert.equal(angebot.an, fertig.ki.id);
+      assert.equal(angebot.name, 'Max');
+
+      // Ein zweites [Mit dieser KI gekoppelt] auf denselben Stick: dort wohnt schon eine KI.
+      const nochmal = await req('POST', '/api/stick/einrichten', { path: ziel, ki: 'gekoppelt', andereSysteme: false });
+      assert.equal(nochmal.status, 409, nochmal.text);
+      assert.equal(nochmal.json.error.code, 'KI_VORHANDEN');
+      assert.equal(nochmal.json.error.message, 'Auf diesem Stick wohnt schon eine KI.');
+
+      // Der neue Stick startet zum ersten Mal: er nimmt an, hat die Notiz von A, und ist eine eigene KI.
+      appB = await starteNeuenStick(basis);
+      assert.equal(appB.identitaet.id, fertig.ki.id, 'der Start hat die Kennung ersetzt (Marker und config.json passen nicht)');
+      assert.equal(appB.identitaet.name, fertig.ki.name);
+      assert.equal(appB.identitaet.port, JSON.parse(fs.readFileSync(path.join(basis, 'data', 'config.json'), 'utf8')).server.port);
+      await appB.kopplung.starten();
+      const st = appB.kopplung.status();
+      assert.equal(st.partner.length, 1, JSON.stringify(st));
+      assert.equal(st.partner[0].id, app.identitaet.id);
+      assert.equal(st.partner[0].name, 'Max');
+      assert.equal(st.hinweis, 'Gekoppelt mit Max.');
+      assert.ok(appB.store.get(note.id), 'die Notiz von A ist nicht auf dem neuen Stick');
+      assert.ok(!fs.existsSync(path.join(basis, 'sync', 'koppeln', `${app.identitaet.id}.angebot`)), 'das Angebot muss weg sein');
+    } finally {
+      if (appB) await appB.close().catch(() => {});
+      medien.cleanup();
+    }
+  }, { kopplung: { automatisch: false, einhaengepunkte: () => [] } });
+});
+
+test('HTTP [Mit dieser KI gekoppelt] mit PIN: Feld "PIN für den neuen Stick" ist Pflicht, der neue Stick bekommt einen eigenen Tresor, das Angebot reist versiegelt', async () => {
+  const geraete = tempHome('stick-geraete');
+  const vorher = process.env.NEURAL_OS_GERAETE;
+  process.env.NEURAL_OS_GERAETE = geraete.home;
+  try {
+    await withApp(async ({ app, req, home }) => {
+      const medien = tempHome('stick-gekoppelt-pin');
+      const ziel = path.join(medien.home, 'LENA');
+      fs.mkdirSync(ziel);
+      app.stick = createStick({ paths: app.paths, config: app.config });
+      const note = app.store.create('note', { title: 'Nur auf A', body: 'versiegelt unterwegs' });
+      let appB = null;
+      try {
+        assert.equal(app.vaultCrypto.enabled, true, 'die Probe braucht eine KI mit PIN');
+        assert.equal((await req('GET', '/api/stick')).json.pinNoetig, true);
+        const plan = await req('GET', `/api/stick/plan?path=${encodeURIComponent(ziel)}`);
+        assert.equal(plan.json.pinNoetig, true);
+        assert.equal(plan.json.leer, true);
+
+        // Ohne PIN fuer den neuen Stick: Absage vor dem Strom, nichts geschrieben.
+        const ohne = await req('POST', '/api/stick/einrichten', { path: ziel, ki: 'gekoppelt', andereSysteme: false });
+        assert.equal(ohne.status, 400, ohne.text);
+        assert.equal(ohne.json.error.message, 'PIN für den neuen Stick');
+        assert.deepEqual(fs.readdirSync(ziel), []);
+
+        const lauf = await req('POST', '/api/stick/einrichten', { path: ziel, ki: 'gekoppelt', pin: '4321', andereSysteme: false });
+        assert.equal(lauf.status, 200, lauf.text);
+        const arten = lauf.events.map((e) => e.event);
+        assert.ok(arten.includes('fertig') && !arten.includes('fehler'), lauf.text.slice(0, 600));
+        const fertig = lauf.events.find((e) => e.event === 'fertig').data;
+        const basis = pruefeGekoppelt(app, ziel, fertig);
+
+        // Ein eigener Tresor: nicht der von A (Befund 13), und die config.json weiss davon.
+        assert.deepEqual(fs.readdirSync(path.join(basis, 'data')).sort(), ['config.json', 'secrets.json']);
+        const meins = JSON.parse(fs.readFileSync(path.join(home, 'secrets.json'), 'utf8'));
+        const seins = JSON.parse(fs.readFileSync(path.join(basis, 'data', 'secrets.json'), 'utf8'));
+        assert.notEqual(seins.wrappedKey, meins.wrappedKey, 'der Schluessel von A wurde kopiert');
+        assert.notEqual(seins.salt, meins.salt);
+        const konfig = JSON.parse(fs.readFileSync(path.join(basis, 'data', 'config.json'), 'utf8'));
+        assert.equal(konfig.security.encryption.enabled, true);
+        assert.equal(konfig.sync.deviceId, fertig.ki.id);
+        // Das Angebot ist mit der PIN des neuen Sticks versiegelt (K1: mit PIN nur versiegelt).
+        const angebot = JSON.parse(fs.readFileSync(path.join(basis, 'sync', 'koppeln', `${app.identitaet.id}.angebot`), 'utf8'));
+        assert.equal(typeof angebot.versiegelt, 'string');
+        assert.equal(angebot.an, undefined);
+        // Und unter sync/ steht nirgends Klartext der Notiz.
+        const dateien = [];
+        const lies = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) lies(p); else dateien.push(p); } };
+        lies(path.join(basis, 'sync'));
+        for (const d of dateien) assert.ok(!fs.readFileSync(d).includes('versiegelt unterwegs'), `Klartext in ${d}`);
+
+        // Der neue Stick startet mit seiner PIN und nimmt an.
+        appB = await starteNeuenStick(basis, { pin: '4321' });
+        assert.equal(appB.identitaet.id, fertig.ki.id);
+        assert.equal(appB.vaultCrypto.state, 'unlocked');
+        await appB.kopplung.starten();
+        const st = appB.kopplung.status();
+        assert.equal(st.partner.length, 1, JSON.stringify(st));
+        assert.equal(st.partner[0].id, app.identitaet.id);
+        assert.equal(st.selbst.pin, true);
+        assert.ok(appB.store.get(note.id), 'die Notiz von A ist nicht auf dem neuen Stick');
+      } finally {
+        if (appB) await appB.close().catch(() => {});
+        medien.cleanup();
+      }
+    }, {
+      passphrase: '1234',
+      kopplung: { automatisch: false, einhaengepunkte: () => [] },
+      vorher: async (home) => {
+        const { createVaultCrypto } = require('../src/store/vaultcrypto');
+        const vc = createVaultCrypto({ paths: { secrets: path.join(home, 'secrets.json') }, config: {}, geraet: false });
+        await vc.initialise('1234');
+        vc.lock();
+      },
+    });
+  } finally {
+    if (vorher === undefined) delete process.env.NEURAL_OS_GERAETE;
+    else process.env.NEURAL_OS_GERAETE = vorher;
+    geraete.cleanup();
+  }
+});
+
+test('HTTP: ohne Koppeln-Dienst ist [Mit dieser KI gekoppelt] ein 501 mit einem Satz, und es wird nichts geschrieben', async () => {
+  await withApp(async ({ app, req }) => {
+    const medien = tempHome('stick-ohne-koppeln');
+    const ziel = path.join(medien.home, 'USB');
+    fs.mkdirSync(ziel);
+    app.stick = createStick({ paths: app.paths, config: app.config });
+    app.kopplung = null;
+    try {
+      assert.equal((await req('GET', '/api/stick')).json.koppelnMoeglich, false);
+      for (const route of ['/api/stick/einrichten', '/api/stick/prepare']) {
+        const r = await req('POST', route, { path: ziel, ki: 'gekoppelt', andereSysteme: false });
+        assert.equal(r.status, 501, r.text);
+        assert.equal(r.json.error.message, 'Koppeln gibt es noch nicht.');
+        assert.equal(r.events.length, 0);
+      }
+      assert.deepEqual(fs.readdirSync(ziel), []);
+      // Ein unbekanntes ki ist ein 400; [Neue KI] geht weiterhin.
+      const falsch = await req('POST', '/api/stick/einrichten', { path: ziel, ki: 'kopie' });
+      assert.equal(falsch.status, 400, falsch.text);
+    } finally {
+      medien.cleanup();
+    }
+  }, { kopplung: { automatisch: false, einhaengepunkte: () => [] } });
+});
+
+test('HTTP [Für Mac holen]: POST /api/stick/runtime {platforms} holt beide Macs mit einmaliger Erlaubnis; ohne Netz steht "Ohne Internet geht das nicht." dabei', async () => {
+  await withApp(async ({ app, req }) => {
+    const medien = tempHome('stick-runtime-http');
+    const ziel = path.join(medien.home, 'USB');
+    fs.mkdirSync(ziel);
+    const stickMod = require('../src/portable/stick');
+    const macs = ['darwin-arm64', 'darwin-x64'].filter((p) => p !== LOCAL_PLATFORM);
+    const { routes, binaries } = laufzeitArchive(macs);
+    try {
+      app.stick = createStick({ paths: app.paths, config: app.config });
+      const erst = await req('POST', '/api/stick/einrichten', { path: ziel, andereSysteme: false });
+      assert.equal(erst.status, 200, erst.text);
+      const v = await req('GET', `/api/stick/verify?path=${encodeURIComponent(ziel)}`);
+      assert.ok(v.json.problems.some((p) => p.code === 'FEHLT_MAC' && p.fix === 'Für Mac holen'), JSON.stringify(v.json.problems));
+
+      // Ohne Netz: der Stick bleibt, wie er ist, und die Antwort sagt den einen Satz.
+      const ohne = await req('POST', '/api/stick/runtime', { path: ziel, platforms: macs });
+      assert.equal(ohne.status, 200, ohne.text);
+      const f1 = ohne.events.find((e) => e.event === 'fertig').data;
+      assert.deepEqual(f1.geholt, []);
+      assert.deepEqual(f1.fehlend.map((x) => x.platform), macs);
+      assert.ok(f1.fehlend.every((x) => x.satz === 'Ohne Internet geht das nicht.'), JSON.stringify(f1.fehlend));
+
+      // Mit Erlaubnis: nodejs.org (Attrappe), beide Macs, Freigabe danach zurueckgezogen.
+      app.stick = createStick({ gate: fakeGate(routes), paths: app.paths, config: app.config });
+      const lauf = await req('POST', '/api/stick/runtime', { path: ziel, platforms: macs, erlaubnis: true });
+      assert.equal(lauf.status, 200, lauf.text);
+      const fertig = lauf.events.find((e) => e.event === 'fertig').data;
+      assert.deepEqual(fertig.fehlend, []);
+      assert.deepEqual(fertig.geholt.map((x) => x.platform), macs);
+      for (const p of macs) {
+        assert.ok(fertig.laufzeiten.includes(p));
+        assert.ok(fs.readFileSync(path.join(ziel, 'Inhalt', 'runtime', p, stickMod.PLATFORMS[p].file)).equals(binaries[p]));
+      }
+      const freigaben = (app.store.all ? app.store.all('grant') : app.store.list('grant').items)
+        .filter((g) => g.data.scope === stickMod.RUNTIME_SCOPE);
+      assert.equal(freigaben.length, 1);
+      assert.equal(freigaben[0].data.revoked, true);
+      const danach = await req('GET', `/api/stick/verify?path=${encodeURIComponent(ziel)}`);
+      assert.ok(!danach.json.problems.some((p) => p.code === 'FEHLT_MAC'), JSON.stringify(danach.json.problems));
+      assert.equal(danach.json.startklar.mac, true);
+      // Die Einzelform bleibt.
+      const einzeln = await req('POST', '/api/stick/runtime', { path: ziel, platform: LOCAL_PLATFORM });
+      assert.equal(einzeln.status, 200, einzeln.text);
+      assert.equal(einzeln.events.find((e) => e.event === 'fertig').data.geholt[0].platform, LOCAL_PLATFORM);
+      const unbekannt = await req('POST', '/api/stick/runtime', { path: ziel, platforms: ['amiga'] });
+      assert.equal(unbekannt.status, 400, unbekannt.text);
+    } finally {
+      medien.cleanup();
+    }
+  }, { kopplung: { automatisch: false, einhaengepunkte: () => [] } });
+});
+
+test('HTTP: GET /api/stick/plan und /laufwerke sagen der Ansicht, was sie fuer die Karte braucht (leer, frei, aelter, Aufbau, KI)', async () => {
+  await withApp(async ({ app, req }) => {
+    const medien = tempHome('stick-plan-http');
+    const ziel = path.join(medien.home, 'USB');
+    fs.mkdirSync(ziel);
+    const stickMod = require('../src/portable/stick');
+    app.findeLaufwerke = (opts) => stickMod.findeLaufwerke({ ...opts, platform: 'linux', wurzeln: [medien.home], einhaengepunkt: () => true });
+    app.stick = createStick({ paths: app.paths, config: app.config });
+    try {
+      const leer = await req('GET', `/api/stick/plan?path=${encodeURIComponent(ziel)}`);
+      assert.equal(leer.status, 200, leer.text);
+      assert.equal(leer.json.leer, true);
+      assert.equal(leer.json.fall, 'neu');
+      assert.ok(Number.isFinite(leer.json.frei), 'kein freier Platz fuer "· 14,2 GB frei"');
+      assert.equal(leer.json.pinNoetig, false);
+      assert.equal(leer.json.koppelnMoeglich, true);
+      assert.equal(leer.json.aufbau, 'inhalt');
+      let lw = await req('GET', '/api/stick/laufwerke');
+      assert.equal(lw.json.laufwerke[0].istStick, false);
+      assert.equal(lw.json.laufwerke[0].ki, null);
+
+      const lauf = await req('POST', '/api/stick/einrichten', { path: ziel, andereSysteme: false, name: 'Lena' });
+      assert.equal(lauf.status, 200, lauf.text);
+      const fertig = lauf.events.find((e) => e.event === 'fertig').data;
+      assert.equal(fertig.ki.name, 'Lena');
+      fs.writeFileSync(path.join(ziel, 'Inhalt', 'app', 'package.json'), JSON.stringify({ name: 'neural-os', version: '0.0.1' }));
+
+      const plan = await req('GET', `/api/stick/plan?path=${encodeURIComponent(ziel)}`);
+      assert.equal(plan.json.leer, false);
+      assert.equal(plan.json.fall, 'erneuern');
+      assert.equal(plan.json.aelter, true, '"Programm auf dem Stick ist älter." [Erneuern]');
+      assert.equal(plan.json.ki.name, 'Lena');
+      lw = await req('GET', '/api/stick/laufwerke');
+      const l = lw.json.laufwerke.find((x) => x.pfad === ziel);
+      assert.equal(l.istStick, true);
+      assert.equal(l.aufbau, 'inhalt');
+      assert.equal(l.aelter, true);
+      assert.equal(l.ki.name, 'Lena');
+      // [Erneuern] = POST /api/stick/update.
+      const erneuert = await req('POST', '/api/stick/update', { path: ziel });
+      assert.equal(erneuert.status, 200, erneuert.text);
+      assert.ok(erneuert.events.some((e) => e.event === 'fertig'), erneuert.text.slice(0, 300));
+      assert.equal((await req('GET', `/api/stick/plan?path=${encodeURIComponent(ziel)}`)).json.aelter, false);
+      // Die Vorschau kennt die Rohkopie nicht mehr.
+      const roh = await req('GET', `/api/stick/preview?path=${encodeURIComponent(ziel)}&vault=1`);
+      assert.equal(roh.status, 400, roh.text);
+    } finally {
+      medien.cleanup();
+    }
+  }, { kopplung: { automatisch: false, einhaengepunkte: () => [] } });
 });
 
 module.exports = { name: 'stick', tests: drain() };

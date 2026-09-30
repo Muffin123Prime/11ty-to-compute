@@ -1730,57 +1730,81 @@ async function checkStick() {
   const httpZiel = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-usb-http-'));
   const httpDaten = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-usb-daten-'));
   const httpNeu = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-usb-neu-'));
+  const httpGekoppelt = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-usb-gekoppelt-'));
+  // Neuer Aufbau (Bauplan 2.10.4): in der Wurzel nur Inhalt, LIESMICH und
+  // die zwei Starter; Programm, Laufzeiten und Daten liegen in Inhalt/.
+  const inhalt = (wurzel, ...rest) => path.join(wurzel, 'Inhalt', ...rest);
+  // Ohne Internet fehlen die Laufzeiten fuer Windows und Mac -- verify sagt
+  // das mit FEHLT_WINDOWS/FEHLT_MAC (2.10.1). Alles andere muss in Ordnung sein.
+  const nurFehlt = (problems) => (problems || []).filter((p) => !/^FEHLT_/.test(p.code) && p.level === 'error');
   let app = null;
   try {
     const { createApp } = require('../src/app');
     app = await createApp({ home: src, logLevel: 'error', harden: false });
     const stick = createStick({ gate: app.gate, logger: app.logger, paths: app.paths, config: app.config });
 
-    await check('Stick vorbereiten (ohne Internet)', async () => {
-      const r = await stick.prepare(tmp, { includeRuntimes: true, includeVault: false });
-      assert(fs.existsSync(path.join(tmp, 'neural-os.portable')), 'Marker fehlt');
-      assert(fs.existsSync(path.join(tmp, 'app', 'bin', 'neural-os.js')), 'Programm fehlt');
-      assert(fs.existsSync(path.join(tmp, 'data')), 'Datenordner fehlt');
-      return `${r.files} Dateien, ${Math.round(r.bytes / 1048576)} MB`;
+    await check('[Neue KI] ohne Internet: Programm, Daten, eigene Kennung; Windows und Mac stehen als fehlend da', async () => {
+      const r = await stick.prepare(tmp, { includeRuntimes: true, ki: 'neu' });
+      assert(fs.existsSync(inhalt(tmp, 'neural-os.portable')), 'Marker fehlt');
+      assert(fs.existsSync(inhalt(tmp, 'app', 'bin', 'neural-os.js')), 'Programm fehlt');
+      assert(fs.existsSync(inhalt(tmp, 'data', 'config.json')), 'Datenordner ohne die Kennung der neuen KI');
+      assert(r.ki && /^dev_[0-9a-f]{24}$/.test(r.ki.id), `keine Kennung: ${JSON.stringify(r.ki)}`);
+      assert(r.ki.port >= 20000 && r.ki.port <= 29999, `Port ${r.ki.port} liegt nicht in 20000-29999`);
+      const marker = JSON.parse(fs.readFileSync(inhalt(tmp, 'neural-os.portable'), 'utf8'));
+      assert(marker.kiId === r.ki.id, 'Marker und config.json nennen verschiedene KIs');
+      const fehlend = (r.fehlend || []).map((f) => f.platform).sort().join(', ');
+      assert(Array.isArray(r.fehlend) && r.fehlend.length === (LOCAL_PLATFORM === 'win-x64' ? 2 : 3),
+        `ohne Netz muessten Windows und Mac fehlen, fehlend: ${fehlend || 'nichts'}`);
+      return `${r.files} Dateien, ${Math.round(r.bytes / 1048576)} MB, KI ${r.ki.id.slice(0, 10)}…, ohne Netz fehlt: ${fehlend}`;
     });
     await check('Laufzeit dieses Rechners liegt mit auf dem Stick', async () => {
-      const p = path.join(tmp, 'runtime', LOCAL_PLATFORM);
-      assert(fs.existsSync(p), `runtime/${LOCAL_PLATFORM} fehlt`);
+      const p = inhalt(tmp, 'runtime', LOCAL_PLATFORM);
+      assert(fs.existsSync(p), `Inhalt/runtime/${LOCAL_PLATFORM} fehlt`);
       const files = fs.readdirSync(p);
       assert(files.length > 0, 'Laufzeitordner ist leer');
       return `${LOCAL_PLATFORM}: ${files.join(', ')}`;
     });
-    await check('Starter für alle drei Betriebssysteme', async () => {
-      const namen = fs.readdirSync(tmp).filter((f) => /^Neural OS starten\./.test(f));
-      assert(namen.length === 3, `nur ${namen.length}: ${namen.join(', ')}`);
-      return namen.join(', ');
+    await check('In der Wurzel nur Inhalt, LIESMICH und die Starter fuer Windows und Mac; LIESMICH hat fuenf Zeilen', async () => {
+      const sichtbar = fs.readdirSync(tmp).filter((n) => !n.startsWith('.')).sort();
+      const soll = ['Inhalt', 'LIESMICH.txt', 'Neural OS starten - Mac.command', 'Neural OS starten - Windows.bat'];
+      assert(sichtbar.join('|') === soll.join('|'), `Wurzel: ${sichtbar.join(', ')}`);
+      assert(fs.existsSync(inhalt(tmp, 'Starter fuer Linux.sh')), 'der Linux-Starter fehlt im Inhalt');
+      const bat = fs.readFileSync(path.join(tmp, 'Neural OS starten - Windows.bat'), 'utf8');
+      assert(bat.includes('\r\n'), 'die .bat hat kein CRLF');
+      const zeilen = fs.readFileSync(path.join(tmp, 'LIESMICH.txt'), 'utf8').replace(/\r?\n$/, '').split(/\r?\n/);
+      assert(zeilen.length === 5, `LIESMICH hat ${zeilen.length} Zeilen statt 5`);
+      return `${sichtbar.length} Eintraege, LIESMICH ${zeilen.length} Zeilen`;
     });
     await check('Portabler Modus wird erkannt', async () => {
       const paths = require('../src/kernel/paths');
-      const d = paths.detectPortable(path.join(tmp, 'app'));
+      const d = paths.detectPortable(inhalt(tmp, 'app'));
       assert(d, 'nicht erkannt');
-      assert(d.dataDir === path.join(tmp, 'data'), `falscher Datenordner: ${d.dataDir}`);
+      assert(d.dataDir === inhalt(tmp, 'data'), `falscher Datenordner: ${d.dataDir}`);
       return d.dataDir;
     });
     await check('Aktualisieren lässt data/ unangetastet', async () => {
-      fs.writeFileSync(path.join(tmp, 'data', 'wichtig.txt'), 'darf nicht verschwinden');
-      const vorher = fs.readdirSync(path.join(tmp, 'data')).sort().join(',');
-      const stat = fs.statSync(path.join(tmp, 'data', 'wichtig.txt'));
+      fs.writeFileSync(inhalt(tmp, 'data', 'wichtig.txt'), 'darf nicht verschwinden');
+      const vorher = fs.readdirSync(inhalt(tmp, 'data')).sort().join(',');
+      const stat = fs.statSync(inhalt(tmp, 'data', 'wichtig.txt'));
       await stick.update(tmp);
-      const nachher = fs.readdirSync(path.join(tmp, 'data')).sort().join(',');
+      const nachher = fs.readdirSync(inhalt(tmp, 'data')).sort().join(',');
       assert(vorher === nachher, 'Inhalt von data/ hat sich geändert');
-      assert(fs.readFileSync(path.join(tmp, 'data', 'wichtig.txt'), 'utf8') === 'darf nicht verschwinden', 'Datei verändert');
-      assert(fs.statSync(path.join(tmp, 'data', 'wichtig.txt')).mtimeMs === stat.mtimeMs, 'Zeitstempel geändert');
+      assert(fs.readFileSync(inhalt(tmp, 'data', 'wichtig.txt'), 'utf8') === 'darf nicht verschwinden', 'Datei verändert');
+      assert(fs.statSync(inhalt(tmp, 'data', 'wichtig.txt')).mtimeMs === stat.mtimeMs, 'Zeitstempel geändert');
       return 'byte- und zeitstempelgleich';
     });
-    await check('Prüfung erkennt einen beschädigten Stick', async () => {
+    await check('Prüfung: ohne Netz fehlen genau Windows und Mac (mit den Saetzen aus 1.8), und ein beschaedigter Stick wird erkannt', async () => {
       const vorher = await stick.verify(tmp);
-      assert(vorher.ok, `frischer Stick gilt als kaputt: ${JSON.stringify(vorher.problems)}`);
-      fs.rmSync(path.join(tmp, 'app', 'bin'), { recursive: true, force: true });
+      assert(nurFehlt(vorher.problems).length === 0, `frischer Stick gilt als kaputt: ${JSON.stringify(nurFehlt(vorher.problems))}`);
+      const saetze = vorher.problems.filter((p) => /^FEHLT_/.test(p.code)).map((p) => p.message);
+      for (const s of saetze) {
+        assert(/^(Auf diesem Stick fehlt das Programm für (Windows|den Mac)\.|Läuft bisher nur a[nm] (Windows|Mac)\.)$/.test(s), `kein Satz aus 1.8: ${s}`);
+      }
+      fs.rmSync(inhalt(tmp, 'app', 'bin'), { recursive: true, force: true });
       const nachher = await stick.verify(tmp);
-      assert(!nachher.ok, 'beschädigter Stick gilt als in Ordnung');
+      assert(nurFehlt(nachher.problems).some((p) => p.code === 'APP_INCOMPLETE'), `beschädigter Stick gilt als in Ordnung: ${JSON.stringify(nachher.problems)}`);
       assert(nachher.problems.every((p) => p.message), 'Problem ohne Beschreibung');
-      return `erkannt: ${nachher.problems[0].code}`;
+      return `ohne Netz: ${saetze.join(' · ')}; beschaedigt erkannt als APP_INCOMPLETE`;
     });
 
     /* ---- und jetzt dieselben Zusagen durch die echte HTTP-Tuer ---- */
@@ -1834,16 +1858,16 @@ async function checkStick() {
       assert(fortschritt.length >= 3, `zu wenige Fortschrittsmeldungen fuer einen Balken: ${fortschritt.length}`);
       const prozente = fortschritt.map((e) => e.data && e.data.percent).filter((v) => Number.isFinite(v));
       assert(prozente.length && prozente[prozente.length - 1] === 100, `der Balken endet nicht bei 100: ${prozente.join(',')}`);
-      assert(fs.existsSync(path.join(httpZiel, 'neural-os.portable')), 'Marker fehlt');
-      assert(fs.existsSync(path.join(httpZiel, 'app', 'bin', 'neural-os.js')), 'Programm fehlt');
-      assert(fs.existsSync(path.join(httpZiel, 'runtime', LOCAL_PLATFORM)), 'Laufzeit fehlt');
+      assert(fs.existsSync(inhalt(httpZiel, 'neural-os.portable')), 'Marker fehlt');
+      assert(fs.existsSync(inhalt(httpZiel, 'app', 'bin', 'neural-os.js')), 'Programm fehlt');
+      assert(fs.existsSync(inhalt(httpZiel, 'runtime', LOCAL_PLATFORM)), 'Laufzeit fehlt');
       return `${fortschritt.length} Meldungen, ${arten.filter((a) => a === 'fertig').length}× fertig`;
     });
 
     await check('Die Pruefung ueber HTTP schreibt nichts auf den Stick', async () => {
       const vorher = fs.statSync(httpZiel).mtimeMs;
       const r = ok(await api.get(`/api/stick/verify?path=${encodeURIComponent(httpZiel)}`), 'verify');
-      assert(r.ok === true, `frischer Stick gilt als kaputt: ${JSON.stringify(r.problems)}`);
+      assert(nurFehlt(r.problems).length === 0, `frischer Stick gilt als kaputt: ${JSON.stringify(nurFehlt(r.problems))}`);
       assert(r.filesystem && r.filesystem.probed === false, 'die Pruefung hat eine Sonde geschrieben');
       assert(fs.statSync(httpZiel).mtimeMs === vorher, 'der Wurzelordner wurde angefasst');
       return `ok, ${r.problems.length} Hinweis(e), keine Sonde`;
@@ -1861,26 +1885,37 @@ async function checkStick() {
       assert(/laeuft bereits/.test(satz), `kein brauchbarer Satz: ${satz.slice(0, 120)}`);
       // Und der Stick ist danach heil -- genau das, was die Sperre schuetzt.
       const nach = ok(await api.get(`/api/stick/verify?path=${encodeURIComponent(httpZiel)}`), 'verify danach');
-      assert(nach.ok === true, `der Stick ist beschaedigt: ${JSON.stringify(nach.problems)}`);
+      assert(nurFehlt(nach.problems).length === 0, `der Stick ist beschaedigt: ${JSON.stringify(nurFehlt(nach.problems))}`);
       return `409 mit Grund, Stick danach in Ordnung`;
     });
 
     await check('Was nicht klappen kann, wird VOR dem ersten Byte abgelehnt', async () => {
-      // Der Datenbestand geht einmal mit -- das ist der Fall, um den es geht.
-      const erst = await sse('/api/stick/prepare', { path: httpDaten, includeVault: true });
-      assert(erst.status === 200, `erster Lauf: HTTP ${erst.status}: ${String(erst.text).slice(0, 200)}`);
-      assert(fs.readdirSync(path.join(httpDaten, 'data')).length > 0, 'der Datenbestand kam nicht mit');
+      // Die Rohkopie des Datenbestands gibt es nicht mehr (Bauplan 2.10.3,
+      // Befunde 11 und 13): ein alter Aufruf bekommt den Satz, nichts wird
+      // geschrieben, kein Strom geoeffnet.
+      const alt = await api.post('/api/stick/prepare', { path: httpDaten, includeVault: true });
+      assert(alt.status === 400, `includeVault: HTTP ${alt.status} statt 400`);
+      assert(!/^event:/m.test(String(alt.text)), 'es wurde doch ein Ereignisstrom geoeffnet');
+      const altSatz = (alt.json && alt.json.error && alt.json.error.message) || '';
+      assert(altSatz === 'Gibt es nicht mehr. Stattdessen: Mit dieser KI gekoppelt.', `falscher Satz: ${altSatz.slice(0, 120)}`);
+      assert(fs.readdirSync(httpDaten).length === 0, `trotz Absage wurde geschrieben: ${fs.readdirSync(httpDaten).join(', ')}`);
 
-      // Und jetzt noch einmal: prepare ueberschreibt NIE Daten. Die Absage
+      // [Neue KI] einmal -- dann wohnt dort eine KI.
+      const erst = await sse('/api/stick/prepare', { path: httpDaten, ki: 'neu' });
+      assert(erst.status === 200, `erster Lauf: HTTP ${erst.status}: ${String(erst.text).slice(0, 200)}`);
+      assert(fs.existsSync(inhalt(httpDaten, 'data', 'config.json')), 'die neue KI hat keine Kennung');
+
+      // Und jetzt noch einmal: prepare ueberschreibt NIE eine KI. Die Absage
       // muss ein Statuscode sein, kein halber Ereignisstrom, in dem eine
       // Fehlermeldung steht -- sonst haette der Browser schon einen Balken
       // gezeichnet, bevor klar war, dass nichts passiert.
-      const zweit = await api.post('/api/stick/prepare', { path: httpDaten, includeVault: true });
+      const zweit = await api.post('/api/stick/prepare', { path: httpDaten, ki: 'neu' });
       assert(zweit.status === 409, `HTTP ${zweit.status} statt 409`);
       assert(!/^event:/m.test(String(zweit.text)), 'es wurde doch ein Ereignisstrom geoeffnet');
       const satz = (zweit.json && zweit.json.error && zweit.json.error.message) || '';
-      assert(/bereits ein Datenbestand/.test(satz), `kein brauchbarer Satz: ${satz.slice(0, 120)}`);
-      return `409 ohne Strom, "${satz.slice(0, 55)}…"`;
+      assert(satz === 'Auf diesem Stick wohnt schon eine KI.', `kein Satz aus 1.6: ${satz.slice(0, 120)}`);
+      assert(zweit.json.error.code === 'KI_VORHANDEN', `Code ${zweit.json.error.code}`);
+      return `includeVault 400 "${altSatz.slice(0, 20)}…", zweites [Neue KI] 409 ohne Strom "${satz}"`;
     });
 
     /* ---- die vier Handgriffe der Ansicht, durch dieselbe Tuer ---- */
@@ -1905,18 +1940,50 @@ async function checkStick() {
       return `neu, ${r.andere.join(', ')} bräuchten nodejs.org (${r.download.erlaubt ? 'erlaubt' : 'Rückfrage'})`;
     });
 
-    await check('Ein Klick "Stick vorbereiten": Programm, Laufzeit, Wissen – ein Balken bis 100', async () => {
-      const r = await sse('/api/stick/einrichten', { path: httpNeu, andereSysteme: false });
+    await check('Ein Klick [Neue KI]: Programm, Laufzeit, eigene Kennung – ein Balken bis 100', async () => {
+      const r = await sse('/api/stick/einrichten', { path: httpNeu, ki: 'neu', andereSysteme: false });
       assert(r.status === 200, `HTTP ${r.status}: ${String(r.text).slice(0, 200)}`);
       const fertig = r.events.find((e) => e.event === 'fertig');
       assert(fertig, `kein Abschluss: ${r.events.map((e) => e.event).join(',')}`);
-      assert(fertig.data.fall === 'neu' && fertig.data.wissen === 'kopiert', JSON.stringify(fertig.data).slice(0, 200));
+      assert(fertig.data.fall === 'neu' && fertig.data.wissen === 'neu', JSON.stringify(fertig.data).slice(0, 200));
       assert(fertig.data.laufzeiten.includes(LOCAL_PLATFORM), 'die Laufzeit dieses Rechners fehlt');
       const p = r.events.filter((e) => e.event === 'fortschritt').map((e) => e.data.percent);
       assert(p.length >= 3 && p[p.length - 1] === 100, `Balken: ${p.join(',')}`);
       assert(p.every((v, i) => i === 0 || v >= p[i - 1]), `der Balken lief rueckwaerts: ${p.join(',')}`);
-      assert(fs.readdirSync(path.join(httpNeu, 'data')).length > 0, 'das Wissen kam nicht mit');
-      return `${p.length} Schritte, startet an ${fertig.data.laufzeiten.join(', ')}`;
+      // Befund 11: eine eigene Kennung, nie die dieser Installation.
+      const status = ok(await api.get('/api/status'), 'status');
+      const meine = status.ki && status.ki.id;
+      assert(fertig.data.ki && /^dev_[0-9a-f]{24}$/.test(fertig.data.ki.id), `keine Kennung: ${JSON.stringify(fertig.data.ki)}`);
+      assert(!meine || fertig.data.ki.id !== meine, 'der neue Stick traegt die Kennung dieser KI (Befund 11)');
+      assert(fertig.data.gekoppelt === null, '[Neue KI] hat gekoppelt');
+      const inData = fs.readdirSync(inhalt(httpNeu, 'data'));
+      assert(inData.join(',') === 'config.json', `in data/ liegt mehr als die Kennung: ${inData.join(', ')}`);
+      return `${p.length} Schritte, KI ${fertig.data.ki.name}, startet an ${fertig.data.laufzeiten.join(', ')}`;
+    });
+
+    await check('Ein Klick [Mit dieser KI gekoppelt]: neue Kennung, Angebot und Postfach – kein Paarschluessel, kein Abgleich-Stand (Befund 11)', async () => {
+      const selbst = ok(await api.get('/api/stick'), 'GET /api/stick');
+      if (selbst.koppelnMoeglich !== true) return unklar('diese Instanz hat keinen Koppel-Dienst');
+      const status = ok(await api.get('/api/status'), 'status');
+      const meine = status.ki && status.ki.id;
+      assert(meine, 'die Kennung dieser KI ist nicht zu erfahren');
+      const koerper = { path: httpGekoppelt, ki: 'gekoppelt', andereSysteme: false };
+      if (selbst.pinNoetig) koerper.pin = '2468';
+      const r = await sse('/api/stick/einrichten', koerper);
+      assert(r.status === 200, `HTTP ${r.status}: ${String(r.text).slice(0, 200)}`);
+      const fertig = r.events.find((e) => e.event === 'fertig');
+      assert(fertig, `kein Abschluss: ${r.events.map((e) => e.event).join(',')}`);
+      assert(fertig.data.ki && fertig.data.ki.id !== meine, 'der neue Stick traegt die Kennung dieser KI (Befund 11)');
+      assert(fertig.data.gekoppelt && fertig.data.gekoppelt.id === fertig.data.ki.id, `kein Partner in der Antwort: ${JSON.stringify(fertig.data.gekoppelt)}`);
+      const inData = fs.readdirSync(inhalt(httpGekoppelt, 'data'));
+      assert(!inData.includes('kopplungen.json') && !inData.includes('sync-folder.json') && !inData.includes('vault'),
+        `Paarschluessel, Abgleich-Stand oder Tresor dieser KI auf dem neuen Stick: ${inData.join(', ')}`);
+      assert(fs.existsSync(inhalt(httpGekoppelt, 'sync', 'koppeln', `${meine}.angebot`)), 'kein Angebot auf dem neuen Stick');
+      assert(fs.existsSync(inhalt(httpGekoppelt, 'sync', meine, 'manifest.json')), 'das Postfach dieser KI liegt nicht auf dem neuen Stick');
+      // Ein zweites Mal auf denselben Stick: dort wohnt schon eine KI.
+      const nochmal = await api.post('/api/stick/einrichten', koerper);
+      assert(nochmal.status === 409, `zweites Mal: HTTP ${nochmal.status} statt 409`);
+      return `KI ${fertig.data.ki.name}, Partner "${fertig.data.gekoppelt.zustand}", Angebot und Postfach da`;
     });
 
     await check('"Jetzt sichern" legt eine vollstaendige Sicherung auf den Stick', async () => {
@@ -1942,6 +2009,7 @@ async function checkStick() {
     fs.rmSync(httpZiel, { recursive: true, force: true });
     fs.rmSync(httpDaten, { recursive: true, force: true });
     fs.rmSync(httpNeu, { recursive: true, force: true });
+    fs.rmSync(httpGekoppelt, { recursive: true, force: true });
   }
 }
 

@@ -11,17 +11,24 @@
  * hat hier genau eine Tür:
  *
  *   GET  /api/stick/laufwerke   welche Sticks stecken gerade an diesem Rechner
- *   POST /api/stick/einrichten  "Stick vorbereiten" -- was der Stick braucht
+ *   POST /api/stick/einrichten  [Neue KI] / [Mit dieser KI gekoppelt] /
+ *                               [Erneuern] -- was der Stick braucht
+ *   POST /api/stick/runtime     [Für Mac holen] / [Für Windows holen]
  *   POST /api/stick/sichern     "Jetzt sichern" -- auf den Stick, sonst in den
  *                               Sicherungsordner
  *   POST /api/stick/beenden     "Beenden & abziehen" -- speichern, auswerfen
  *                               wo es geht, sauber schliessen
  *
- * Die älteren Türen (`prepare`, `update`, `runtime`, `preview`, `verify`)
- * bleiben: dieselben Vorgänge wie auf der Kommandozeile, und die Prüfwerkzeuge
+ * Die älteren Türen (`prepare`, `update`, `preview`, `verify`) bleiben:
+ * dieselben Vorgänge wie auf der Kommandozeile, und die Prüfwerkzeuge
  * benutzen sie. Die Routen für ein Sprachmodell auf dem Stick
  * (`/api/stick/models*`) gibt es nicht mehr: die KI ist Claude und läuft
  * online (Entscheidung des Nutzers).
+ *
+ * Die Rohkopie des Datenbestands (`includeVault`) gibt es nicht mehr
+ * (Bauplan 2.10.3, Befunde 11 und 13): Ein neuer Stick bekommt immer eine
+ * eigene KI, und "gleiches Wissen auf zwei Sticks" ist Koppeln --
+ * `ki:'gekoppelt'` koppelt den eben vorbereiteten Stick mit dieser KI.
  *
  * Drei Entscheidungen, die sich durch alle Routen ziehen
  * -----------------------------------------------------
@@ -62,7 +69,7 @@ const {
   strParam,
   boolParam,
 } = require('./support');
-const { NeuralError, ValidationError, asNeuralError } = require('../../kernel/errors');
+const { NeuralError, ValidationError, LockedError, asNeuralError } = require('../../kernel/errors');
 
 const { describePortable } = require('../../kernel/paths');
 const stickMod = require('../../portable/stick');
@@ -149,6 +156,59 @@ function runtimeSummary(list) {
     isLocal: !!r.isLocal,
     executableBit: r.executableBit === undefined ? null : !!r.executableBit,
   }));
+}
+
+/* ------------------------------ [Neue KI] oder [Mit dieser KI gekoppelt] */
+
+/** `ki` aus dem Körper: 'neu' (Vorgabe) oder 'gekoppelt'. */
+function kiWahl(body) {
+  if (body.includeVault === true) throw new ValidationError(stickMod.SATZ.ROHKOPIE);
+  const ki = body.ki === undefined || body.ki === null ? 'neu' : body.ki;
+  if (ki !== 'neu' && ki !== 'gekoppelt') {
+    throw new ValidationError('"ki" muss "neu" oder "gekoppelt" sein.');
+  }
+  return ki;
+}
+
+/**
+ * [Mit dieser KI gekoppelt], Bauplan 2.10.3: NACH dem Vorbereiten bekommt der
+ * neue Stick -- hat diese KI eine PIN -- einen eigenen Tresor mit der
+ * eingegebenen PIN, und dann koppelt `kopplung.koppelnNeu` ihn mit dieser KI.
+ * Gekoppelte Sticks sind entweder beide geschützt oder beide nicht (1.6).
+ *
+ * Was hier VOR dem Strom entschieden wird: Gibt es das Koppeln überhaupt
+ * (sonst 501), und fehlt die PIN, obwohl diese KI eine hat (400). Zurück
+ * kommt der Schritt, den die Route nach dem Vorbereiten ausführt.
+ *
+ * @returns {null|((ergebnis:{basis:string, dataDir:string})=>Promise<object|null>)}
+ */
+function koppelnVorbereiten(rc, ki, pin) {
+  if (ki !== 'gekoppelt') return null;
+  const kopplung = rc.ctx.kopplung;
+  if (!kopplung || typeof kopplung.koppelnNeu !== 'function') {
+    throw new NeuralError('KOPPELN_FEHLT', 'Koppeln gibt es noch nicht.', { status: 501 });
+  }
+  if (pin !== undefined && pin !== null && typeof pin !== 'string') throw new ValidationError('"pin" muss Text sein.');
+  const vc = rc.ctx.vaultCrypto;
+  const mitPin = !!(vc && vc.enabled);
+  if (mitPin) {
+    if (typeof pin !== 'string' || !pin) throw new ValidationError('PIN für den neuen Stick');
+    if (vc.state === 'locked') throw new LockedError('Der Tresor ist gesperrt.');
+  }
+  return async (ergebnis) => {
+    if (mitPin) {
+      const { createVaultCrypto } = require('../../store/vaultcrypto');
+      const neu = createVaultCrypto({ paths: { secrets: path.join(ergebnis.dataDir, 'secrets.json') }, config: {}, geraet: false });
+      try {
+        await neu.initialise(pin);
+      } finally {
+        neu.lock();
+      }
+      stickMod.schutzEinschalten(ergebnis.dataDir);
+    }
+    const r = await kopplung.koppelnNeu({ root: ergebnis.basis, pin: mitPin ? pin : undefined });
+    return r && r.partner ? r.partner : null;
+  };
 }
 
 /* ------------------------------------------------- nodejs.org, einmal */
@@ -440,6 +500,14 @@ function register(router) {
       freieBytes: null,
       dateisystem: null,
       pruefung: null,
+      aufbau: null,
+      wurzel: null,
+      ki: null,
+      startklar: null,
+      hinweise: [],
+      /** Hat diese KI eine PIN? Dann braucht [Mit dieser KI gekoppelt] das Feld "PIN für den neuen Stick". */
+      pinNoetig: !!(rc.ctx.vaultCrypto && rc.ctx.vaultCrypto.enabled),
+      koppelnMoeglich: !!(rc.ctx.kopplung && typeof rc.ctx.kopplung.koppelnNeu === 'function'),
     };
 
     if (portable) {
@@ -448,6 +516,11 @@ function register(router) {
       antwort.freieBytes = pruefung.freeBytes;
       antwort.dateisystem = pruefung.filesystem || null;
       antwort.pruefung = { ok: pruefung.ok, problems: pruefung.problems };
+      antwort.aufbau = pruefung.aufbau || null;
+      antwort.wurzel = pruefung.root || null;
+      antwort.ki = pruefung.ki || null;
+      antwort.startklar = pruefung.startklar || null;
+      antwort.hinweise = pruefung.hinweise || [];
     }
     return antwort;
   });
@@ -481,9 +554,9 @@ function register(router) {
       throw new ValidationError(`"${action}" ist kein bekannter Vorgang. Möglich sind: prepare, update, runtime.`);
     }
     const runtimes = strParam(rc.query, 'runtimes', 200);
+    if (boolParam(rc.query, 'vault', false)) throw new ValidationError(stickMod.SATZ.ROHKOPIE);
     return stick.preview(pathParam(rc), {
       action,
-      includeVault: boolParam(rc.query, 'vault', false),
       includeRuntimes: runtimes ? runtimes.split(',').map((s) => s.trim()).filter(Boolean) : true,
       platform: strParam(rc.query, 'platform', 40) || undefined,
     });
@@ -505,6 +578,12 @@ function register(router) {
       dieserRechner: stick.LOCAL_PLATFORM,
       dieserRechnerName: stickMod.plattformName(stick.LOCAL_PLATFORM),
       download: { noetig: plan.andere.length > 0, erlaubt: netz.erlaubt, grund: netz.grund },
+      /** Fuer [Mit dieser KI gekoppelt]: Feld "PIN für den neuen Stick" zeigen? Knopf ueberhaupt? */
+      pinNoetig: !!(rc.ctx.vaultCrypto && rc.ctx.vaultCrypto.enabled),
+      koppelnMoeglich: !!(rc.ctx.kopplung && typeof rc.ctx.kopplung.koppelnNeu === 'function'),
+      /** "Leerer Stick: E:\\ · 14,2 GB frei" -- kein Marker, keine KI. */
+      leer: !plan.istStick && plan.wissenAufStick === 0,
+      frei: stick.freeBytes(plan.root),
     };
   });
 
@@ -516,7 +595,16 @@ function register(router) {
    * Wunsch die für Windows und Mac, und das Wissen dieses Rechners, wenn auf
    * dem Stick noch keins liegt.
    *
-   * Körper: `{ path, andereSysteme?: boolean (Vorgabe true), erlaubnis?: boolean }`.
+   * Körper: `{ path, ki?: 'neu'|'gekoppelt' (Vorgabe 'neu'), pin?, name?,
+   *            andereSysteme?: boolean (Vorgabe true), erlaubnis?: boolean }`.
+   * `ki:'neu'` ist [Neue KI], `ki:'gekoppelt'` ist [Mit dieser KI gekoppelt]:
+   * nach dem Vorbereiten wird der neue Stick mit dieser KI gekoppelt (`pin`
+   * ist die PIN des neuen Sticks, Pflicht, wenn diese KI eine hat). Beide
+   * gelten nur einem leeren Stick: Wohnt dort schon eine KI, ist es ein 409
+   * (KI_VORHANDEN, "Auf diesem Stick wohnt schon eine KI."), und nichts wird
+   * überschrieben; Koppeln geht dann über /api/kopplung/koppeln. Ohne `ki`
+   * ist es [Erneuern] (Programm erneuern, KI bleibt) bzw. das Nachlegen von
+   * Laufzeiten auf dem eigenen Stick.
    * `erlaubnis: true` heißt: der Mensch hat eben zugestimmt, dass nodejs.org
    * einmal erreicht werden darf. Nur dann wird eine Freigabe angelegt -- eng,
    * befristet, und nach dem Vorgang zurückgezogen.
@@ -526,6 +614,8 @@ function register(router) {
     const stick = stickOf(rc, 'einrichten');
     const body = asObject(await rc.body());
     const root = path.resolve(requireString(body.path, 'path', { max: MAX_PATH }));
+    const ki = kiWahl(body);
+    const name = optionalString(body.name, 'name', { max: 60 });
     const mitAnderen = body.andereSysteme !== false;
     const eigenerStick = eigenerStickPfad(rc);
     const plan = stick.einrichtenPlan(root, { eigenerStick, andereSysteme: mitAnderen });
@@ -533,16 +623,20 @@ function register(router) {
     if (!plan.eigener && !istOrdner(path.dirname(root)) && !istOrdner(root)) {
       throw nichtDa(`Den Ort ${root} gibt es nicht. Steckt der Stick noch?`, { root });
     }
+    // [Neue KI] und [Mit dieser KI gekoppelt] gelten nur einem leeren Stick
+    // (1.6): Wohnt dort schon eine KI, kommt der Satz, und nichts wird
+    // ueberschrieben. Ohne `ki` ist es [Erneuern] bzw. das Nachlegen von
+    // Laufzeiten auf dem eigenen Stick -- die KI bleibt, wie sie ist.
+    if (body.ki !== undefined && body.ki !== null && plan.fall !== 'neu') {
+      throw new stickMod.KiVorhandenError({ root, fall: plan.fall });
+    }
+    const koppeln = koppelnVorbereiten(rc, ki, body.pin);
 
     // Was vorher entscheidbar ist, wird vorher entschieden -- mit derselben
     // Vorschau, mit der auch die einzelnen Vorgänge rechnen.
     const vorschauVon = () => {
       if (plan.fall === 'neu') {
-        return stick.preview(root, {
-          action: 'prepare',
-          includeVault: true,
-          includeRuntimes: plan.andere.length ? plan.andere : true,
-        });
+        return stick.preview(root, { action: 'prepare', includeRuntimes: plan.andere });
       }
       if (plan.fall === 'erneuern') return stick.preview(root, { action: 'update' });
       const laeuft = stickMod.runningOn(root);
@@ -552,18 +646,12 @@ function register(router) {
       };
     };
 
-    // Das Wissen wird gleich kopiert; was noch im Schreibpuffer des Tresors
-    // steht, gehört dazu.
-    if (plan.fall === 'neu' && rc.ctx.store && typeof rc.ctx.store.flush === 'function') {
-      await rc.ctx.store.flush();
-    }
-
     let grantId = null;
     if (mitAnderen && body.erlaubnis === true && plan.andere.length && !downloadErlaubt(rc).erlaubt) {
       grantId = erlaubnisErteilen(rc, plan.andere.length);
     }
 
-    audit(rc, 'stick.einrichten', { root, fall: plan.fall, andere: plan.andere, erlaubnis: !!grantId });
+    audit(rc, 'stick.einrichten', { root, fall: plan.fall, ki, andere: plan.andere, erlaubnis: !!grantId });
     return streamed(rc, {
       what: 'Stick vorbereiten',
       root,
@@ -580,13 +668,16 @@ function register(router) {
         const r = await stick.einrichten(root, {
           eigenerStick,
           andereSysteme: mitAnderen,
-          sourceHome: rc.ctx.paths && rc.ctx.paths.home,
+          name: name || undefined,
           signal,
           onProgress,
         });
-        publish(rc, 'stick.eingerichtet', { root, fall: r.fall, laufzeiten: r.laufzeiten });
+        // [Mit dieser KI gekoppelt]: erst jetzt, mit der neuen Kennung auf dem Stick.
+        const partner = koppeln && r.fall === 'neu' ? await koppeln(r) : null;
+        publish(rc, 'stick.eingerichtet', { root, fall: r.fall, ki: r.ki || null, gekoppelt: !!partner, laufzeiten: r.laufzeiten });
         return {
           ...r,
+          gekoppelt: partner,
           laufzeitenNamen: r.laufzeiten.map(stickMod.plattformName),
           fehlend: r.fehlend.map((f) => ({ ...f, name: stickMod.plattformName(f.platform) })),
         };
@@ -597,25 +688,35 @@ function register(router) {
 
   /* ------------------------------------------------ die einzelnen Vorgänge */
 
+  /**
+   * Körper: `{ path, ki?: 'neu'|'gekoppelt', pin?, name?, runtimes?: string[] }`.
+   * Ohne `runtimes` kommen die Laufzeit dieses Rechners, Windows und beide
+   * Macs mit (Bauplan 2.10.1); `runtimes` nennt stattdessen die zusätzlichen.
+   * `includeVault` (die Rohkopie) gibt es nicht mehr: 400.
+   */
   router.post('/api/stick/prepare', async (rc) => {
     rc.requireOwner('Einen Stick vorzubereiten');
     const stick = stickOf(rc, 'prepare');
     const body = asObject(await rc.body());
     const root = requireString(body.path, 'path', { max: MAX_PATH });
-    const includeVault = body.includeVault === true;
+    const ki = kiWahl(body);
+    const name = optionalString(body.name, 'name', { max: 60 });
     const extra = body.runtimes === undefined
       ? []
       : requireStringArray(body.runtimes, 'runtimes', { maxItems: 8, max: 40 });
-    // Die Laufzeit DIESES Rechners kommt immer mit; `runtimes` nennt nur die
-    // zusätzlichen.
     const includeRuntimes = extra.length ? extra : true;
-    if (includeVault && rc.ctx.store && typeof rc.ctx.store.flush === 'function') await rc.ctx.store.flush();
+    const koppeln = koppelnVorbereiten(rc, ki, body.pin);
 
     return streamed(rc, {
       what: 'Stick vorbereiten',
       root,
-      previewOpts: { action: 'prepare', includeVault, includeRuntimes },
-      run: ({ signal, onProgress }) => stick.prepare(root, { includeVault, includeRuntimes, signal, onProgress }),
+      previewOpts: { action: 'prepare', includeRuntimes },
+      run: async ({ signal, onProgress }) => {
+        const r = await stick.prepare(root, { ki, name: name || undefined, includeRuntimes, signal, onProgress });
+        const partner = koppeln ? await koppeln(r) : null;
+        publish(rc, 'stick.eingerichtet', { root: r.root, fall: 'neu', ki: r.ki || null, gekoppelt: !!partner, laufzeiten: r.runtimes.map((x) => x.platform) });
+        return { ...r, gekoppelt: partner };
+      },
     });
   });
 
@@ -633,18 +734,65 @@ function register(router) {
     });
   });
 
+  /**
+   * [Für Mac holen] bzw. [Für Windows holen] (Bauplan 2.10.1).
+   * Körper: `{ path, platforms?: string[], platform?: string, erlaubnis?: boolean }`.
+   * `platforms: ['darwin-arm64','darwin-x64']` holt beide Macs; `platform`
+   * ist die alte Einzelform. `erlaubnis` wie bei /einrichten. Was nicht
+   * kommt, steht in `fehlend` mit dem Satz "Ohne Internet geht das nicht."
+   */
   router.post('/api/stick/runtime', async (rc) => {
     rc.requireOwner('Eine Laufzeit auf den Stick zu legen');
     const stick = stickOf(rc, 'addRuntime');
     const body = asObject(await rc.body());
     const root = requireString(body.path, 'path', { max: MAX_PATH });
-    const platform = requireString(body.platform, 'platform', { max: 40 });
+    const liste = body.platforms !== undefined
+      ? requireStringArray(body.platforms, 'platforms', { maxItems: 8, max: 40 })
+      : [requireString(body.platform, 'platform', { max: 40 })];
+    const platforms = [...new Set(liste)];
+    if (!platforms.length) throw new ValidationError('"platforms" nennt keine Plattform.');
+    for (const p of platforms) {
+      if (!stick.PLATFORMS[p]) {
+        throw new ValidationError(`"${p}" ist keine bekannte Plattform. Möglich sind: ${Object.keys(stick.PLATFORMS).join(', ')}.`);
+      }
+    }
+    const fremde = platforms.filter((p) => p !== stick.LOCAL_PLATFORM);
+    let grantId = null;
+    if (body.erlaubnis === true && fremde.length && !downloadErlaubt(rc).erlaubt) {
+      grantId = erlaubnisErteilen(rc, fremde.length);
+    }
+    const namen = platforms.map(stickMod.plattformName).join(', ');
 
     return streamed(rc, {
-      what: `Laufzeit ${platform} holen`,
+      what: `Laufzeit ${namen} holen`,
       root,
-      previewOpts: { action: 'runtime', platform },
-      run: ({ signal, onProgress }) => stick.addRuntime(root, platform, { signal, onProgress }),
+      vorschauVon: () => {
+        try {
+          return stick.preview(root, { action: 'runtime', platform: platforms[0] });
+        } catch (err) {
+          erlaubnisZurueckziehen(rc, grantId);
+          throw err;
+        }
+      },
+      run: async ({ signal, onProgress }) => {
+        const geholt = [];
+        const fehlend = [];
+        for (const platform of platforms) {
+          try {
+            const r = await stick.addRuntime(root, platform, { signal, onProgress });
+            geholt.push({ platform, name: stickMod.plattformName(platform), bytes: r.bytes || null, version: r.version || null, source: r.source || null });
+          } catch (err) {
+            const e = asNeuralError(err);
+            if (e.code === 'ABORTED') throw err;
+            const netz = e.code === 'NETWORK_BLOCKED' || e.code === 'VALIDATION_FAILED' || e.code === 'INTERNAL_ERROR' || /^NETWORK/.test(e.code);
+            fehlend.push({ platform, name: stickMod.plattformName(platform), grund: e.message, code: e.code, satz: netz ? stickMod.SATZ.OHNE_INTERNET : null });
+          }
+        }
+        const laufzeiten = stick.detectPlatforms(root).map((p) => p.platform);
+        publish(rc, 'stick.eingerichtet', { root, fall: 'laufzeit', laufzeiten });
+        return { geholt, fehlend, laufzeiten, laufzeitenNamen: laufzeiten.map(stickMod.plattformName) };
+      },
+      danach: () => erlaubnisZurueckziehen(rc, grantId),
     });
   });
 

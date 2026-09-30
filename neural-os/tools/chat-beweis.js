@@ -12,7 +12,11 @@
  * mehrfach, eigene Antwort, Taste 2), einen Termin eintragen lassen und
  * zuruecknehmen, einen Prompt kopieren (und die Zwischenablage auslesen),
  * mitten im Strom stoppen, eine Nachricht bearbeiten, neu antworten lassen.
- * Jeder Schritt wird am Ende im Tresor nachgesehen, nicht nur am Bildschirm.
+ * Dazu die Antwort, die ihre Oberflaeche selbst baut (docs/ANTWORT-BAUSTEINE.md):
+ * alle 22 Baustein-Arten aus ```ui-Bloecken, jede wirklich bedient, ihr
+ * Zustand nach dem Neuladen; Fassungen, Umwandeln, markierter Text,
+ * Codebloecke (Bearbeiten, Ausfuehren im Sandkasten). Jeder Schritt wird am
+ * Ende im Tresor nachgesehen, nicht nur am Bildschirm.
  *
  * Was es NICHT beweist: wie sich Anthropic wirklich verhaelt. Der Statist
  * spricht die Form aus docs/CLAUDE-ANBINDUNG.md (dieselben Bausteine wie
@@ -162,6 +166,24 @@ function heute(tage = 0) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/**
+ * Ein Element ins Bild rollen. Eine Antwort wird bei jeder Aenderung ihrer
+ * Signatur neu gebaut (auch durch eine spaete Bus-Meldung); trifft das
+ * genau zwischen Auffinden und Rollen, meldet Playwright "not attached".
+ * Dann noch einmal -- der Locator findet den neuen Knoten.
+ */
+async function insBild(loc) {
+  for (let i = 0; ; i += 1) {
+    try {
+      await loc.scrollIntoViewIfNeeded({ timeout: 4000 });
+      return;
+    } catch (err) {
+      if (i >= 2 || !/not attached|detached/i.test(String(err && err.message))) throw err;
+      await loc.page().waitForTimeout(200);
+    }
+  }
+}
+
 async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
   const ende = Date.now() + timeout;
   for (;;) {
@@ -239,6 +261,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
 
   let fehlgeschlagen = null;
   let chatBausteine = null; // der Chat mit den Bausteinen (Abschnitt 5b), fuer iPad und hellen Modus
+  let chatAlle = null; // der Chat mit allen Baustein-Arten (Abschnitt 5c)
   try {
     /* ============================================ 1 · Verbinden, Vorlage */
     console.log(`\n${BO}1 · Verbinde Claude, dann die Vorlage nachgestellt (1440×900)${X}`);
@@ -594,7 +617,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     check(await bausteinAntwort.locator('.cv-md .tb .tb-sort').count() === 3, 'Die Markdown-Tabelle ist sortierbar (Kopfzeile aus Knöpfen)');
     check(await bausteinAntwort.locator('.bs[data-baustein="diagramm"] svg').count() >= 1, 'Das Diagramm ist ein SVG');
     check(!/\{"typ"/.test(await bausteinAntwort.innerText()), 'Nirgends steht JSON');
-    await bausteinAntwort.locator('.bs[data-baustein="checkliste"]').scrollIntoViewIfNeeded();
+    await insBild(bausteinAntwort.locator('.bs[data-baustein="checkliste"]'));
     await foto(p, 'bausteine-1440');
 
     // Checkliste: abhaken -> Fortschritt, gespeichert (PUT …/ui), nach Neuladen noch da, Strg+Z.
@@ -640,7 +663,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
 
     // Code ausfuehren im Sandkasten: die Ausgabe steht darunter.
     const codeBox = antwortB.locator('.cv-code').first();
-    await codeBox.scrollIntoViewIfNeeded();
+    await insBild(codeBox);
     await codeBox.locator('.cv-code__knopf', { hasText: 'Ausführen' }).click();
     const ausgabe = await warteBis(async () => {
       const t = await antwortB.locator('.cv-code .sk-lauf').innerText().catch(() => '');
@@ -650,7 +673,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     await foto(p, 'code-ausgefuehrt-1440');
 
     // Markierter Text -> kleines Menue -> Kuerzen aendert nur die Stelle (neue Fassung).
-    await antwortB.locator('.cv-md p', { hasText: 'Eine Stunde am Tag' }).scrollIntoViewIfNeeded();
+    await insBild(antwortB.locator('.cv-md p', { hasText: 'Eine Stunde am Tag' }));
     await p.evaluate(() => {
       const el = [...document.querySelectorAll('.cv-msg--bot')].pop().querySelector('.cv-md p');
       const range = document.createRange();
@@ -716,7 +739,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     check(await vergleich.count() === 1 && await vergleich.locator('del').count() >= 1 && await vergleich.locator('ins').count() >= 1
       && /Wörter weg/.test(await vergleich.innerText()),
     '„Vergleichen“ zeigt den wortweisen Unterschied zur vorigen Fassung (weg/neu, gezählt)', (await vergleich.locator('.cv-vergleich__zahlen').innerText()).trim());
-    await vergleich.scrollIntoViewIfNeeded();
+    await insBild(vergleich);
     await foto(p, 'fassungen-vergleich-1440');
     await angesehen.getByRole('button', { name: 'Wiederherstellen' }).click();
     await warteBis(() => { const m = nachrichten(chatBausteine).filter((x) => x.data.role === 'assistant').pop(); return m.data.version === 0 ? m : null; }, { timeout: 4000 });
@@ -729,7 +752,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
 
     // Codeblock bearbeiten -> PATCH …/block -> Fassung „bearbeitet“.
     const codeB = letzteAntwort(p).locator('.cv-code').first();
-    await codeB.scrollIntoViewIfNeeded();
+    await insBild(codeB);
     await codeB.locator('.cv-code__knopf', { hasText: 'Bearbeiten' }).click();
     const codeFeld = codeB.locator('textarea.bs-bearbeiten__feld');
     await codeFeld.waitFor({ timeout: 3000 });
@@ -761,7 +784,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     // Baustein aktionen: ein Tippen sendet.
     statist.weiter(zug([B.start(), textLang(0, 'Hier sind drei weitere Übungen zu Brüchen.'), B.ende('end_turn')], 6));
     const aktionKnopf = p.locator('.bs[data-baustein="aktionen"] button', { hasText: 'Mehr Übungen' });
-    await aktionKnopf.scrollIntoViewIfNeeded();
+    await insBild(aktionKnopf);
     await aktionKnopf.click();
     await strom(p);
     await p.waitForTimeout(300);
@@ -775,6 +798,280 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
     await p.waitForTimeout(250);
     const kopie = await p.evaluate(() => navigator.clipboard.readText());
     check(!/"typ"/.test(kopie) && /Brüche üben/.test(kopie) && /Lernzeit je Tag/.test(kopie), 'Kopieren unter der Antwort kopiert Bausteine als Text (Checkliste, Diagramm-Tabelle), nie JSON', `${kopie.length} Zeichen`);
+
+    /* ================= 5c · Alle 22 Baustein-Arten im Chat, jede bedient */
+    // Der Statist streamt Antworten mit jeder Art von ```ui-Block; jeder
+    // Baustein wird hier wirklich bedient (Maus, Tastatur), sein Zustand im
+    // Tresor nachgesehen (PUT …/ui) und nach dem Neuladen noch einmal
+    // gepruefft. Checkliste, Diagramm und Aktionen stehen schon in 5b.
+    console.log(`\n${BO}5c · Alle Baustein-Arten im Chat: jede bedient, Zustand nach Neuladen noch da${X}`);
+    const ui = (spec) => `\`\`\`ui\n${JSON.stringify(spec)}\n\`\`\``;
+    const antwortMd = (md) => zug([B.start(), textLang(0, md), B.ende('end_turn')], 4);
+    const bs = (typ) => p.locator(`.bs[data-baustein="${typ}"]`).first();
+    const juengsteFrage = (id) => nachrichten(id).filter((x) => x.data.role === 'user').pop();
+    const fragen = async (t) => {
+      await p.locator('.cv-composer__feld').fill(t);
+      await p.keyboard.press('Enter');
+      await warteBis(() => p.locator('.cv-composer__senden.is-stopp').count(), { timeout: 5000 });
+      await strom(p);
+      await p.waitForTimeout(400);
+    };
+    const typenDer = (antwortEl) => antwortEl.locator('.bs[data-baustein]').evaluateAll((els) => els.map((e) => e.dataset.baustein));
+    await p.locator('.rail__brand').click();
+    await p.locator('.cv-leer__titel').waitFor({ timeout: 5000 });
+
+    // --- A · Üben: quiz, lernkarten, lueckentext, zuordnung
+    statist.weiter(antwortMd(`Los geht's – vier Übungen:\n\n${ui({ typ: 'quiz', titel: 'Portugal', fragen: [
+      { frage: 'Was ist die Hauptstadt von Portugal?', optionen: ['Porto', 'Lissabon', 'Coimbra'], richtig: 1, erklaerung: 'Lissabon ist seit dem 13. Jahrhundert Hauptstadt.' },
+      { frage: 'Welcher Fluss fließt durch Lissabon?', optionen: ['Douro', 'Tejo', 'Mondego'], richtig: 1 },
+    ] })}\n\n${ui({ typ: 'lernkarten', titel: 'Erste Wörter', karten: [{ vorne: 'Obrigado', hinten: 'Danke' }, { vorne: 'Bom dia', hinten: 'Guten Morgen' }, { vorne: 'Por favor', hinten: 'Bitte' }] })}\n\n${ui({ typ: 'lueckentext', titel: 'Städte', text: 'Die Hauptstadt von Portugal ist {{Lissabon|Lisboa}}. Der Portwein kommt aus {{Porto}}.' })}\n\n${ui({ typ: 'zuordnung', titel: 'Wörter zuordnen', paare: [{ links: 'Hund', rechts: 'cão' }, { links: 'Katze', rechts: 'gato' }, { links: 'Vogel', rechts: 'pássaro' }] })}`));
+    await fragen('Ich will Portugiesisch üben – mit Quiz, Karten, Lückentext und Zuordnung');
+    chatAlle = chatIdAus(p);
+    const typenA = await typenDer(letzteAntwort(p));
+    check(typenA.join(',') === 'quiz,lernkarten,lueckentext,zuordnung', 'Üben: Quiz, Lernkarten, Lückentext und Zuordnung stehen als Bausteine da', typenA.join(','));
+    const quiz = bs('quiz');
+    await quiz.getByRole('radio', { name: /Lissabon/ }).click();
+    check((await quiz.locator('.bs-quiz__urteil').innerText()).trim() === 'Richtig' && /13\. Jahrhundert/.test(await quiz.innerText()), 'Quiz: „Lissabon“ → ✓ Richtig, mit Erklärung');
+    await quiz.getByRole('button', { name: 'Nächste Frage' }).click();
+    await quiz.getByRole('radio', { name: /Douro/ }).click();
+    check((await quiz.locator('.bs-quiz__urteil').innerText()).trim() === 'Falsch', 'Quiz: „Douro“ → ✗ Falsch');
+    await quiz.getByRole('button', { name: 'Auswertung' }).click();
+    check((await quiz.locator('.bs-quiz__zahl').innerText()).trim() === '1/2', 'Quiz: die Auswertung sagt 1/2');
+    statist.weiter(antwortMd('Der Tejo mündet bei Lissabon in den Atlantik; der Douro fließt durch Porto.'));
+    await quiz.getByRole('button', { name: 'Frage erklären' }).click();
+    await warteBis(() => p.locator('.cv-composer__senden.is-stopp').count(), { timeout: 5000 });
+    await strom(p);
+    const erkl = juengsteFrage(chatAlle);
+    check(/Frage 2/.test(erkl.data.content) && /Douro/.test(erkl.data.content) && /Tejo/.test(erkl.data.content) && /Atlantik/.test(await letzteAntwort(p).innerText()),
+      '[Frage erklären] schickt die Frage samt meiner und der richtigen Antwort, und die KI antwortet', erkl.data.content.slice(0, 110));
+    const lern = bs('lernkarten');
+    await insBild(lern);
+    await lern.locator('.bs-lern__karte').click();
+    check(await lern.locator('.bs-lern__karte.is-umgedreht').count() === 1 && /Danke/.test(await lern.innerText()), 'Lernkarte: Antippen dreht um („Obrigado“ → „Danke“)');
+    await lern.getByRole('button', { name: 'Gewusst' }).click();
+    check(/1 von 3 gewusst/.test(await lern.innerText()), 'Lernkarten: [Gewusst] zählt „1 von 3 gewusst“');
+    const lt = bs('lueckentext');
+    await lt.locator('input.bs-luecke').nth(0).fill('lisboa');
+    await lt.locator('input.bs-luecke').nth(1).fill('PORTO');
+    await lt.locator('input.bs-luecke').nth(1).press('Enter');
+    check(/2 von 2 richtig/.test(await lt.innerText()), 'Lückentext: „lisboa“ und „PORTO“ gelten (Alternative, Groß/Klein egal)');
+    const zu = bs('zuordnung');
+    await zu.getByRole('button', { name: /^Hund/ }).click();
+    await zu.getByRole('button', { name: /^cão/ }).click();
+    check(/1 von 3 verbunden/.test(await zu.innerText()), 'Zuordnung: links antippen, dann rechts → „1 von 3 verbunden“');
+    await zu.getByRole('button', { name: /^Katze/ }).click();
+    await zu.getByRole('button', { name: /^gato/ }).click();
+    await zu.getByRole('button', { name: /^Vogel/ }).click();
+    await zu.getByRole('button', { name: /^pássaro/ }).click();
+    await zu.getByRole('button', { name: 'Prüfen' }).click();
+    check(/3 von 3 richtig/.test(await zu.innerText()) && await zu.locator('.bs-zu__linien path.is-richtig').count() === 3, 'Zuordnung: [Prüfen] → „3 von 3 richtig“ mit drei grünen Linien');
+    await insBild(quiz);
+    await foto(p, 'alle-bausteine-ueben-1440');
+
+    // --- B · Struktur: tabs (mit verschachteltem fortschritt), schritte, abschnitte (mit checkliste), mehr, liste, karten
+    statist.weiter(antwortMd(`So geht es:\n\n${ui({ typ: 'tabs', tabs: [
+      { titel: 'macOS', inhalt: 'Mit Homebrew: `brew install node`.' },
+      { titel: 'Windows', inhalt: `Lade den Installer von nodejs.org.\n\n${ui({ typ: 'fortschritt', titel: 'Download', wert: 64, ziel: 100 })}` },
+      { titel: 'Linux', inhalt: '`sudo apt install nodejs`' },
+    ] })}\n\n${ui({ typ: 'schritte', titel: 'Node einrichten', schritte: [
+      { titel: 'Installieren', inhalt: 'Installer laden und ausführen.' },
+      { titel: 'Prüfen', inhalt: '`node -v` zeigt die Version.' },
+      { titel: 'Erstes Skript', inhalt: '`node hallo.js`' },
+    ] })}\n\n${ui({ typ: 'abschnitte', abschnitte: [
+      { titel: 'Was ist npm?', inhalt: 'Der Paketmanager von Node.' },
+      { titel: 'Was brauche ich?', inhalt: `Ein Terminal.\n\n${ui({ typ: 'checkliste', punkte: ['Terminal geöffnet', 'Node installiert'] })}` },
+    ] })}\n\n${ui({ typ: 'mehr', knopf: 'Genauer erklären', inhalt: 'Node führt JavaScript **außerhalb des Browsers** aus – mit Zugriff auf Dateien und Netz.' })}\n\n${ui({ typ: 'liste', titel: 'Was ist dir am wichtigsten?', punkte: ['Tempo', 'Sicherheit', 'Einfachheit'] })}\n\n${ui({ typ: 'karten', karten: [
+      { titel: 'Skript ausführen', symbol: 'code', text: 'Ein erstes Programm', aktion: { text: 'Beispiel zeigen', senden: 'Zeig mir ein erstes Node-Skript.' } },
+      { titel: 'Dokumentation', symbol: 'buch', text: 'nodejs.org/docs', aktion: { text: 'Öffnen', link: 'https://nodejs.org/docs' } },
+    ] })}`));
+    await fragen('Wie richte ich Node ein? Mit Reitern je System, Schritten und einer Rangliste');
+    const typenB = await typenDer(letzteAntwort(p));
+    check(typenB.join(',') === 'tabs,schritte,abschnitte,mehr,liste,karten', 'Struktur: Reiter, Schritte, Abschnitte, Mehr, Liste und Karten stehen als Bausteine da', typenB.join(','));
+    const tabs = bs('tabs');
+    await tabs.getByRole('tab', { name: 'Windows' }).click();
+    check(await tabs.locator('.bs[data-baustein="fortschritt"]').count() === 1 && /64 %/.test(await tabs.innerText()), 'Reiter „Windows“ zeigt seinen Inhalt – mit einem verschachtelten Baustein (Fortschritt 64 %)');
+    const schritteB = bs('schritte');
+    await schritteB.getByRole('button', { name: 'Weiter' }).click();
+    check(/Schritt 2 von 3/.test(await schritteB.innerText()) && /node -v/.test(await schritteB.innerText()), 'Schritte: [Weiter] → „Schritt 2 von 3“ mit dem Inhalt des zweiten Schritts');
+    const abschn = bs('abschnitte');
+    await abschn.getByRole('button', { name: 'Was brauche ich?' }).click();
+    const innen = abschn.locator('.bs[data-baustein="checkliste"]');
+    await innen.waitFor({ timeout: 3000 });
+    await innen.locator('.bs-check__text').first().click();
+    check(/1 von 2/.test(await innen.innerText()), 'Abschnitte: Aufklappen zeigt eine verschachtelte Checkliste, Abhaken zählt „1 von 2“');
+    const mehr = bs('mehr');
+    const vorherMehr = !/außerhalb des Browsers/.test(await mehr.innerText());
+    await mehr.getByRole('button', { name: 'Genauer erklären' }).click();
+    check(vorherMehr && /außerhalb des Browsers/.test(await mehr.innerText()) && await mehr.getByRole('button', { name: 'Weniger' }).count() === 1, '[Genauer erklären] zeigt wirklich mehr (vorher verborgen), danach [Weniger]');
+    const listeB = bs('liste');
+    await listeB.getByRole('button', { name: /Tempo/ }).focus();
+    await p.keyboard.press('Alt+ArrowDown');
+    const reihe = (await listeB.locator('.bs-liste__text').allInnerTexts()).join(',');
+    check(reihe === 'Sicherheit,Tempo,Einfachheit', 'Liste: Alt+↓ verschiebt „Tempo“ nach unten', reihe);
+    statist.weiter(antwortMd('Sicherheit zuerst – gut. Dann fangen wir mit `npm audit` an.'));
+    await listeB.getByRole('button', { name: 'Reihenfolge übernehmen' }).click();
+    await warteBis(() => p.locator('.cv-composer__senden.is-stopp').count(), { timeout: 5000 });
+    await strom(p);
+    const reiheMsg = juengsteFrage(chatAlle);
+    check(reiheMsg.data.content === '**Was ist dir am wichtigsten?** – meine Reihenfolge:\n1. Sicherheit\n2. Tempo\n3. Einfachheit', '[Reihenfolge übernehmen] schickt die Reihenfolge als Nachricht', reiheMsg.data.content.replace(/\n/g, ' / '));
+    const karten = bs('karten');
+    statist.weiter(antwortMd('Ein erstes Skript:\n\n```js\nconsole.log("Hallo");\n```'));
+    await karten.getByRole('button', { name: /Skript ausführen/ }).click();
+    await warteBis(() => p.locator('.cv-composer__senden.is-stopp').count(), { timeout: 5000 });
+    await strom(p);
+    const kartenMsg = juengsteFrage(chatAlle);
+    check(kartenMsg.data.content === 'Zeig mir ein erstes Node-Skript.' && (await karten.locator('a.bs-karte').getAttribute('target')) === '_blank',
+      'Karten: die ganze Karte sendet ihren Auftrag; die Link-Karte ist ein Link in neuem Tab');
+    await insBild(tabs);
+    await p.waitForTimeout(200);
+    await foto(p, 'alle-bausteine-struktur-1440');
+
+    // --- C · Zeit und Dateien: timer, countdown, termin, datei, vorschau, fortschritt
+    const jahr = new Date().getFullYear() + 1;
+    statist.weiter(antwortMd(`Hier ist alles beisammen:\n\n${ui({ typ: 'timer', titel: 'Konzentriert arbeiten', dauer: '05:00' })}\n\n${ui({ typ: 'countdown', titel: 'Bis Neujahr', ziel: `${jahr}-01-01T00:00` })}\n\n${ui({ typ: 'termin', titel: 'Lernstunde Portugiesisch', start: `${heute()}T21:30`, ende: `${heute()}T22:00`, ort: 'Zuhause', notiz: 'Karten mitnehmen.' })}\n\n${ui({ typ: 'datei', name: 'lernplan.md', inhalt: '# Lernplan\n\n- Montag: Wörter\n- Dienstag: Sätze\n' })}\n\n${ui({ typ: 'vorschau', art: 'html', titel: 'Zähler', inhalt: '<!doctype html><html><head><style>body{font-family:system-ui;margin:0;display:grid;place-items:center;height:100vh;background:#f5f5f7;color:#111}button{font-size:18px;padding:10px 18px;border-radius:10px;border:0;background:#2f7cf6;color:#fff}</style></head><body><div style="text-align:center"><h1 id="z">0</h1><button id="k">Zählen</button></div><script>let n=0;document.getElementById("k").onclick=()=>{document.getElementById("z").textContent=++n};</script></body></html>' })}\n\n${ui({ typ: 'fortschritt', titel: 'Wochenziel', wert: 3, ziel: 5, einheit: 'Tage' })}`));
+    await fragen('Stell mir einen Timer, einen Countdown bis Neujahr, schlag einen Termin vor und gib mir den Plan als Datei und Vorschau');
+    const typenC = await typenDer(letzteAntwort(p));
+    check(typenC.join(',') === 'timer,countdown,termin,datei,vorschau,fortschritt', 'Zeit und Dateien: Timer, Countdown, Termin, Datei, Vorschau und Fortschritt stehen als Bausteine da', typenC.join(','));
+    const timer = bs('timer');
+    await timer.getByRole('button', { name: 'Start' }).click();
+    await p.waitForTimeout(1300);
+    const t1 = (await timer.locator('.bs-timer__zeit').innerText()).trim();
+    check(t1 === '04:59' || t1 === '04:58', 'Timer: [Start] – er läuft', t1);
+    await timer.getByRole('button', { name: 'Pause' }).click();
+    const t2 = (await timer.locator('.bs-timer__zeit').innerText()).trim();
+    await p.waitForTimeout(1100);
+    check((await timer.locator('.bs-timer__zeit').innerText()).trim() === t2 && /Pausiert/.test(await timer.innerText()), 'Timer: [Pause] hält an („Pausiert“)', t2);
+    await timer.getByRole('button', { name: 'Fortsetzen' }).click();
+    const cd = bs('countdown');
+    const s1 = await cd.locator('[data-teil="sekunden"] .bs-cd__zahl').innerText();
+    await p.waitForTimeout(1100);
+    const s2 = await cd.locator('[data-teil="sekunden"] .bs-cd__zahl').innerText();
+    check(s1 !== s2 && /Tage/.test(await cd.innerText()), 'Countdown: zählt selbst herunter (Tage, Stunden, Minuten, Sekunden)', `${s1} → ${s2}`);
+    const termin = bs('termin');
+    await termin.getByRole('button', { name: 'Zum Kalender hinzufügen' }).click();
+    await termin.getByText('Eingetragen').waitFor({ timeout: 5000 });
+    const ev = store.all('event').find((e) => e.data.title === 'Lernstunde Portugiesisch');
+    check(!!ev && ev.data.source === 'auto' && ev.data.chatId === chatAlle && ev.data.location === 'Zuhause',
+      'Termin: [Zum Kalender hinzufügen] legt ihn wirklich an (Tresor: Herkunft „auto“, mit Chat, Ort)');
+    check(await termin.getByRole('button', { name: 'Öffnen' }).count() === 1 && await termin.getByRole('link', { name: /\.ics/ }).count() === 1 && await termin.getByRole('button', { name: 'Rückgängig' }).count() === 1,
+      'danach „Eingetragen“ mit [Öffnen], [.ics] und [Rückgängig]');
+    // Die Kachel erfaehrt es ueber den Bus (event.created), nicht aus der Antwort auf den POST.
+    const kachelTermin = await warteBis(async () => (/Lernstunde Portugiesisch/.test(await p.locator('.tile[data-tile="kalender"]').innerText().catch(() => '')) ? true : null), { timeout: 4000 });
+    check(!!kachelTermin, 'und die Kachel „Kalender“ zeigt ihn, ohne Neuladen');
+    await termin.getByRole('button', { name: 'Rückgängig' }).click();
+    await termin.getByText('Zurückgenommen').waitFor({ timeout: 5000 });
+    check(!store.get(ev.id), '[Rückgängig] nimmt den Termin wieder aus dem Tresor');
+    const datei = bs('datei');
+    await datei.getByRole('button', { name: 'Öffnen' }).click();
+    check(await datei.locator('.bs-datei__vorschau .md-heading').count() >= 1 && /Montag: Wörter/.test(await datei.innerText()), 'Datei: [Öffnen] zeigt das Markdown gesetzt');
+    const [dl] = await Promise.all([p.waitForEvent('download', { timeout: 5000 }), datei.getByRole('button', { name: 'Herunterladen' }).click()]);
+    const dlInhalt = fs.readFileSync(await dl.path(), 'utf8');
+    check(dl.suggestedFilename() === 'lernplan.md' && dlInhalt.startsWith('# Lernplan'), 'Datei: [Herunterladen] liefert die Datei mit ihrem Inhalt', `${dl.suggestedFilename()}, ${dlInhalt.length} Zeichen`);
+    check(await datei.getByRole('button', { name: 'Bearbeiten' }).count() === 1 && await datei.getByRole('button', { name: 'Teilen' }).count() === 0,
+      'Datei: [Bearbeiten] ist da, [Teilen] nicht – dieses Gerät kann keine Dateien teilen');
+    const vs = bs('vorschau');
+    const rahmen = vs.frameLocator('iframe.sk-rahmen');
+    await rahmen.getByRole('button', { name: 'Zählen' }).click();
+    await rahmen.getByRole('button', { name: 'Zählen' }).click();
+    check((await rahmen.locator('#z').innerText()) === '2' && (await vs.locator('iframe.sk-rahmen').getAttribute('sandbox')) === 'allow-scripts',
+      'Vorschau: das HTML läuft im Sandkasten (zwei Klicks zählen „2“), sandbox="allow-scripts"');
+    const fsC = p.locator('.bs[data-baustein="fortschritt"]').last();
+    check(/3 von 5 Tage/.test(await fsC.innerText()) && /60 %/.test(await fsC.innerText()), 'Fortschritt: „3 von 5 Tage · 60 %“');
+    await insBild(termin);
+    await p.waitForTimeout(200);
+    await foto(p, 'alle-bausteine-zeit-dateien-1440');
+    await vs.getByRole('button', { name: 'Anhalten' }).click();
+    check(await vs.locator('iframe.sk-rahmen').count() === 0 && /Angehalten/.test(await vs.innerText()), 'Vorschau: [Anhalten] entfernt den Rahmen');
+
+    // --- D · Angaben: auswahl (Liste, mehrfach), formular
+    statist.weiter(antwortMd(`Zwei Dinge brauche ich noch:\n\n${ui({ typ: 'auswahl', stil: 'liste', mehrfach: true, frage: 'Welche Teile sollen in den Plan?', optionen: [{ text: 'Grundlagen', beschreibung: 'Begriffe und Regeln' }, { text: 'Übungen', beschreibung: 'Mit Lösungen' }, { text: 'Prüfung', beschreibung: 'Eine Probeklausur' }], knopf: 'Weiter' })}\n\n${ui({ typ: 'formular', titel: 'Dein Lernplan', knopf: 'Plan erstellen', felder: [
+      { name: 'start', label: 'Start', art: 'datum', pflicht: true },
+      { name: 'tage', label: 'Tage pro Woche', art: 'zahl', min: 1, max: 7, wert: 3 },
+      { name: 'niveau', label: 'Niveau', art: 'auswahl', optionen: ['A1', 'A2', 'B1'], wert: 'A1' },
+      { name: 'erinnern', label: 'Erinnerung', art: 'schalter' },
+    ] })}`));
+    await fragen('Ich will einen Lernplan – frag mich, was du brauchst');
+    const typenD = await typenDer(letzteAntwort(p));
+    check(typenD.join(',') === 'auswahl,formular', 'Angaben: Auswahl und Formular stehen als Bausteine da', typenD.join(','));
+    const wahl = bs('auswahl');
+    await wahl.getByRole('checkbox', { name: /Grundlagen/ }).click();
+    await wahl.getByRole('checkbox', { name: /Übungen/ }).click();
+    check(/2 gewählt/.test(await wahl.innerText()), 'Auswahl (Liste, mehrfach): zwei Kästchen → „2 gewählt“, nichts gesendet');
+    statist.weiter(antwortMd('Grundlagen und Übungen – gut.'));
+    await wahl.getByRole('button', { name: 'Weiter' }).click();
+    await warteBis(() => p.locator('.cv-composer__senden.is-stopp').count(), { timeout: 5000 });
+    await strom(p);
+    check(juengsteFrage(chatAlle).data.content === 'Grundlagen, Übungen', '[Weiter] schickt die Wahl als Nachricht', juengsteFrage(chatAlle).data.content);
+    const form = bs('formular');
+    await form.getByRole('button', { name: 'Plan erstellen' }).click();
+    check(/Bitte ausfüllen\./.test(await form.innerText()), 'Formular: das Pflichtfeld wird vor dem Senden geprüft („Bitte ausfüllen.“)');
+    await form.getByLabel('Start').fill(heute(3));
+    await form.getByLabel('Niveau').selectOption('A2');
+    await form.getByRole('switch').click();
+    statist.weiter(antwortMd('Dein Plan ab dem Wochenende, Niveau A2, mit Erinnerung.'));
+    await form.getByRole('button', { name: 'Plan erstellen' }).click();
+    await warteBis(() => p.locator('.cv-composer__senden.is-stopp').count(), { timeout: 5000 });
+    await strom(p);
+    const formMsg = juengsteFrage(chatAlle).data.content;
+    check(formMsg.startsWith('**Formular: Dein Lernplan**') && /Niveau: A2/.test(formMsg) && /Erinnerung: Ja/.test(formMsg) && /Tage pro Woche: 3/.test(formMsg) && /Start: /.test(formMsg),
+      'Formular: Absenden schickt eine lesbare Nachricht „Formular: Dein Lernplan – Feld: Wert …“', formMsg.replace(/\n/g, ' / '));
+    check(/Gesendet/.test(await form.innerText()) && await form.getByLabel('Start').isDisabled(), 'danach steht „Gesendet“ am Formular, die Felder sind zu');
+    await insBild(wahl);
+    await p.waitForTimeout(200);
+    await foto(p, 'alle-bausteine-angaben-1440');
+
+    // --- E · Regler: Antwortstil setzen -> die Antwort wird als neue Fassung neu erstellt
+    const reglerSpec = (wert) => ({ typ: 'regler', titel: 'Antwortstil', regler: [{ name: 'laenge', label: 'Länge', links: 'kurz', rechts: 'ausführlich', wert }, { name: 'fachlich', label: 'Fachbegriffe', links: 'einfach', rechts: 'fachlich', wert: 50 }] });
+    statist.weiter(antwortMd(`Der Konjunktiv drückt Möglichkeit, Wunsch und indirekte Rede aus. Stell den Stil ein, wenn du es anders willst:\n\n${ui(reglerSpec(50))}`));
+    await fragen('Erklär mir den Konjunktiv – und lass mich den Stil einstellen');
+    const reg = bs('regler');
+    check(await reg.count() === 1 && await reg.locator('input[type="range"]').count() === 2 && /Loslassen übernimmt den Stil/.test(await reg.innerText()), 'Der Regler „Antwortstil“ steht mit zwei Schiebern da – Loslassen übernimmt, ohne Knopf');
+    statist.weiter(antwortMd(`Ausführlicher: Der Konjunktiv I steht in der indirekten Rede („er sagte, er komme“), der Konjunktiv II markiert Irreales („wenn ich Zeit hätte“).\n\n${ui(reglerSpec(55))}`));
+    await reg.locator('input[type="range"]').first().focus();
+    for (let i = 0; i < 5; i += 1) await p.keyboard.press('ArrowRight');
+    const stilLaeuft = await warteBis(() => p.locator('.cv-composer__senden.is-stopp').count(), { timeout: 5000 });
+    check(!!stilLaeuft, 'Loslassen (entprellt) erstellt die Antwort mit dem neuen Stil neu – ohne weiteren Knopf');
+    await strom(p);
+    await p.waitForTimeout(400);
+    const nachStil = nachrichten(chatAlle).filter((x) => x.data.role === 'assistant').pop();
+    const chatSatz = store.get(chatAlle);
+    check(nachStil.data.versionen.length === 2 && nachStil.data.versionen[1].art === 'neu' && nachStil.data.versionen[1].anweisung === 'stil' && /Konjunktiv II/.test(nachStil.data.content),
+      'Die neue Antwort ist Fassung 2 („Neuer Stil“); die alte bleibt', `${nachStil.data.versionen.length} Fassungen`);
+    check(!!chatSatz.data.stil && chatSatz.data.stil.laenge === 55 && chatSatz.data.stil.fachlich === 50, 'und der Antwortstil des Chats ist gesetzt (Länge 55, Fachbegriffe 50)', JSON.stringify(chatSatz.data.stil));
+    const anfrageStil = JSON.stringify(statist.anfragen[statist.anfragen.length - 1] || {});
+    check(anfrageStil.includes('[Antwortstil: Länge 55/100'), 'Die KI bekam den Stil als Block in der Frage („[Antwortstil: Länge 55/100 …]“)');
+    await letzteAntwort(p).hover();
+    check(/2\/2/.test(await letzteAntwort(p).locator('.cv-fassungen__stand').innerText()) && /Neuer Stil/.test(await letzteAntwort(p).locator('.cv-fassungen__stand').innerText()),
+      'Unter der Antwort steht „2/2 · Neuer Stil“', (await letzteAntwort(p).locator('.cv-fassungen__stand').innerText()).trim());
+    await foto(p, 'alle-bausteine-regler-1440');
+
+    // --- Im Tresor: je Baustein ein Zustand; nach dem Neuladen ist alles noch da.
+    const ersteAntwort = nachrichten(chatAlle).find((x) => x.data.role === 'assistant');
+    const uiA = await warteBis(() => { const m = store.get(ersteAntwort.id); const z = m && m.data.ui && m.data.ui['0']; return z && ['b0', 'b1', 'b2', 'b3'].every((k) => z[k]) ? z : null; }, { timeout: 4000 });
+    check(!!uiA, 'Im Tresor liegt je Baustein ein Zustand (PUT …/ui): Quiz, Lernkarten, Lückentext, Zuordnung', uiA ? Object.keys(uiA).join(', ') : 'fehlt');
+    await p.reload({ waitUntil: 'domcontentloaded' });
+    await p.locator('.bs[data-baustein="quiz"]').first().waitFor({ timeout: 8000 });
+    await p.waitForTimeout(700);
+    const nachher = {
+      quiz: (await bs('quiz').locator('.bs-quiz__zahl').innerText().catch(() => '')).trim(),
+      lernkarten: /1 von 3 gewusst/.test(await bs('lernkarten').innerText()),
+      lueckentext: /2 von 2 richtig/.test(await bs('lueckentext').innerText()),
+      zuordnung: /3 von 3 richtig/.test(await bs('zuordnung').innerText()),
+      schritte: /Schritt 2 von 3/.test(await bs('schritte').innerText()),
+      liste: (await bs('liste').locator('.bs-liste__text').allInnerTexts()).join(','),
+      auswahl: /Grundlagen/.test(await bs('auswahl').innerText()) && await bs('auswahl').getByRole('button', { name: 'Weiter' }).count() === 0,
+      formular: /Gesendet/.test(await bs('formular').innerText()),
+      timer: (await bs('timer').locator('.bs-timer__zeit').innerText()).trim(),
+      timerLaeuft: await bs('timer').getByRole('button', { name: 'Pause' }).count() === 1,
+    };
+    check(nachher.quiz === '1/2' && nachher.lernkarten && nachher.lueckentext && nachher.zuordnung && nachher.schritte && nachher.liste === 'Sicherheit,Tempo,Einfachheit' && nachher.auswahl && nachher.formular,
+      'Nach dem Neuladen ist jeder Zustand noch da: Quiz 1/2, Lernkarten, Lückentext, Zuordnung, Schritt 2, Reihenfolge, Wahl, Formular', JSON.stringify(nachher).slice(0, 140));
+    check(nachher.timerLaeuft && /^0[34]:\d\d$/.test(nachher.timer) && nachher.timer !== '05:00', 'Der Timer läuft nach dem Neuladen weiter', nachher.timer);
+    // Der Regler in einer Antwort, die nicht mehr die letzte ist, sagt ehrlich "Senden" statt "Übernehmen"
+    // (Neu erstellen geht nur bei der letzten Antwort) -- geprueft, sobald eine weitere Antwort da ist:
+    statist.weiter(antwortMd('Gern – bis morgen.'));
+    await fragen('Danke, das reicht für heute.');
+    check(await bs('regler').getByRole('button', { name: 'Übernehmen' }).count() === 1 && !/Loslassen übernimmt/.test(await bs('regler').innerText()), 'Der Regler einer älteren Antwort bietet ehrlich [Übernehmen] als Nachricht an – neu erstellen lässt sich nur die letzte Antwort');
     await c.close();
 
     /* ============================ 6 · Kopieren ohne navigator.clipboard */
@@ -787,7 +1084,7 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       const karte2 = p2.locator('.md-copycard').first();
       await karte2.waitFor({ timeout: 8000 });
       check(await p2.evaluate(() => navigator.clipboard === undefined), 'In diesem Fenster gibt es navigator.clipboard nicht');
-      await karte2.scrollIntoViewIfNeeded();
+      await insBild(karte2);
       await karte2.locator('.md-copycard__copy').tap();
       await p2.waitForTimeout(250);
       const kopiert = await p2.evaluate(() => window.__kopiert);
@@ -843,14 +1140,34 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       // Der Zustand gehoert zur Fassung: die zuletzt bearbeitete Fassung
       // faengt leer an. Geprueft wird, dass Antippen einen Punkt abhakt.
       const listeI = p3.locator('.bs[data-baustein="checkliste"]');
-      await listeI.scrollIntoViewIfNeeded();
+      await insBild(listeI);
       const vorherI = await listeI.locator('.bs-check__punkt.is-erledigt').count();
       await listeI.locator('.bs-check__text').nth(2).tap();
       await warteBis(async () => (await listeI.locator('.bs-check__punkt.is-erledigt').count()) !== vorherI, { timeout: 3000 });
       const nachherI = await listeI.locator('.bs-check__punkt.is-erledigt').count();
       check(nachherI === vorherI + 1 && new RegExp(`${nachherI} von 3`).test(await listeI.innerText()), 'iPad: Antippen hakt ab, der Zähler folgt', `${vorherI} → ${nachherI} von 3`);
-      await p3.locator('.cv-msg--bot').last().scrollIntoViewIfNeeded();
+      await insBild(p3.locator('.cv-msg--bot').last());
       await foto(p3, 'ipad-bausteine-1180');
+      // Der Chat mit allen Baustein-Arten (5c), mit dem Finger: nichts zu klein, Antippen bedient.
+      await p3.goto(`${base}/#/chat?id=${encodeURIComponent(chatAlle)}`, { waitUntil: 'domcontentloaded' });
+      await p3.locator('.bs[data-baustein="quiz"]').waitFor({ timeout: 8000 });
+      await p3.waitForTimeout(700);
+      const kleinC = await p3.evaluate(() => [...document.querySelectorAll('.cv-msg--bot button, .cv-msg--bot a[href], .cv-msg--bot input:not([type="checkbox"]), .cv-msg--bot select, .cv-msg--bot [role="tab"]')]
+        .filter((e) => e.offsetWidth && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).opacity !== '0')
+        .map((e) => [String(e.className.baseVal === undefined ? e.className : '').split(' ')[0] || e.tagName.toLowerCase(), Math.round(e.getBoundingClientRect().height)])
+        .filter(([, hgt]) => hgt < 44));
+      check(kleinC.length === 0, 'iPad: auch im Chat mit allen Baustein-Arten kein sichtbares Bedienelement unter 44 px', kleinC.slice(0, 8).map(([k, hgt]) => `${k} ${hgt}`).join(' · '));
+      const lernI = p3.locator('.bs[data-baustein="lernkarten"]').first();
+      await insBild(lernI);
+      await lernI.locator('.bs-lern__karte').tap();
+      check(await lernI.locator('.bs-lern__karte.is-umgedreht').count() === 1, 'iPad: Antippen dreht die Lernkarte um');
+      const tabsI = p3.locator('.bs[data-baustein="tabs"]').first();
+      await insBild(tabsI);
+      await tabsI.getByRole('tab', { name: 'Linux' }).tap();
+      check(/apt install nodejs/.test(await tabsI.innerText()), 'iPad: Antippen wechselt den Reiter');
+      await insBild(p3.locator('.bs[data-baustein="quiz"]').first());
+      await p3.waitForTimeout(200);
+      await foto(p3, 'ipad-alle-bausteine-1180');
       await c3.close();
     }
 
@@ -864,8 +1181,19 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       check((await p5.evaluate(() => document.documentElement.dataset.theme || document.documentElement.getAttribute('data-theme') || '')) !== 'dark'
         && await p5.locator('.bs[data-baustein="checkliste"]').count() === 1,
       'Im hellen Modus stehen dieselben Bausteine');
-      await p5.locator('.bs[data-baustein="diagramm"]').scrollIntoViewIfNeeded();
+      await insBild(p5.locator('.bs[data-baustein="diagramm"]'));
       await foto(p5, 'bausteine-hell-1440');
+      await p5.goto(`${base}/#/chat?id=${encodeURIComponent(chatAlle)}`, { waitUntil: 'domcontentloaded' });
+      await p5.locator('.bs[data-baustein="tabs"]').waitFor({ timeout: 8000 });
+      await p5.waitForTimeout(700);
+      const typenHell = await p5.locator('.bs[data-baustein]').evaluateAll((els) => [...new Set(els.map((e) => e.dataset.baustein))]);
+      check(typenHell.length >= 18, 'Im hellen Modus stehen alle Baustein-Arten', `${typenHell.length} Arten`);
+      await insBild(p5.locator('.bs[data-baustein="tabs"]').first());
+      await p5.waitForTimeout(200);
+      await foto(p5, 'alle-bausteine-hell-1440');
+      await insBild(p5.locator('.bs[data-baustein="quiz"]').first());
+      await p5.waitForTimeout(200);
+      await foto(p5, 'alle-bausteine-ueben-hell-1440');
       await c5.close();
     }
 

@@ -354,6 +354,89 @@ async function main() {
     check(await page.locator('.rail__chat.is-active', { hasText: 'Probe' }).count() === 1,
       'und der Chat ist in „Zuletzt“ markiert');
 
+    /* --------- 7b. Eine gespeicherte Antwort baut ihre Oberflaeche, ohne KI */
+    // Aus dem Tresor, ohne KI: ```ui-Bloecke werden Bausteine (auch eine
+    // Ebene verschachtelt), Tabellen sortier- und filterbar, Codebloecke
+    // bekommen ihre Leiste, die Antwort ihre Aktionsleiste und Fassungen
+    // (docs/ANTWORT-BAUSTEINE.md). Bedient wird, was ohne KI geht: Abhaken
+    // (PUT …/ui, im Tresor), Sortieren und Filtern, Fassung blaettern,
+    // Vergleichen, Wiederherstellen (PATCH …/version, im Tresor). Den Rest --
+    // Umwandeln, Neu erstellen, Ausfuehren -- beweist tools/chat-beweis.js.
+    console.log(`\n${B}7b · Eine gespeicherte Antwort baut ihre Oberfläche – ohne KI${X}`);
+    const bsChat = store.create('chat', { title: 'Lernplan' });
+    const uiBlock = (spec) => '```ui\n' + JSON.stringify(spec) + '\n```';
+    const zeilen = ['Mo|Brüche|30', 'Di|Gleichungen|45', 'Mi|Wiederholen|60', 'Do|Geometrie|20', 'Fr|Prozente|35', 'Sa|Probeklausur|90', 'So|Pause|0', 'Mo|Brüche II|25'];
+    const tabelle = '| Tag | Thema | Minuten |\n|---|---|---|\n' + zeilen.map((z) => `| ${z.split('|').join(' | ')} |`).join('\n');
+    const fassungAlt = '## Dein Plan\n\nEine Stunde am Tag reicht.\n\n- Brüche\n- Gleichungen';
+    const fassungNeu = `## Dein Plan\n\nEine halbe Stunde am Tag reicht, wenn du dranbleibst.\n\n${uiBlock({ typ: 'checkliste', titel: 'Diese Woche', punkte: ['Brüche üben', 'Gleichungen lösen', 'Probeklausur'] })}\n\n${tabelle}\n\n${uiBlock({ typ: 'tabs', tabs: [{ titel: 'Montag', inhalt: 'Brüche kürzen und erweitern.' }, { titel: 'Dienstag', inhalt: `Gleichungen.\n\n${uiBlock({ typ: 'fortschritt', titel: 'Geschafft', wert: 2, ziel: 5 })}` }] })}\n\nSo rechnest du die Summe:\n\n\`\`\`js\nconst minuten = [30, 45, 60];\nconsole.log(minuten.reduce((a, b) => a + b, 0));\n\`\`\``;
+    const jetztIso = new Date().toISOString();
+    store.create('message', { chatId: bsChat.id, role: 'user', content: 'Mach mir einen Lernplan mit Checkliste', ordinal: 1 });
+    const bsAntwort = store.create('message', {
+      chatId: bsChat.id, role: 'assistant', status: 'complete', content: fassungNeu, ordinal: 2, version: 1,
+      versionen: [{ inhalt: fassungAlt, at: jetztIso, art: 'original' }, { inhalt: fassungNeu, at: jetztIso, art: 'umgewandelt', anweisung: 'checkliste' }],
+    });
+    await store.flush();
+    await page.goto(`${base}/#/chat?id=${bsChat.id}`, { waitUntil: 'domcontentloaded' });
+    await page.locator('.bs[data-baustein="checkliste"]').waitFor({ timeout: 8000 });
+    await page.waitForTimeout(500);
+    const bsMsg = page.locator('.cv-msg--bot').last();
+    const bsTypen = await bsMsg.locator('.bs[data-baustein]').evaluateAll((els) => els.map((e) => e.dataset.baustein));
+    check(bsTypen.join(',') === 'checkliste,tabs' && !/"typ"/.test(await bsMsg.innerText()),
+      '```ui-Blöcke einer gespeicherten Antwort stehen als Bausteine da (Checkliste, Reiter) – nirgends JSON', bsTypen.join(','));
+    await bsMsg.locator('.bs[data-baustein="checkliste"] .bs-check__text').first().click();
+    check(/1 von 3/.test(await bsMsg.locator('.bs[data-baustein="checkliste"]').innerText()), 'Abhaken zählt „1 von 3“ mit Balken');
+    let uiSatz = null;
+    for (let i = 0; i < 40 && !uiSatz; i += 1) {
+      await page.waitForTimeout(100);
+      const m = store.get(bsAntwort.id);
+      uiSatz = m && m.data.ui && m.data.ui['1'] && m.data.ui['1'].b0 ? m.data.ui['1'] : null;
+    }
+    check(!!uiSatz && Array.isArray(uiSatz.b0.erledigt) && uiSatz.b0.erledigt.includes(0), 'und der Zustand liegt im Tresor – je Fassung und Baustein (PUT …/ui)', JSON.stringify(uiSatz));
+    await bsMsg.getByRole('tab', { name: 'Dienstag' }).click();
+    check(await bsMsg.locator('.bs[data-baustein="tabs"] .bs[data-baustein="fortschritt"]').count() === 1 && /2 von 5/.test(await bsMsg.locator('.bs[data-baustein="tabs"]').innerText()),
+      'Ein Reiter zeigt einen verschachtelten Baustein (Fortschritt „2 von 5“)');
+    const tb = bsMsg.locator('.cv-md .tb').first();
+    check(await tb.locator('.tb-sort').count() === 3 && await tb.locator('.tb-filter__feld').count() === 1,
+      'Die Markdown-Tabelle ist sortierbar (Kopf aus Knöpfen) und hat ab 7 Zeilen ein Filterfeld');
+    await tb.locator('.tb-sort', { hasText: 'Minuten' }).click();
+    await page.waitForTimeout(200);
+    const sortiert = (await tb.locator('tbody tr:not(.tb-leer) td:first-child').allInnerTexts()).map((t) => t.trim()).filter(Boolean);
+    check(sortiert[0] === 'So' && sortiert[sortiert.length - 1] === 'Sa', 'Klick auf „Minuten“ sortiert als Zahl (0 zuerst, 90 zuletzt)', sortiert.join(','));
+    await tb.locator('.tb-filter__feld').fill('brueche');
+    await page.waitForTimeout(250);
+    const gefiltert = (await tb.locator('tbody tr:not(.tb-leer):not([hidden])').evaluateAll((trs) => trs.filter((tr) => tr.offsetParent !== null).map((tr) => tr.querySelector('td:nth-child(2)').textContent.trim())));
+    check(gefiltert.length === 2 && gefiltert.every((t) => /Brüche/.test(t)) && /2 von 8/.test(await tb.innerText()),
+      'Der Filter „brueche“ findet „Brüche“ und „Brüche II“ (Umlaute egal) und sagt „2 von 8“', gefiltert.join(', '));
+    await tb.locator('.tb-filter__feld').fill('');
+    const codeLeiste = (await bsMsg.locator('.cv-code__leiste').innerText()).replace(/\s+/g, ' ').trim();
+    check(/Bearbeiten.*Ausführen.*Erklären.*Fehler suchen/.test(codeLeiste) && /javascript/i.test(await bsMsg.locator('.md-code__lang').innerText()),
+      'Der Codeblock trägt seine Sprache und die Leiste Bearbeiten · Ausführen · Erklären · Fehler suchen', codeLeiste);
+    check(await bsMsg.locator('.md-heading--2 .cv-frage-dazu').count() === 1, 'Die Überschrift trägt „Frage dazu“');
+    await bsMsg.hover();
+    const aktionen = await bsMsg.locator('.cv-aktionen .cv-aktion').evaluateAll((els) => els.map((e) => e.getAttribute('aria-label')));
+    check(aktionen.includes('Antwort kopieren') && aktionen.includes('Neu erstellen') && aktionen.includes('Umwandeln') && /2\/2/.test(await bsMsg.locator('.cv-fassungen__stand').innerText()),
+      'Die Leiste unter der Antwort: Kopieren · Neu erstellen · Umwandeln · Fassungen „2/2“', aktionen.filter(Boolean).join(' · '));
+    await bsMsg.locator('.cv-aktion[aria-label="Vorige Fassung"]').click();
+    await page.waitForTimeout(300);
+    check(/Fassung 1 von 2 · Original – nur angesehen/.test(await bsMsg.innerText()) && await bsMsg.getByRole('button', { name: 'Wiederherstellen' }).count() === 1
+      && await bsMsg.locator('.bs[data-baustein]').count() === 0,
+    '‹ blättert zur ersten Fassung: nur angesehen, ohne die Bausteine der zweiten, mit [Wiederherstellen]');
+    await bsMsg.locator('.cv-aktion[aria-label="Vergleichen"]').click();
+    await page.waitForTimeout(300);
+    const vergleichZahlen = (await bsMsg.locator('.cv-vergleich__zahlen').innerText().catch(() => '')).trim();
+    check(await bsMsg.locator('.cv-vergleich del').count() >= 1 && await bsMsg.locator('.cv-vergleich ins').count() >= 1 && /Wörter weg/.test(vergleichZahlen),
+      '[Vergleichen] zeigt den wortweisen Unterschied (weg / neu, gezählt)', vergleichZahlen);
+    await bsMsg.getByRole('button', { name: 'Wiederherstellen' }).click();
+    let wieder = null;
+    for (let i = 0; i < 40 && !wieder; i += 1) {
+      await page.waitForTimeout(100);
+      const m = store.get(bsAntwort.id);
+      wieder = m && m.data.version === 0 ? m : null;
+    }
+    check(!!wieder && wieder.data.content === fassungAlt && wieder.data.versionen.length === 2, '[Wiederherstellen] macht Fassung 1 aktiv (PATCH …/version) – im Tresor, keine Fassung geht verloren');
+    await page.waitForTimeout(300);
+    check(/1\/2/.test(await bsMsg.locator('.cv-fassungen__stand').innerText()) && await bsMsg.locator('.cv-vergleich').count() === 0, 'und die Leiste sagt „1/2“');
+
     /* ------------- 8. Kalender, Notizwand, Projekte: bis in den Tresor */
     // Die alte Notizansicht mit Editor und "Zweiter Blick" gibt es nicht mehr:
     // die Notizen macht die KI, die Ansicht ist eine Wand zum Wiederfinden.
@@ -403,10 +486,13 @@ async function main() {
           const fertigText = await page.locator('main').innerText();
           check(/Der Stick ist fertig/.test(fertigText), 'Nach dem Klick meldet die Ansicht „Der Stick ist fertig"',
             fertigText.split('\n').find((z) => /fertig|Fehler|nicht/i.test(z)) || '');
-          check(fs.existsSync(path.join(stickOrt, 'neural-os.portable'))
-            && fs.existsSync(path.join(stickOrt, 'app', 'bin', 'neural-os.js'))
-            && fs.readdirSync(path.join(stickOrt, 'data')).length > 0,
-          'und auf dem Stick liegen wirklich Programm, Laufzeit und Wissen',
+          // Neuer Aufbau (Bauplan 2.10.4): Marker, Programm und Daten liegen
+          // in Inhalt/; die Daten sind die Kennung der neuen KI (config.json).
+          const inhalt = path.join(stickOrt, 'Inhalt');
+          check(fs.existsSync(path.join(inhalt, 'neural-os.portable'))
+            && fs.existsSync(path.join(inhalt, 'app', 'bin', 'neural-os.js'))
+            && fs.existsSync(path.join(inhalt, 'data', 'config.json')),
+          'und auf dem Stick liegen wirklich Programm, Laufzeit und die neue KI (in Inhalt/)',
           fs.readdirSync(stickOrt).join(', '));
           check(await page.locator('.stickv__schritte li').count() === 3,
             'Danach steht eine Anleitung in drei Sätzen da');

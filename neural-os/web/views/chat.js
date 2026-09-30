@@ -1386,7 +1386,13 @@ function baueAnsicht(container, ctx) {
     if (istUi(lang) || (offen && lang === 'u')) {
       // Noch nicht fertig: der ruhige Platzhalter (kein Zustand, keine Insel).
       if (offen) return renderCodeBlock(block, { laeuft: true });
-      const key = inselSchluessel(version, nr, block.code);
+      // Der Regler "Antwortstil" bietet "Übernehmen" nur an, solange die
+      // Antwort die letzte ist (ctx.stilSetzen; der Server erstellt nur die
+      // letzte neu). Kommt eine weitere Antwort, wird allein er neu gebaut
+      // und bietet ehrlich [Übernehmen] als Nachricht an -- die anderen
+      // Inseln bleiben stehen (ein Rahmen luede sonst neu).
+      const stilRegler = /"typ"\s*:\s*"regler"/.test(block.code);
+      const key = inselSchluessel(version, nr, block.code) + (stilRegler && letzte ? '|letzte' : '');
       benutzt.add(key);
       let insel = u.inseln.get(key);
       if (!insel) {

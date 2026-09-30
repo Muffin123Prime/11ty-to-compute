@@ -518,7 +518,7 @@ async function createApp(opts = {}) {
   // Normalfall ist und kein Fehler.
   const stickMod = tryRequire('./portable/stick');
   const stick = stickMod
-    ? optional(failures, 'stick', () => stickMod.createStick({ gate, logger, paths, config }))
+    ? optional(failures, 'stick', () => stickMod.createStick({ gate, logger, paths, config, portable }))
     : null;
 
   if (sync && typeof sync.setAuth === 'function' && auth) sync.setAuth(auth);

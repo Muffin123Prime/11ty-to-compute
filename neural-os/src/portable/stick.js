@@ -83,6 +83,8 @@ const {
   NeuralError,
 } = require('../kernel/errors');
 const { PORTABLE_MARKER } = require('../kernel/paths');
+const dateien = require('../kernel/dateien');
+const { kiPort, neueKiId, standardName } = require('../kernel/identitaet');
 
 /* ------------------------------------------------------------- constants */
 
@@ -124,6 +126,17 @@ const LAYOUT = {
   sync: 'sync',
   backups: 'Sicherungen',
   readme: 'LIESMICH.txt',
+  /**
+   * Der Ordner, in dem auf einem neuen Stick alles liegt, was der Nutzer
+   * nicht anfassen soll (Bauplan 1.1 und 2.10): app, runtime, data, sync und
+   * der Marker. In der Wurzel bleiben nur die Starter und die LIESMICH.
+   * Bestehende Sticks (alles direkt in der Wurzel) werden nie umgebaut.
+   */
+  inhalt: 'Inhalt',
+  /** Zwischenspeicher fuer geholte Laufzeiten in der Heim-Installation. */
+  laufzeitCache: 'laufzeiten',
+  /** Leer angelegt, damit Spotlight den Stick nicht indexiert (Annahme). */
+  spotlight: '.metadata_never_index',
 };
 
 /**
@@ -143,10 +156,34 @@ const ZIEL_PLATTFORMEN = ['win-x64', 'darwin-arm64', 'darwin-x64'];
  * is not what a non-technical person looks for.
  */
 const LAUNCHERS = [
-  { source: 'start-windows.bat', target: 'Neural OS starten.bat', eol: 'crlf', executable: false },
-  { source: 'start-macos.command', target: 'Neural OS starten.command', eol: 'lf', executable: true },
-  { source: 'start-linux.sh', target: 'Neural OS starten.sh', eol: 'lf', executable: true },
+  { source: 'start-windows.bat', target: 'Neural OS starten - Windows.bat', eol: 'crlf', executable: false, ort: 'wurzel' },
+  { source: 'start-macos.command', target: 'Neural OS starten - Mac.command', eol: 'lf', executable: true, ort: 'wurzel' },
+  // Linux ist kein Geraet des Nutzers; der Starter liegt deshalb im Inhalt.
+  { source: 'start-linux.sh', target: 'Starter fuer Linux.sh', eol: 'lf', executable: true, ort: 'basis' },
 ];
+
+/** Die Starter-Namen von vor Paket R; beim Erneuern werden sie entfernt. */
+const ALTE_STARTER = ['Neural OS starten.bat', 'Neural OS starten.command', 'Neural OS starten.sh'];
+
+/**
+ * Die Saetze der Stick-Ansicht (Bauplan 1.8, woertlich). Sie stehen hier,
+ * weil der Server sie liefert und die Oberflaeche sie nur anzeigt.
+ */
+const SATZ = Object.freeze({
+  KI_VORHANDEN: 'Auf diesem Stick wohnt schon eine KI.',
+  NUR_WINDOWS: 'Läuft bisher nur an Windows.',
+  NUR_MAC: 'Läuft bisher nur am Mac.',
+  FEHLT_WINDOWS: 'Auf diesem Stick fehlt das Programm für Windows.',
+  FEHLT_MAC: 'Auf diesem Stick fehlt das Programm für den Mac.',
+  OHNE_INTERNET: 'Ohne Internet geht das nicht.',
+  KEIN_WINDOWS: 'Windows sieht diesen Stick nicht.',
+  KEIN_MAC_SCHREIBEN: 'Ein Mac kann auf diesen Stick nicht schreiben.',
+  AELTER: 'Programm auf dem Stick ist älter.',
+  ROHKOPIE: 'Gibt es nicht mehr. Stattdessen: Mit dieser KI gekoppelt.',
+  FUER_MAC: 'Für Mac holen',
+  FUER_WINDOWS: 'Für Windows holen',
+  ERNEUERN: 'Erneuern',
+});
 
 /**
  * Never copied into `app/`.
@@ -166,9 +203,6 @@ const EXCLUDED_NAMES = new Set([
   // verdoppelte die Kopierzeit fuer "Stick vorbereiten".
   'screenshots',
 ]);
-
-/** Dropped when copying a home directory onto the stick (see EXCLUDED_NAMES). */
-const HOME_EXCLUDED_NAMES = new Set(['.lock', '.DS_Store']);
 
 /** Guards against a symlink loop or a pathologically deep tree. */
 const MAX_DEPTH = 64;
@@ -301,18 +335,14 @@ class StickFullError extends StorageError {
 }
 
 /**
- * Auf dem Stick liegt schon ein Datenbestand, und prepare() ueberschreibt nie
- * Daten. Aus demselben Grund wie StickFullError keine 500: das ist kein Defekt
- * dieses Servers, sondern der Zustand des Sticks, und die Oberflaeche soll
- * "nimm Aktualisieren" anbieten statt eines Fehlerberichts. 409 (Conflict) ist
- * genau dieser Fall. `instanceof StorageError` gilt weiterhin.
+ * Auf dem Stick wohnt schon eine KI (data/ ist nicht leer). "Stick
+ * vorbereiten" ueberschreibt nie eine KI; die alte bleibt still erhalten.
+ * 409 aus demselben Grund wie oben: Zustand des Sticks, kein Serverdefekt.
  */
-class StickDataError extends StorageError {
-  constructor(message, details) {
-    super(message, details);
-    this.name = 'StickDataError';
-    this.code = 'STICK_DATA_PRESENT';
-    this.status = 409;
+class KiVorhandenError extends NeuralError {
+  constructor(details) {
+    super('KI_VORHANDEN', SATZ.KI_VORHANDEN, { status: 409, details });
+    this.name = 'KiVorhandenError';
   }
 }
 
@@ -358,11 +388,11 @@ function throwIfAborted(signal, what) {
  * wird erst freigegeben, wenn der neue vollstaendig danebensteht -- gebraucht
  * wird also die volle Groesse noch einmal, nicht die Differenz.
  */
-function spaceNeeded(action, { sourceBytes = 0, runtimeBytes = 0, homeBytes = 0, extraRuntimes = 0 } = {}) {
+function spaceNeeded(action, { sourceBytes = 0, runtimeBytes = 0, extraRuntimes = 0 } = {}) {
   if (action === 'update') {
     return { required: sourceBytes, withHeadroom: sourceBytes + MIN_HEADROOM_BYTES };
   }
-  const required = sourceBytes + runtimeBytes + homeBytes + extraRuntimes * ESTIMATED_RUNTIME_BYTES;
+  const required = sourceBytes + runtimeBytes + extraRuntimes * ESTIMATED_RUNTIME_BYTES;
   return { required, withHeadroom: required + Math.max(MIN_HEADROOM_BYTES, Math.round(required * 0.05)) };
 }
 
@@ -371,7 +401,7 @@ function spaceNeeded(action, { sourceBytes = 0, runtimeBytes = 0, homeBytes = 0,
  * Grund: die Vorschau lehnt mit demselben Wortlaut ab wie der Vorgang selbst.
  */
 function stickFull(action, parts) {
-  const { free, withHeadroom, sourceBytes = 0, runtimeBytes = 0, homeBytes = 0, extraRuntimes = 0 } = parts;
+  const { free, withHeadroom, sourceBytes = 0, runtimeBytes = 0, extraRuntimes = 0 } = parts;
   if (action === 'update') {
     return new StickFullError(
       `Für die Aktualisierung werden ${humanBytes(withHeadroom)} frei gebraucht, vorhanden sind ${humanBytes(free)}. `
@@ -383,7 +413,6 @@ function stickFull(action, parts) {
     `Auf dem Stick sind nur ${humanBytes(free)} frei, gebraucht werden mindestens ${humanBytes(withHeadroom)} `
     + `(Quelltext ${humanBytes(sourceBytes)}`
     + (runtimeBytes ? `, Laufzeit ${humanBytes(runtimeBytes)}` : '')
-    + (homeBytes ? `, Datenbestand ${humanBytes(homeBytes)}` : '')
     + (extraRuntimes ? `, ${extraRuntimes} weitere Laufzeit(en) geschätzt ${humanBytes(extraRuntimes * ESTIMATED_RUNTIME_BYTES)}` : '')
     + '). Es wurde nichts geschrieben - ein halb kopierter Stick waere schlimmer als keiner. '
     + 'Schaffe Platz oder lass die zusätzlichen Laufzeiten weg.',
@@ -391,13 +420,16 @@ function stickFull(action, parts) {
   );
 }
 
-/** Derselbe Satz fuer "da liegen schon Daten", aus demselben Grund. */
-function dataPresent(dataDir, entries) {
-  return new StickDataError(
-    `In ${dataDir} liegt bereits ein Datenbestand (${entries} Eintrag/Einträge). "Stick vorbereiten" überschreibt `
-    + 'niemals Daten. Nutze "Stick aktualisieren", um nur den Quelltext zu erneuern, oder wähle einen leeren Ordner.',
-    { dataDir, entries },
-  );
+/**
+ * Wohnt in diesem Datenordner schon eine KI? Gezaehlt wird, was kein
+ * Versteck (".lock") und keine Begleitdatei des Betriebssystems ist.
+ */
+function kiEintraege(dataDir) {
+  try {
+    return fs.readdirSync(dataDir).filter((n) => !n.startsWith('.') && !dateien.istBegleitdatei(n));
+  } catch {
+    return [];
+  }
 }
 
 /** Der naechste Ordner nach oben, den es wirklich gibt. Fuer eine Vorschau auf einen Pfad, der noch nicht existiert. */
@@ -670,6 +702,9 @@ async function removeNewEntries(dir, keep) {
  */
 function excludedBy(name, set, dropLogs) {
   if (set.has(name)) return true;
+  // "._app", ".DS_Store", "Thumbs.db": legt das Betriebssystem ungefragt an
+  // (belegt, win-mac v4). Sie gehoeren nie ins Programm.
+  if (dateien.istBegleitdatei(name)) return true;
   return dropLogs && name.endsWith('.log');
 }
 
@@ -840,14 +875,16 @@ async function swapIntoPlace(finalPath, tmpPath) {
   const base = path.basename(finalPath);
   const oldPath = path.join(parent, `.${base}.old-${randomSuffix()}`);
 
+  // dateien.umbenennen statt fs.renameSync: unter Windows haelt der
+  // Virenschutz einen gerade geschriebenen Ordner kurz fest (Bauplan 2.10.8).
   const exists = fs.existsSync(finalPath);
-  if (exists) fs.renameSync(finalPath, oldPath);
+  if (exists) dateien.umbenennen(finalPath, oldPath);
   try {
-    fs.renameSync(tmpPath, finalPath);
+    dateien.umbenennen(tmpPath, finalPath);
   } catch (err) {
     // Put the old one back rather than leaving the stick without an app.
     if (exists) {
-      try { fs.renameSync(oldPath, finalPath); } catch { /* reported by verify() */ }
+      try { dateien.umbenennen(oldPath, finalPath); } catch { /* reported by verify() */ }
     }
     throw new StorageError(
       `Der fertige Ordner "${base}" konnte nicht an seinen Platz verschoben werden (${(err && err.code) || err.message}). `
@@ -863,6 +900,26 @@ async function swapIntoPlace(finalPath, tmpPath) {
 
 /** Names this module leaves behind while it works. */
 const STALE_RE = /^\.([A-Za-z0-9._ -]+)\.(tmp|old)-[0-9a-f]{8}$/;
+
+/**
+ * Ist das ein Rest dieses Moduls? Nie eine Begleitdatei des Betriebssystems:
+ * macOS legt zu ".app.old-deadbeef" den Zwilling "._.app.old-deadbeef" an,
+ * und der sah bisher aus wie ein Rest namens "_.app" -- daraus wurde beim
+ * Aufraeumen ein Ordner "_.app" und die falsche Warnung INTERRUPTED_COPY
+ * (belegt, win-mac v4).
+ */
+function istRest(name) {
+  return !dateien.istBegleitdatei(name) && STALE_RE.test(name);
+}
+
+/** Alle Reste in einem Ordner, ohne Begleitdateien. */
+function resteIn(dir) {
+  try {
+    return fs.readdirSync(dir).filter(istRest);
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Repair the traces of an interrupted copy.
@@ -885,8 +942,8 @@ function cleanStale(root) {
     return { removed, restored };
   }
   for (const entry of entries) {
+    if (!istRest(entry.name)) continue;
     const m = STALE_RE.exec(entry.name);
-    if (!m) continue;
     const full = path.join(root, entry.name);
     const target = path.join(root, m[1]);
     if (m[2] === 'tmp') {
@@ -915,6 +972,45 @@ function markerPath(root) {
   return path.join(root, LAYOUT.marker);
 }
 
+function hatMarker(dir) {
+  try { return fs.existsSync(path.join(dir, LAYOUT.marker)); } catch { return false; }
+}
+
+/**
+ * Wo auf einem Stick was liegt.
+ *
+ * Zwei Aufbauten (Bauplan 2.10.4): neu liegt alles in `<Wurzel>/Inhalt`, und
+ * in der Wurzel bleiben nur die Starter und die LIESMICH; alt liegt alles
+ * direkt in der Wurzel. Ein bestehender Stick wird nie umgebaut, deshalb
+ * muss jeder Vorgang beide kennen. Der Pfad darf die Wurzel ODER der
+ * Inhalt-Ordner sein: Die laufende App kennt nur letzteren (dort liegt ihr
+ * Marker), die Stick-Ansicht nur ersteren (das Laufwerk).
+ *
+ * @param {string} p
+ * @returns {{wurzel:string, basis:string, aufbau:'inhalt'|'alt', istStick:boolean}}
+ */
+function aufbauVon(p) {
+  const abs = path.resolve(p);
+  if (hatMarker(abs)) {
+    const inhalt = path.basename(abs) === LAYOUT.inhalt;
+    return { wurzel: inhalt ? path.dirname(abs) : abs, basis: abs, aufbau: inhalt ? 'inhalt' : 'alt', istStick: true };
+  }
+  const unter = path.join(abs, LAYOUT.inhalt);
+  if (hatMarker(unter)) return { wurzel: abs, basis: unter, aufbau: 'inhalt', istStick: true };
+  // Ein alter Stick, dessen Marker fehlt: verify() soll das melden, nicht
+  // einen zweiten, leeren Aufbau daneben erfinden.
+  for (const n of [LAYOUT.app, LAYOUT.runtime]) {
+    if (fs.existsSync(path.join(abs, n))) return { wurzel: abs, basis: abs, aufbau: 'alt', istStick: false };
+  }
+  // Kein Stick: ein neuer bekommt den Aufbau mit "Inhalt/".
+  return { wurzel: abs, basis: unter, aufbau: 'inhalt', istStick: false };
+}
+
+/** Der Ordner mit Marker, app, runtime, data und sync. */
+function basisVon(p) {
+  return aufbauVon(p).basis;
+}
+
 function readMarker(root) {
   try {
     const parsed = JSON.parse(fs.readFileSync(markerPath(root), 'utf8'));
@@ -932,9 +1028,14 @@ function readMarker(root) {
  * is worthless if it only knows about the default name.
  */
 function dataDirOf(root) {
-  const info = readMarker(root);
+  return dataDirIn(basisVon(root));
+}
+
+/** Dasselbe fuer eine schon bekannte Basis -- auch eine, die es noch nicht gibt. */
+function dataDirIn(basis) {
+  const info = readMarker(basis);
   const rel = info && typeof info.dataDir === 'string' && info.dataDir ? info.dataDir : LAYOUT.data;
-  return path.resolve(root, rel);
+  return path.resolve(basis, rel);
 }
 
 /**
@@ -954,7 +1055,7 @@ function dataDirOf(root) {
 function geschuetzterOrdner(root, target) {
   const data = dataDirOf(root);
   if (isInside(data, target)) return { dir: data, was: 'Datenordner' };
-  const backups = path.resolve(root, LAYOUT.backups);
+  const backups = path.resolve(basisVon(root), LAYOUT.backups);
   if (isInside(backups, target)) return { dir: backups, was: 'Ordner mit deinen Sicherungen' };
   return null;
 }
@@ -988,7 +1089,12 @@ function toEol(text, kind) {
  * The .bat has to be CRLF: cmd.exe is the one interpreter still in wide use
  * that mis-parses a LF-only batch file, and the repository stores LF.
  */
-function deployLaunchers(root, sourceRoot) {
+/** Wo ein Starter auf diesem Stick liegt: Windows und Mac in der Wurzel, Linux im Inhalt. */
+function launcherPath(lage, launcher) {
+  return path.join(launcher.ort === 'basis' ? lage.basis : lage.wurzel, launcher.target);
+}
+
+function deployLaunchers(lage, sourceRoot) {
   const written = [];
   const warnings = [];
   for (const launcher of LAUNCHERS) {
@@ -1003,11 +1109,29 @@ function deployLaunchers(root, sourceRoot) {
       );
       continue;
     }
-    const target = path.join(root, launcher.target);
+    const target = launcherPath(lage, launcher);
     writeFileAtomic(target, toEol(raw, launcher.eol), launcher.executable ? 0o755 : 0o644);
     written.push(launcher.target);
   }
+  // Die Starter von vor Paket R: ein Doppelklick darauf soll nicht mehr
+  // moeglich sein, sonst gaebe es zwei Starter mit verschiedenem Verhalten.
+  for (const dir of new Set([lage.wurzel, lage.basis])) {
+    for (const alt of ALTE_STARTER) {
+      try { fs.rmSync(path.join(dir, alt), { force: true }); } catch { /* verify() meldet, was liegt */ }
+    }
+  }
   return { written, warnings };
+}
+
+/**
+ * Die Datei, die Spotlight vom Stick fernhaelt (Annahme zur Wirkung,
+ * Bauplan 2.10.5). Leer, nur in der Wurzel, nie ueberschrieben.
+ */
+function spotlightAus(wurzel) {
+  const datei = path.join(wurzel, LAYOUT.spotlight);
+  try {
+    if (!fs.existsSync(datei)) fs.writeFileSync(datei, '');
+  } catch { /* ohne Schreibrecht meldet es die Sonde */ }
 }
 
 /** Menschliche Namen der Plattformen, fuer LIESMICH und Oberflaeche. */
@@ -1026,85 +1150,21 @@ function plattformName(id) {
 }
 
 /**
- * Die LIESMICH auf dem Stick.
- *
- * Sie ist fuer den Moment geschrieben, in dem jemand vor einem fremden Rechner
- * steht und der Stick nicht tut, was er soll -- also kurz, und die
- * Reihenfolge ist die Reihenfolge der Handgriffe. ASCII ohne Umlaute, weil
- * der Windows-Editor eine UTF-8-Datei ohne BOM auf aelteren Systemen als
- * Zeichensalat zeigt.
+ * Die LIESMICH auf dem Stick: genau die fuenf Zeilen aus Bauplan 1.1,
+ * woertlich. Nichts wird erklaert; wer vor einem fremden Rechner steht, soll
+ * nur wissen, worauf er doppelklickt. CRLF, damit auch ein alter
+ * Windows-Editor fuenf Zeilen zeigt und nicht eine.
  */
-function renderReadme({ platforms, version, fsInfo }) {
-  const runtimeList = platforms.length
-    ? platforms.map((p) => `  - ${plattformName(p)} (${p})`).join('\n')
-    : '  (keine - siehe unten)';
-  const modeNote = fsInfo && fsInfo.enforcesModes === false
-    ? 'WICHTIG: Das Dateisystem dieses Sticks kennt keine Zugriffsrechte. Jeder, der\n'
-      + 'den Stick in der Hand hat, kann die Dateien lesen. Schalte deshalb in den\n'
-      + 'Einstellungen die Verschluesselung ein - sie ist hier der einzige echte Schutz.\n'
-    : 'Tipp: Schalte in den Einstellungen die Verschluesselung ein. Ein Stick geht\n'
-      + 'leicht verloren, und ohne Verschluesselung kann ihn jeder lesen.\n';
+const LIESMICH_ZEILEN = Object.freeze([
+  'Windows:  "Neural OS starten - Windows" doppelklicken.',
+  'Mac:      "Neural OS starten - Mac" doppelklicken.',
+  'Fertig:   in der App auf "Beenden".',
+  'Deine Daten liegen im Ordner "Inhalt". Sichern = ganzen Stick kopieren.',
+  'Geht etwas nicht, steht der Grund im Fenster, das dann offen bleibt.',
+]);
 
-  return `Neural OS - deine KI auf diesem Stick
-====================================
-
-So startest du
---------------
-  Windows   -> Doppelklick auf  "Neural OS starten.bat"
-  Mac       -> Rechtsklick auf  "Neural OS starten.command"  -> Oeffnen
-               (nur beim ersten Mal; danach genuegt ein Doppelklick)
-  Linux     -> Doppelklick auf  "Neural OS starten.sh"
-
-Danach oeffnet sich dein Browser mit Neural OS. Das schwarze Fenster bitte
-offen lassen - solange es offen ist, laeuft Neural OS.
-
-So hoerst du auf
-----------------
-In Neural OS unter Einstellungen -> Stick auf "Beenden & abziehen" tippen.
-Sobald dort "Jetzt kannst du den Stick abziehen" steht, ist alles gespeichert.
-
-Was liegt hier?
----------------
-  app        das Programm
-  runtime    die Laufzeit - deshalb muss auf dem Rechner nichts installiert sein
-  ${LAYOUT.data.padEnd(10)} dein Wissen: Notizen, Chats, Termine, Projekte
-  ${LAYOUT.backups.padEnd(10)} deine Sicherungen ("Jetzt sichern")
-
-Auf dem fremden Rechner wird nichts installiert und nichts gespeichert.
-
-Und die KI?
------------
-Die KI ist Claude und braucht Internet. Den Schluessel dafuer traegst du einmal
-in den Einstellungen unter "Claude verbinden" ein; er liegt dann in deinem
-Tresor auf diesem Stick und reist mit. Ohne Internet siehst du trotzdem alle
-Notizen, Termine und Projekte - nur neue Antworten gibt es dann nicht.
-
-${modeNote}
-Mitgelieferte Laufzeiten
-------------------------
-${runtimeList}
-
-Steht dein Rechner nicht in der Liste, sagt der Starter das. Dann den Stick an
-einem Rechner mit Neural OS und Internet einstecken und dort unter
-Einstellungen -> Stick noch einmal "Stick vorbereiten" tippen - dein Wissen auf
-dem Stick bleibt dabei, wie es ist.
-
-Wenn gar nichts geht
---------------------
-1. Starte im abgesicherten Modus - dabei bleiben eigene Erweiterungen aus:
-     Windows:  runtime\\win-x64\\node.exe app\\bin\\neural-os.js start --safe
-     Mac:      ./runtime/darwin-arm64/node app/bin/neural-os.js start --safe
-     Linux:    ./runtime/linux-x64/node app/bin/neural-os.js start --safe
-2. Passiert nach dem Doppelklick gar nichts, ist der Stick moeglicherweise mit
-   "noexec" eingehaengt. Dann den ganzen Ordner auf die Festplatte kopieren
-   und von dort starten.
-3. Der Ordner "app" fehlt oder ist halb? Dann wurde der Stick beim Kopieren
-   abgezogen. An einem Rechner mit Neural OS noch einmal "Stick vorbereiten"
-   tippen - dein Wissen in "${LAYOUT.data}" bleibt dabei unberuehrt.
-
-Version: ${version}
-Erstellt: ${new Date().toISOString().slice(0, 10)}
-`;
+function renderReadme() {
+  return `${LIESMICH_ZEILEN.join('\r\n')}\r\n`;
 }
 
 /* ------------------------------------------------------- archive readers */
@@ -1525,6 +1585,7 @@ async function findeLaufwerke(opts = {}) {
   }
 
   const frei = typeof opts.freeBytes === 'function' ? opts.freeBytes : freeBytesOf;
+  const eigeneWurzel = opts.eigenerStick ? aufbauVon(opts.eigenerStick).wurzel : null;
   const laufwerke = kandidaten.map((k) => {
     let gesamt = null;
     try {
@@ -1532,12 +1593,23 @@ async function findeLaufwerke(opts = {}) {
       gesamt = Number(st.bsize) * Number(st.blocks);
       if (!Number.isFinite(gesamt)) gesamt = null;
     } catch { /* bleibt unbekannt */ }
+    // Die Pfaderkennung prueft <Wurzel> und <Wurzel>/Inhalt (Bauplan 2.10.4).
+    const lage = aufbauVon(k.pfad);
+    const marker = lage.istStick ? readMarker(lage.basis) : null;
+    const roh = lage.istStick ? appVersion(path.join(lage.basis, LAYOUT.app)) : null;
+    const version = roh && roh !== 'unbekannt' ? roh : null;
     return {
       ...k,
       frei: frei(k.pfad),
       gesamt,
-      istStick: !!readMarker(k.pfad),
-      eigener: opts.eigenerStick ? gleicherPfad(opts.eigenerStick, k.pfad) : false,
+      istStick: !!marker,
+      aufbau: marker ? lage.aufbau : null,
+      basis: marker ? lage.basis : null,
+      ki: marker ? { id: marker.kiId || null, name: marker.name || null } : null,
+      version,
+      /** "Programm auf dem Stick ist älter." [Erneuern] */
+      aelter: !!(version && vergleicheVersion(version, laufendeVersion()) < 0),
+      eigener: eigeneWurzel ? gleicherPfad(eigeneWurzel, lage.wurzel) : false,
     };
   });
   laufwerke.sort((a, b) => {
@@ -1615,6 +1687,88 @@ async function auswerfen(pfad, opts = {}) {
   return { ausgeworfen: null, wie: 'sync', grund: r && r.code === 0 ? null : 'sync ließ sich nicht ausführen.' };
 }
 
+/* ------------------------------------------- Dateisystem des Sticks (Mac) */
+
+/**
+ * Welches Dateisystem traegt der Stick? Am Mac steht das in der Zeile von
+ * `/sbin/mount` ("/dev/disk4s1 on /Volumes/LENA (exfat, local, nodev, ...)").
+ * Ein mit APFS oder HFS formatierter Stick ist fuer Windows unsichtbar; das
+ * soll der Nutzer beim Vorbereiten hoeren, nicht am Schullaptop (2.10.6).
+ * Auf anderen Systemen antwortet statfs (readFsType), hier kommt null.
+ *
+ * @param {string} wurzel
+ * @param {{platform?:string, run?:Function}} [opts] Attrappen fuer Tests
+ * @returns {Promise<{punkt:string, typ:string}|null>}
+ */
+async function dateisystemTyp(wurzel, { platform = process.platform, run = ausfuehren } = {}) {
+  if (platform !== 'darwin') return null;
+  const r = await run('/sbin/mount', [], { timeoutMs: 5000 });
+  if (!r || r.code !== 0 || !r.stdout) return null;
+  let ziel;
+  try { ziel = fs.realpathSync.native(wurzel); } catch { ziel = path.resolve(wurzel); }
+  let beste = null;
+  for (const roh of String(r.stdout).split('\n')) {
+    const m = /^(.+?) on (.+?) \(([^,)]+)/.exec(roh.trim());
+    if (!m) continue;
+    const punkt = m[2];
+    const typ = m[3].trim().toLowerCase();
+    const drin = ziel === punkt || ziel.startsWith(punkt.endsWith('/') ? punkt : `${punkt}/`);
+    if (drin && (!beste || punkt.length > beste.punkt.length)) beste = { punkt, typ };
+  }
+  return beste;
+}
+
+/**
+ * Der eine Satz zum Dateisystem, oder null. APFS/HFS: Windows sieht den
+ * Stick nicht. NTFS: ein Mac liest ihn nur (Annahme, Bauplan Teil 3).
+ * @param {string|null} typName
+ * @returns {{code:string, satz:string}|null}
+ */
+function dateisystemHinweis(typName) {
+  const t = String(typName || '').toLowerCase();
+  if (/^(apfs|hfs)/.test(t)) return { code: 'KEIN_WINDOWS', satz: SATZ.KEIN_WINDOWS };
+  if (/^ntfs/.test(t)) return { code: 'NUR_LESEN_MAC', satz: SATZ.KEIN_MAC_SCHREIBEN };
+  return null;
+}
+
+/** Wie in src/sync/kopplung.js: "0.2.0" > "0.1.9"; nur die ersten drei Zahlen. */
+function vergleicheVersion(a, b) {
+  const teile = (v) => String(v).split(/[.+-]/).slice(0, 3).map((n) => parseInt(n, 10) || 0);
+  const x = teile(a);
+  const y = teile(b);
+  for (let i = 0; i < 3; i++) {
+    if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0) ? -1 : 1;
+  }
+  return 0;
+}
+
+/** Die Version des Programms, das hier laeuft. */
+let hierVersion = null;
+function laufendeVersion() {
+  if (hierVersion === null) hierVersion = appVersion(APP_ROOT);
+  return hierVersion;
+}
+
+/**
+ * Nach dem Vorbereiten mit [Mit dieser KI gekoppelt] und eigener PIN: der
+ * neue Stick bekommt eine eigene PIN (createVaultCrypto legt secrets.json
+ * an), und seine config.json muss das wissen -- sonst hielte der erste Start
+ * den Tresor fuer unverschluesselt. Nur der Schalter wird gesetzt, alles
+ * andere in der Datei bleibt.
+ */
+function schutzEinschalten(dataDir) {
+  const datei = path.join(dataDir, 'config.json');
+  let config = {};
+  try {
+    const roh = JSON.parse(fs.readFileSync(datei, 'utf8'));
+    if (roh && typeof roh === 'object' && !Array.isArray(roh)) config = roh;
+  } catch { /* dann entsteht sie hier */ }
+  if (!config.security || typeof config.security !== 'object') config.security = {};
+  config.security.encryption = { ...(config.security.encryption || {}), enabled: true, kdf: 'scrypt', algorithm: 'aes-256-gcm' };
+  dateien.schreibeDauerhaft(datei, `${JSON.stringify(config, null, 2)}\n`, { modus: 0o600 });
+  return config;
+}
+
 /* ----------------------------------------------------------- the factory */
 
 /**
@@ -1629,6 +1783,12 @@ function createStick(deps = {}) {
   const appPaths = deps.paths || null;
   const config = deps.config || null;
   const freeBytes = typeof deps.freeBytes === 'function' ? deps.freeBytes : freeBytesOf;
+  // Laeuft diese Instanz von einem Stick? Dann ist dessen runtime/ die
+  // zweite Quelle fuer Laufzeiten (offline), siehe laufzeitBeschaffen().
+  const portable = deps.portable === undefined ? require('../kernel/paths').detectPortable() : (deps.portable || null);
+  const eigeneBasis = portable && typeof portable.root === 'string' ? path.resolve(portable.root) : null;
+  const plattform = deps.platform || process.platform;
+  const run = typeof deps.ausfuehren === 'function' ? deps.ausfuehren : ausfuehren;
 
   /** Node version used for downloads: the one we run, unless configured. */
   function nodeVersion() {
@@ -1665,12 +1825,42 @@ function createStick(deps = {}) {
         { root },
       );
     }
-    if (!readMarker(root)) {
+    const lage = aufbauVon(root);
+    if (!lage.istStick || !readMarker(lage.basis)) {
       throw new ValidationError(
         `In ${root} liegt kein Neural-OS-Stick (die Datei "${LAYOUT.marker}" fehlt oder ist unlesbar). `
         + `${what} arbeitet nur auf einem bereits vorbereiteten Stick - lege ihn zuerst mit "Stick vorbereiten" an.`,
       );
     }
+    return lage;
+  }
+
+  /** Der Name der neuen KI, wenn einer gewuenscht ist; sonst null. */
+  function nameWahl(value) {
+    if (value === undefined || value === null || value === '') return null;
+    if (typeof value !== 'string') throw new ValidationError('Der Name muss ein Text sein.');
+    const sauber = value.trim();
+    const laenge = [...sauber].length;
+    if (laenge < 1 || laenge > 60) throw new ValidationError('Der Name muss 1 bis 60 Zeichen lang sein.');
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u001f\u007f]/.test(sauber)) throw new ValidationError('Der Name darf keine Zeilenumbrüche enthalten.');
+    return sauber;
+  }
+
+  /**
+   * Die Identitaet der neuen KI (Bauplan 2.10.2): eine frische Kennung, ein
+   * Name, der eigene Port. Sie steht in data/config.json, genau so, wie
+   * identitaet.sicherstellen() sie beim ersten Start sonst anlegen wuerde --
+   * nur eben schon jetzt, damit der Marker daneben dieselbe Kennung traegt
+   * und ein anderer Stick sie ohne PIN lesen kann (Paket K1).
+   */
+  function kiAnlegen(dataDir, wunschName, wurzel) {
+    const id = neueKiId();
+    const name = wunschName || standardName({ root: wurzel }, id);
+    const port = kiPort(id);
+    const konfig = { sync: { deviceId: id, deviceName: name, heimat: 'stick' }, server: { port } };
+    dateien.schreibeDauerhaft(path.join(dataDir, 'config.json'), `${JSON.stringify(konfig, null, 2)}\n`, { modus: 0o600 });
+    return { id, name, port };
   }
 
   /**
@@ -1710,24 +1900,32 @@ function createStick(deps = {}) {
     }
   }
 
-  /** Which platforms does the caller want? Local is included unless refused. */
+  /**
+   * Welche Laufzeiten sollen auf den Stick? Ohne Angabe (oder `true`) immer
+   * die des laufenden Rechners plus Windows und beide Macs (ZIEL_PLATTFORMEN,
+   * Bauplan 2.10.1). Eine Liste nennt die zusaetzlichen, 'all' alle,
+   * `false` gar keine (Tests).
+   */
   function resolvePlatforms(includeRuntimes) {
     const extra = [];
     let local = true;
+    const wollen = (id) => {
+      if (!PLATFORMS[id]) {
+        throw new ValidationError(
+          `"${id}" ist keine bekannte Plattform. Möglich sind: ${Object.keys(PLATFORMS).join(', ')}.`,
+        );
+      }
+      if (id !== LOCAL_PLATFORM) extra.push(id);
+    };
     if (includeRuntimes === false) {
       local = false;
     } else if (Array.isArray(includeRuntimes)) {
-      for (const id of includeRuntimes) {
-        if (!PLATFORMS[id]) {
-          throw new ValidationError(
-            `"${id}" ist keine bekannte Plattform. Möglich sind: ${Object.keys(PLATFORMS).join(', ')}.`,
-          );
-        }
-        if (id !== LOCAL_PLATFORM) extra.push(id);
-      }
+      includeRuntimes.forEach(wollen);
     } else if (includeRuntimes === 'all') {
-      for (const id of Object.keys(PLATFORMS)) if (id !== LOCAL_PLATFORM) extra.push(id);
-    } else if (includeRuntimes !== undefined && includeRuntimes !== true) {
+      Object.keys(PLATFORMS).forEach(wollen);
+    } else if (includeRuntimes === undefined || includeRuntimes === true) {
+      ZIEL_PLATTFORMEN.forEach(wollen);
+    } else {
       throw new ValidationError('includeRuntimes muss true, false, "all" oder eine Liste von Plattformen sein.');
     }
     return { local, extra: [...new Set(extra)] };
@@ -1744,10 +1942,10 @@ function createStick(deps = {}) {
    * Modus unveraendert zurueck, setzt das Dateisystem Rechte durch; kommt
    * stattdessen 0777/0666 zurueck, hat es sie verworfen (exFAT, FAT32).
    */
-  function modeWitnesses(root) {
-    const list = [{ path: dataDirOf(root), mode: 0o700 }];
+  function modeWitnesses(lage) {
+    const list = [{ path: dataDirIn(lage.basis), mode: 0o700 }];
     for (const launcher of LAUNCHERS) {
-      list.push({ path: path.join(root, launcher.target), mode: launcher.executable ? 0o755 : 0o644 });
+      list.push({ path: launcherPath(lage, launcher), mode: launcher.executable ? 0o755 : 0o644 });
     }
     return list;
   }
@@ -1761,7 +1959,7 @@ function createStick(deps = {}) {
   function dropRuntimeScraps(dir) {
     try {
       for (const name of fs.readdirSync(dir)) {
-        if (STALE_RE.test(name)) rmrf(path.join(dir, name));
+        if (istRest(name)) rmrf(path.join(dir, name));
       }
     } catch { /* the directory may not exist yet */ }
   }
@@ -1801,7 +1999,7 @@ function createStick(deps = {}) {
       throw new StorageError(`Die Laufzeit konnte nicht kopiert werden (${(err && err.code) || err.message}).`);
     }
     try { fs.chmodSync(tmp, 0o755); } catch { /* FAT ignores modes; noted in warnings */ }
-    fs.renameSync(tmp, target);
+    dateien.umbenennen(tmp, target);
     writeFileAtomic(path.join(dir, 'node-version.txt'), `${process.version}\n`);
     return { platform: LOCAL_PLATFORM, file: target, bytes: sizeOf(target), version: process.version, source: 'lokal' };
   }
@@ -2002,7 +2200,7 @@ function createStick(deps = {}) {
     try {
       fs.writeFileSync(tmp, binary);
       try { fs.chmodSync(tmp, 0o755); } catch { /* FAT */ }
-      fs.renameSync(tmp, target);
+      dateien.umbenennen(tmp, target);
     } catch (err) {
       rmrf(tmp);
       if (err && err.code === 'ENOSPC') {
@@ -2017,50 +2215,190 @@ function createStick(deps = {}) {
     return { platform, file: target, bytes: binary.length, version, source: DIST_HOST };
   }
 
+  /* -------------------------------------- Laufzeiten fuer andere Rechner */
+
+  function versionIn(dir) {
+    try { return fs.readFileSync(path.join(dir, 'node-version.txt'), 'utf8').trim() || null; } catch { return null; }
+  }
+
+  /** Der Zwischenspeicher der Heim-Installation fuer eine Plattform, oder null. */
+  function cacheDir(platform) {
+    return appPaths && typeof appPaths.home === 'string' && appPaths.home
+      ? path.join(appPaths.home, LAYOUT.laufzeitCache, platform)
+      : null;
+  }
+
+  /**
+   * Eine fertige Laufzeit von einem Ort auf dem Rechner in den Stick
+   * kopieren -- ohne Netz. null, wenn dort keine liegt.
+   */
+  async function laufzeitKopieren(basis, platform, quelleDir, source, signal) {
+    const spec = PLATFORMS[platform];
+    const quelle = path.join(quelleDir, spec.file);
+    let st;
+    try { st = fs.statSync(quelle); } catch { return null; }
+    if (!st.isFile() || st.size === 0) return null;
+    const version = versionIn(quelleDir);
+    const dir = runtimeDir(basis, platform);
+    mkdirp(dir);
+    dropRuntimeScraps(dir);
+    const target = runtimeBinary(basis, platform);
+    const tmp = path.join(dir, `.${spec.file}.tmp-${randomSuffix()}`);
+    throwIfAborted(signal, `Das Kopieren der Laufzeit ${platform}`);
+    try {
+      await fsp.copyFile(quelle, tmp);
+    } catch (err) {
+      await rmrfAsync(tmp);
+      if (err && err.code === 'ENOSPC') {
+        throw new StickFullError(
+          `Der Stick hat nicht genug Platz für die Laufzeit ${platform} (${humanBytes(st.size)}).`,
+          { platform, needed: st.size },
+        );
+      }
+      throw new StorageError(`Die Laufzeit ${platform} konnte nicht kopiert werden (${(err && err.code) || err.message}).`);
+    }
+    try { fs.chmodSync(tmp, 0o755); } catch { /* FAT */ }
+    dateien.umbenennen(tmp, target);
+    if (version) writeFileAtomic(path.join(dir, 'node-version.txt'), `${version}\n`);
+    return { platform, file: target, bytes: st.size, version, source };
+  }
+
+  /**
+   * Eine geholte Laufzeit in der Heim-Installation aufheben, damit der
+   * naechste Stick sie ohne Netz bekommt. Nur dort: laeuft die Instanz vom
+   * Stick, ist dessen runtime/ ohnehin die Quelle. Scheitert es, ist der
+   * Stick trotzdem fertig -- das ist nur ein Vorrat.
+   */
+  async function zwischenspeichern(got) {
+    const dir = cacheDir(got.platform);
+    if (!dir || eigeneBasis) return;
+    const spec = PLATFORMS[got.platform];
+    const tmp = path.join(dir, `.${spec.file}.tmp-${randomSuffix()}`);
+    try {
+      mkdirp(dir);
+      await fsp.copyFile(got.file, tmp);
+      try { fs.chmodSync(tmp, 0o755); } catch { /* FAT */ }
+      dateien.umbenennen(tmp, path.join(dir, spec.file));
+      writeFileAtomic(path.join(dir, 'node-version.txt'), `${got.version}\n`);
+    } catch (err) {
+      await rmrfAsync(tmp);
+      log.warn(`Laufzeit ${got.platform} ließ sich nicht zwischenspeichern: ${err && err.message}`);
+    }
+  }
+
+  /**
+   * Eine Laufzeit fuer einen anderen Rechner beschaffen, in der Reihenfolge
+   * aus Bauplan 2.10.1: die Laufzeit dieses Rechners; das runtime/ des
+   * eigenen Sticks, wenn die App portabel laeuft (offline); der
+   * Zwischenspeicher der Heim-Installation; zuletzt nodejs.org ueber die
+   * Schleuse. Was ohne Netz da ist, kommt ohne Netz.
+   */
+  async function laufzeitBeschaffen(basis, platform, onProgress, signal) {
+    const name = plattformName(platform);
+    if (platform === LOCAL_PLATFORM) {
+      const warnungen = [];
+      const r = await copyLocalRuntime(basis, warnungen, signal);
+      if (!r) throw new StorageError('Die Laufzeit des laufenden Systems konnte nicht kopiert werden.');
+      return { ...r, warnings: warnungen };
+    }
+    if (eigeneBasis && eigeneBasis !== basis) {
+      const r = await laufzeitKopieren(basis, platform, runtimeDir(eigeneBasis, platform), 'eigener-stick', signal);
+      if (r) {
+        onProgress({ phase: 'runtime', message: `Laufzeit für ${name} wird vom eigenen Stick kopiert …`, platform });
+        return r;
+      }
+    }
+    const cache = cacheDir(platform);
+    if (cache && versionIn(cache) === nodeVersion()) {
+      const r = await laufzeitKopieren(basis, platform, cache, 'zwischenspeicher', signal);
+      if (r) {
+        onProgress({ phase: 'runtime', message: `Laufzeit für ${name} wird aus dem Zwischenspeicher kopiert …`, platform });
+        return r;
+      }
+    }
+    const got = await downloadRuntime(basis, platform, onProgress, signal);
+    await zwischenspeichern(got);
+    return got;
+  }
+
+  /**
+   * Eine fehlende Laufzeit, strukturiert: die Oberflaeche zeigt bei einem
+   * Netzproblem nur "Ohne Internet geht das nicht." (1.8) und behaelt den
+   * Grund fuer das Protokoll. Ein Pruefsummenfehler ist KEIN Netzproblem.
+   */
+  function fehlendEintrag(platform, err) {
+    const message = err && err.message ? err.message : String(err);
+    const code = (err && err.code) || null;
+    const netz = !(err instanceof NeuralError) || code === 'NETWORK_BLOCKED' || code === 'VALIDATION_FAILED' || /^NETWORK/.test(String(code));
+    return { platform, name: plattformName(platform), grund: message, code, satz: netz ? SATZ.OHNE_INTERNET : null };
+  }
+
+  /** Die Hinweise zum Dateisystem des Sticks, mit dem Mac-Weg ueber mount. */
+  async function dateisystemHinweise(wurzel, fsInfo) {
+    let name = fsInfo && fsInfo.typeName && fsInfo.typeName !== 'unbekannt' ? fsInfo.typeName : null;
+    let mac = null;
+    try { mac = await dateisystemTyp(wurzel, { platform: plattform, run }); } catch { mac = null; }
+    if (mac && mac.typ) name = mac.typ;
+    const h = dateisystemHinweis(name);
+    return { name, hinweise: h ? [h] : [] };
+  }
+
   /* --------------------------------------------------------- public API */
 
   /**
-   * Make `targetDir` a running Neural OS stick.
+   * Make `targetDir` a running Neural OS stick with a NEW KI of its own.
    *
-   * @param {string} targetDir
-   * @param {{includeRuntimes?:boolean|'all'|string[], includeVault?:boolean,
-   *          sourceHome?:string, sourceRoot?:string, onProgress?:Function,
-   *          signal?:AbortSignal}} [opts]
+   * Was hier nicht mehr geht: die Rohkopie des eigenen Datenbestands
+   * (`includeVault`). Sie klonte Kennung, Paarschluessel und Freigaben
+   * (Befunde 11 und 13). Gleiches Wissen auf zwei Sticks ist Koppeln, und
+   * das macht die Route mit `ki:'gekoppelt'` NACH diesem Vorgang.
+   *
+   * @param {string} targetDir die Wurzel des Sticks (das Laufwerk)
+   * @param {{ki?:'neu'|'gekoppelt', name?:string, includeRuntimes?:boolean|'all'|string[],
+   *          sourceRoot?:string, onProgress?:Function, signal?:AbortSignal}} [opts]
    *   `signal` bricht den Vorgang ab -- der Fall "Browsertab zu, waehrend 8 GB
    *   kopiert werden". Ohne ihn laeuft alles wie bisher.
-   * @returns {Promise<{root:string, bytes:number, files:number, runtimes:object[], warnings:string[]}>}
    */
   async function prepare(targetDir, opts = {}) {
     const root = requireTarget(targetDir, 'prepare()');
-    const release = lockRoot(root, 'Stick vorbereiten');
+    if (opts.includeVault === true) throw new ValidationError(SATZ.ROHKOPIE);
+    const lage = aufbauVon(root);
+    const release = lockRoot(lage.wurzel, 'Stick vorbereiten');
     try {
-      return await prepareLocked(root, opts);
+      return await prepareLocked(lage, opts);
     } finally {
       release();
     }
   }
 
-  async function prepareLocked(root, opts) {
+  async function prepareLocked(lage, opts) {
+    const { wurzel, basis } = lage;
     const signal = opts.signal || null;
     const what = 'Das Vorbereiten des Sticks';
     throwIfAborted(signal, what);
     const sourceRoot = path.resolve(opts.sourceRoot || APP_ROOT);
     const progress = makeProgress(opts.onProgress, log);
     const warnings = [];
+    const wunschName = nameWahl(opts.name);
 
     if (!fs.existsSync(sourceRoot)) {
       throw new StickNotFoundError(`Den Quelltext-Ordner ${sourceRoot} gibt es nicht.`, { sourceRoot });
     }
     // Copying a tree into itself produces an ever-growing copy. Refuse early.
-    if (isInside(sourceRoot, root)) {
+    if (isInside(sourceRoot, wurzel)) {
       throw new ValidationError(
-        `Der Stick-Ordner ${root} liegt im Quelltext-Ordner ${sourceRoot}. Wähle einen Ordner ausserhalb, `
+        `Der Stick-Ordner ${wurzel} liegt im Quelltext-Ordner ${sourceRoot}. Wähle einen Ordner ausserhalb, `
         + 'sonst wuerde sich die Kopie endlos selbst kopieren.',
       );
     }
-    if (isInside(root, sourceRoot)) {
-      throw new ValidationError(`Der Quelltext liegt im Zielordner ${root}. Wähle einen anderen Zielordner.`);
+    if (isInside(wurzel, sourceRoot)) {
+      throw new ValidationError(`Der Quelltext liegt im Zielordner ${wurzel}. Wähle einen anderen Zielordner.`);
     }
+
+    // ---- wohnt hier schon eine KI? Vor dem ersten Byte. ----
+    const dataDir = dataDirIn(basis);
+    const belegt = kiEintraege(dataDir);
+    if (belegt.length) throw new KiVorhandenError({ dataDir, entries: belegt.length });
 
     const plan = resolvePlatforms(opts.includeRuntimes);
     if (!plan.local) {
@@ -2074,60 +2412,46 @@ function createStick(deps = {}) {
     const source = collectTree(sourceRoot);
     warnings.push(...source.warnings);
 
-    let home = null;
-    if (opts.includeVault) {
-      const homeDir = opts.sourceHome || (appPaths && appPaths.home);
-      if (!homeDir) {
-        throw new ValidationError(
-          'Für eine Sicherung des Datenbestands fehlt der Quellordner. Uebergib sourceHome, '
-          + 'oder erzeuge das Werkzeug mit paths aus einer laufenden Instanz.',
-        );
-      }
-      if (!fs.existsSync(homeDir)) {
-        throw new StickNotFoundError(`Den Datenordner ${homeDir} gibt es nicht.`, { homeDir });
-      }
-      if (isInside(homeDir, root) || isInside(root, homeDir)) {
-        throw new ValidationError(`Der Datenordner ${homeDir} und der Stick-Ordner ${root} duerfen nicht ineinander liegen.`);
-      }
-      home = collectTree(homeDir, { exclude: HOME_EXCLUDED_NAMES, dropLogs: false });
-      warnings.push(...home.warnings);
-    }
-
     // ---- the space check, before a single byte of content is written ----
-    mkdirp(root);
+    mkdirp(wurzel);
     const localRuntimeBytes = plan.local && LOCAL_PLATFORM ? sizeOf(process.execPath) : 0;
     const bedarf = {
       sourceBytes: source.bytes,
       runtimeBytes: localRuntimeBytes,
-      homeBytes: home ? home.bytes : 0,
       extraRuntimes: plan.extra.length,
     };
     const { withHeadroom } = spaceNeeded('prepare', bedarf);
-    const free = freeBytes(root);
+    const free = freeBytes(wurzel);
     if (free === null) {
       warnings.push('Der freie Platz auf dem Stick ließ sich nicht ermitteln; der Vorgang läuft ohne diese Prüfung.');
     } else if (free < withHeadroom) {
       throw stickFull('prepare', { ...bedarf, free, withHeadroom });
     }
 
-    const fsInfo = probeFilesystem(root);
+    const fsInfo = probeFilesystem(wurzel);
     if (!fsInfo.writable) {
       throw new PermissionError(
-        `In ${root} lässt sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}). `
+        `In ${wurzel} lässt sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}). `
         + 'Ist der Stick schreibgeschützt oder nur lesend eingehängt?',
-        { root, error: fsInfo.error },
+        { root: wurzel, error: fsInfo.error },
       );
     }
     warnFilesystem(fsInfo, warnings);
+    // Erst jetzt der Ordner "Inhalt": alles davor durfte nichts anlegen.
+    mkdirp(basis);
 
-    const recovered = cleanStale(root);
+    const recovered = cleanStale(basis);
+    if (wurzel !== basis) {
+      const oben = cleanStale(wurzel);
+      recovered.restored.push(...oben.restored);
+    }
     if (recovered.restored.length) {
       warnings.push(`Ein früher abgebrochener Kopiervorgang wurde repariert (wiederhergestellt: ${recovered.restored.join(', ')}).`);
     }
 
     // ---- source tree: build beside, then swap ----
     progress({ phase: 'source', message: 'Quelltext wird kopiert …', total: source.files.length });
-    const tmpApp = path.join(root, `.${LAYOUT.app}.tmp-${randomSuffix()}`);
+    const tmpApp = path.join(basis, `.${LAYOUT.app}.tmp-${randomSuffix()}`);
     rmrf(tmpApp);
     mkdirp(tmpApp);
     let written;
@@ -2142,7 +2466,7 @@ function createStick(deps = {}) {
           ...p,
         }),
       });
-      await swapIntoPlace(path.join(root, LAYOUT.app), tmpApp);
+      await swapIntoPlace(path.join(basis, LAYOUT.app), tmpApp);
     } catch (err) {
       // Auch bei Abbruch: das halbfertige Verzeichnis verschwindet, der
       // vorherige Stand bleibt unangetastet.
@@ -2153,44 +2477,11 @@ function createStick(deps = {}) {
     let totalBytes = written.bytes;
     let totalFiles = written.files;
 
-    // ---- data and sync directories ----
-    const dataDir = dataDirOf(root);
+    // ---- data and sync directories, and the KI that lives here ----
     mkdirp(dataDir, 0o700);
-    mkdirp(path.join(root, LAYOUT.sync), 0o700);
-
-    if (home) {
-      const existing = fs.readdirSync(dataDir).filter((n) => !n.startsWith('.'));
-      if (existing.length) throw dataPresent(dataDir, existing.length);
-      progress({ phase: 'data', message: 'Datenbestand wird auf den Stick kopiert …', total: home.files.length });
-      const vorhandene = new Set(fs.readdirSync(dataDir));
-      let copiedHome;
-      try {
-        copiedHome = await copyFiles(home.files, dataDir, {
-          label: 'data',
-          signal,
-          what,
-          onFile: (p) => progress({
-            phase: 'data',
-            message: `Datenbestand wird kopiert (${p.copied}/${p.total}, ${p.percent} %) …`,
-            ...p,
-          }),
-        });
-      } catch (err) {
-        // Eine halbe Sicherung sieht aus wie eine ganze und ist deshalb
-        // schlimmer als keine -- also wird zurueckgenommen, was dieser Vorgang
-        // angelegt hat, und nur das.
-        await removeNewEntries(dataDir, vorhandene);
-        throw err;
-      }
-      totalBytes += copiedHome.bytes;
-      totalFiles += copiedHome.files;
-      if (fsInfo.enforcesModes === false) {
-        warnings.push(
-          'Der Datenbestand liegt jetzt auf einem Dateisystem ohne Zugriffsrechte. Falls die Sicherung '
-          + 'unverschlüsselt war, kann sie jeder lesen, der den Stick findet.',
-        );
-      }
-    }
+    mkdirp(path.join(basis, LAYOUT.sync), 0o700);
+    const ki = kiAnlegen(dataDir, wunschName, wurzel);
+    totalFiles += 1;
 
     // ---- runtimes ----
     const runtimes = [];
@@ -2204,7 +2495,7 @@ function createStick(deps = {}) {
         message: `Laufzeit für ${LOCAL_PLATFORM || 'dieses System'} wird kopiert …`,
         platform: LOCAL_PLATFORM,
       });
-      const localRuntime = await copyLocalRuntime(root, warnings, signal);
+      const localRuntime = await copyLocalRuntime(basis, warnings, signal);
       if (localRuntime) {
         runtimes.push(localRuntime);
         totalBytes += localRuntime.bytes;
@@ -2214,20 +2505,20 @@ function createStick(deps = {}) {
           warnings.push(
             `Die kopierte Laufzeit ließ sich auf dem Stick nicht starten (${check.reason}). `
             + 'Häufigster Grund: der Stick ist mit "noexec" eingehängt. Auf einem anderen Rechner '
-            + 'funktioniert sie in der Regel trotzdem; notfalls den Ordner auf die Festplatte kopieren.',
+            + 'funktioniert sie in der Regel trotzdem.',
           );
         }
       }
     }
 
     // Welche Laufzeit fehlt und warum -- strukturiert, damit die Oberflaeche
-    // "laeuft auf Windows, der Mac fehlt: keine Verbindung" sagen kann, ohne
-    // Warnsaetze auseinanderzunehmen.
+    // "Läuft bisher nur an Windows." sagen kann, ohne Warnsaetze
+    // auseinanderzunehmen. Ohne Netz ist das kein Fehler (2.10.1).
     const fehlend = [];
     for (const platform of plan.extra) {
       throwIfAborted(signal, what);
       try {
-        const got = await downloadRuntime(root, platform, progress, signal);
+        const got = await laufzeitBeschaffen(basis, platform, progress, signal);
         runtimes.push(got);
         totalBytes += got.bytes;
         totalFiles += 1;
@@ -2239,7 +2530,7 @@ function createStick(deps = {}) {
         // stick. It is reported in full and the work continues.
         const message = err && err.message ? err.message : String(err);
         warnings.push(`Laufzeit für ${platform} wurde NICHT auf den Stick gelegt: ${message}`);
-        fehlend.push({ platform, grund: message, code: (err && err.code) || null });
+        fehlend.push(fehlendEintrag(platform, err));
         log.warn(`Laufzeit ${platform} fehlgeschlagen: ${message}`);
       }
     }
@@ -2247,42 +2538,57 @@ function createStick(deps = {}) {
     // ---- launchers, readme, marker ----
     throwIfAborted(signal, what);
     progress({ phase: 'finish', message: 'Starter und Hinweise werden geschrieben …', percent: 99 });
-    const launchers = deployLaunchers(root, sourceRoot);
+    const launchers = deployLaunchers(lage, sourceRoot);
     warnings.push(...launchers.warnings);
-
-    const platformsOnStick = detectPlatforms(root).map((p) => p.platform);
-    writeFileAtomic(path.join(root, LAYOUT.readme), renderReadme({
-      platforms: platformsOnStick,
-      version: appVersion(sourceRoot),
-      fsInfo,
-    }));
-    writeMarker(root, {
+    spotlightAus(wurzel);
+    writeFileAtomic(path.join(wurzel, LAYOUT.readme), renderReadme());
+    writeMarker(basis, {
+      kiId: ki.id,
+      name: ki.name,
       preparedBy: `${process.platform}-${process.arch}`,
       nodeVersion: process.version,
     });
 
+    const ds = await dateisystemHinweise(wurzel, fsInfo);
+    warnings.push(...ds.hinweise.map((h) => h.satz));
+
     progress({ phase: 'done', message: 'Der Stick ist fertig.', bytes: totalBytes, files: totalFiles, percent: 100 });
-    return { root, bytes: totalBytes, files: totalFiles, runtimes, fehlend, warnings, vault: !!home };
+    return {
+      root: wurzel,
+      basis,
+      aufbau: lage.aufbau,
+      dataDir,
+      ki,
+      bytes: totalBytes,
+      files: totalFiles,
+      runtimes,
+      fehlend,
+      warnings,
+      hinweise: ds.hinweise,
+      dateisystem: ds.name,
+    };
   }
 
   /**
    * Replace the source tree on an existing stick, and nothing else.
    *
    * `data/`, `sync/` and `runtime/` are deliberately untouched. That is the
-   * reason this function exists separately from `prepare()`.
+   * reason this function exists separately from `prepare()`. Der Aufbau
+   * bleibt, wie er ist: ein alter Stick bekommt keinen Ordner "Inhalt".
    */
   async function update(targetDir, opts = {}) {
     const root = requireTarget(targetDir, 'update()');
-    requireStick(root, 'update()');
-    const release = lockRoot(root, 'Stick aktualisieren');
+    const lage = requireStick(root, 'update()');
+    const release = lockRoot(lage.wurzel, 'Stick aktualisieren');
     try {
-      return await updateLocked(root, opts);
+      return await updateLocked(lage, opts);
     } finally {
       release();
     }
   }
 
-  async function updateLocked(root, opts) {
+  async function updateLocked(lage, opts) {
+    const { wurzel, basis } = lage;
     const signal = opts.signal || null;
     const what = 'Das Aktualisieren des Sticks';
     throwIfAborted(signal, what);
@@ -2290,40 +2596,41 @@ function createStick(deps = {}) {
     const progress = makeProgress(opts.onProgress, log);
     const warnings = [];
 
-    if (isInside(sourceRoot, root) || isInside(root, sourceRoot)) {
-      throw new ValidationError(`Quelltext (${sourceRoot}) und Stick (${root}) duerfen nicht ineinander liegen.`);
+    if (isInside(sourceRoot, wurzel) || isInside(wurzel, sourceRoot)) {
+      throw new ValidationError(`Quelltext (${sourceRoot}) und Stick (${wurzel}) duerfen nicht ineinander liegen.`);
     }
 
-    const appDir = path.join(root, LAYOUT.app);
-    assertNichtGeschuetzt(root, appDir);
+    const appDir = path.join(basis, LAYOUT.app);
+    assertNichtGeschuetzt(basis, appDir);
 
     progress({ phase: 'check', message: 'Quelltext wird vermessen …' });
     const source = collectTree(sourceRoot);
     warnings.push(...source.warnings);
 
-    const free = freeBytes(root);
+    const free = freeBytes(basis);
     const { withHeadroom: needed } = spaceNeeded('update', { sourceBytes: source.bytes });
     if (free !== null && free < needed) {
       throw stickFull('update', { free, withHeadroom: needed, sourceBytes: source.bytes });
     }
 
-    const fsInfo = probeFilesystem(root);
+    const fsInfo = probeFilesystem(wurzel);
     if (!fsInfo.writable) {
       throw new PermissionError(
-        `In ${root} lässt sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}). Ist der Stick schreibgeschützt?`,
-        { root },
+        `In ${wurzel} lässt sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}). Ist der Stick schreibgeschützt?`,
+        { root: wurzel },
       );
     }
     warnFilesystem(fsInfo, warnings);
 
-    const recovered = cleanStale(root);
+    const recovered = cleanStale(basis);
+    if (wurzel !== basis) recovered.restored.push(...cleanStale(wurzel).restored);
     if (recovered.restored.length) {
       warnings.push(`Ein früher abgebrochener Kopiervorgang wurde repariert (wiederhergestellt: ${recovered.restored.join(', ')}).`);
     }
 
     progress({ phase: 'source', message: 'Quelltext wird erneuert …', total: source.files.length });
-    const tmpApp = path.join(root, `.${LAYOUT.app}.tmp-${randomSuffix()}`);
-    assertNichtGeschuetzt(root, tmpApp);
+    const tmpApp = path.join(basis, `.${LAYOUT.app}.tmp-${randomSuffix()}`);
+    assertNichtGeschuetzt(basis, tmpApp);
     rmrf(tmpApp);
     mkdirp(tmpApp);
     let written;
@@ -2346,18 +2653,15 @@ function createStick(deps = {}) {
 
     throwIfAborted(signal, what);
     progress({ phase: 'finish', message: 'Starter und Hinweise werden erneuert …', percent: 99 });
-    for (const launcher of LAUNCHERS) assertNichtGeschuetzt(root, path.join(root, launcher.target));
-    const launchers = deployLaunchers(root, sourceRoot);
+    for (const launcher of LAUNCHERS) assertNichtGeschuetzt(basis, launcherPath(lage, launcher));
+    const launchers = deployLaunchers(lage, sourceRoot);
     warnings.push(...launchers.warnings);
+    spotlightAus(wurzel);
 
-    const readme = path.join(root, LAYOUT.readme);
-    assertNichtGeschuetzt(root, readme);
-    writeFileAtomic(readme, renderReadme({
-      platforms: detectPlatforms(root).map((p) => p.platform),
-      version: appVersion(sourceRoot),
-      fsInfo,
-    }));
-    writeMarker(root, { nodeVersion: process.version });
+    const readme = path.join(wurzel, LAYOUT.readme);
+    assertNichtGeschuetzt(basis, readme);
+    writeFileAtomic(readme, renderReadme());
+    writeMarker(basis, { nodeVersion: process.version });
 
     progress({
       phase: 'done',
@@ -2366,7 +2670,7 @@ function createStick(deps = {}) {
       files: written.files,
       percent: 100,
     });
-    return { root, bytes: written.bytes, files: written.files, warnings, dataDir: dataDirOf(root) };
+    return { root: wurzel, basis, aufbau: lage.aufbau, bytes: written.bytes, files: written.files, warnings, dataDir: dataDirIn(basis) };
   }
 
   /**
@@ -2389,29 +2693,30 @@ function createStick(deps = {}) {
    * Oberflaeche es anzeigen kann, statt einen Fehler zu werfen.
    *
    * @param {string} targetDir
-   * @param {{action?:'prepare'|'update'|'runtime', includeVault?:boolean,
-   *          includeRuntimes?:*, platform?:string, sourceRoot?:string,
-   *          sourceHome?:string}} [opts]
+   * @param {{action?:'prepare'|'update'|'runtime', includeRuntimes?:*,
+   *          platform?:string, sourceRoot?:string}} [opts]
    */
   function preview(targetDir, opts = {}) {
     const action = opts.action === 'update' || opts.action === 'runtime' ? opts.action : 'prepare';
     const label = action === 'update' ? 'Die Vorschau auf "Stick aktualisieren"'
       : action === 'runtime' ? 'Die Vorschau auf "Laufzeit holen"' : 'Die Vorschau auf "Stick vorbereiten"';
     const root = requireTarget(targetDir, label);
-    if (action !== 'prepare') requireStick(root, label);
+    if (opts.includeVault === true) throw new ValidationError(SATZ.ROHKOPIE);
+    const lage = action === 'prepare' ? aufbauVon(root) : requireStick(root, label);
+    const { wurzel, basis } = lage;
 
     const warnings = [];
     const blockers = [];
     const block = (err) => blockers.push({ code: err.code, status: err.status, message: err.message });
 
-    const exists = fs.existsSync(root);
-    const marker = readMarker(root);
+    const exists = fs.existsSync(wurzel);
+    const marker = lage.istStick ? readMarker(basis) : null;
 
     // Ein laufender Vorgang ist der haeufigste Grund, aus dem ein zweiter
     // Klick nichts tun darf -- und der einzige, den man auf der Platte nicht
     // sehen kann.
-    const running = runningOn(root);
-    if (running) block(busyError(root, running));
+    const running = runningOn(wurzel);
+    if (running) block(busyError(wurzel, running));
 
     // ---- Quelltext ----
     const sourceRoot = path.resolve(opts.sourceRoot || APP_ROOT);
@@ -2420,38 +2725,17 @@ function createStick(deps = {}) {
       if (!fs.existsSync(sourceRoot)) {
         throw new StickNotFoundError(`Den Quelltext-Ordner ${sourceRoot} gibt es nicht.`, { sourceRoot });
       }
-      if (isInside(sourceRoot, root)) {
+      if (isInside(sourceRoot, wurzel)) {
         throw new ValidationError(
-          `Der Stick-Ordner ${root} liegt im Quelltext-Ordner ${sourceRoot}. Wähle einen Ordner ausserhalb, `
+          `Der Stick-Ordner ${wurzel} liegt im Quelltext-Ordner ${sourceRoot}. Wähle einen Ordner ausserhalb, `
           + 'sonst wuerde sich die Kopie endlos selbst kopieren.',
         );
       }
-      if (isInside(root, sourceRoot)) {
-        throw new ValidationError(`Der Quelltext liegt im Zielordner ${root}. Wähle einen anderen Zielordner.`);
+      if (isInside(wurzel, sourceRoot)) {
+        throw new ValidationError(`Der Quelltext liegt im Zielordner ${wurzel}. Wähle einen anderen Zielordner.`);
       }
       source = collectTree(sourceRoot);
       warnings.push(...source.warnings);
-    }
-
-    // ---- Datenbestand ----
-    let home = null;
-    let homeDir = null;
-    if (action === 'prepare' && opts.includeVault) {
-      homeDir = opts.sourceHome || (appPaths && appPaths.home) || null;
-      if (!homeDir) {
-        throw new ValidationError(
-          'Für eine Sicherung des Datenbestands fehlt der Quellordner. Uebergib sourceHome, '
-          + 'oder erzeuge das Werkzeug mit paths aus einer laufenden Instanz.',
-        );
-      }
-      if (!fs.existsSync(homeDir)) {
-        throw new StickNotFoundError(`Den Datenordner ${homeDir} gibt es nicht.`, { homeDir });
-      }
-      if (isInside(homeDir, root) || isInside(root, homeDir)) {
-        throw new ValidationError(`Der Datenordner ${homeDir} und der Stick-Ordner ${root} duerfen nicht ineinander liegen.`);
-      }
-      home = collectTree(homeDir, { exclude: HOME_EXCLUDED_NAMES, dropLogs: false });
-      warnings.push(...home.warnings);
     }
 
     // ---- Laufzeiten ----
@@ -2468,18 +2752,17 @@ function createStick(deps = {}) {
     } else {
       plan = resolvePlatforms(opts.includeRuntimes);
     }
-    const onStick = detectPlatforms(root);
+    const onStick = lage.istStick ? detectPlatforms(basis) : [];
     const runtimeBytes = plan.local && LOCAL_PLATFORM ? sizeOf(process.execPath) : 0;
 
     // ---- Platz, mit derselben Formel wie der Vorgang ----
     const bedarf = {
       sourceBytes: source.bytes,
       runtimeBytes,
-      homeBytes: home ? home.bytes : 0,
       extraRuntimes: plan.extra.length,
     };
     const { required, withHeadroom } = spaceNeeded(action, bedarf);
-    const free = freeBytes(root);
+    const free = freeBytes(exists ? basis : wurzel);
     let fits = null;
     if (free === null) {
       warnings.push('Der freie Platz ließ sich hier nicht ermitteln; der Vorgang läuft dann ohne diese Prüfung.');
@@ -2495,42 +2778,40 @@ function createStick(deps = {}) {
     }
 
     // ---- Dateisystem, ohne Sonde ----
-    const probeDir = exists ? root : nearestExisting(root);
+    const probeDir = exists ? wurzel : nearestExisting(wurzel);
     const filesystem = probeDir
-      ? inspectFilesystem(probeDir, exists ? modeWitnesses(root) : [])
+      ? inspectFilesystem(probeDir, exists ? modeWitnesses(lage) : [])
       : emptyFsInfo();
     if (!probeDir) {
-      warnings.push(`Von ${root} existiert kein einziger übergeordneter Ordner; der Pfad ist vermutlich falsch getippt.`);
+      warnings.push(`Von ${wurzel} existiert kein einziger übergeordneter Ordner; der Pfad ist vermutlich falsch getippt.`);
     } else if (!filesystem.writable) {
       block(new PermissionError(
         exists
-          ? `In ${root} lässt sich nicht schreiben (${filesystem.error || 'unbekannter Grund'}). `
+          ? `In ${wurzel} lässt sich nicht schreiben (${filesystem.error || 'unbekannter Grund'}). `
             + 'Ist der Stick schreibgeschützt oder nur lesend eingehängt?'
-          : `Den Ordner ${root} gibt es noch nicht, und in ${probeDir} lässt sich nichts anlegen `
+          : `Den Ordner ${wurzel} gibt es noch nicht, und in ${probeDir} lässt sich nichts anlegen `
             + `(${filesystem.error || 'unbekannter Grund'}).`,
-        { root },
+        { root: wurzel },
       ));
     }
     warnFilesystem(filesystem, warnings);
+    const hinweis = dateisystemHinweis(filesystem.typeName);
+    const hinweise = hinweis ? [hinweis] : [];
 
-    // ---- Datenordner auf dem Stick ----
-    const dataDir = dataDirOf(root);
-    let dataEntries = [];
-    try {
-      dataEntries = fs.readdirSync(dataDir).filter((n) => !n.startsWith('.'));
-    } catch { /* gibt es noch nicht */ }
-    if (action === 'prepare' && home && dataEntries.length) {
-      block(dataPresent(dataDir, dataEntries.length));
+    // ---- Datenordner auf dem Stick: wohnt hier schon eine KI? ----
+    const dataDir = dataDirIn(basis);
+    const dataEntries = kiEintraege(dataDir);
+    if (action === 'prepare' && dataEntries.length) {
+      block(new KiVorhandenError({ dataDir, entries: dataEntries.length }));
     }
 
-    const stale = [];
-    try {
-      for (const entry of fs.readdirSync(root)) if (STALE_RE.test(entry)) stale.push(entry);
-    } catch { /* der Ordner muss noch nicht existieren */ }
+    const stale = [...new Set([...resteIn(basis), ...(wurzel === basis ? [] : resteIn(wurzel))])];
 
     return {
       action,
-      root,
+      root: wurzel,
+      basis,
+      aufbau: lage.aufbau,
       exists,
       isStick: !!marker,
       marker: marker ? {
@@ -2538,6 +2819,8 @@ function createStick(deps = {}) {
         updatedAt: marker.updatedAt || null,
         preparedBy: marker.preparedBy || null,
         nodeVersion: marker.nodeVersion || null,
+        kiId: marker.kiId || null,
+        name: marker.name || null,
       } : null,
       source: action === 'runtime' ? null : {
         root: sourceRoot,
@@ -2545,7 +2828,6 @@ function createStick(deps = {}) {
         files: source.files.length,
         bytes: source.bytes,
       },
-      home: home ? { root: homeDir, files: home.files.length, bytes: home.bytes } : null,
       data: { path: dataDir, exists: fs.existsSync(dataDir), entries: dataEntries.length },
       runtimes: {
         local: LOCAL_PLATFORM,
@@ -2555,6 +2837,7 @@ function createStick(deps = {}) {
       },
       space: { free, required, withHeadroom, fits },
       filesystem,
+      hinweise,
       running,
       stale,
       blockers,
@@ -2576,34 +2859,43 @@ function createStick(deps = {}) {
    * liegen. Wer die Schreibsonde trotzdem will, verlangt sie ausdruecklich:
    * `verify(pfad, { probe: true })`.
    *
+   * Fehlt Windows oder der Mac, ist das ein Fehler (FEHLT_WINDOWS,
+   * FEHLT_MAC; Bauplan 2.10.1): Der Stick soll an beiden Geraeten des
+   * Nutzers starten. `startklar` sagt zusaetzlich je Rechner, was geht.
+   *
    * @param {string} targetDir
    * @param {{probe?:boolean}} [opts]
    */
   async function verify(targetDir, opts = {}) {
     const root = requireTarget(targetDir, 'verify()');
+    const lage = aufbauVon(root);
+    const { wurzel, basis } = lage;
     const probeWrite = opts.probe === true;
     const problems = [];
     const add = (level, code, message, fix) => problems.push({ level, code, message, fix });
 
-    const exists = fs.existsSync(root);
+    const exists = fs.existsSync(wurzel);
     const layout = {
-      root,
-      marker: { path: markerPath(root), exists: false },
-      app: { path: path.join(root, LAYOUT.app), exists: false },
-      data: { path: path.join(root, LAYOUT.data), exists: false },
-      runtime: { path: path.join(root, LAYOUT.runtime), exists: false },
-      sync: { path: path.join(root, LAYOUT.sync), exists: false },
-      readme: { path: path.join(root, LAYOUT.readme), exists: false },
+      root: wurzel,
+      basis,
+      aufbau: lage.aufbau,
+      marker: { path: markerPath(basis), exists: false },
+      app: { path: path.join(basis, LAYOUT.app), exists: false },
+      data: { path: path.join(basis, LAYOUT.data), exists: false },
+      runtime: { path: path.join(basis, LAYOUT.runtime), exists: false },
+      sync: { path: path.join(basis, LAYOUT.sync), exists: false },
+      readme: { path: path.join(wurzel, LAYOUT.readme), exists: false },
       launchers: {},
       runtimes: [],
     };
+    const startklar = { hier: false, windows: false, mac: false };
 
     if (!exists) {
-      add('error', 'NO_STICK', `Der Ordner ${root} existiert nicht.`, 'Stecke den Stick ein und wähle den richtigen Ordner.');
-      return { ok: false, problems, layout, freeBytes: null };
+      add('error', 'NO_STICK', `Der Ordner ${wurzel} existiert nicht.`, 'Stecke den Stick ein und wähle den richtigen Ordner.');
+      return { ok: false, problems, layout, freeBytes: null, root: wurzel, basis, aufbau: lage.aufbau, ki: null, version: null, startklar, hinweise: [] };
     }
 
-    const marker = readMarker(root);
+    const marker = readMarker(basis);
     layout.marker.exists = fs.existsSync(layout.marker.path);
     if (!marker) {
       add('error', 'MARKER_MISSING',
@@ -2611,22 +2903,19 @@ function createStick(deps = {}) {
         'Stick einmal mit "Stick aktualisieren" anfassen - dabei wird die Datei neu geschrieben.');
     }
 
-    layout.data = { path: dataDirOf(root), exists: fs.existsSync(dataDirOf(root)) };
+    layout.data = { path: dataDirIn(basis), exists: fs.existsSync(dataDirIn(basis)) };
     layout.app.exists = fs.existsSync(layout.app.path);
     layout.runtime.exists = fs.existsSync(layout.runtime.path);
-    layout.sync.exists = fs.existsSync(path.join(root, LAYOUT.sync));
-    layout.readme.exists = fs.existsSync(path.join(root, LAYOUT.readme));
+    layout.sync.exists = fs.existsSync(layout.sync.path);
+    layout.readme.exists = fs.existsSync(layout.readme.path);
 
     // An interrupted copy is the one failure mode a stick really has.
-    const stale = [];
-    try {
-      for (const entry of fs.readdirSync(root)) if (STALE_RE.test(entry)) stale.push(entry);
-    } catch { /* handled by the checks below */ }
+    const stale = [...new Set([...resteIn(basis), ...(wurzel === basis ? [] : resteIn(wurzel))])];
     // Ein gerade laufender Vorgang sieht auf der Platte genauso aus wie ein
     // abgebrochener -- gleiche Namen, gleiche halbe Ordner. Ihn als Abbruch zu
     // melden waere ein erfundener Befund, und der zweite Browsertab macht das
     // ueber HTTP zum Normalfall.
-    const running = runningOn(root);
+    const running = runningOn(wurzel);
     if (running) {
       add('info', 'OPERATION_RUNNING',
         `Auf diesem Stick läuft gerade "${running.what}". Was hier steht, ist eine Momentaufnahme mittendrin.`,
@@ -2644,6 +2933,7 @@ function createStick(deps = {}) {
           : 'Der Ordner "app" fehlt dadurch. Rufe "Stick aktualisieren" auf - dabei wird der vorherige Stand wiederhergestellt.');
     }
 
+    let appOk = layout.app.exists;
     if (!layout.app.exists) {
       add('error', 'APP_MISSING', 'Der Ordner "app" mit dem Programm fehlt.', 'Stick neu vorbereiten oder aktualisieren.');
     } else {
@@ -2651,6 +2941,7 @@ function createStick(deps = {}) {
       // state that otherwise only shows up as a confusing crash at startup.
       for (const rel of ['bin/neural-os.js', 'src/app.js', 'src/kernel/paths.js', 'web/index.html', 'package.json']) {
         if (!fs.existsSync(path.join(layout.app.path, rel))) {
+          appOk = false;
           add('error', 'APP_INCOMPLETE', `Im Programmordner fehlt "${rel}" - die Kopie ist unvollständig.`,
             'Rufe "Stick aktualisieren" auf; dabei wird der Quelltext vollstaendig neu geschrieben.');
         }
@@ -2661,19 +2952,30 @@ function createStick(deps = {}) {
       add('warn', 'DATA_MISSING', 'Der Datenordner fehlt.', 'Er wird beim nächsten Start automatisch angelegt.');
     }
 
-    layout.runtimes = detectPlatforms(root);
+    layout.runtimes = detectPlatforms(basis);
+    const hatLokal = !!LOCAL_PLATFORM && layout.runtimes.some((r) => r.platform === LOCAL_PLATFORM);
     if (!layout.runtimes.length) {
       add('error', 'NO_RUNTIME', 'Auf dem Stick liegt keine einzige Laufzeitumgebung.',
         'Bereite den Stick erneut vor - dabei wird die Laufzeit dieses Rechners immer mitkopiert.');
-    } else if (LOCAL_PLATFORM && !layout.runtimes.some((r) => r.platform === LOCAL_PLATFORM)) {
+    } else if (LOCAL_PLATFORM && !hatLokal) {
       add('warn', 'NO_LOCAL_RUNTIME',
         `Für dieses System (${LOCAL_PLATFORM}) liegt keine Laufzeit auf dem Stick; vorhanden sind: `
         + `${layout.runtimes.map((r) => r.platform).join(', ')}.`,
         'Auf diesem Rechner startet der Stick nur, wenn Node.js installiert ist. "Stick aktualisieren" auf diesem Rechner legt die passende Laufzeit an.');
     }
+    // Die Geraete des Nutzers: ein Windows-Laptop und ein MacBook. Fehlt
+    // eines, sagt der Stick das in dem Satz, den die Ansicht zeigt (1.8).
+    startklar.windows = layout.runtimes.some((r) => r.platform.startsWith('win-'));
+    startklar.mac = layout.runtimes.some((r) => r.platform.startsWith('darwin-'));
+    if (!startklar.windows) {
+      add('error', 'FEHLT_WINDOWS', startklar.mac ? SATZ.NUR_MAC : SATZ.FEHLT_WINDOWS, SATZ.FUER_WINDOWS);
+    }
+    if (!startklar.mac) {
+      add('error', 'FEHLT_MAC', startklar.windows ? SATZ.NUR_WINDOWS : SATZ.FEHLT_MAC, SATZ.FUER_MAC);
+    }
 
     for (const launcher of LAUNCHERS) {
-      const file = path.join(root, launcher.target);
+      const file = launcherPath(lage, launcher);
       const present = fs.existsSync(file);
       layout.launchers[launcher.target] = { path: file, exists: present };
       if (!present) {
@@ -2682,7 +2984,15 @@ function createStick(deps = {}) {
       }
     }
 
-    const fsInfo = probeWrite ? probeFilesystem(root) : inspectFilesystem(root, modeWitnesses(root));
+    // Ein aelteres Programm auf dem Stick: [Erneuern] (1.6).
+    const stickVersion = layout.app.exists ? appVersion(layout.app.path) : null;
+    const version = stickVersion && stickVersion !== 'unbekannt' ? stickVersion : null;
+    const hier = laufendeVersion();
+    if (version && hier !== 'unbekannt' && vergleicheVersion(version, hier) < 0) {
+      add('warn', 'PROGRAMM_AELTER', SATZ.AELTER, SATZ.ERNEUERN);
+    }
+
+    const fsInfo = probeWrite ? probeFilesystem(wurzel) : inspectFilesystem(wurzel, modeWitnesses(lage));
     if (!fsInfo.writable) {
       add('error', 'READ_ONLY', `Auf den Stick lässt sich nicht schreiben (${fsInfo.error || 'unbekannter Grund'}).`,
         'Schreibschutz-Schalter prüfen, oder der Stick ist nur lesend eingehängt. Ohne Schreibrecht kann Neural OS nichts speichern.');
@@ -2697,31 +3007,44 @@ function createStick(deps = {}) {
         'Ob dieses Dateisystem Zugriffsrechte durchsetzt, ist hier nicht zu sehen - die Prüfung schreibt nichts auf den Stick.',
         'Beim Vorbereiten oder Aktualisieren wird es geprüft und gemeldet; bis dahin gilt: auf einem Stick schützt nur Verschlüsselung.');
     }
+    const ds = await dateisystemHinweise(wurzel, fsInfo);
+    for (const h of ds.hinweise) add('warn', h.code, h.satz, null);
 
-    const free = freeBytes(root);
+    const free = freeBytes(basis);
     if (free !== null && free < MIN_HEADROOM_BYTES) {
       add('warn', 'LOW_SPACE', `Auf dem Stick sind nur noch ${humanBytes(free)} frei.`,
         'Schaffe Platz, sonst kann Neural OS nichts mehr speichern.');
     }
+
+    startklar.hier = !!marker && appOk && hatLokal && !(stale.length && !running) && fsInfo.writable;
 
     return {
       ok: !problems.some((p) => p.level === 'error'),
       problems,
       layout,
       freeBytes: free,
-      filesystem: fsInfo,
+      filesystem: { ...fsInfo, name: ds.name },
+      root: wurzel,
+      basis,
+      aufbau: lage.aufbau,
+      ki: marker ? { id: marker.kiId || null, name: marker.name || null } : null,
+      version,
+      startklar,
+      hinweise: ds.hinweise,
     };
   }
 
   /**
-   * Fetch one more runtime onto an existing stick.
+   * Fetch one more runtime onto an existing stick: [Für Mac holen] bzw.
+   * [Für Windows holen].
    *
    * For the local platform this is a plain file copy and needs no network at
-   * all -- the same guarantee `prepare()` gives.
+   * all -- the same guarantee `prepare()` gives. Fuer jede andere gilt die
+   * Reihenfolge der Quellen aus laufzeitBeschaffen().
    */
   async function addRuntime(targetDir, platform, opts = {}) {
     const root = requireTarget(targetDir, 'addRuntime()');
-    requireStick(root, 'addRuntime()');
+    const lage = requireStick(root, 'addRuntime()');
     if (!PLATFORMS[platform]) {
       throw new ValidationError(
         `"${platform}" ist keine bekannte Plattform. Möglich sind: ${Object.keys(PLATFORMS).join(', ')}.`,
@@ -2729,37 +3052,32 @@ function createStick(deps = {}) {
     }
     // Dieselbe Sperre wie prepare/update: addRuntime schreibt in dieselbe
     // Wurzel, und dropRuntimeScraps() raeumt dort nach denselben Regeln auf.
-    const release = lockRoot(root, `Laufzeit ${platform} holen`);
+    const release = lockRoot(lage.wurzel, `Laufzeit ${platform} holen`);
     try {
-      return await addRuntimeLocked(root, platform, opts);
+      return await addRuntimeLocked(lage, platform, opts);
     } finally {
       release();
     }
   }
 
-  async function addRuntimeLocked(root, platform, opts) {
+  async function addRuntimeLocked(lage, platform, opts) {
+    const { basis } = lage;
     const signal = opts.signal || null;
     throwIfAborted(signal, `Das Holen der Laufzeit ${platform}`);
     const progress = makeProgress(opts.onProgress, log);
-    const warnings = [];
-    mkdirp(path.join(root, LAYOUT.runtime));
+    mkdirp(path.join(basis, LAYOUT.runtime));
 
-    if (platform === LOCAL_PLATFORM) {
-      progress({
-        phase: 'runtime',
-        message: `Laufzeit für ${platform} wird vom laufenden System kopiert …`,
-        platform,
-        percent: 0,
-      });
-      const copied = await copyLocalRuntime(root, warnings, signal);
-      if (!copied) throw new StorageError('Die Laufzeit des laufenden Systems konnte nicht kopiert werden.');
-      progress({ phase: 'done', message: `Laufzeit ${platform} liegt auf dem Stick.`, platform, percent: 100 });
-      return { ...copied, warnings };
-    }
-
-    const got = await downloadRuntime(root, platform, progress, signal);
+    progress({
+      phase: 'runtime',
+      message: platform === LOCAL_PLATFORM
+        ? `Laufzeit für ${platform} wird vom laufenden System kopiert …`
+        : `Laufzeit für ${plattformName(platform)} …`,
+      platform,
+      percent: 0,
+    });
+    const got = await laufzeitBeschaffen(basis, platform, progress, signal);
     progress({ phase: 'done', message: `Laufzeit ${platform} liegt auf dem Stick.`, platform, percent: 100 });
-    return { ...got, warnings };
+    return { ...got, warnings: got.warnings || [] };
   }
 
   /**
@@ -2770,34 +3088,39 @@ function createStick(deps = {}) {
    * Vorbereiten, ein Erneuern oder ein Laufzeit-Nachlegen ist. Diese Frage
    * beantwortet der Stick selbst:
    *
-   *   neu       -- kein Neural-OS-Stick, oder einer ohne Wissen: Programm,
-   *                Laufzeiten und das Wissen dieses Rechners kommen drauf.
-   *   erneuern  -- auf dem Stick liegt schon Wissen. Das ist womoeglich
+   *   neu       -- kein Neural-OS-Stick, oder einer ohne KI: Programm,
+   *                Laufzeiten und eine NEUE KI kommen drauf ([Neue KI]).
+   *                Soll sie das Wissen dieser KI teilen, koppelt die Route
+   *                danach ([Mit dieser KI gekoppelt]).
+   *   erneuern  -- auf dem Stick wohnt schon eine KI. Ihr Wissen ist womoeglich
    *                NEUER als das hier (auf einem anderen Rechner geschrieben)
    *                und wird deshalb nie ueberschrieben: nur das Programm wird
-   *                erneuert und fehlende Laufzeiten kommen dazu.
+   *                erneuert und fehlende Laufzeiten kommen dazu ([Erneuern]).
    *   eigener   -- der Stick, von dem diese Instanz laeuft. Das Programm kann
    *                sich nicht selbst ersetzen (die Quelle laege im Ziel); es
    *                kommen nur fehlende Laufzeiten dazu.
    *
-   * Laufzeiten fuer andere Betriebssysteme brauchen einmal nodejs.org. Scheitert
-   * das (kein Netz, Schleuse zu), ist der Stick trotzdem fertig -- `fehlend`
-   * sagt, welche fehlen und warum, und ein spaeterer Klick holt sie nach.
+   * Laufzeiten fuer andere Betriebssysteme brauchen einmal nodejs.org -- oder
+   * den eigenen Stick bzw. den Zwischenspeicher. Scheitert das (kein Netz,
+   * Schleuse zu), ist der Stick trotzdem fertig -- `fehlend` sagt, welche
+   * fehlen und warum, und ein spaeterer Klick holt sie nach.
    *
    * Der Fortschritt ist ein einziger Balken ueber alle Schritte. Jede
    * Bewegung kommt aus einem echten Ereignis (kopierte Bytes, begonnener
    * Download); fest sind nur die Anteile, die jeder Schritt am Balken hat.
    *
    * @param {string} targetDir
-   * @param {{andereSysteme?:boolean, plattformen?:string[], mitWissen?:boolean,
-   *          eigenerStick?:string|null, sourceRoot?:string, sourceHome?:string,
+   * @param {{andereSysteme?:boolean, plattformen?:string[], name?:string,
+   *          eigenerStick?:string|null, sourceRoot?:string,
    *          signal?:AbortSignal, onProgress?:Function}} [opts]
    */
   async function einrichten(targetDir, opts = {}) {
     const root = requireTarget(targetDir, 'Stick vorbereiten');
-    const release = lockRoot(root, 'Stick vorbereiten');
+    if (opts.includeVault === true || opts.mitWissen === true) throw new ValidationError(SATZ.ROHKOPIE);
+    const lage = aufbauVon(root);
+    const release = lockRoot(lage.wurzel, 'Stick vorbereiten');
     try {
-      return await einrichtenLocked(root, opts);
+      return await einrichtenLocked(lage, opts);
     } finally {
       release();
     }
@@ -2806,33 +3129,50 @@ function createStick(deps = {}) {
   /** Der Plan, den einrichten() fahren wuerde -- ohne etwas zu schreiben. */
   function einrichtenPlan(targetDir, opts = {}) {
     const root = requireTarget(targetDir, 'Stick vorbereiten');
-    const eigener = !!(opts.eigenerStick && gleicherPfad(opts.eigenerStick, root));
-    const marker = readMarker(root);
-    let wissen = 0;
-    try { wissen = fs.readdirSync(dataDirOf(root)).filter((n) => !n.startsWith('.')).length; } catch { /* noch keiner */ }
+    const lage = aufbauVon(root);
+    const eigener = !!(opts.eigenerStick && gleicherPfad(aufbauVon(opts.eigenerStick).wurzel, lage.wurzel));
+    const marker = lage.istStick ? readMarker(lage.basis) : null;
+    const wissen = kiEintraege(dataDirIn(lage.basis)).length;
     const fall = eigener ? 'eigener' : (!marker || wissen === 0 ? 'neu' : 'erneuern');
-    const vorhanden = new Set(detectPlatforms(root).map((r) => r.platform));
+    const vorhanden = new Set((lage.istStick ? detectPlatforms(lage.basis) : []).map((r) => r.platform));
     const andere = opts.andereSysteme === false
       ? []
       : (opts.plattformen || ZIEL_PLATTFORMEN).filter((p) => PLATFORMS[p] && p !== LOCAL_PLATFORM && !vorhanden.has(p));
     const lokalFehlt = !!LOCAL_PLATFORM && !vorhanden.has(LOCAL_PLATFORM);
-    return { root, fall, eigener, istStick: !!marker, wissenAufStick: wissen, vorhanden: [...vorhanden], andere, lokalFehlt };
+    const version = marker ? appVersion(path.join(lage.basis, LAYOUT.app)) : null;
+    return {
+      root: lage.wurzel,
+      basis: lage.basis,
+      aufbau: lage.aufbau,
+      fall,
+      eigener,
+      istStick: !!marker,
+      wissenAufStick: wissen,
+      ki: marker ? { id: marker.kiId || null, name: marker.name || null } : null,
+      version: version && version !== 'unbekannt' ? version : null,
+      aelter: !!(version && version !== 'unbekannt' && vergleicheVersion(version, laufendeVersion()) < 0),
+      vorhanden: [...vorhanden],
+      andere,
+      lokalFehlt,
+    };
   }
 
-  async function einrichtenLocked(root, opts) {
+  async function einrichtenLocked(lage, opts) {
     const signal = opts.signal || null;
     const progress = makeProgress(opts.onProgress, log);
-    const plan = einrichtenPlan(root, opts);
+    const plan = einrichtenPlan(lage.wurzel, opts);
     const warnings = [];
+    const hinweise = [];
     const fehlend = [];
     let bytes = 0;
     let files = 0;
-    let wissen = 'blieb';
+    let ki = plan.ki;
+    let dataDir = dataDirIn(lage.basis);
 
     // Die Baender des einen Balkens. Ein Schritt, den es in diesem Fall nicht
     // gibt, bekommt keins -- sonst stuende der Balken dort still.
     const schritte = [];
-    if (plan.fall === 'neu') schritte.push(['source', 40], ['data', 22]);
+    if (plan.fall === 'neu') schritte.push(['source', 55]);
     if (plan.fall === 'erneuern') schritte.push(['source', 55]);
     if (plan.fall === 'neu' || plan.lokalFehlt) schritte.push(['local', 8]);
     for (const p of plan.andere) schritte.push([`dl:${p}`, 22]);
@@ -2850,7 +3190,6 @@ function createStick(deps = {}) {
     // Teilschritts bleibt als `detail` erhalten.
     const satz = (key, n) => {
       if (key === 'source') return 'Programm wird kopiert …';
-      if (key === 'data') return 'Dein Wissen wird kopiert …';
       if (key === 'local') return `Laufzeit für ${plattformName(LOCAL_PLATFORM)} wird kopiert …`;
       if (key.startsWith('dl:')) {
         const name = plattformName(key.slice(3));
@@ -2869,7 +3208,7 @@ function createStick(deps = {}) {
     const weiter = (event) => {
       if (!event) return;
       const phase = event.phase;
-      if (phase === 'source' || phase === 'data') {
+      if (phase === 'source') {
         const anteil = Number.isFinite(event.percent) ? event.percent / 100 : 0;
         melde(phase, anteil, event);
       } else if (phase === 'runtime') {
@@ -2897,29 +3236,30 @@ function createStick(deps = {}) {
     };
 
     if (plan.fall === 'neu') {
-      const r = await prepareLocked(root, {
-        includeVault: opts.mitWissen !== false,
-        includeRuntimes: plan.andere.length ? plan.andere : true,
+      const r = await prepareLocked(lage, {
+        includeRuntimes: plan.andere,
+        name: opts.name,
         sourceRoot: opts.sourceRoot,
-        sourceHome: opts.sourceHome,
         signal,
         onProgress: weiter,
       });
       bytes += r.bytes;
       files += r.files;
       warnings.push(...r.warnings.filter((w) => !/^Laufzeit für .* wurde NICHT/.test(w)));
+      hinweise.push(...r.hinweise);
       fehlend.push(...(r.fehlend || []));
-      wissen = r.vault ? 'kopiert' : 'leer';
+      ki = r.ki;
+      dataDir = r.dataDir;
     } else {
       if (plan.fall === 'erneuern') {
-        const r = await updateLocked(root, { sourceRoot: opts.sourceRoot, signal, onProgress: weiter });
+        const r = await updateLocked(lage, { sourceRoot: opts.sourceRoot, signal, onProgress: weiter });
         bytes += r.bytes;
         files += r.files;
         warnings.push(...r.warnings);
       }
       if (plan.lokalFehlt) {
         melde('local', 0, { phase: 'runtime', message: `Laufzeit für ${plattformName(LOCAL_PLATFORM)} wird kopiert …`, platform: LOCAL_PLATFORM });
-        const r = await addRuntimeLocked(root, LOCAL_PLATFORM, { signal });
+        const r = await addRuntimeLocked(lage, LOCAL_PLATFORM, { signal });
         bytes += r.bytes || 0;
         files += 1;
         melde('local', 1, { phase: 'runtime', message: `Laufzeit für ${plattformName(LOCAL_PLATFORM)} liegt auf dem Stick.`, platform: LOCAL_PLATFORM, fertig: true });
@@ -2927,40 +3267,34 @@ function createStick(deps = {}) {
       for (const platform of plan.andere) {
         throwIfAborted(signal, 'Das Vorbereiten des Sticks');
         try {
-          const r = await addRuntimeLocked(root, platform, { signal, onProgress: weiter });
+          const r = await addRuntimeLocked(lage, platform, { signal, onProgress: weiter });
           bytes += r.bytes || 0;
           files += 1;
         } catch (err) {
           if (err instanceof AbortedError || (err && err.code === 'ABORTED')) throw err;
-          const message = err && err.message ? err.message : String(err);
-          fehlend.push({ platform, grund: message, code: (err && err.code) || null });
-          log.warn(`Laufzeit ${platform} fehlgeschlagen: ${message}`);
+          fehlend.push(fehlendEintrag(platform, err));
+          log.warn(`Laufzeit ${platform} fehlgeschlagen: ${err && err.message}`);
         }
         melde(`dl:${platform}`, 1, { phase: 'runtime', message: `${plattformName(platform)}: erledigt.`, platform, fertig: true });
       }
-      if (plan.fall === 'eigener' && (plan.andere.length || plan.lokalFehlt)) {
-        // Die LIESMICH nennt die Laufzeiten; sie soll nach dem Nachlegen stimmen.
-        try {
-          writeFileAtomic(path.join(root, LAYOUT.readme), renderReadme({
-            platforms: detectPlatforms(root).map((p) => p.platform),
-            version: appVersion(opts.sourceRoot ? path.resolve(opts.sourceRoot) : APP_ROOT),
-            fsInfo: null,
-          }));
-        } catch { /* die LIESMICH ist Beiwerk; der Stick laeuft ohne sie */ }
-      }
     }
 
-    const laufzeiten = detectPlatforms(root).map((p) => p.platform);
+    const laufzeiten = detectPlatforms(lage.basis).map((p) => p.platform);
     progress({ phase: 'done', message: 'Der Stick ist fertig.', percent: 100 });
     return {
-      root,
+      root: lage.wurzel,
+      basis: lage.basis,
+      aufbau: lage.aufbau,
       fall: plan.fall,
       bytes,
       files,
-      wissen,
+      wissen: plan.fall === 'neu' ? 'neu' : 'blieb',
+      ki,
+      dataDir,
       laufzeiten,
       fehlend: fehlend.filter((f) => !laufzeiten.includes(f.platform)),
       warnings,
+      hinweise,
     };
   }
 
@@ -2975,7 +3309,7 @@ function createStick(deps = {}) {
   function detectPlatforms(targetDir) {
     let root;
     if (targetDir) {
-      root = path.resolve(targetDir);
+      root = basisVon(targetDir);
     } else {
       const detected = require('../kernel/paths').detectPortable();
       if (!detected) {
@@ -3031,6 +3365,8 @@ function createStick(deps = {}) {
     probeFilesystem,
     /** Dieselben Fragen wie probeFilesystem(), ohne eine Zeile zu schreiben. */
     inspectFilesystem,
+    /** Wurzel, Basis und Aufbau eines Sticks -- reine Lesefrage. */
+    aufbauVon,
     LOCAL_PLATFORM,
     PLATFORMS,
     LAYOUT,
@@ -3055,13 +3391,25 @@ module.exports = {
   LAYOUT,
   EXCLUDED_NAMES,
   LAUNCHERS,
+  ALTE_STARTER,
   RUNTIME_SCOPE,
   DIST_HOST,
+  SATZ,
+  LIESMICH_ZEILEN,
+  renderReadme,
   probeFilesystem,
   inspectFilesystem,
   freeBytesOf,
   collectTree,
   cleanStale,
+  istRest,
+  aufbauVon,
+  basisVon,
+  kiEintraege,
+  schutzEinschalten,
+  dateisystemTyp,
+  dateisystemHinweis,
+  vergleicheVersion,
   nodeDistPlatform,
   humanBytes,
   /**
@@ -3081,6 +3429,7 @@ module.exports = {
   throwIfAborted,
   abortedDuring,
   StickFullError,
+  KiVorhandenError,
   /** Die unantastbaren Ordner, als reine Funktion pruefbar. */
   geschuetzterOrdner,
   laufendeVorgaenge,
