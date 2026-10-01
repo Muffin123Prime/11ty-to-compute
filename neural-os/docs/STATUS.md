@@ -9,12 +9,12 @@ prüfen ist, steht weiter unten – ungeschönt.
 ## Messwerte
 
 ```
-npm test                             1647 Tests, 0 fehlgeschlagen
+npm test                             1693 Tests, 0 fehlgeschlagen
 npm run check                        170 Funktionen über HTTP, 0 defekt
-npm run ui                           264 Prüfpunkte im Browser, alles in Ordnung
-npm run proof                        22 Prüfungen, ohne Freigabe geht nichts ins Netz
-node tools/chat-beweis.js            231 Punkte, alle Baustein-Arten im Browser
-node tools/insel-beweis.js           74 Punkte, die Insel samt schwebendem Fenster im Browser
+npm run ui                           267 Prüfpunkte im Browser, alles in Ordnung
+npm run proof                        24 Prüfungen, ohne Freigabe geht nichts ins Netz (auch nicht zu Mistral, Groq, OpenRouter, OVHcloud, Wikipedia)
+node tools/chat-beweis.js            239 Punkte, alle Baustein-Arten im Browser, eine zweite KI springt ein und schlägt in Wikipedia nach
+node tools/insel-beweis.js           129 Punkte, das Wesen am Rand, Fenster, Live, Füttern, schwebendes Fenster im Browser
 node tools/stick-trennung-check.js   17 Punkte, zwei Sticks im selben Browser, [Beenden] am Mac
 node tools/screenshots.js            106 Bilder, kein Schritt fehlt
 ```
@@ -23,8 +23,9 @@ Die Werkzeuge prüfen absichtlich Verschiedenes: `test` den Code, `check` jede
 Funktion über die echte HTTP-Schnittstelle, `ui` ob ein Klick in der
 Oberfläche wirklich bis in den Tresor durchschlägt, `chat-beweis` den Chat mit
 allen Baustein-Arten im echten Browser (mit nachgestellter KI),
-`insel-beweis` die Insel (Fragen, Bildschirm zeigen, Timer, schwebendes
-Fenster, Sprechen) und `stick-trennung-check` zwei Sticks nacheinander im
+`insel-beweis` die Insel (das Wesen am Rand bei allen Größen, Fragen, Live,
+Dateien füttern, Bildschirm zeigen, Timer, schwebendes Fenster; Mikrofon,
+Spracherkennung und Sprachausgabe dort nachgestellt) und `stick-trennung-check` zwei Sticks nacheinander im
 selben Browser; `proof` beweist, dass ohne Freigabe nichts ins Netz geht.
 
 ## Was es gibt

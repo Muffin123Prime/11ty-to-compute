@@ -350,9 +350,12 @@ async function main() {
       && /Oder eine andere kostenlose KI \(Mistral, Groq, OpenRouter\)/.test(chatText)
       && !/console\.mistral\.ai/.test(chatText),
     'Darunter zugeklappt: „Oder eine andere kostenlose KI (Mistral, Groq, OpenRouter)“');
-    check(await page.locator('.cv-verbinden button', { hasText: 'OVHcloud einschalten' }).count() === 1
-      && /Ganz ohne Schlüssel und ohne Konto: OVHcloud/.test(chatText),
-    'Und ganz ohne Schlüssel: „OVHcloud einschalten“ – mit dem Satz, dass es langsam ist');
+    // Offline (so läuft diese Prüfung) heißt der Knopf "Online gehen und einschalten" -- der Klick tut beides.
+    const ovhKnopf = page.locator('.cv-verbinden__ohne button');
+    const ovhText = (await ovhKnopf.innerText().catch(() => '')).trim();
+    check(await ovhKnopf.count() === 1 && /^(OVHcloud einschalten|Online gehen und einschalten)$/.test(ovhText)
+      && /Ganz ohne Schlüssel und ohne Konto: OVHcloud .* langsam/.test(chatText),
+    'Und ganz ohne Schlüssel: OVHcloud mit einem Knopf – und dem Satz, dass es langsam ist', ovhText);
     await page.locator('.cv-verbinden details.cv-verbinden__andere > summary').click();
     await page.waitForTimeout(200);
     check(await page.locator('.cv-verbinden input[aria-label="Schlüssel einer anderen KI"]').isVisible()

@@ -1965,8 +1965,10 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       check(!!geladen14 && /^\/api\/ki\/bild\?u=/.test(await bild14.first().getAttribute('src')),
         'Das Bild aus Wikipedia steht in der Antwort – geholt von Neural OS (/api/ki/bild), nicht vom Browser bei Wikipedia');
       const anMistral = mistral.stromAnfragen()[0] && mistral.stromAnfragen()[0].body;
-      check(!!anMistral && (anMistral.tools || []).some((t) => t.function && t.function.name === 'wikipedia_suchen') && wiki.anfragen.length === 2,
-        'Mistral bekam das Werkzeug „wikipedia_suchen“, und Neural OS hat zweimal bei Wikipedia nachgefragt (suchen, Kurztexte)', `Wikipedia-Anfragen: ${wiki.anfragen.length}`);
+      const api14 = wiki.anfragen.filter((x) => x.pfad === '/w/api.php').length;
+      const bilder14 = wiki.anfragen.filter((x) => x.pfad.startsWith('/wikipedia/')).length;
+      check(!!anMistral && (anMistral.tools || []).some((t) => t.function && t.function.name === 'wikipedia_suchen') && api14 === 2 && bilder14 === 1,
+        'Mistral bekam das Werkzeug „wikipedia_suchen“; Neural OS fragte Wikipedia zweimal (suchen, Kurztexte) und holte das Bild einmal', `api.php: ${api14}, Bild: ${bilder14}`);
       await foto(p14, 'mistral-springt-ein-wikipedia-1440');
       app.saveConfig({ network: { mode: 'offline' } });
       await c14.close();
