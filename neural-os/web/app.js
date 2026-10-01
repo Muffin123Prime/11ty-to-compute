@@ -28,6 +28,7 @@
 import { h, text, clear, on, list, icon, cx, frag, timeAgo, formatNumber, formatDate, debounce, snippet } from './lib/dom.js';
 import { api, ApiError } from './lib/api.js';
 import * as lokal from './lib/lokal.js';
+import { zielVon } from './lib/agenten.js';
 
 const APP_VERSION = '2';
 /**
@@ -304,6 +305,10 @@ function createShell() {
   /** null | {art:'weg'} (Verbindung weg) | {art:'beendet', danach} -- dann deckt „Neural OS ist aus.“ alles zu. */
   let aus = null;
   let ausUhr = null;
+  /** Ist dieses Geraet das, auf dem Neural OS laeuft? null, solange unbekannt. */
+  let besitzer = null;
+  /** Saetze zum Koppeln, die schon kamen (Satz -> Zeit): jeder nur einmal. */
+  const kopplungGezeigt = new Map();
 
   /* ---------------------------------------------------------------- */
   /* Live-Ereignisse vom Server                                        */
@@ -483,6 +488,17 @@ function createShell() {
     // Umbenannt (Einstellungen, auch an einem anderen Geraet): oben sofort der neue Name.
     if (type === 'ki.umbenannt' && payload && typeof payload.name === 'string') state.set('kiName', payload.name.trim() || null);
 
+    // Koppeln (docs/STICK-BAUPLAN.md 1.7): abgeglichen wird still; gesagt
+    // wird nur, was der Mensch wissen oder tun muss.
+    if (type === 'kopplung.angenommen') {
+      kopplungHinweis(typeof payload.text === 'string' && payload.text ? payload.text : `Gekoppelt mit ${payload.name || 'einem Stick'}.`);
+    } else if (type === 'kopplung.zwilling' && payload.vorbei !== true) {
+      kopplungHinweis('Zwei Sticks tragen dieselbe KI.', { ton: 'info', ziel: '#/stick' });
+    } else if (type === 'kopplung.zweiFassungen' && payload.kopieId) {
+      kopplungHinweis(`„${payload.titel || 'Ohne Titel'}“ gab es zweimal verschieden – beide sind da.`,
+        { ton: 'info', ziel: zielVon(payload.kopieId) });
+    }
+
     if (type === 'vault.locked') toast('Der Tresor wurde gesperrt.', 'info');
     if (type === 'vault.unlocked') toast('Der Tresor ist entsperrt.', 'success');
   }
@@ -608,10 +624,38 @@ function createShell() {
   async function besitzerPruefen() {
     try {
       const r = await api.get('/ipad', { timeoutMs: 8000 });
-      if (dom.beenden) dom.beenden.hidden = !!(r && r.besitzer === false);
+      besitzer = !(r && r.besitzer === false);
+      if (dom.beenden) dom.beenden.hidden = !besitzer;
     } catch {
       /* unbekannt: der Knopf bleibt, der Server sagt beim Tippen, was geht */
     }
+    kopplungHinweisHolen();
+  }
+
+  /**
+   * Ein Satz zum Koppeln, einmal: „Gekoppelt mit Max.“ kann als Ereignis UND
+   * im Status der Kopplung ankommen (dann, wenn der Tab erst nach dem Start
+   * zuhoerte), und die Stick-Ansicht fragt denselben Status.
+   */
+  function kopplungHinweis(satz, { ton = 'success', ziel = null } = {}) {
+    if (typeof satz !== 'string' || !satz.trim()) return;
+    const jetzt = Date.now();
+    const vorher = kopplungGezeigt.get(satz);
+    if (vorher && jetzt - vorher < 60000) return;
+    kopplungGezeigt.set(satz, jetzt);
+    toast(satz, ton, ziel ? { action: { label: 'Ansehen', run: () => navigate(ziel) }, timeout: 12000 } : { timeout: 6000 });
+  }
+
+  /**
+   * „Gekoppelt mit Max.“ (Bauplan 1.7 Punkt 5): B hat das Angebot beim Start
+   * angenommen -- oft, bevor dieser Tab zuhoerte. Dann steht der Satz einmal
+   * im Status der Kopplung. Nur am eigenen Rechner (ein iPad darf das nicht).
+   */
+  function kopplungHinweisHolen() {
+    if (besitzer !== true) return;
+    api.get('/kopplung', { timeoutMs: 8000 }).then((r) => {
+      if (r && typeof r.hinweis === 'string' && r.hinweis) kopplungHinweis(r.hinweis);
+    }, () => { /* ohne Kopplung kein Hinweis */ });
   }
 
   function kiNameZeigen(name) {
@@ -720,6 +764,7 @@ function createShell() {
           refreshStatus();
           refreshApprovals();
           refreshRecent();
+          kopplungHinweisHolen();
         }
         renderChrome();
       },
@@ -926,7 +971,7 @@ function createShell() {
       h('div.rail__head', null, brand, dom.collapseLeft),
       nav,
       dom.recent,
-      h('div.rail__foot', null, dom.statusButton, dom.beenden)));
+      h('div.rail__foot', null, dom.beenden, dom.statusButton)));
   }
 
   function renderRecent() {
@@ -1334,6 +1379,8 @@ function createShell() {
         close: (side) => setSide(side, false),
         toggle: (side) => toggleSide(side),
         newChat: () => startNewChat(),
+        /** Ein Satz zum Koppeln, nur einmal (die Stick-Ansicht, web/views/stick.js). */
+        hinweis: (satz) => kopplungHinweis(satz),
       },
       version: APP_VERSION,
     };

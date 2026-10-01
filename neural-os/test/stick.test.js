@@ -2766,4 +2766,70 @@ test('HTTP: GET /api/stick/plan und /laufwerke sagen der Ansicht, was sie fuer d
   }, { kopplung: { automatisch: false, einhaengepunkte: () => [] } });
 });
 
+test('einrichten vom eigenen Stick: was dort liegt, kommt ohne Netz mit; der Plan fragt nur nach dem Rest', async () => {
+  const eigen = tempHome('stick-eigen');
+  const ziel = tempHome('stick-eigen-ziel');
+  const src = tempHome('stick-eigen-src');
+  try {
+    makeSource(src.home);
+    const { PLATFORMS } = require('../src/portable/stick');
+    // Auf dem eigenen Stick liegt eine Laufzeit, die nicht die dieses Rechners ist.
+    const dort = ['win-x64', 'darwin-arm64'].find((p) => p !== LOCAL_PLATFORM);
+    fs.mkdirSync(path.join(eigen.home, 'runtime', dort), { recursive: true });
+    const binaer = Buffer.alloc(2048, 3);
+    fs.writeFileSync(path.join(eigen.home, 'runtime', dort, PLATFORMS[dort].file), binaer);
+    const gate = fakeGate({});
+    const tool = createStick({ gate, portable: { root: eigen.home } });
+
+    const plan = tool.einrichtenPlan(ziel.home, {});
+    assert.ok(plan.andere.includes(dort));
+    assert.ok(!plan.ausDemNetz.includes(dort), 'was auf dem eigenen Stick liegt, muss nicht ins Netz');
+    assert.deepEqual(plan.ausDemNetz, plan.andere.filter((p) => p !== dort));
+    assert.equal(plan.pin, false, 'ein leerer Stick hat keine PIN');
+
+    // „Ohne Internet“: nur, was ohne Netz kommt.
+    const r = await tool.einrichten(ziel.home, { sourceRoot: src.home, plattformen: [dort] });
+    assert.deepEqual(r.fehlend, []);
+    assert.ok(r.laufzeiten.includes(dort) && r.laufzeiten.includes(LOCAL_PLATFORM), r.laufzeiten.join(','));
+    assert.ok(fs.readFileSync(path.join(ziel.home, 'Inhalt', 'runtime', dort, PLATFORMS[dort].file)).equals(binaer));
+    assert.equal(gate.calls.length, 0, 'es ging nichts ins Netz');
+
+    // Hat die KI auf einem Stick eine PIN, sagt es der Plan (für „PIN von …“).
+    fs.writeFileSync(path.join(ziel.home, 'Inhalt', 'data', 'secrets.json'), '{}');
+    assert.equal(tool.einrichtenPlan(ziel.home, {}).pin, true);
+  } finally {
+    eigen.cleanup();
+    ziel.cleanup();
+    src.cleanup();
+  }
+});
+
+test('HTTP: andereSysteme "ohneNetz" holt nichts aus dem Netz und legt keine Freigabe an; der Plan nennt ausDemNetz', async () => {
+  await withApp(async ({ app, req }) => {
+    const medien = tempHome('stick-ohnenetz');
+    const ziel = path.join(medien.home, 'LEER');
+    fs.mkdirSync(ziel);
+    const gate = fakeGate({});
+    app.stick = createStick({ gate, paths: app.paths, config: app.config });
+    try {
+      const plan = await req('GET', `/api/stick/plan?path=${encodeURIComponent(ziel)}`);
+      assert.equal(plan.status, 200, plan.text);
+      assert.deepEqual(plan.json.ausDemNetz, plan.json.andere, 'vom Laptop ohne Zwischenspeicher kommt alles aus dem Netz');
+      assert.equal(plan.json.ausDemNetzNamen.length, plan.json.andere.length);
+      assert.equal(plan.json.download.noetig, true);
+      const freigabenVorher = app.gate.listGrants({ includeInactive: true }).length;
+      const lauf = await req('POST', '/api/stick/einrichten', { path: ziel, ki: 'neu', andereSysteme: 'ohneNetz', erlaubnis: true });
+      assert.equal(lauf.status, 200, lauf.text);
+      const fertig = (lauf.events.find((e) => e.event === 'fertig') || {}).data;
+      assert.ok(fertig, lauf.text.slice(0, 300));
+      assert.deepEqual(fertig.laufzeiten, [LOCAL_PLATFORM]);
+      assert.deepEqual(fertig.fehlend, []);
+      assert.equal(gate.calls.length, 0, 'es ging nichts ins Netz');
+      assert.equal(app.gate.listGrants({ includeInactive: true }).length, freigabenVorher, '"ohneNetz" legt nie eine Freigabe an');
+    } finally {
+      medien.cleanup();
+    }
+  }, { kopplung: { automatisch: false, einhaengepunkte: () => [] } });
+});
+
 module.exports = { name: 'stick', tests: drain() };

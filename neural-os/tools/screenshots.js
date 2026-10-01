@@ -50,7 +50,8 @@ async function hochfahren() {
   await app.close();
   demo.altern(path.join(home, 'vault', 'log'), alt);
 
-  app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error' });
+  // Die Stick-Suche sieht nur dort nach, wo dieses Werkzeug einen „Stick“ hinlegt.
+  app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error', kopplung: { einhaengepunkte: () => [...STICK_WELT] } });
   await app.loadModules({});
   if (app.graph && app.graph.scanAll) app.graph.scanAll(app.store, {});
   if (app.assist) await app.assist.scan({});
@@ -58,6 +59,9 @@ async function hochfahren() {
   const server = await app.listen();
   return { app, home, base: `http://127.0.0.1:${server.server.address().port}` };
 }
+
+/** Welche „Sticks“ gerade stecken (Ordner; Abschnitt 12). */
+const STICK_WELT = new Set();
 
 const args = process.argv.slice(2);
 const OUT = (() => {
@@ -71,7 +75,7 @@ const VIEWS = [
 ];
 
 /** Hell ist eine Wahl, keine Systemvorgabe: dunkel ist die Voreinstellung. Gemerkt je KI (web/lib/lokal.js). */
-const THEMA = () => `neural-os:${app.ki.id}:design`;
+const THEMA = (kiId) => `neural-os:${kiId}:design`;
 
 let n = 0;
 const gemacht = [];
@@ -135,7 +139,7 @@ async function los(page, base, view, warten = 1000) {
       colorScheme: theme,
       hasTouch: !!opts.finger,
     });
-    await c.addInitScript(([k, t]) => { try { localStorage.setItem(k, t); } catch { /* egal */ } }, [THEMA(), theme]);
+    await c.addInitScript(([k, t]) => { try { localStorage.setItem(k, t); } catch { /* egal */ } }, [THEMA(app.ki.id), theme]);
     const p = await c.newPage();
     p.on('pageerror', (e) => konsole.push(`${theme}: ${e.message.slice(0, 100)}`));
     p.on('console', (m) => { if (m.type() === 'error') konsole.push(`${theme}: ${m.text().slice(0, 100)}`); });
@@ -798,28 +802,37 @@ async function los(page, base, view, warten = 1000) {
 
   /* ======================================= 12 · Stick und Sicherung */
   //
-  // Der Bereich "Stick" hat vier Knoepfe: Stick vorbereiten, Jetzt sichern,
-  // (klein) Wiederherstellen, Beenden & abziehen. Festgehalten wird jeder
-  // Zustand, den ein Mensch dort sieht -- die Rueckfrage nach dem Internet,
-  // der Balken, "fertig" mit der Anleitung, die Sicherung auf dem Stick und
-  // die Vorschau vor dem Zurueckspielen. "Beenden" kommt ganz zum Schluss
-  // (Abschnitt 99), weil danach kein Server mehr da ist.
+  // Der Bereich "Stick" (docs/STICK-BAUPLAN.md 1.6/1.7): ein leerer Stick
+  // mit [Neue KI], die eine Rueckfrage nach dem Internet, der Balken,
+  // "Fertig. Stick kann raus.", ein anderer Stick mit [Koppeln], danach
+  // "Gekoppelt mit Lena", die Sicherung und die Vorschau vor dem
+  // Zurueckspielen. "Beenden" kommt ganz zum Schluss (Abschnitt 99), weil
+  // danach kein Server mehr da ist.
   //
   // An diesem Rechner steckt kein Stick. Die Suche ist trotzdem die echte
-  // Funktion; nur ihre Wurzel zeigt auf einen Ordner, der wie /media aussieht.
+  // Funktion; nur ihre Einhaengepunkte sind Ordner (STICK_WELT).
   const medien = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-shots-medien-'));
   const stickOrt = path.join(medien, 'USB-STICK');
   fs.mkdirSync(stickOrt);
+  STICK_WELT.add(stickOrt);
+  // Lena: ein Stick mit eigener KI, einmal gestartet und wieder beendet.
+  const lena = path.join(medien, 'LENA');
   {
-    const stickMod = require('../src/portable/stick');
-    app.findeLaufwerke = (opts) => stickMod.findeLaufwerke({
-      ...opts, platform: 'linux', wurzeln: [medien], einhaengepunkt: (d) => d === stickOrt,
-    });
+    const pathsMod = require('../src/kernel/paths');
+    fs.mkdirSync(path.join(lena, 'data'), { recursive: true });
+    fs.mkdirSync(path.join(lena, 'app'), { recursive: true });
+    fs.writeFileSync(path.join(lena, 'app', 'package.json'), JSON.stringify({ name: 'neural-os', version: require('../package.json').version }));
+    fs.writeFileSync(path.join(lena, pathsMod.PORTABLE_MARKER), JSON.stringify({ neuralOsPortable: true, dataDir: 'data', appDir: 'app' }, null, 2));
+    const b = await createApp({ home: path.join(lena, 'data'), appDir: path.join(lena, 'app'), port: 0, host: '127.0.0.1', logLevel: 'error', kopplung: { automatisch: false, einhaengepunkte: () => [] } });
+    b.identitaet.umbenennen('Lena');
+    await b.close();
+  }
+  {
     const { c, p } = await mach('dark');
     await los(p, base, 'stick', 1600);
-    await step('Stick: gefunden, ein Knopf', async () => { await shot(p, 'stick-gefunden-dunkel'); });
+    await step('Stick: ein leerer Stick, [Neue KI]', async () => { await shot(p, 'stick-leerer-stick-dunkel'); });
     await step('Stick: die eine Rückfrage', async () => {
-      await klick(p, /^Stick vorbereiten$/, { warten: 900 });
+      await klick(p, /^Neue KI$/, { warten: 900 });
       await shot(p, 'stick-rueckfrage-internet-dunkel');
     });
     await step('Stick: der Balken', async () => {
@@ -827,22 +840,42 @@ async function los(page, base, view, warten = 1000) {
       await p.locator('.stickv__bar').waitFor({ timeout: 10000 });
       for (let i = 0; i < 200; i++) {
         const t = await p.locator('.stickv__lauf-text').innerText().catch(() => '');
-        const m = /^(\d+) %/.exec(t);
+        const m = /(\d+) %$/.exec(t);
         if (m && Number(m[1]) >= 15) break;
         await p.waitForTimeout(20);
       }
       await shot(p, 'stick-balken-dunkel');
     });
-    await step('Stick: fertig, drei Sätze', async () => {
+    await step('Stick: Fertig. Stick kann raus.', async () => {
       await p.locator('.stickv__fertig').waitFor({ timeout: 120000 });
       await p.waitForTimeout(600);
       await shot(p, 'stick-fertig-dunkel');
     });
-    await step('Sicherung: auf dem Stick', async () => {
+    await step('Stick: anderer Stick, [Koppeln]', async () => {
+      STICK_WELT.delete(stickOrt);
+      STICK_WELT.add(lena);
+      await klick(p, /^Neu suchen$/, { warten: 900 });
+      await p.locator('.stickv__reihe[data-art="fremd"]', { hasText: 'Lena' }).waitFor({ timeout: 10000 });
+      await shot(p, 'stick-anderer-stick-dunkel');
+    });
+    await step('Stick: Gekoppelt mit Lena', async () => {
+      await klick(p, /^Koppeln$/, { warten: 400 });
+      await p.locator('.stickv__reihe[data-art="partner"]').waitFor({ timeout: 15000 });
+      await p.waitForTimeout(500);
+      await shot(p, 'stick-gekoppelt-dunkel');
+    });
+    await step('Stick: Entkoppeln? (in der Seite)', async () => {
+      await klick(p, /^Entkoppeln$/, { warten: 400 });
+      await p.locator('.stickv__rueckfrage').waitFor({ timeout: 4000 });
+      await shot(p, 'stick-entkoppeln-frage-dunkel');
+      await klick(p, /^Abbrechen$/, { warten: 300 });
+    });
+    await step('Sicherung', async () => {
       await klick(p, /^Jetzt sichern$/, { warten: 300 });
       await p.locator('.stickv__sichern [role=status]').waitFor({ timeout: 60000 });
+      await p.locator('.stickv__sichern').scrollIntoViewIfNeeded();
       await p.waitForTimeout(600);
-      await shot(p, 'sicherung-auf-dem-stick-dunkel');
+      await shot(p, 'sicherung-dunkel');
     });
     await step('Sicherung: Vorschau vor dem Zurückspielen', async () => {
       await p.locator('summary', { hasText: 'Von einer Sicherung wiederherstellen' }).click();
@@ -872,25 +905,25 @@ async function los(page, base, view, warten = 1000) {
     await c.close();
   }
 
-  /* ====================================== 99 · Beenden & abziehen */
+  /* ====================================== 99 · Beenden */
   //
-  // Zuletzt, weil danach kein Server mehr da ist. Das Ende ist das echte
-  // app.close(); nur process.exit (das die Kommandozeile danach aufruft)
-  // bleibt hier aus, sonst endete dieses Werkzeug mitten im Bild.
+  // Zuletzt, weil danach kein Server mehr da ist. [Beenden] steht unten
+  // links in der Leiste (web/app.js). Das Ende ist das echte app.close();
+  // nur process.exit (das die Kommandozeile danach aufruft) bleibt hier aus,
+  // sonst endete dieses Werkzeug mitten im Bild.
   {
     app.beenden = () => app.close();
     const { c, p } = await mach('dark', { breite: 1180, hoehe: 820, finger: true });
-    await los(p, base, 'stick', 1600);
+    await los(p, base, 'chat', 1600);
     // Nach dem Beenden antwortet absichtlich kein Server mehr. Was die Schale
     // und die Kacheln danach vergeblich abfragen, ist der Beweis dafuer und
     // kein Fehler der Anwendung -- es zaehlt deshalb nicht als Konsolenfehler.
     const konsoleVorher = konsole.length;
-    await step('Beenden & abziehen', async () => {
-      await klick(p, /Beenden & abziehen/, { warten: 400 });
-      await klick(p, /^Beenden$/, { warten: 200 });
-      await p.locator('.stickv__ende[data-zustand="fertig"]').waitFor({ timeout: 30000 });
+    await step('Beenden', async () => {
+      await klick(p, /^Neural OS beenden$/, { warten: 400 });
+      await p.locator('#aus').waitFor({ timeout: 30000 });
       await p.waitForTimeout(400);
-      await shot(p, 'stick-jetzt-abziehen-ipad-dunkel');
+      await shot(p, 'beendet-ipad-dunkel');
     });
     await c.close();
     konsole.splice(konsoleVorher);

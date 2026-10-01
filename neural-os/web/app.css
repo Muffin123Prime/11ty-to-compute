@@ -650,22 +650,24 @@ mark {
 
 .rail__foot {
   display: flex;
-  align-items: center;
-  gap: 4px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
   margin-top: auto;
   padding-top: 12px;
 }
 
-.rail__foot > .rail__status { flex: 1 1 auto; min-width: 0; }
-
-/* [Beenden]: klein neben dem Status, mit Wort -- ein Ein/Aus ohne Wort raet man nicht. */
+/* [Beenden]: eine ruhige Zeile ueber dem Status, mit Wort -- ein Ein/Aus
+   ohne Wort raet man nicht. Darunter bleibt der Status wie in der Vorlage
+   (docs/vorlage/app.png), ungekuerzt. */
 .rail__beenden {
-  display: inline-flex;
-  flex: none;
+  display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
+  width: 100%;
   min-height: 44px;
-  padding: 0 12px;
+  padding: 0 14px;
+  text-align: left;
   font-size: var(--fs-sm);
   color: var(--fg-muted);
   background: none;
@@ -681,7 +683,7 @@ mark {
 }
 
 .rail__beenden:disabled { cursor: progress; opacity: 0.7; }
-.rail__beenden svg { width: 18px; height: 18px; }
+.rail__beenden svg { width: 22px; height: 22px; }
 
 /* Aus: Verbindung weg oder beendet. Deckt ALLES zu -- von der KI bleibt nichts sichtbar. */
 .aus {

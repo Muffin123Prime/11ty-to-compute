@@ -575,9 +575,11 @@ function register(router) {
     return {
       ...plan,
       andereNamen: plan.andere.map(stickMod.plattformName),
+      ausDemNetzNamen: (plan.ausDemNetz || plan.andere).map(stickMod.plattformName),
       dieserRechner: stick.LOCAL_PLATFORM,
       dieserRechnerName: stickMod.plattformName(stick.LOCAL_PLATFORM),
-      download: { noetig: plan.andere.length > 0, erlaubt: netz.erlaubt, grund: netz.grund },
+      // Nur was nicht schon auf dem eigenen Stick oder im Zwischenspeicher liegt, muss ins Netz.
+      download: { noetig: (plan.ausDemNetz || plan.andere).length > 0, erlaubt: netz.erlaubt, grund: netz.grund },
       /** Fuer [Mit dieser KI gekoppelt]: Feld "PIN für den neuen Stick" zeigen? Knopf ueberhaupt? */
       pinNoetig: !!(rc.ctx.vaultCrypto && rc.ctx.vaultCrypto.enabled),
       koppelnMoeglich: !!(rc.ctx.kopplung && typeof rc.ctx.kopplung.koppelnNeu === 'function'),
@@ -596,7 +598,7 @@ function register(router) {
    * dem Stick noch keins liegt.
    *
    * Körper: `{ path, ki?: 'neu'|'gekoppelt' (Vorgabe 'neu'), pin?, name?,
-   *            andereSysteme?: boolean (Vorgabe true), erlaubnis?: boolean }`.
+   *            andereSysteme?: boolean|'ohneNetz' (Vorgabe true), erlaubnis?: boolean }`.
    * `ki:'neu'` ist [Neue KI], `ki:'gekoppelt'` ist [Mit dieser KI gekoppelt]:
    * nach dem Vorbereiten wird der neue Stick mit dieser KI gekoppelt (`pin`
    * ist die PIN des neuen Sticks, Pflicht, wenn diese KI eine hat). Beide
@@ -618,7 +620,15 @@ function register(router) {
     const name = optionalString(body.name, 'name', { max: 60 });
     const mitAnderen = body.andereSysteme !== false;
     const eigenerStick = eigenerStickPfad(rc);
-    const plan = stick.einrichtenPlan(root, { eigenerStick, andereSysteme: mitAnderen });
+    // `andereSysteme: 'ohneNetz'` ist die zweite Antwort auf die Frage nach
+    // dem Internet: die anderen Systeme nur, soweit sie ohne Netz kommen (vom
+    // eigenen Stick, aus dem Zwischenspeicher) -- nie eine Freigabe.
+    const nurOhneNetz = body.andereSysteme === 'ohneNetz';
+    const erster = stick.einrichtenPlan(root, { eigenerStick, andereSysteme: mitAnderen });
+    const plattformen = nurOhneNetz
+      ? erster.andere.filter((p) => !(erster.ausDemNetz || erster.andere).includes(p))
+      : undefined;
+    const plan = plattformen ? stick.einrichtenPlan(root, { eigenerStick, andereSysteme: mitAnderen, plattformen }) : erster;
 
     if (!plan.eigener && !istOrdner(path.dirname(root)) && !istOrdner(root)) {
       throw nichtDa(`Den Ort ${root} gibt es nicht. Steckt der Stick noch?`, { root });
@@ -647,8 +657,9 @@ function register(router) {
     };
 
     let grantId = null;
-    if (mitAnderen && body.erlaubnis === true && plan.andere.length && !downloadErlaubt(rc).erlaubt) {
-      grantId = erlaubnisErteilen(rc, plan.andere.length);
+    const ausDemNetz = plan.ausDemNetz || plan.andere;
+    if (mitAnderen && !nurOhneNetz && body.erlaubnis === true && ausDemNetz.length && !downloadErlaubt(rc).erlaubt) {
+      grantId = erlaubnisErteilen(rc, ausDemNetz.length);
     }
 
     audit(rc, 'stick.einrichten', { root, fall: plan.fall, ki, andere: plan.andere, erlaubnis: !!grantId });
@@ -668,6 +679,7 @@ function register(router) {
         const r = await stick.einrichten(root, {
           eigenerStick,
           andereSysteme: mitAnderen,
+          ...(plattformen ? { plattformen } : {}),
           name: name || undefined,
           signal,
           onProgress,

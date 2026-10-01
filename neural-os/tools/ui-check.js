@@ -97,7 +97,10 @@ async function main() {
   const shotDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-shots-'));
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-ui-'));
   const { createApp, seedIfEmpty } = require('../src/app');
-  const app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error' });
+  // Wo die Stick-Suche nachsieht: nur hier, sonst zaehlte, was an diesem
+  // Pruefrechner unter /mnt haengt, als „Leerer Stick“.
+  const stickWelt = new Set();
+  const app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error', kopplung: { einhaengepunkte: () => [...stickWelt] } });
   await seedIfEmpty(app);
   await app.loadModules({});
   const server = await app.listen();
@@ -445,14 +448,15 @@ async function main() {
     console.log(`\n${B}8 · Kalender, Notizen, Projekte: ein Klick wirkt im Tresor${X}`);
     await pruefeKalenderNotizenProjekte(page, base, store);
 
-    /* ------------- 9. Stick: vorbereiten, sichern, wiederherstellen */
-    console.log(`\n${B}9 · Stick: ein Klick bereitet vor, „Jetzt sichern" legt wirklich etwas ab${X}`);
+    /* ------------- 9. Stick: ein leerer Stick, [Neue KI], sichern, wiederherstellen */
+    console.log(`\n${B}9 · Stick: ein leerer Stick bekommt mit einem Klick eine KI, „Jetzt sichern" legt wirklich etwas ab${X}`);
     // Der Punkt dieser Pruefung: eine gruene Meldung beweist gar nichts. Ein
     // Stick ist erst dann vorbereitet und eine Sicherung erst dann eine, wenn
     // danach Dateien auf der Platte liegen. Deshalb wird nach jedem Klick im
-    // Dateisystem nachgesehen. Hier steckt kein echter Stick; ein leerer
-    // Ordner steht an seiner Stelle und wird von Hand eingetragen -- genau
-    // der Weg, den die Ansicht anbietet, wenn die Suche nichts findet.
+    // Dateisystem nachgesehen. Hier laeuft Neural OS vom Laptop, und hier
+    // steckt kein echter Stick: ein leerer Ordner steht an seiner Stelle und
+    // wird von Hand eingetragen -- der Weg, den die Ansicht anbietet, wenn die
+    // Suche einen Stick nicht findet. Vom Stick aus prueft es Abschnitt 9b.
     const stickOrt = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-ui-stick-'));
     /** Der Ordner, den der Klick wirklich angelegt hat -- nicht der getippte. */
     let geschrieben = null;
@@ -461,32 +465,55 @@ async function main() {
       await page.waitForTimeout(1500);
       check(/#\/stick$/.test(page.url()), 'Die alte Adresse #/backup führt in den Bereich „Stick“', page.url());
 
-      const ortFeld = page.getByLabel('Ort des Sticks');
-      check(await ortFeld.count() === 1, 'Es gibt genau ein Feld für den Ort des Sticks');
       const stickText = await page.locator('main').innerText();
-      check(/Kein Stick gefunden|frei/.test(stickText),
-        'Die Suche sagt, was sie gefunden hat – oder ehrlich, dass sie nichts fand');
+      check(/Neural OS läuft von diesem Rechner/.test(stickText),
+        'Vom Laptop aus sagt die Ansicht, dass Neural OS nicht vom Stick läuft');
+      check(/Kein anderer Stick gefunden/.test(stickText),
+        'Die Suche sagt ehrlich, dass sie keinen Stick fand');
       check(!/Modell|Ollama|llama/i.test(stickText), 'Vom Sprachmodell auf dem Stick ist nicht mehr die Rede');
+      check(!/Beenden & abziehen/.test(stickText), 'Das alte „Beenden & abziehen“ ist weg (Beenden steht unten links)');
       check(/Zuletzt gesichert|Noch keine Sicherung/.test(stickText),
         'Neben „Jetzt sichern" steht still, wann zuletzt gesichert wurde');
 
+      await page.locator('summary', { hasText: 'Ort von Hand eintragen' }).click();
+      const ortFeld = page.getByLabel('Ort des Sticks');
+      check(await ortFeld.count() === 1, 'Es gibt genau ein Feld für den Ort des Sticks');
+
       if (await ortFeld.count()) {
         await ortFeld.fill(stickOrt);
-        await page.waitForTimeout(900);
+        await page.getByRole('button', { name: /^Prüfen$/ }).click();
+        const reihe = page.locator('.stickv__reihe[data-art="leer"]');
+        await reihe.first().waitFor({ timeout: 8000 }).catch(() => {});
+        const reiheText = await reihe.first().innerText().catch(() => '');
+        check(reiheText.startsWith(`Leerer Stick: ${stickOrt}`) && /frei/.test(reiheText),
+          'Der Ordner heißt „Leerer Stick: … · … frei“', reiheText.split('\n')[0]);
+        check(await reihe.getByRole('button', { name: /^Neue KI$/ }).count() === 1
+          && await reihe.getByRole('button', { name: /^Mit dieser KI gekoppelt$/ }).count() === 1,
+        'Daneben stehen [Neue KI] und [Mit dieser KI gekoppelt]');
 
-        // --- Stick vorbereiten: ab Werk ist das Netz zu, also kommt die
-        // eine Rueckfrage -- mit zwei Knoepfen, nicht mit einem Dialog.
-        await page.getByRole('button', { name: /^Stick vorbereiten$/ }).click();
+        // --- [Neue KI]: ab Werk ist das Netz zu, also kommt die eine
+        // Rueckfrage -- mit zwei Knoepfen, nicht mit einem Dialog.
+        await reihe.getByRole('button', { name: /^Neue KI$/ }).click();
         const nurHier = page.getByRole('button', { name: /^Nur / });
         await nurHier.first().waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
         check(await page.getByRole('button', { name: /^Erlauben$/ }).count() === 1 && await nurHier.count() === 1,
           'Für Windows/Mac fragt der Knopf einmal – „Erlauben" oder „Nur dieses System"');
         if (await nurHier.count()) {
           await nurHier.first().click();
+          // Waehrend der Arbeit: „Wird vorbereitet … 42 %“ -- gemessen, nicht erfunden.
+          let laufSatz = '';
+          for (let i = 0; i < 400 && !laufSatz; i++) {
+            laufSatz = await page.locator('.stickv__lauf-text').first().innerText({ timeout: 200 }).catch(() => '');
+            if (!laufSatz) {
+              if (await page.locator('.stickv__fertig, .stickv__meldung').count()) break;
+              await page.waitForTimeout(25);
+            }
+          }
+          check(/^Wird vorbereitet … \d+ %$/.test(laufSatz), 'Während der Arbeit steht „Wird vorbereitet … 42 %“', laufSatz || 'nicht gesehen');
           await page.locator('.stickv__fertig, .stickv__meldung').first().waitFor({ timeout: 120000 }).catch(() => {});
           const fertigText = await page.locator('main').innerText();
-          check(/Der Stick ist fertig/.test(fertigText), 'Nach dem Klick meldet die Ansicht „Der Stick ist fertig"',
-            fertigText.split('\n').find((z) => /fertig|Fehler|nicht/i.test(z)) || '');
+          check(/Fertig\. Stick kann raus\./.test(fertigText), 'Danach steht dort „Fertig. Stick kann raus.“',
+            fertigText.split('\n').find((z) => /Fertig/.test(z)) || fertigText.split('\n').find((z) => /Fehler|nicht/i.test(z)) || '');
           // Neuer Aufbau (Bauplan 2.10.4): Marker, Programm und Daten liegen
           // in Inhalt/; die Daten sind die Kennung der neuen KI (config.json).
           const inhalt = path.join(stickOrt, 'Inhalt');
@@ -495,8 +522,11 @@ async function main() {
             && fs.existsSync(path.join(inhalt, 'data', 'config.json')),
           'und auf dem Stick liegen wirklich Programm, Laufzeit und die neue KI (in Inhalt/)',
           fs.readdirSync(stickOrt).join(', '));
-          check(await page.locator('.stickv__schritte li').count() === 3,
-            'Danach steht eine Anleitung in drei Sätzen da');
+          await page.waitForTimeout(600);
+          const danach = page.locator('.stickv__reihe[data-art="fremd"]');
+          const danachText = await danach.first().innerText().catch(() => '');
+          check(/^Anderer Stick: /.test(danachText) && await danach.getByRole('button', { name: /^Koppeln$/ }).count() === 1,
+            'Jetzt wohnt dort eine KI: „Anderer Stick: …“ mit [Koppeln]', danachText.split('\n')[0]);
         }
 
         // --- Jetzt sichern: Ziel ist der Stick im Feld.
@@ -568,6 +598,11 @@ async function main() {
 
     check(errors.length === 0, 'Keine Konsolenfehler während all dessen',
       errors.slice(0, 2).join(' | ').slice(0, 200));
+
+    /* ------ 9b. Vom Stick aus: Laufzeit, [Neue KI], [Koppeln], Kopie */
+    console.log(`\n${B}9b · Vom Stick aus: Laufzeit-Zeile, leerer Stick, anderer Stick, zwei Sticks mit derselben KI${X}`);
+    await pruefeStickKopplung(browser);
+
     if (claudeFehlt) {
       hmm('GET /api/claude antwortet', 'die Route fehlt noch (Bereich Claude-Unterbau) – der Status sagt deshalb „Online“, nie „verbunden“');
     }
@@ -592,6 +627,248 @@ async function main() {
     + (unclear ? ` · ${Y}${unclear} nicht prüfbar${X}` : ''));
   console.log('');
   process.exit(failed ? 1 : 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* Stick-Ansicht vom Stick aus (docs/STICK-BAUPLAN.md 1.6/1.7, W2)      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Eine KI („Max“), die von einem Stick läuft, und daneben, was man
+ * einsteckt: ein leerer Stick, ein Stick mit der KI „Lena“, eine Kopie von
+ * Max. Die Sticks sind Ordner; welche „stecken“, sagt die Liste der
+ * Einhängepunkte (`kopplung.einhaengepunkte`), genau wie in
+ * test/kopplung.test.js. Alles andere ist echt: Suche, Vorbereiten, Koppeln,
+ * Postfächer, neue Kennung.
+ *
+ * Das Einzige, was nachgestellt wird: das Internet fehlt. [Für Mac holen]
+ * würde sonst wirklich bei nodejs.org laden; hier scheitert das Holen, wie
+ * es ohne Netz scheitert, und die Ansicht muss „Ohne Internet geht das
+ * nicht.“ sagen.
+ */
+async function pruefeStickKopplung(browser) {
+  const { createApp, seedIfEmpty } = require('../src/app');
+  const pathsMod = require('../src/kernel/paths');
+  const VERSION = require('../package.json').version;
+  const wurzel = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-ui-koppeln-'));
+  const welt = new Set();
+  const apps = [];
+  const stick = (name) => {
+    const root = path.join(wurzel, name);
+    fs.mkdirSync(path.join(root, 'data'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'app'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'app', 'package.json'), JSON.stringify({ name: 'neural-os', version: VERSION }));
+    fs.writeFileSync(path.join(root, pathsMod.PORTABLE_MARKER), JSON.stringify({
+      neuralOsPortable: true, dataDir: 'data', appDir: 'app', createdAt: new Date().toISOString(),
+    }, null, 2));
+    return { root, data: path.join(root, 'data'), appDir: path.join(root, 'app') };
+  };
+  const starte = (s) => createApp({
+    home: s.data, appDir: s.appDir, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false,
+    kopplung: { automatisch: false, einhaengepunkte: () => [...welt] },
+  });
+  let page = null;
+  const fehler = [];
+  let dialoge = 0;
+  try {
+    // Lena: ein Stick mit eigener KI, einmal gestartet und wieder beendet.
+    const lena = stick('Lena');
+    {
+      const b = await starte(lena);
+      b.identitaet.umbenennen('Lena');
+      await b.close();
+    }
+    // Max: der Stick, von dem diese KI läuft -- bisher nur mit der Laufzeit für Windows.
+    const max = stick('Max');
+    fs.mkdirSync(path.join(max.root, 'runtime', 'win-x64'), { recursive: true });
+    fs.writeFileSync(path.join(max.root, 'runtime', 'win-x64', 'node.exe'), Buffer.alloc(4096, 7));
+    const appA = await starte(max);
+    apps.push(appA);
+    await seedIfEmpty(appA);
+    appA.identitaet.umbenennen('Max');
+    const server = await appA.listen();
+    const base = `http://127.0.0.1:${server.server.address().port}`;
+
+    page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    page.on('pageerror', (e) => fehler.push(e.message));
+    page.on('console', (m) => { if (m.type() === 'error') fehler.push(m.text()); });
+    page.on('dialog', async (d) => { dialoge++; await d.dismiss().catch(() => {}); });
+    await page.goto(`${base}/#/stick`, { waitUntil: 'domcontentloaded' });
+    const karte = (name) => page.locator(`.stickv__karte[data-karte="${name}"]`);
+    const neuSuchen = async () => {
+      await page.getByRole('button', { name: /^Neu suchen$/ }).click();
+      await page.waitForTimeout(700);
+    };
+
+    /* --- 1. Die Laufzeit-Zeile: „Läuft bisher nur an Windows.“ [Für Mac holen] */
+    const laufzeit = karte('dieser').locator('.stickv__reihe[data-art="laufzeit"]');
+    await laufzeit.first().waitFor({ timeout: 10000 }).catch(() => {});
+    const laufzeitText = await laufzeit.first().innerText().catch(() => '');
+    const holen = laufzeit.getByRole('button', { name: /^Für Mac holen$/ });
+    check(/^Läuft bisher nur an Windows\./.test(laufzeitText) && await holen.count() === 1,
+      'Dieser Stick: „Läuft bisher nur an Windows.“ mit [Für Mac holen]', laufzeitText.split('\n')[0]);
+    if (await holen.count()) {
+      const echt = appA.stick.addRuntime;
+      let versucht = 0;
+      appA.stick.addRuntime = async () => {
+        versucht++;
+        throw Object.assign(new Error('getaddrinfo ENOTFOUND nodejs.org'), { code: 'ENOTFOUND' });
+      };
+      try {
+        await holen.click();
+        await page.locator('.stickv__reihe[data-art="laufzeit"] .stickv__hinweis').first().waitFor({ timeout: 15000 }).catch(() => {});
+        const danach = await laufzeit.first().innerText().catch(() => '');
+        check(versucht > 0 && (danach.match(/Ohne Internet geht das nicht\./g) || []).length === 1,
+          'Ohne Internet: einmal „Ohne Internet geht das nicht.“ – und der Knopf bleibt für später',
+          `${versucht} Versuch(e) · ${danach.replace(/\s+/g, ' ').slice(0, 120)}`);
+        check(await laufzeit.getByRole('button', { name: /^Für Mac holen$/ }).count() === 1, 'Danach lässt es sich wieder versuchen');
+      } finally {
+        appA.stick.addRuntime = echt;
+      }
+    }
+
+    /* --- 2. „Leerer Stick“ -> [Neue KI] */
+    const leer = path.join(wurzel, 'LEER');
+    fs.mkdirSync(leer);
+    welt.add(leer);
+    await neuSuchen();
+    const leerReihe = karte('andere').locator('.stickv__reihe[data-art="leer"]');
+    await leerReihe.first().waitFor({ timeout: 8000 }).catch(() => {});
+    const leerText = await leerReihe.first().innerText().catch(() => '');
+    check(leerText.startsWith(`Leerer Stick: ${leer} · `) && /GB frei|MB frei/.test(leerText),
+      'Ein leerer Stick steckt: „Leerer Stick: … · … frei“', leerText.split('\n')[0]);
+    check(await leerReihe.getByRole('button', { name: /^Neue KI$/ }).count() === 1
+      && await leerReihe.getByRole('button', { name: /^Mit dieser KI gekoppelt$/ }).count() === 1,
+    'mit [Neue KI] und [Mit dieser KI gekoppelt]');
+    if (await leerReihe.getByRole('button', { name: /^Neue KI$/ }).count()) {
+      await leerReihe.getByRole('button', { name: /^Neue KI$/ }).click();
+      // Für den Mac müsste es ins Netz; Windows kommt vom eigenen Stick. Die
+      // zweite Antwort heißt deshalb „Ohne Internet“, nicht „Nur Linux“.
+      const ohne = page.getByRole('button', { name: /^Ohne Internet$/ });
+      await ohne.first().waitFor({ timeout: 8000 }).catch(() => {});
+      const frage = await page.locator('.stickv__frage').first().innerText().catch(() => '');
+      check(await ohne.count() === 1 && /auch an Mac startet/.test(frage),
+        'Die eine Frage nennt, was aus dem Netz käme (der Mac) – und bietet „Ohne Internet“', frage.split('\n')[0]);
+      if (await ohne.count()) {
+        await ohne.first().click();
+        await page.locator('.stickv__fertig, .stickv__meldung').first().waitFor({ timeout: 120000 }).catch(() => {});
+        await page.waitForTimeout(800);
+        const inhalt = path.join(leer, 'Inhalt');
+        let marker = null;
+        try { marker = JSON.parse(fs.readFileSync(path.join(inhalt, pathsMod.PORTABLE_MARKER), 'utf8')); } catch { marker = null; }
+        const text = await karte('andere').innerText().catch(() => '');
+        check(/Fertig\. Stick kann raus\./.test(text) && !!(marker && marker.kiId && marker.kiId !== appA.identitaet.id),
+          '[Neue KI]: „Fertig. Stick kann raus.“ – und auf dem Stick wohnt eine neue KI mit eigener Kennung',
+          marker ? `${marker.name || ''} ${marker.kiId || ''}` : 'kein Marker');
+        check(fs.existsSync(path.join(inhalt, 'runtime', 'win-x64', 'node.exe')),
+          'Die Laufzeit für Windows kam ohne Netz vom eigenen Stick mit');
+        check(/Läuft bisher nur an Windows\./.test(text), 'und die Ansicht sagt, dass der neue Stick bisher nur an Windows läuft');
+      }
+      welt.delete(leer);
+    }
+
+    /* --- 3. „Anderer Stick: Lena“ -> [Koppeln] -> „Gekoppelt mit Lena …“ */
+    welt.add(lena.root);
+    await neuSuchen();
+    const lenaReihe = karte('andere').locator('.stickv__reihe[data-art="fremd"]', { hasText: 'Anderer Stick: Lena' });
+    await lenaReihe.first().waitFor({ timeout: 8000 }).catch(() => {});
+    check(await lenaReihe.count() === 1 && await lenaReihe.getByRole('button', { name: /^Koppeln$/ }).count() === 1,
+      'Steckt Lenas Stick: „Anderer Stick: Lena“ [Koppeln] – ohne Klick passiert nichts',
+      (await karte('andere').innerText().catch(() => '')).replace(/\s+/g, ' ').slice(0, 120));
+    check(!fs.existsSync(path.join(lena.root, 'sync', 'koppeln')), 'Vor dem Klick liegt auf Lenas Stick noch kein Angebot');
+    if (await lenaReihe.count()) {
+      await lenaReihe.getByRole('button', { name: /^Koppeln$/ }).click();
+      const partner = karte('gekoppelt').locator('.stickv__reihe[data-art="partner"]');
+      await partner.first().waitFor({ timeout: 15000 }).catch(() => {});
+      const partnerText = await partner.first().innerText().catch(() => '');
+      check(/^Gekoppelt mit Lena · (Lena übernimmt beim nächsten Start|abgeglichen \d\d:\d\d)/.test(partnerText),
+        'Nach [Koppeln]: „Gekoppelt mit Lena · Lena übernimmt beim nächsten Start“', partnerText.split('\n')[0]);
+      check(await partner.getByRole('button', { name: /^Jetzt abgleichen$/ }).count() === 1
+        && await partner.getByRole('button', { name: /^Entkoppeln$/ }).count() === 1,
+      'mit [Jetzt abgleichen] und [Entkoppeln]');
+      const angebote = fs.existsSync(path.join(lena.root, 'sync', 'koppeln')) ? fs.readdirSync(path.join(lena.root, 'sync', 'koppeln')) : [];
+      check(angebote.some((n) => n.endsWith('.angebot')), 'und auf Lenas Stick liegt jetzt wirklich das Angebot', angebote.join(', '));
+      check(appA.kopplung.status().partner.some((x) => x.name === 'Lena'), 'Max kennt Lena jetzt als Partner');
+
+      // [Entkoppeln] fragt in der Seite nach -- [Abbrechen] laesst alles, wie es ist.
+      await partner.getByRole('button', { name: /^Entkoppeln$/ }).click();
+      const rueck = partner.locator('.stickv__rueckfrage');
+      await rueck.waitFor({ timeout: 4000 }).catch(() => {});
+      const rueckText = await rueck.innerText().catch(() => '');
+      check(/Entkoppeln\? Beide behalten, was sie wissen\./.test(rueckText)
+        && await rueck.getByRole('button', { name: /^Entkoppeln$/ }).count() === 1
+        && await rueck.getByRole('button', { name: /^Abbrechen$/ }).count() === 1,
+      '[Entkoppeln] fragt in der Seite: „Entkoppeln? Beide behalten, was sie wissen.“', rueckText.split('\n')[0]);
+      await rueck.getByRole('button', { name: /^Abbrechen$/ }).click().catch(() => {});
+      await page.waitForTimeout(300);
+      check(await partner.locator('.stickv__rueckfrage').count() === 0 && appA.kopplung.status().partner.length === 1,
+        '[Abbrechen]: die Frage ist weg, gekoppelt bleibt gekoppelt');
+    }
+
+    /* --- 3b. „„Einkaufsliste“ gab es zweimal verschieden – beide sind da.“ [Ansehen] */
+    // Die zweite Fassung entsteht beim Abgleich (src/sync/folder.js); er
+    // meldet sie mit genau diesem Ereignis. Hier wird es so gemeldet, wie er
+    // es tut -- geprüft wird, was die Oberfläche daraus macht.
+    {
+      const kopieNotiz = appA.store.create('note', { title: 'Einkaufsliste (Fassung von Lena)', body: 'Milch, Brot, Äpfel' });
+      const lenaId = (appA.kopplung.status().partner.find((x) => x.name === 'Lena') || {}).id || null;
+      appA.bus.publish('kopplung.zweiFassungen', { titel: 'Einkaufsliste', kopieId: kopieNotiz.id, partner: lenaId });
+      const fassung = karte('gekoppelt').locator('.stickv__reihe[data-art="fassung"]');
+      await fassung.first().waitFor({ timeout: 8000 }).catch(() => {});
+      const fassungText = (await fassung.first().innerText().catch(() => '')).split('\n')[0];
+      check(fassungText === '„Einkaufsliste“ gab es zweimal verschieden – beide sind da.'
+        && await fassung.getByRole('button', { name: /^Ansehen$/ }).count() === 1,
+      'Zwei Fassungen: „„Einkaufsliste“ gab es zweimal verschieden – beide sind da.“ [Ansehen]', fassungText);
+      const meldung = page.locator('.toast', { hasText: 'gab es zweimal verschieden' });
+      check(await meldung.count() >= 1, 'und die App meldet es auch dann, wenn die Stick-Ansicht nicht offen ist (kurzer Hinweis mit [Ansehen])');
+      if (await fassung.getByRole('button', { name: /^Ansehen$/ }).count()) {
+        await fassung.getByRole('button', { name: /^Ansehen$/ }).click();
+        await page.waitForTimeout(900);
+        check(page.url().includes(`#/notes?id=${kopieNotiz.id}`), '[Ansehen] öffnet die zweite Fassung', page.url().split('#')[1] || '');
+        await page.goto(`${base}/#/stick`, { waitUntil: 'domcontentloaded' });
+        await karte('gekoppelt').locator('.stickv__reihe[data-art="partner"]').first().waitFor({ timeout: 10000 }).catch(() => {});
+        check(await karte('gekoppelt').locator('.stickv__reihe[data-art="fassung"]').count() === 0,
+          'Einmal angesehen, steht sie nicht wieder da');
+      }
+    }
+
+    /* --- 4. „Zwei Sticks tragen dieselbe KI.“ [Diesen Stick eigenständig machen] */
+    const kopie = path.join(wurzel, 'MaxKopie');
+    fs.mkdirSync(path.join(kopie, 'app'), { recursive: true });
+    fs.copyFileSync(path.join(max.appDir, 'package.json'), path.join(kopie, 'app', 'package.json'));
+    fs.copyFileSync(path.join(max.root, pathsMod.PORTABLE_MARKER), path.join(kopie, pathsMod.PORTABLE_MARKER));
+    welt.add(kopie);
+    const alteKennung = appA.identitaet.id;
+    await neuSuchen();
+    const zwilling = page.locator('.stickv__reihe[data-art="zwilling"]');
+    await zwilling.first().waitFor({ timeout: 8000 }).catch(() => {});
+    const zwillingText = await zwilling.first().innerText().catch(() => '');
+    const eigen = zwilling.getByRole('button', { name: /^Diesen Stick eigenständig machen$/ });
+    check(/^Zwei Sticks tragen dieselbe KI\./.test(zwillingText) && await eigen.count() === 1,
+      'Steckt eine Kopie: „Zwei Sticks tragen dieselbe KI.“ [Diesen Stick eigenständig machen]', zwillingText.split('\n')[0]);
+    if (await eigen.count()) {
+      await Promise.all([
+        page.waitForEvent('load', { timeout: 15000 }).catch(() => {}),
+        eigen.first().click(),
+      ]);
+      await page.locator('.stickv__karte[data-karte="andere"] .stickv__reihe, .stickv__karte[data-karte="andere"] [data-leer]').first()
+        .waitFor({ timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(800);
+      const neuText = await karte('andere').innerText().catch(() => '');
+      check(appA.identitaet.id !== alteKennung && !/Zwei Sticks tragen dieselbe KI/.test(neuText),
+        'Danach hat dieser Stick eine eigene Kennung, und die Kopie ist ein anderer Stick',
+        neuText.replace(/\s+/g, ' ').slice(0, 120));
+    }
+
+    check(dialoge === 0, 'Kein Fenster des Browsers (confirm/alert) dabei');
+    check(fehler.length === 0, 'Keine Seiten- oder Konsolenfehler dabei', fehler.slice(0, 2).join(' | ').slice(0, 200));
+  } catch (err) {
+    bad('Die Stick-Ansicht vom Stick aus ließ sich prüfen', err && err.message);
+  } finally {
+    if (page) await page.close().catch(() => {});
+    for (const a of apps) await a.close().catch(() => {});
+    fs.rmSync(wurzel, { recursive: true, force: true });
+  }
 }
 
 /* ------------------------------------------------------------------ */

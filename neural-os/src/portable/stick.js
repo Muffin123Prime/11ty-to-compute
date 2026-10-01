@@ -2322,6 +2322,29 @@ function createStick(deps = {}) {
   }
 
   /**
+   * Kaeme diese Laufzeit ohne Netz? Dieselbe Reihenfolge wie
+   * laufzeitBeschaffen, nur nachgesehen, nichts kopiert. Damit fragt „Stick
+   * vorbereiten“ nur dann nach dem Internet, wenn es wirklich hinaus muss --
+   * vom vollstaendigen eigenen Stick kommen Windows und Mac ohne Netz.
+   */
+  function ohneNetzDa(basis, platform) {
+    const spec = PLATFORMS[platform];
+    if (!spec) return false;
+    if (platform === LOCAL_PLATFORM) return true;
+    const liegt = (dir) => {
+      try {
+        const st = fs.statSync(path.join(dir, spec.file));
+        return st.isFile() && st.size > 0;
+      } catch {
+        return false;
+      }
+    };
+    if (eigeneBasis && eigeneBasis !== basis && liegt(runtimeDir(eigeneBasis, platform))) return true;
+    const cache = cacheDir(platform);
+    return !!(cache && versionIn(cache) === nodeVersion() && liegt(cache));
+  }
+
+  /**
    * Eine fehlende Laufzeit, strukturiert: die Oberflaeche zeigt bei einem
    * Netzproblem nur "Ohne Internet geht das nicht." (1.8) und behaelt den
    * Grund fuer das Protokoll. Ein Pruefsummenfehler ist KEIN Netzproblem.
@@ -3153,7 +3176,11 @@ function createStick(deps = {}) {
       aelter: !!(version && version !== 'unbekannt' && vergleicheVersion(version, laufendeVersion()) < 0),
       vorhanden: [...vorhanden],
       andere,
+      /** Die von `andere`, die nur aus dem Netz kommen (nicht vom eigenen Stick, nicht aus dem Zwischenspeicher). */
+      ausDemNetz: andere.filter((p) => !ohneNetzDa(lage.basis, p)),
       lokalFehlt,
+      /** Hat die KI auf diesem Stick eine PIN? Dann braucht [Koppeln] das Feld „PIN von …“. */
+      pin: !!marker && fs.existsSync(path.join(dataDirIn(lage.basis), 'secrets.json')),
     };
   }
 

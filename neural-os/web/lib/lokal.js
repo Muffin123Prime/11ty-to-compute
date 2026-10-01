@@ -41,6 +41,8 @@ export const ERLAUBT = Object.freeze([
   'erinnerungen-erledigt',
   'erinnerungen-mitgeteilt',
   'erinnerung-mitteilung',
+  // Stick-Ansicht: welche zweite Fassung schon angesehen ist (nur Kennungen).
+  'fassungen-gesehen',
 ]);
 
 /** Alte Schluessel aus der Zeit ohne Kennung -- beim Start weg. */
