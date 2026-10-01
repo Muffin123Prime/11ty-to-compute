@@ -236,6 +236,10 @@ async function main() {
     console.log(`\n${B}4d · Das Gehirn: importiertes Wissen, Unterthemen als Bereiche, Karte mit Adresse${X}`);
     await pruefeGehirnUnterthemen(browser);
 
+    /* ------------- 4e. Pruefrunde 2: Gehirn und Notizen bleiben behoben */
+    console.log(`\n${B}4e · Gehirn und Notizen: was die Prüfer fanden, bleibt behoben${X}`);
+    await pruefePruefrunde2(browser);
+
     /* ------------------------ 5. Schnellerfassung von ueberall aus */
     console.log(`\n${B}5 · Schnell festhalten, ohne den Bereich zu wechseln${X}`);
     // Absichtlich aus dem Gehirn heraus: der ganze Sinn ist, dass man nicht
@@ -1696,6 +1700,251 @@ async function pruefeGehirnUnterthemen(browser) {
     await context.close().catch(() => {});
     await app.close().catch(() => {});
     fs.rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Pruefrunde 2: Gehirn und Notizen bleiben behoben                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Was die Pruefer in Runde 2 nur im echten Browser zeigen konnten -- ein
+ * Wettlauf, ein Ladefehler, ein Eintrag, der anderswo verschwindet --, hier
+ * als feste Pruefpunkte, damit es behoben bleibt (Gehirn 1, 3, 6, 13;
+ * Notizen 6, 7, 8). Eigene kleine App: die Faelle brauchen Daten, die im
+ * grossen Tresor oben stoeren wuerden.
+ */
+async function pruefePruefrunde2(browser) {
+  const { createApp } = require('../src/app');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nos-ui-runde2-'));
+  const app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error' });
+  await app.loadModules({});
+  const server = await app.listen();
+  const base = `http://127.0.0.1:${server.server.address().port}`;
+  const store = app.store;
+  const fehler = [];
+  const warte = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    for (let i = 0; i < 6; i++) store.create('note', { title: `Schule ${i}`, body: `Mathe ${i}`, tags: ['schule'] });
+    for (let i = 0; i < 3; i++) store.create('note', { title: `Physik ${i}`, body: `Kraft ${i}`, tags: ['schule', 'physik'] });
+    for (let i = 0; i < 3; i++) store.create('note', { title: `Chemie ${i}`, body: `Stoff ${i}`, tags: ['schule', 'chemie'] });
+    for (let i = 0; i < 5; i++) store.create('note', { title: `Kochen ${i}`, body: `Rezept ${i}`, tags: ['kochen'] });
+    store.create('entity', { name: 'Biologie', kind: 'topic', description: 'Die Lehre vom Leben.' });
+    for (let i = 0; i < 6; i++) store.create('note', { title: `Bio ${i}`, body: `Zelle ${i} #biologie`, tags: ['biologie'] });
+    const urlaub = [];
+    for (let i = 0; i < 3; i++) urlaub.push(store.create('note', { title: `Urlaub ${i}`, body: `Meer ${i}`, tags: ['urlaub'] }));
+    const mitte = store.create('note', { title: 'Mitte', body: 'Siehe [[Schule 0]]' });
+    const weg = store.create('note', { title: 'Gleich weg', body: 'x', tags: ['schule'] });
+    store.remove(weg.id);
+    await warte(500);
+
+    const seite = async (hash, bereit) => {
+      const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark', serviceWorkers: 'block' });
+      const page = await context.newPage();
+      page.on('pageerror', (e) => fehler.push(e.message.slice(0, 120)));
+      await page.goto(`${base}/${hash}`, { waitUntil: 'domcontentloaded' });
+      await dismissWelcome(page);
+      if (bereit) await page.waitForFunction(bereit, null, { timeout: 15000 }).catch(() => {});
+      await warte(1200);
+      return page;
+    };
+    const zustand = (page) => page.evaluate(() => {
+      const g = document.querySelector('.gh');
+      const a = g && g.gehirn;
+      const schicht = (n) => { const e = document.querySelector(`.gh__layer--${n}`); return e ? e.dataset.zustand : null; };
+      return {
+        ebene: a ? a.ebene : null,
+        nodes: a ? a.nodes : 0,
+        kreise: a && Array.isArray(a.kreise) ? a.kreise.length : 0,
+        thema: a && a.thema ? a.thema.id : null,
+        ansicht: a ? a.ansicht : null,
+        uni: schicht('uni'),
+        netz: schicht('netz'),
+        hash: location.hash,
+        karteZu: !!(document.querySelector('.gh__karte') || {}).hidden,
+        toasts: [...document.querySelectorAll('.toast')].map((t) => t.innerText.trim()).filter(Boolean),
+      };
+    });
+    const istGehirn = () => { const g = document.querySelector('.gh'); return g && g.gehirn && g.gehirn.themen > 0; };
+    const imThema = () => { const g = document.querySelector('.gh'); return g && g.gehirn && g.gehirn.ebene === 1 && g.gehirn.nodes > 0; };
+
+    // Gehirn 1: Ein Fokus auf einen geloeschten Eintrag -- die Wurzel, keine leere Flaeche.
+    {
+      const page = await seite('#/graph', istGehirn);
+      await page.goto(`${base}/#/notes`, { waitUntil: 'domcontentloaded' });
+      await warte(500);
+      await page.goto(`${base}/#/graph?focus=${encodeURIComponent(weg.id)}`, { waitUntil: 'domcontentloaded' });
+      await warte(2500);
+      const z = await zustand(page);
+      check(z.ebene === 0 && z.uni === 'da' && z.kreise > 0 && z.hash === '#/graph' && z.toasts.includes('Diesen Eintrag gibt es nicht mehr.'),
+        'Gehirn: ein Fokus auf einen gelöschten Eintrag zeigt das Universum mit „Diesen Eintrag gibt es nicht mehr.“', JSON.stringify({ ebene: z.ebene, uni: z.uni, kreise: z.kreise, hash: z.hash, toasts: z.toasts }));
+      await page.context().close();
+    }
+
+    // Gehirn 3: Laedt das Elternthema nicht (Netz kurz weg), bleibt das Bild stehen.
+    {
+      const page = await seite(`#/graph?thema=${encodeURIComponent('thema:physik')}`, imThema);
+      const vorher = await zustand(page);
+      await page.route((url) => url.pathname === '/api/graph/universum' && url.searchParams.get('thema') === 'thema:schule', (route) => route.abort('internetdisconnected'));
+      await page.keyboard.press('Escape');
+      await warte(1500);
+      const z = await zustand(page);
+      check(vorher.thema === 'thema:physik' && (z.netz === 'da' || z.uni === 'da') && z.toasts.some((t) => /konnte nicht geladen werden/.test(t)),
+        'Gehirn: scheitert das Laden des Elternthemas, bleibt das Bild stehen, und ein Satz sagt es', JSON.stringify({ thema: z.thema, netz: z.netz, uni: z.uni, toasts: z.toasts }));
+      await page.context().close();
+    }
+
+    // Gehirn 6: [Öffnen] bei einem Begriff in der Karte zeigt sein Umfeld -- sichtbar, Karte zu.
+    {
+      const page = await seite(`#/graph?ansicht=karte&thema=${encodeURIComponent('thema:biologie')}`, () => !!document.querySelector('.wk__row'));
+      const zeile = page.locator('.wk__row', { hasText: 'Biologie' }).filter({ hasText: /Thema/i }).first();
+      const da = await zeile.count();
+      if (da) await zeile.locator('.icon-button').click();
+      await warte(1500);
+      const z = await zustand(page);
+      check(da > 0 && z.ansicht === 'universum' && z.karteZu && z.ebene === 1 && z.nodes > 0,
+        'Gehirn: [Öffnen] bei einem Begriff in der Karte zeigt sein Umfeld (Karte zu, Universum)', JSON.stringify({ zeile: da, ansicht: z.ansicht, karteZu: z.karteZu, ebene: z.ebene, nodes: z.nodes }));
+      await page.context().close();
+    }
+
+    // Gehirn 13: Was offen ist, verschwindet anderswo -- eine Ebene hoch, mit Meldung.
+    {
+      const page = await seite(`#/graph?thema=${encodeURIComponent('thema:urlaub')}`, imThema);
+      for (const n of urlaub) store.update(n.id, { tags: ['reisen'] });
+      store.remove(urlaub[0].id);
+      await warte(3500);
+      const z = await zustand(page);
+      check(z.ebene === 0 && z.hash === '#/graph' && z.toasts.includes('Dieses Thema gibt es nicht mehr.'),
+        'Gehirn: verschwindet das offene Thema anderswo, geht es mit „Dieses Thema gibt es nicht mehr.“ zur Wurzel', JSON.stringify({ ebene: z.ebene, hash: z.hash, toasts: z.toasts }));
+      await page.context().close();
+    }
+    {
+      const page = await seite(`#/graph?focus=${encodeURIComponent(mitte.id)}`, imThema);
+      store.remove(mitte.id);
+      await warte(3500);
+      const z = await zustand(page);
+      check(z.ebene === 0 && z.hash === '#/graph' && z.toasts.includes('Diesen Eintrag gibt es nicht mehr.'),
+        'Gehirn: wird der Eintrag des Umfelds gelöscht, geht es mit Meldung zur Wurzel', JSON.stringify({ ebene: z.ebene, hash: z.hash, toasts: z.toasts }));
+      await page.context().close();
+    }
+
+    // Gehirn 5: Wo die Karte steht, entscheidet das CSS (Container-Abfrage) -- und der Code
+    // rechnet mit derselben Lage: kein gewaehlter Knoten liegt unter der Karte.
+    {
+      const ids = [store.create('note', { title: 'Zelle', body: 'Grundbaustein', tags: ['schule', 'anatomie'] }).id];
+      for (let i = 0; i < 12; i++) ids.push(store.create('note', { title: `Anatomie ${i}`, body: `Teil von [[Zelle]] ${i}`, tags: ['schule', 'anatomie'] }).id);
+      await warte(600);
+      const lagen = new Set();
+      for (const [vw, vh] of [[1024, 768], [1440, 900]]) {
+        const context = await browser.newContext({ viewport: { width: vw, height: vh }, colorScheme: 'dark', serviceWorkers: 'block' });
+        const page = await context.newPage();
+        page.on('pageerror', (e) => fehler.push(e.message.slice(0, 120)));
+        await page.goto(`${base}/#/graph?thema=${encodeURIComponent('thema:anatomie')}`, { waitUntil: 'domcontentloaded' });
+        await dismissWelcome(page);
+        await page.waitForFunction(() => { const g = document.querySelector('.gh'); return g && g.gehirn && g.gehirn.ebene === 1 && g.gehirn.nodes > 5; }, null, { timeout: 15000 }).catch(() => {});
+        await page.waitForFunction(() => document.querySelector('.gh').dataset.ruhe === 'ja', null, { timeout: 20000 }).catch(() => {});
+        await warte(500);
+        let verdeckt = 0;
+        let gezaehlt = 0;
+        let lage = null;
+        for (const id of ids.slice(0, 5)) {
+          const p = await page.evaluate((nid) => {
+            const g = document.querySelector('.gh').gehirn;
+            const c = document.querySelector('.gh__canvas--netz').getBoundingClientRect();
+            const s = g.screenPosition(nid);
+            return s ? { x: c.left + s.x, y: c.top + s.y } : null;
+          }, id);
+          if (!p) continue;
+          await page.mouse.click(p.x, p.y);
+          await warte(900);
+          const r = await page.evaluate((nid) => {
+            const g = document.querySelector('.gh').gehirn;
+            const root = document.querySelector('.gh').getBoundingClientRect();
+            const c = document.querySelector('.gh__canvas--netz').getBoundingClientRect();
+            const karte = document.querySelector('.gh__card');
+            const k = karte.getBoundingClientRect();
+            const s = g.screenPosition(nid);
+            const x = c.left + s.x;
+            const y = c.top + s.y;
+            return {
+              gewaehlt: g.selectedId === nid,
+              steht: k.top - root.top > 40 ? 'unten' : 'rechts',
+              css: getComputedStyle(karte).getPropertyValue('--gh-karte').trim(),
+              darunter: x >= k.left && x <= k.right && y >= k.top && y <= k.bottom,
+            };
+          }, id);
+          if (!r.gewaehlt) continue;
+          gezaehlt++;
+          if (r.darunter) verdeckt++;
+          if (!lage) lage = r;
+          lagen.add(r.steht);
+          await page.keyboard.press('Escape');
+          await warte(400);
+        }
+        check(gezaehlt >= 3 && lage && lage.steht === lage.css && verdeckt === 0,
+          `Gehirn bei ${vw}×${vh}: die Karte steht, wo das CSS sie hinlegt, und verdeckt keinen gewählten Knoten`,
+          lage ? `Karte ${lage.steht}, CSS „${lage.css}“, ${verdeckt} von ${gezaehlt} verdeckt` : `${gezaehlt} gewählt`);
+        await context.close();
+      }
+      check(lagen.has('unten') && lagen.has('rechts'), 'Gehirn: schmal steht die Karte unten, breit rechts', [...lagen].join(', '));
+    }
+
+    // Notizen 6: Das offene Blatt zeigt eine Aenderung von anderswo (iPad, KI) -- auch bei langsamer Wand.
+    {
+      const n = store.create('note', { title: 'Einkauf', body: 'Milch, Brot' });
+      const page = await seite(`#/notes?id=${encodeURIComponent(n.id)}`, () => !!document.querySelector('.nw__read .nw__prose'));
+      await page.route(/\/api\/notizen\?/, async (route) => { await warte(300); await route.continue(); });
+      store.update(n.id, { body: 'Milch, Brot, Eier (vom iPad)' });
+      await warte(2500);
+      const prosa = await page.locator('.nw__read .nw__prose').innerText().catch(() => '');
+      check(/Eier \(vom iPad\)/.test(prosa), 'Notizen: das offene Blatt zeigt eine Änderung von anderswo, auch wenn die Wand langsam lädt', prosa.slice(0, 60));
+      await page.context().close();
+    }
+
+    // Notizen 7: Eine Notiz antippen, waehrend der Server langsam ist, dann gleich „Neue Notiz“ -- das Getippte bleibt.
+    {
+      const a = store.create('note', { title: 'Lernplan', body: 'Siehe [[Zellatmung]] und [[Photosynthese]].' });
+      const page = await seite('#/notes', () => !!document.querySelector('.nw__note'));
+      await page.route(/\/api\/notizen\/aufloesen/, async (route) => { await warte(1500); await route.continue(); });
+      await page.click(`.nw__note[data-id="${a.id}"]`);
+      await warte(150);
+      await page.click('button[data-nw-plus]');
+      await page.click('button[data-neu="notiz"]');
+      await page.waitForSelector('input.nw__edit-title', { timeout: 5000 }).catch(() => {});
+      await page.fill('input.nw__edit-title', 'Idee');
+      await page.click('textarea.nos-ne__area');
+      await page.keyboard.type('Wichtiger Gedanke, den ich gerade tippe.');
+      await warte(2000);
+      const titel = await page.locator('input.nw__edit-title').inputValue().catch(() => null);
+      const textInhalt = await page.locator('textarea.nos-ne__area').inputValue().catch(() => null);
+      check(titel === 'Idee' && /Wichtiger Gedanke, den ich gerade tippe\./.test(textInhalt || ''),
+        'Notizen: eine langsam ladende Notiz verdrängt die gerade begonnene neue nicht', JSON.stringify({ titel, text: textInhalt }));
+      await page.context().close();
+    }
+
+    // Notizen 8: [Anheften] und gleich [Bearbeiten] -- der Editor bleibt, das Getippte auch.
+    {
+      const a = store.create('note', { title: 'Vorrat', body: 'Milch' });
+      const page = await seite(`#/notes?id=${encodeURIComponent(a.id)}`, () => !!document.querySelector('.nw__read'));
+      await page.route(/\/api\/notizen\?/, async (route) => { await warte(700); await route.continue(); });
+      await page.click('.nw__read-foot button:has-text("Anheften")');
+      await warte(100);
+      await page.click('.nw__read-foot button:has-text("Bearbeiten")');
+      await page.waitForSelector('textarea.nos-ne__area', { timeout: 5000 }).catch(() => {});
+      await page.click('textarea.nos-ne__area');
+      await page.keyboard.press('Control+End');
+      await page.keyboard.type(', Brot, Eier');
+      await warte(1300);
+      const textInhalt = await page.locator('textarea.nos-ne__area').inputValue().catch(() => null);
+      check(/Milch, Brot, Eier\s*$/.test(textInhalt || '') && store.get(a.id).data.pinned === true,
+        'Notizen: [Anheften] und gleich [Bearbeiten] – angeheftet, und der Editor behält das Getippte', JSON.stringify({ text: textInhalt, angeheftet: store.get(a.id).data.pinned }));
+      await page.context().close();
+    }
+
+    check(!fehler.length, 'Keine Seitenfehler dabei', fehler.join(' | '));
+  } finally {
+    await app.close().catch(() => {});
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* egal */ }
   }
 }
 

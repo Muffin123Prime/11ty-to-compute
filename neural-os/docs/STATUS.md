@@ -11,7 +11,7 @@ prüfen ist, steht weiter unten – ungeschönt.
 ```
 npm test                             1596 Tests, 0 fehlgeschlagen
 npm run check                        170 Funktionen über HTTP, 0 defekt
-npm run ui                           249 Prüfpunkte im Browser, alles in Ordnung
+npm run ui                           261 Prüfpunkte im Browser, alles in Ordnung
 npm run proof                        22 Prüfungen, ohne Freigabe geht nichts ins Netz
 node tools/chat-beweis.js            226 Punkte, alle Baustein-Arten im Browser
 node tools/stick-trennung-check.js   15 Punkte, zwei Sticks im selben Browser
