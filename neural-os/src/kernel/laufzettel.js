@@ -23,7 +23,8 @@ const { NeuralError, StorageError } = require('./errors');
  *    "zustand":"startet|gesperrt|bereit", "port":21064, "url":"http://127.0.0.1:21064/",
  *    "instanz":"<12 Zeichen>", "heim":"<sha256(realpath(home))[0..15]>", "version":"0.1.0",
  *    "ordner":"<dev>:<ino> von data/ (nicht unter Windows)",
- *    "stopp":"<zufällig, das Beenden-Recht von `neural-os stop`>"}
+ *    "stopp":"<zufällig, das Beenden-Recht von `neural-os stop`>",
+ *    "bau":"<Fingerabdruck des Programms, src/kernel/bau.js>"}
  *
  * `seit` ist der Zeitpunkt des letzten Zustandswechsels: "startet" gilt nur
  * 120 s, und wer zwischen Vorraum und Anwendung wieder auf "startet" geht,
@@ -488,7 +489,7 @@ function laeuftSchon(befund) {
   if (befund.zustand === 'startet') {
     return new NeuralError('STARTET_SCHON', 'Neural OS startet gerade schon.', { status: 409, details: { seit: befund.seit } });
   }
-  return new NeuralError('AELTERE_VERSION', 'Neural OS läuft schon (ältere Version). Bitte dort beenden.', {
+  return new NeuralError('AELTERE_VERSION', 'Neural OS läuft schon (ältere Version). Bitte dort beenden: das schwarze Fenster der alten Version schließen oder den Rechner neu starten.', {
     status: 409, details: { pid: befund.pid },
   });
 }
@@ -496,7 +497,7 @@ function laeuftSchon(befund) {
 /**
  * Den eigenen Laufzettel anlegen.
  * @param {{lock:string, home:string, vault?:string}} paths
- * @param {{instanz?:string, heim?:string, zustand?:string, port?:number|null, url?:string|null, version?:string, stopp?:string}} [felder]
+ * @param {{instanz?:string, heim?:string, zustand?:string, port?:number|null, url?:string|null, version?:string, stopp?:string, bau?:string}} [felder]
  * @param {object} [opts] wie bei `pruefen`
  * @returns {Promise<{instanz:string, zettel:object, aktualisieren:(f:object)=>boolean, freigeben:()=>boolean}>}
  * @throws NeuralError LAEUFT_SCHON {url} | STARTET_SCHON | AELTERE_VERSION
@@ -520,6 +521,10 @@ async function anlegen(paths, felder = {}, opts = {}) {
   // Das Beenden-Recht für `neural-os stop` (ohne PIN-Sitzung, etwa unter
   // Windows ohne SIGTERM). Steht nur hier, nie in /api/health.
   if (typeof felder.stopp === 'string' && felder.stopp) zettel.stopp = felder.stopp;
+  // Welche Fassung hier läuft: Ein Starter einer anderen beendet sie und
+  // startet seine (bin/neural-os.js, cmdStarter). Fehlt sie, ist es eine
+  // Fassung von vor dem 01.10.2026.
+  if (typeof felder.bau === 'string' && felder.bau) zettel.bau = felder.bau;
 
   for (let versuch = 0; versuch < 4; versuch++) {
     try {

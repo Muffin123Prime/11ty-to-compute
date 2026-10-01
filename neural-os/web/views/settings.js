@@ -626,15 +626,20 @@ function anbieterBlock(self, id, c, istAktiv) {
       meldung.textContent = 'Wird mit einem kleinen Probeaufruf geprüft …';
       meldung.className = 'setv__meldung';
       try {
-        await self.api.post(`/ki/${id}/schluessel`, { schluessel: wert }, { timeoutMs: 45000 });
+        // Einfuegen heisst: diese KI soll antworten (oben steht, wer gerade antwortet; zurueck geht mit einem Tipp).
+        const z = await self.api.post(`/ki/${id}/schluessel`, { schluessel: wert, aktivieren: true }, { timeoutMs: 45000 });
         if (!self.alive) return;
         feld.value = '';
         self.ui.feldOffen[id] = false;
-        self.ctx.toast(`${A.name} ist verbunden.`, 'success');
+        // Ein Google-Schluessel im Claude-Feld (oder umgekehrt): der Server hat ihn richtig zugeordnet.
+        const wer = z && z.umgeleitet && ANBIETER[z.umgeleitet] ? ANBIETER[z.umgeleitet].name : A.name;
+        self.ctx.toast(z && z.umgeleitet
+          ? `Das war ein Schlüssel für ${wer} – ${wer} ist verbunden und antwortet ab jetzt.`
+          : `${wer} ist verbunden und antwortet ab jetzt.`, 'success');
         await kiNeu(self);
       } catch (err) {
         if (!self.alive) return;
-        meldung.textContent = fehlerText(err);
+        meldung.textContent = fehlerText(err) + (err && err.code === 'CLAUDE_GUTHABEN' ? ' Kostenlos geht es mit Gemini (oben).' : '');
         meldung.className = 'setv__meldung is-danger';
       }
     };

@@ -19,6 +19,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { test, tempHome, fakeServer } = require('./harness');
 const rechner = require('../src/kernel/rechner');
+const bau = require('../src/kernel/bau');
 
 const WURZEL = path.join(__dirname, '..');
 const BIN = path.join(WURZEL, 'bin', 'neural-os.js');
@@ -158,7 +159,7 @@ test('Laufzettel "bereit" + Attrappe: start --hintergrund --open öffnet nur den
     const url = `${srv.url}/`;
     const vorher = {
       v: 2, pid: process.pid, rechner: rechner.kennung(), boot: rechner.bootZeit(), seit: new Date().toISOString(),
-      zustand: 'bereit', port: srv.port, url, instanz: 'attrappe0001', heim, version: '0.1.0',
+      zustand: 'bereit', port: srv.port, url, instanz: 'attrappe0001', heim, version: '0.1.0', bau: bau.kennung(),
     };
     fs.writeFileSync(path.join(u.home, '.lock'), JSON.stringify(vorher));
 
@@ -188,6 +189,7 @@ test('start --hintergrund ohne TTY: Ende unter 10 s mit 0, der Dienst lebt abgel
     assert.ok(z, 'Laufzettel fehlt');
     assert.equal(z.v, 2);
     assert.equal(z.zustand, 'bereit');
+    assert.equal(z.bau, bau.kennung(), 'der Laufzettel nennt die Fassung, die läuft');
     assert.notEqual(z.pid, r.pid, 'der Dienst ist ein eigener Prozess');
     assert.ok(lebt(z.pid), 'der Dienst lebt nach dem Ende des Starters weiter');
     assert.equal(z.url, `http://127.0.0.1:${z.port}/`);
@@ -606,7 +608,7 @@ test('echter Öffner statt NEURAL_OS_OEFFNER: „Fertig. Dieses Fenster kann zu.
     const url = `${srv.url}/`;
     fs.writeFileSync(path.join(u.home, '.lock'), JSON.stringify({
       v: 2, pid: process.pid, rechner: rechner.kennung(), boot: rechner.bootZeit(), seit: new Date().toISOString(),
-      zustand: 'bereit', port: srv.port, url, instanz: 'attrappe0002', heim, version: '0.1.0',
+      zustand: 'bereit', port: srv.port, url, instanz: 'attrappe0002', heim, version: '0.1.0', bau: bau.kennung(),
     }));
     const r = await lauf(['start', '--hintergrund', '--open', '--home', u.home], {
       env: { ...u.env, NEURAL_OS_OEFFNER: '', PATH: `${binOrdner}${path.delimiter}${process.env.PATH}` },
@@ -637,7 +639,7 @@ test('Browser lässt sich nicht öffnen (Öffner endet mit Fehler): die Adresse 
     const url = `${srv.url}/`;
     fs.writeFileSync(path.join(u.home, '.lock'), JSON.stringify({
       v: 2, pid: process.pid, rechner: rechner.kennung(), boot: rechner.bootZeit(), seit: new Date().toISOString(),
-      zustand: 'bereit', port: srv.port, url, instanz: 'attrappe0003', heim, version: '0.1.0',
+      zustand: 'bereit', port: srv.port, url, instanz: 'attrappe0003', heim, version: '0.1.0', bau: bau.kennung(),
     }));
     const r = await lauf(['start', '--hintergrund', '--open', '--home', u.home], {
       env: { ...u.env, NEURAL_OS_OEFFNER: '', PATH: `${binOrdner}${path.delimiter}${process.env.PATH}` },
@@ -832,6 +834,191 @@ test('Alte Sperre {pid, at} von einem anderen Rechner, die PID gehört hier eine
     await bis(() => !lebt(z.pid), { ms: 5000, was: 'Dienst endet nach [Beenden]' });
   } finally {
     try { fremd.kill('SIGKILL'); } catch { /* schon weg */ }
+    await u.cleanup();
+  }
+});
+
+/* ------------------------------------------- eine andere Fassung läuft */
+
+test('Eine andere Fassung läuft noch (Laufzettel ohne Bau-Kennung): der Starter beendet sie und startet die neue', async () => {
+  // So beim Nutzer am 01.10.2026: Die neue ZIP war entpackt, der neue
+  // Starter doppelgeklickt -- und der Browser zeigte die alte App, die nur
+  // Claude kannte. Sie lief noch, mit demselben Datenordner.
+  const u = umgebung('nos-s-andere');
+  try {
+    const r = await lauf(['start', '--hintergrund', '--open', '--home', u.home, '--port', '0'], { env: u.env });
+    assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`);
+    const alt = leseZettel(u.home);
+    assert.ok(alt && alt.zustand === 'bereit' && lebt(alt.pid), 'die erste Fassung läuft nicht');
+    // Die laufende wird zur Fassung von vor der Bau-Kennung: ihr Zettel ohne `bau`.
+    const { bau: _weg, ...ohneBau } = alt;
+    fs.writeFileSync(path.join(u.home, '.lock'), JSON.stringify(ohneBau));
+
+    const zwei = await lauf(['start', '--hintergrund', '--open', '--home', u.home, '--port', '0'], { env: u.env });
+    assert.equal(zwei.code, 0, `${zwei.stdout}\n${zwei.stderr}`);
+    assert.match(zwei.stdout, /Eine andere Version von Neural OS lief noch und wurde beendet\./);
+    assert.ok(!lebt(alt.pid), 'die alte Fassung lebt noch');
+    const neu = leseZettel(u.home);
+    assert.ok(neu && neu.zustand === 'bereit', 'die neue Fassung läuft nicht');
+    assert.notEqual(neu.pid, alt.pid);
+    assert.notEqual(neu.instanz, alt.instanz);
+    assert.equal(neu.bau, bau.kennung());
+    assert.deepEqual(u.geoeffnet(), [alt.url, neu.url], 'der Browser bekommt die neue Fassung');
+    // Die alte endete sauber über SIGTERM -- nicht über [Beenden], das auf
+    // dem Mac den Stick auswürfe, von dem die neue gerade startet.
+    const log = fs.readFileSync(path.join(u.home, 'protokoll', 'dienst.log'), 'utf8');
+    assert.match(log, /Neural OS endet \(SIGTERM\)\./, 'die alte endete nicht sauber');
+    assert.doesNotMatch(log, /Neural OS endet \(knopf\)/);
+
+    // Ein dritter Doppelklick: dieselbe Fassung, also nur der Browser.
+    const drei = await lauf(['start', '--hintergrund', '--open', '--home', u.home, '--port', '0'], { env: u.env });
+    assert.equal(drei.code, 0, drei.stdout + drei.stderr);
+    assert.doesNotMatch(drei.stdout, /andere Version/);
+    assert.equal(leseZettel(u.home).instanz, neu.instanz, 'derselbe Dienst');
+
+    const b = await rufe(`http://127.0.0.1:${neu.port}/api/system/beenden`, { method: 'POST', body: {} });
+    assert.equal(b.status, 202, b.text);
+    await bis(() => !lebt(neu.pid), { ms: 5000, was: 'Dienst endet nach [Beenden]' });
+  } finally {
+    await u.cleanup();
+  }
+});
+
+test('Unter Windows (vorgetäuscht): die andere Fassung endet über ihr Beenden-Recht, nicht hart', async () => {
+  const u = umgebung('nos-s-andere-win');
+  // heimKennung schreibt unter win32 klein: ein Heim ohne Großbuchstaben (wie bei "stop unter Windows").
+  const home = path.join(os.tmpdir(), `nos-s-andere-win-${require('node:crypto').randomBytes(6).toString('hex')}`);
+  fs.mkdirSync(home);
+  // Der Starter hält sich für Windows -- nur sein spawn nicht: Den neuen
+  // Dienst startet Node hier ja doch unter Linux. `os` vorher laden: Sonst
+  // hielte os.tmpdir() (das cwd des Dienstes) "undefined\temp" für den Ordner.
+  const win32 = path.join(path.dirname(u.oeffner), 'win32.js');
+  fs.writeFileSync(win32, [
+    "require('node:os');",
+    "const cp = require('node:child_process');",
+    'const echt = process.platform;',
+    "const als = (wert) => Object.defineProperty(process, 'platform', { value: wert, configurable: true });",
+    'const spawn = cp.spawn;',
+    "cp.spawn = function spawnUnterLinux(...a) { als(echt); try { return spawn.apply(this, a); } finally { als('win32'); } };",
+    "als('win32');",
+    '',
+  ].join('\n'));
+  try {
+    const r = await lauf(['start', '--hintergrund', '--open', '--home', home, '--port', '0'], { env: u.env });
+    assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`);
+    const alt = leseZettel(home);
+    assert.ok(alt && alt.zustand === 'bereit' && alt.stopp, 'die erste Fassung läuft nicht');
+    const { bau: _weg, ...ohneBau } = alt;
+    fs.writeFileSync(path.join(home, '.lock'), JSON.stringify(ohneBau));
+
+    const zwei = await lauf(['start', '--hintergrund', '--open', '--home', home, '--port', '0'], { env: u.env, vorab: ['--require', win32] });
+    assert.equal(zwei.code, 0, `${zwei.stdout}\n${zwei.stderr}`);
+    assert.match(zwei.stdout, /Eine andere Version von Neural OS lief noch und wurde beendet\./);
+    assert.ok(!lebt(alt.pid), 'die alte Fassung lebt noch');
+    const log = fs.readFileSync(path.join(home, 'protokoll', 'dienst.log'), 'utf8');
+    assert.match(log, /Neural OS endet \(knopf\)\./, 'die alte endete nicht über ihr Beenden-Recht');
+    const neu = leseZettel(home);
+    assert.ok(neu && neu.zustand === 'bereit' && neu.pid !== alt.pid, 'die neue Fassung läuft nicht');
+    assert.deepEqual(u.geoeffnet(), [alt.url, neu.url]);
+    const b = await rufe(`http://127.0.0.1:${neu.port}/api/system/beenden`, { method: 'POST', body: {} });
+    assert.equal(b.status, 202, b.text);
+    await bis(() => !lebt(neu.pid), { ms: 5000, was: 'Dienst endet nach [Beenden]' });
+  } finally {
+    await aufraeumen(home);
+    fs.rmSync(home, { recursive: true, force: true });
+    await u.cleanup();
+  }
+});
+
+/**
+ * Eine andere Fassung als eigener Prozess: ".../app/bin/neural-os.js", mit
+ * /api/health wie ein Neural OS, aber ohne Beenden-Recht (jede andere Frage:
+ * 403) -- wie eine Fassung, die den Kopf x-neural-os-stopp nicht kennt.
+ */
+function andereFassungStarten(ordner, { instanz, heim }) {
+  const skript = path.join(ordner, 'app', 'bin', 'neural-os.js');
+  const portDatei = path.join(ordner, 'port.txt');
+  fs.mkdirSync(path.dirname(skript), { recursive: true });
+  fs.writeFileSync(skript, `
+const fs = require('node:fs');
+const http = require('node:http');
+const [instanz, heim, portDatei] = process.argv.slice(2);
+const srv = http.createServer((req, res) => {
+  if (req.url.startsWith('/api/health')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, at: new Date().toISOString(), instanz, heim }));
+    return;
+  }
+  res.writeHead(403, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: { code: 'NICHT_ERLAUBT', message: 'Nur mit Sitzung.' } }));
+});
+srv.listen(0, '127.0.0.1', () => fs.writeFileSync(portDatei, String(srv.address().port)));
+process.on('SIGTERM', () => { fs.writeFileSync(portDatei + '.sigterm', '1'); process.exit(0); });
+`);
+  const kind = spawn(process.execPath, [skript, instanz, heim, portDatei], { stdio: 'ignore' });
+  return { kind, portDatei };
+}
+
+test('Eine andere Fassung, die kein Beenden-Recht kennt: SIGTERM an ihren Prozess, dann startet die neue', async () => {
+  const u = umgebung('nos-s-andere-ohne-stopp');
+  const ordner = tempHome('nos-s-andere-ohne-stopp-app');
+  const heim = require('../src/kernel/laufzettel').heimKennung(u.home);
+  const { kind, portDatei } = andereFassungStarten(ordner.home, { instanz: 'anderefass01', heim });
+  try {
+    const port = Number(await bis(() => { try { return fs.readFileSync(portDatei, 'utf8'); } catch { return null; } }, { ms: 5000, was: 'die andere Fassung lauscht' }));
+    fs.mkdirSync(u.home, { recursive: true });
+    fs.writeFileSync(path.join(u.home, '.lock'), JSON.stringify({
+      v: 2, pid: kind.pid, rechner: rechner.kennung(), boot: rechner.bootZeit(), seit: new Date().toISOString(),
+      zustand: 'bereit', port, url: `http://127.0.0.1:${port}/`, instanz: 'anderefass01', heim, version: '0.1.0',
+    }));
+
+    const r = await lauf(['start', '--hintergrund', '--open', '--home', u.home, '--port', '0'], { env: u.env });
+    assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /Eine andere Version von Neural OS lief noch und wurde beendet\./);
+    assert.ok(fs.existsSync(`${portDatei}.sigterm`), 'kein SIGTERM an die andere Fassung');
+    assert.ok(!lebt(kind.pid), 'die andere Fassung lebt noch');
+    const neu = leseZettel(u.home);
+    assert.ok(neu && neu.zustand === 'bereit' && neu.pid !== kind.pid, 'die neue Fassung läuft nicht');
+    assert.equal(neu.bau, bau.kennung());
+    assert.deepEqual(u.geoeffnet(), [neu.url]);
+    const b = await rufe(`http://127.0.0.1:${neu.port}/api/system/beenden`, { method: 'POST', body: {} });
+    assert.equal(b.status, 202, b.text);
+    await bis(() => !lebt(neu.pid), { ms: 5000, was: 'Dienst endet nach [Beenden]' });
+  } finally {
+    try { kind.kill('SIGKILL'); } catch { /* schon weg */ }
+    await u.cleanup();
+    ordner.cleanup();
+  }
+});
+
+test('Ein Laufzettel ohne Bau-Kennung, dessen PID kein Neural OS ist: nichts wird beendet, das Fenster sagt warum', async () => {
+  if (process.platform !== 'linux') return; // die Befehlszeile liest der Test hier aus /proc
+  const u = umgebung('nos-s-andere-fremd');
+  const heim = require('../src/kernel/laufzettel').heimKennung(u.home);
+  // Ein beliebiges Programm; unter dem Port antwortet eine Attrappe mit passender Instanz.
+  const fremd = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const srv = await fakeServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, at: new Date().toISOString(), instanz: 'fremdinst001', heim }));
+  });
+  try {
+    await warte(200);
+    fs.mkdirSync(u.home, { recursive: true });
+    const zettel = {
+      v: 2, pid: fremd.pid, rechner: rechner.kennung(), boot: rechner.bootZeit(), seit: new Date().toISOString(),
+      zustand: 'bereit', port: srv.port, url: `${srv.url}/`, instanz: 'fremdinst001', heim, version: '0.1.0',
+    };
+    fs.writeFileSync(path.join(u.home, '.lock'), JSON.stringify(zettel));
+    const r = await lauf(['start', '--hintergrund', '--open', '--home', u.home, '--port', '0'], { env: u.env });
+    assert.ok(lebt(fremd.pid), 'ein fremdes Programm wurde beendet');
+    assert.equal(r.code, 1, 'das Fenster bleibt offen');
+    assert.match(r.stdout, /Eine andere Version von Neural OS läuft noch und ließ sich nicht beenden\./);
+    assert.match(r.stdout, /Bitte den Rechner neu starten und dann noch einmal doppelklicken\./);
+    assert.deepEqual(u.geoeffnet(), [], 'kein Browser zur fremden Adresse');
+    assert.deepEqual(leseZettel(u.home), zettel, 'der Laufzettel bleibt');
+  } finally {
+    try { fremd.kill('SIGKILL'); } catch { /* schon weg */ }
+    await srv.close();
     await u.cleanup();
   }
 });

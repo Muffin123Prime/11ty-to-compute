@@ -179,7 +179,7 @@ test('alte Sperre {pid, at}: tot oder vor dem Start verwaist, sonst "ältere Ver
     assert.equal(b.zustand, 'aeltere');
     assert.equal(b.sicher, true);
     await assert.rejects(() => lz().anlegen(h.paths, { instanz: 'zweiter0000c' }, altesNeuralOs),
-      /Neural OS läuft schon \(ältere Version\)\. Bitte dort beenden\./);
+      /Neural OS läuft schon \(ältere Version\)\. Bitte dort beenden: das schwarze Fenster der alten Version schließen oder den Rechner neu starten\./);
   } finally {
     h.cleanup();
   }

@@ -94,6 +94,17 @@ const KEINE = Object.freeze({
 const ANLEITUNG = `${GEMINI_ANLEITUNG}\n\nOder Claude (kostet pro Nutzung): console.anthropic.com → API Keys, dann unter Einstellungen → KI bei Claude einfügen.`;
 
 /**
+ * Wem ein Schluessel gehoert, an seinem Anfang: "AIza" (Google) oder
+ * "sk-ant-" (Anthropic). Sonst null -- dann gilt das Feld, in dem er steht.
+ */
+function anbieterVonSchluessel(roh) {
+  const s = typeof roh === 'string' ? roh.trim() : '';
+  if (/^AIza/.test(s)) return 'gemini';
+  if (/^sk-ant-/.test(s)) return 'claude';
+  return null;
+}
+
+/**
  * @param {object} deps
  * @param {object} deps.paths
  * @param {object} deps.config
@@ -199,15 +210,32 @@ function createKi(deps = {}) {
     return zustand();
   }
 
-  /** Schlüssel eines Anbieters speichern; beim ersten Erfolg wird er die Einstellung. */
-  async function schluesselSpeichern(anbieter, roh, opts) {
-    const d = dienst(anbieter);
+  /**
+   * Schlüssel eines Anbieters speichern; beim ersten Erfolg wird er die
+   * Einstellung. Mit `aktivieren` antwortet er ab jetzt auch dann, wenn
+   * schon ein anderer eingestellt war: So meint es, wer im Chat unter
+   * "Kostenlos mit Google" oder in den Einstellungen einen Schlüssel einfügt
+   * (Nutzer am 01.10.2026: Claude war eingestellt, ohne Guthaben -- der
+   * Gemini-Schlüssel kam dazu, und weiter antwortete Claude). Ohne die
+   * Angabe bleibt, wer eingestellt ist (Gemini nur fürs Umschreiben von
+   * Sprache, während Claude antwortet).
+   */
+  async function schluesselSpeichern(anbieter, roh, opts = {}) {
+    dienst(anbieter);
+    // Ein Schluessel verraet, wem er gehoert: Google-Schluessel beginnen mit
+    // "AIza", die von Anthropic mit "sk-ant-". Steht er im falschen Feld
+    // (Nutzer am 01.10.2026: den Google-Schluessel ins Claude-Feld), wird er
+    // trotzdem richtig verbunden -- statt "Der Claude-Schlüssel stimmt nicht".
+    const erkannt = anbieterVonSchluessel(roh);
+    const ziel = erkannt && erkannt !== anbieter ? erkannt : anbieter;
+    const d = dienst(ziel);
     await d.schluesselSpeichern(roh, opts);
-    if (!eingestellt()) {
-      speichern({ ki: { anbieter } });
-      publish('ki.anbieter', { anbieter });
+    if (!eingestellt() || (opts.aktivieren === true && eingestellt() !== ziel)) {
+      speichern({ ki: { anbieter: ziel } });
+      publish('ki.anbieter', { anbieter: ziel });
     }
-    return zustand();
+    const z = zustand();
+    return ziel !== anbieter ? { ...z, umgeleitet: ziel } : z;
   }
 
   function schluesselLoeschen(anbieter) {
@@ -241,6 +269,7 @@ function createKi(deps = {}) {
 module.exports = {
   createKi,
   createGemini,
+  anbieterVonSchluessel,
   ANBIETER,
   PROFIL_GEMINI,
   GEMINI_ANLEITUNG,

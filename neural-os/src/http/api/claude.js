@@ -5,6 +5,7 @@
  *
  *   GET    /api/claude             -> Zustand (fragt NIE das Netz)
  *   POST   /api/claude/schluessel  { schluessel } -> prüft mit Probeaufruf, speichert im Tresor
+ *                                   (ein Google-Schlüssel AIza… verbindet Gemini)
  *   DELETE /api/claude/schluessel  -> vergisst den Schlüssel
  *   PATCH  /api/claude             { modell } -> claude-opus-5 | claude-sonnet-5 | claude-haiku-4-5
  *
@@ -19,6 +20,7 @@
 
 const { asObject } = require('./support');
 const { NeuralError } = require('../../kernel/errors');
+const { anbieterVonSchluessel } = require('../../models/ki');
 
 function claudeVon(rc) {
   const c = rc.ctx.claude;
@@ -45,6 +47,16 @@ function register(router) {
     const controller = new AbortController();
     // Wer den Tab schliesst, bricht die Pruefung ab; ein fertiger Aufruf nicht mehr.
     rc.res.on('close', () => { if (!rc.res.writableEnded) controller.abort(); });
+    // Ein Google-Schlüssel (AIza…) im Claude-Feld -- etwa aus einem Tab, der
+    // noch die Oberfläche von vor Gemini zeigt: Er verbindet Gemini, und
+    // Gemini antwortet ab dann, wie bei POST /api/ki/claude/schluessel. Die
+    // Antwort ist der Zustand der KI, die jetzt antwortet.
+    const ki = rc.ctx.kiDienst;
+    if (ki && typeof ki.schluesselSpeichern === 'function' && anbieterVonSchluessel(body.schluessel) === 'gemini') {
+      const z = await ki.schluesselSpeichern('claude', body.schluessel, { signal: controller.signal, aktivieren: true });
+      const { anbieter, ...ohneListe } = z;
+      return { ok: true, ...ohneListe, umgeleitet: 'gemini' };
+    }
     const zustand = await claude.schluesselSpeichern(body.schluessel, { signal: controller.signal });
     return { ok: true, ...zustand };
   });

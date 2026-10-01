@@ -58,7 +58,9 @@ Terminal; dort steht danach „Fertig. Dieses Fenster kann zu.“
 Falsch: „Falsche PIN.“, nach fünf Fehlversuchen „Zu oft falsch. Kurz warten.“
 
 **Noch einmal doppelklicken** öffnet nur den Browser mit derselben Adresse; ein
-zweites Neural OS startet nicht.
+zweites Neural OS startet nicht. Läuft dort noch eine andere Fassung (der Stick
+wurde mit [Erneuern] auf den neuen Stand gebracht, die alte lief noch), wird
+sie sauber beendet und die neue gestartet.
 
 Geht etwas schief, bleibt das Fenster offen (am Mac: ein Dialog) und nennt
 genau einen Grund:
@@ -71,6 +73,8 @@ genau einen Grund:
 | macOS hat den Start blockiert: Systemeinstellungen › Datenschutz & Sicherheit › Dennoch öffnen. | Einmal dort „Dennoch öffnen“, dann noch einmal doppelklicken. |
 | Der Stick ist schreibgeschützt. | Schreibschutz-Schalter am Stick prüfen. |
 | Neural OS konnte nicht starten: | Darunter stehen die letzten Zeilen des Protokolls. |
+| Eine andere Version von Neural OS läuft noch und ließ sich nicht beenden. | Den Rechner neu starten, dann noch einmal doppelklicken. |
+| Neural OS läuft schon (ältere Version). Bitte dort beenden. | Eine ganz alte Fassung im eigenen schwarzen Fenster: das Fenster schließen oder den Rechner neu starten, dann noch einmal doppelklicken. |
 
 ## Beenden
 

@@ -691,6 +691,8 @@ function baueAnsicht(container, ctx) {
   const schluesselEntwurf = { gemini: '', claude: '' };
   let verbindenFehler = null; // {anbieter, satz}
   let verbindet = false;
+  /** Claude hat kein Guthaben mehr: die Karte bietet Gemini an, obwohl Claude "verbunden" ist. */
+  let geminiAngebot = false;
   let folgen = true;
   /**
    * Was im Eingabefeld angehaengt ist: Textdateien (ihr Inhalt geht als Text
@@ -998,9 +1000,10 @@ function baueAnsicht(container, ctx) {
     if (ladeFehler) return;
     // Waehrend "Verbinden" laeuft, bleibt die Karte stehen (Knopf, Spinner).
     if (verbindet) return;
-    const fehlt = !!claude && claude.verbunden === false;
+    if (geminiAngebot && claude && claude.aktiv === 'gemini' && claude.verbunden) geminiAngebot = false;
+    const fehlt = (!!claude && claude.verbunden === false) || geminiAngebot;
     const art = leer ? (fehlt ? 'verbinden' : (claudeGeprueft ? 'leer' : 'laedt')) : (fehlt ? 'unten' : 'nichts');
-    const key = `${art}|${fehlt ? JSON.stringify([claude.grundCode, claude.grund, mussOnline()]) : ''}`;
+    const key = `${art}|${geminiAngebot}|${fehlt && claude ? JSON.stringify([claude.grundCode, claude.grund, mussOnline()]) : ''}`;
     if (key === obenKey) return;
     obenKey = key;
     clear(oben);
@@ -1166,13 +1169,17 @@ function baueAnsicht(container, ctx) {
               await api.put('/network', { mode: 'online' });
               umgeschaltet = true;
             }
-            const z = await api.post(`/ki/${anbieter}/schluessel`, { schluessel: wert }, { timeoutMs: 45000 });
+            // Wer hier einen Schluessel einfuegt, will mit dieser KI weiterschreiben -- auch wenn vorher eine andere eingestellt war.
+            const z = await api.post(`/ki/${anbieter}/schluessel`, { schluessel: wert, aktivieren: true }, { timeoutMs: 45000 });
             claude = { ...z };
+            geminiAngebot = false;
             // GET /api/ki sagt zusaetzlich, ob das Mikrofon ueber Gemini umschreiben kann.
             claudeBald();
             schluesselEntwurf[anbieter] = '';
             eingabeFeld.value = '';
-            ctx.toast(`${A.name} ist verbunden.`, 'success');
+            // Stand ein Google-Schluessel im Claude-Feld (oder umgekehrt), hat der Server ihn richtig zugeordnet.
+            const wer = z && z.umgeleitet && ANBIETER[z.umgeleitet] ? ANBIETER[z.umgeleitet].name : A.name;
+            ctx.toast(z && z.umgeleitet ? `Das war ein Schlüssel für ${wer} – ${wer} ist verbunden.` : `${wer} ist verbunden.`, 'success');
             verbindet = false;
             obenKey = null;
             plane();
@@ -1197,6 +1204,7 @@ function baueAnsicht(container, ctx) {
               // *_OFFLINE ohne Umschalten: der Zustand war veraltet; die neu
               // gebaute Karte bietet "Online gehen und verbinden" an.
               verbindenFehler = { anbieter, satz: (err && err.message) || 'Der Schlüssel ließ sich nicht prüfen.' };
+              if (err && err.code === 'CLAUDE_GUTHABEN') verbindenFehler.satz += ' Kostenlos geht es oben mit Google (Gemini).';
             }
             verbindet = false;
             await claudeLaden();
@@ -1226,7 +1234,9 @@ function baueAnsicht(container, ctx) {
     // Ein abgelehnter Schluessel: das Feld des betroffenen Anbieters ist offen.
     const falschBei = code === 'schluessel-falsch' && claude ? claude.aktiv : null;
     karte.append(kopf('Verbinde eine KI'));
-    if (falschBei) {
+    if (geminiAngebot) {
+      karte.append(h('p.cv-verbinden__text', null, text('Bei Anthropic ist kein Guthaben mehr. Kostenlos geht es mit Gemini von Google weiter – Schlüssel einfügen, dann antwortet Gemini.')));
+    } else if (falschBei) {
       karte.append(h('p.cv-verbinden__text', null, text(`Der gespeicherte ${ANBIETER[falschBei].name}-Schlüssel wird nicht mehr angenommen. Füge einen neuen ein – danach geht es sofort weiter.`)));
     }
     karte.append(
@@ -2257,8 +2267,20 @@ function baueAnsicht(container, ctx) {
       ? h('button.btn.btn--small', { type: 'button', onClick: (e) => { e.stopPropagation(); neuAntworten(); } }, icon(I.refresh), h('span', null, text('Nochmal versuchen')))
       : null;
     if (d.status === 'failed' && d.error) {
+      // Kein Guthaben bei Anthropic: der Weg zu Gemini (kostenlos) steht gleich daneben.
+      const zuGemini = d.error.code === 'CLAUDE_GUTHABEN' && letzte
+        ? h('button.btn.btn--accent.btn--small', {
+          type: 'button',
+          onClick: (e) => {
+            e.stopPropagation();
+            geminiAngebot = true;
+            obenKey = null;
+            plane();
+          },
+        }, h('span', null, text('Kostenlos mit Gemini weiter')))
+        : null;
       out.push(h('div.cv-status.cv-status--fehler', { role: 'alert' },
-        icon(I.alert), h('span', null, text(d.error.message || 'Die Antwort ist gescheitert.')), nochmal));
+        icon(I.alert), h('span', null, text(d.error.message || 'Die Antwort ist gescheitert.')), zuGemini, nochmal));
     } else if (d.status === 'aborted') {
       out.push(h('p.cv-status', null, icon(I.info),
         h('span', null, text(String(d.content || '').trim() ? 'Abgebrochen – die Antwort ist unvollständig.' : 'Abgebrochen, bevor etwas kam.')),

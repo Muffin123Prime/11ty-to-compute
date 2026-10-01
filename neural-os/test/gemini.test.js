@@ -605,6 +605,76 @@ test('Anbieterwechsel per PATCH /api/ki wirkt im nächsten Zug – der Verlauf w
   }, { claudeAuch: true });
 });
 
+test('Claude war eingestellt (ohne Guthaben), der Gemini-Schlüssel kommt dazu: mit „aktivieren“ antwortet ab jetzt Gemini', async () => {
+  await mitGemini(async ({ app, base, statist, claude, chatId }) => {
+    // Ausgangslage wie beim Nutzer am 01.10.2026: Claude verbunden und eingestellt.
+    await anfrage(base, 'DELETE', '/api/ki/gemini/schluessel');
+    const c = await anfrage(base, 'POST', '/api/ki/claude/schluessel', { schluessel: claude.schluessel });
+    assert.equal(c.status, 200, c.text);
+    await anfrage(base, 'PATCH', '/api/ki', { anbieter: 'claude' });
+    assert.equal((await anfrage(base, 'GET', '/api/ki')).json.aktiv, 'claude');
+    // Ohne "aktivieren" (Gemini nur fürs Umschreiben von Sprache): Claude bleibt.
+    const nur = await anfrage(base, 'POST', '/api/ki/gemini/schluessel', { schluessel: statist.schluessel });
+    assert.equal(nur.status, 200, nur.text);
+    assert.equal(nur.json.aktiv, 'claude');
+    // So, wie Chat und Einstellungen es schicken: Gemini antwortet ab jetzt.
+    const g = await anfrage(base, 'POST', '/api/ki/gemini/schluessel', { schluessel: statist.schluessel, aktivieren: true });
+    assert.equal(g.status, 200, g.text);
+    assert.equal(g.json.aktiv, 'gemini');
+    assert.equal(app.config.ki.anbieter, 'gemini', 'die Wahl ist gespeichert');
+    statist.weiter(antwort(B.text('Hallo, hier ist Gemini.'), B.ende()));
+    const r = await strom(base, `/api/chats/${chatId}/messages`, { inhalt: 'Wer antwortet?' });
+    assert.equal(r.ereignisse.find((e) => e.name === 'fertig').data.record.data.model.provider, 'gemini');
+    assert.equal(claude.stromAnfragen().length, 0, 'Anthropic bekam nichts');
+  }, { claudeAuch: true });
+});
+
+test('Der Google-Schlüssel im Claude-Feld: er wird als Gemini erkannt und verbunden – nicht zu Anthropic geschickt', async () => {
+  await mitGemini(async ({ app, base, statist, claude }) => {
+    const r = await anfrage(base, 'POST', '/api/ki/claude/schluessel', { schluessel: `  ${statist.schluessel}  `, aktivieren: true });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.umgeleitet, 'gemini');
+    assert.equal(r.json.aktiv, 'gemini');
+    assert.equal(r.json.anbieter.gemini.verbunden, true);
+    assert.equal(r.json.anbieter.claude.schluesselVorhanden, false, 'kein Google-Schlüssel im Claude-Tresorfach');
+    assert.equal(claude.anfragen.length, 0, 'Anthropic hat den Google-Schlüssel nie gesehen');
+    assert.equal(app.config.ki.anbieter, 'gemini');
+    // Umgekehrt genauso: ein Anthropic-Schlüssel im Google-Feld gehört Claude.
+    const c = await anfrage(base, 'POST', '/api/ki/gemini/schluessel', { schluessel: claude.schluessel });
+    assert.equal(c.status, 200, c.text);
+    assert.equal(c.json.umgeleitet, 'claude');
+    assert.equal(c.json.anbieter.claude.verbunden, true);
+    assert.equal(c.json.aktiv, 'gemini', 'ohne aktivieren bleibt, wer eingestellt ist');
+    // Ein Schlüssel ohne erkennbaren Anfang bleibt in dem Feld, in dem er steht.
+    const { anbieterVonSchluessel } = require('../src/models/ki');
+    assert.equal(anbieterVonSchluessel('AIzaSy123'), 'gemini');
+    assert.equal(anbieterVonSchluessel('sk-ant-api03-x'), 'claude');
+    assert.equal(anbieterVonSchluessel('irgendwas'), null);
+    assert.equal(anbieterVonSchluessel(null), null);
+  }, { verbinden: false, claudeAuch: true });
+});
+
+test('Ein Tab mit der Oberfläche von vor Gemini schickt den Google-Schlüssel an /api/claude/schluessel: Gemini verbindet und antwortet', async () => {
+  await mitGemini(async ({ app, base, statist, claude }) => {
+    const r = await anfrage(base, 'POST', '/api/claude/schluessel', { schluessel: statist.schluessel });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.ok, true);
+    assert.equal(r.json.umgeleitet, 'gemini');
+    // Die alte Oberfläche liest daraus "verbunden" -- und es ist die KI, die jetzt antwortet.
+    assert.equal(r.json.verbunden, true);
+    assert.equal(r.json.aktiv, 'gemini');
+    assert.equal(r.json.anbieter, undefined, 'keine Liste beider Anbieter, die die alte Oberfläche nicht kennt');
+    assert.equal(claude.anfragen.length, 0, 'Anthropic hat den Google-Schlüssel nie gesehen');
+    assert.equal(app.config.ki.anbieter, 'gemini');
+    assert.doesNotMatch(r.text, new RegExp(statist.schluessel), 'der Schlüssel geht nie zurück');
+    // Ein echter Claude-Schlüssel auf demselben Weg bleibt bei Claude.
+    const c = await anfrage(base, 'POST', '/api/claude/schluessel', { schluessel: claude.schluessel });
+    assert.equal(c.status, 200, c.text);
+    assert.equal(c.json.umgeleitet, undefined);
+    assert.equal(c.json.verbunden, true);
+  }, { verbinden: false, claudeAuch: true });
+});
+
 test('Gemini in der Registry: Werkzeugnamen mit Punkt, Signaturen reisen mit, keine Websuche', async () => {
   await mitGemini(async ({ app, statist }) => {
     statist.weiter(

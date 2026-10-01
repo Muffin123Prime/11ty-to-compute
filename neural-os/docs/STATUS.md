@@ -9,11 +9,11 @@ prüfen ist, steht weiter unten – ungeschönt.
 ## Messwerte
 
 ```
-npm test                             1627 Tests, 0 fehlgeschlagen
+npm test                             1647 Tests, 0 fehlgeschlagen
 npm run check                        170 Funktionen über HTTP, 0 defekt
 npm run ui                           264 Prüfpunkte im Browser, alles in Ordnung
 npm run proof                        22 Prüfungen, ohne Freigabe geht nichts ins Netz
-node tools/chat-beweis.js            226 Punkte, alle Baustein-Arten im Browser
+node tools/chat-beweis.js            231 Punkte, alle Baustein-Arten im Browser
 node tools/insel-beweis.js           74 Punkte, die Insel samt schwebendem Fenster im Browser
 node tools/stick-trennung-check.js   17 Punkte, zwei Sticks im selben Browser, [Beenden] am Mac
 node tools/screenshots.js            106 Bilder, kein Schritt fehlt
@@ -33,7 +33,11 @@ selben Browser; `proof` beweist, dass ohne Freigabe nichts ins Netz geht.
   Chat, rechte Spalte mit Kacheln; beide Seiten ein- und ausklappbar, der
   Zustand reist mit dem Stick. Dunkel und hell, iPad quer mit dem Finger.
 - **KI** online: Gemini (kostenlos, Voreinstellung) oder Claude, rohes HTTP
-  ohne SDK (`src/models/providers/`), Schlüssel versiegelt im Tresor.
+  ohne SDK (`src/models/providers/`), Schlüssel versiegelt im Tresor. Ein
+  Schlüssel wird an seinem Anfang erkannt (`AIza` → Gemini, `sk-ant-` →
+  Claude), egal in welchem Feld er steht; wer einen einfügt, bekommt diesen
+  Anbieter als den, der antwortet. Claude ohne Guthaben bietet „Kostenlos mit
+  Gemini weiter“ an.
 - **Chat** – 22 Bausteine (`docs/ANTWORT-BAUSTEINE.md`), Fassungen je Antwort,
   Umwandeln, Markier-Menü, Code-Aktionen mit Sandkasten, Bilder und PDF,
   Sprechen, Vorlese-Spieler, Live-Fortschritt, Quellen im Text, Modus „Mein
@@ -72,6 +76,8 @@ selben Browser; `proof` beweist, dass ohne Freigabe nichts ins Netz geht.
   Sticks im selben Browser streng getrennt (`web/lib/lokal.js`). Am Mac ein
   Programm statt Terminal-Fenster („Neural OS starten - Mac“, Notstart im
   Inhalt), und nach [Beenden] wirft der Mac den Stick selbst aus (Paket M).
+  Läuft beim Doppelklick noch eine andere Fassung (Bau-Kennung im Laufzettel,
+  `src/kernel/bau.js`), wird sie beendet und die neue gestartet.
 
 ## Nur am echten Rechner prüfbar
 

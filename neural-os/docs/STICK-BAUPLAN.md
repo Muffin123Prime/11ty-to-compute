@@ -460,7 +460,9 @@ Das Skript startet nichts; es legt nur Dateien ab.
    7. `zustand` ist `startet` und das Alter liegt unter 120 s → startet.
    8. Sonst → verwaist; das ist eine wiederverwendete PID.
 
-   Eine alte Sperre `{pid, at}` gilt als verwaist, wenn die PID tot ist oder `at` vor der Bootzeit liegt. Sonst kommt die Meldung „Neural OS läuft schon (ältere Version). Bitte dort beenden.“
+   Eine alte Sperre `{pid, at}` gilt als verwaist, wenn die PID tot ist oder `at` vor der Bootzeit liegt. Sonst kommt die Meldung „Neural OS läuft schon (ältere Version). Bitte dort beenden.“ (seit 01.10.2026 mit dem Weg dazu: das schwarze Fenster der alten Version schließen oder den Rechner neu starten).
+
+   **Nachtrag 01.10.2026 – eine andere Fassung läuft noch.** Der Nutzer entpackte die neue ZIP, doppelklickte – und sah die alte App, die nur Claude kannte: Sie lief noch mit demselben Datenordner, und der Starter öffnete nur den Browser zu ihr (`version` heißt seit dem ersten Tag 0.1.0). Seitdem trägt der Zettel `"bau"`, einen Fingerabdruck des Programms (`src/kernel/bau.js`: SHA-256 über Pfad, Größe und Inhalt von `bin/`, `src/`, `web/` und `package.json`, je Prozess einmal). Findet der Starter ein laufendes Neural OS mit anderem oder fehlendem `bau`, beendet er es und startet seines (`cmdStarter`, `andereBeenden`): unter Mac und Linux mit SIGTERM – das schließt sauber und wirft, anders als [Beenden], am Mac den Stick nicht aus (Paket M) –, unter Windows mit dem Beenden-Recht aus dem Zettel, sonst hart. Ein Signal geht nur an einen Prozess, dessen Befehlszeile ein Neural OS ist. Geht es nicht: „Eine andere Version von Neural OS läuft noch und ließ sich nicht beenden. Bitte den Rechner neu starten und dann noch einmal doppelklicken.“ Tests: `test/bau.test.js`, `test/start-dienst.test.js` (Abschnitt „eine andere Fassung läuft“).
 
    Weitere Funktionen:
    - `anlegen()` legt die Datei mit `'wx'` an. Bei `EEXIST` wird `pruefen()` aufgerufen. Bei *verwaist* wird überschrieben, **und** `vault/.lock` wird gelöscht, wenn es dieselbe PID trägt.

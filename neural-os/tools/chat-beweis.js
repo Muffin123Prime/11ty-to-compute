@@ -86,6 +86,12 @@ function langsamerStatist() {
         res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Statist: keine Antwort mehr in der Schlange' } }));
         return;
       }
+      // Eine Ablehnung statt eines Stroms ({status, json}), etwa "credit balance is too low".
+      if (naechste.status) {
+        res.writeHead(naechste.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(naechste.json || {}));
+        return;
+      }
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
       let i = 0;
       let zu = false;
@@ -1845,6 +1851,49 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       await p12.waitForTimeout(900);
       check(neu12 && p12.url().includes(`#/notes?id=${neu12.id}`), '„Öffnen“ in der Meldung führt zur neuen Notiz', p12.url().split('#')[1]);
       await c12.close();
+    }
+
+    // 10 · Der Fall des Nutzers am 01.10.2026: Claude eingestellt, aber ohne
+    // Guthaben -- er will kostenlos mit Gemini weiter und fand nur den Weg zu
+    // Claude. Jetzt: der Chat sagt es und bietet Gemini an; der eingefuegte
+    // Google-Schluessel macht Gemini zur antwortenden KI.
+    console.log(`\n${BO}10 · Claude ohne Guthaben: kostenlos mit Gemini weiter${X}`);
+    {
+      await anfrage(base, 'DELETE', '/api/ki/gemini/schluessel');
+      check(app.kiDienst.zustand().aktiv === 'claude', 'Ausgangslage: Claude antwortet, ein Google-Schlüssel ist nicht da');
+      statist.weiter({ status: 400, json: { type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.' } } });
+      const { c: c13, p: p13 } = await neueSeite();
+      await p13.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+      await p13.locator('.cv-composer__feld').waitFor({ timeout: 8000 });
+      const losGehts = p13.getByRole('button', { name: /Los geht/ });
+      if (await losGehts.count()) await losGehts.first().click().catch(() => {});
+      await p13.locator('.cv-composer__feld').fill('Hallo, bist du da?');
+      await p13.locator('.cv-composer__feld').press('Enter');
+      const zeile13 = p13.locator('.cv-status--fehler', { hasText: 'Guthaben' });
+      await zeile13.waitFor({ timeout: 10000 }).catch(() => {});
+      const angebot = zeile13.getByRole('button', { name: 'Kostenlos mit Gemini weiter' });
+      check(await zeile13.count() === 1 && await angebot.count() === 1,
+        'Ohne Guthaben bei Anthropic sagt der Chat es – und bietet daneben „Kostenlos mit Gemini weiter“ an',
+        ((await zeile13.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').slice(0, 120));
+      if (await angebot.count()) {
+        await angebot.click();
+        const feld13 = p13.locator('.cv-verbinden input[name="gemini-schluessel"]');
+        await feld13.waitFor({ timeout: 5000 }).catch(() => {});
+        const kartenText = (await p13.locator('.cv-verbinden').innerText().catch(() => '')).replace(/\s+/g, ' ');
+        check(await feld13.count() === 1 && /kein Guthaben/.test(kartenText) && kartenText.indexOf('Kostenlos mit Google') < kartenText.indexOf('Oder Claude'),
+          'Ein Tipp öffnet „Verbinde eine KI“: oben das Feld für Google, Claude nur noch darunter', kartenText.slice(0, 120));
+        await foto(p13, 'claude-ohne-guthaben-gemini-angebot-1440');
+        await feld13.fill(gemini.schluessel);
+        await feld13.press('Enter');
+        await p13.locator('.toast', { hasText: 'Gemini ist verbunden' }).waitFor({ timeout: 10000 }).catch(() => {});
+        check(app.kiDienst.zustand().aktiv === 'gemini' && app.config.ki.anbieter === 'gemini',
+          'Google-Schlüssel eingefügt: ab jetzt antwortet Gemini – nicht mehr Claude', `antwortet: ${app.kiDienst.zustand().aktiv}`);
+        gemini.weiter(geminiStatist.antwort(geminiStatist.B.text('Ja! Hier antwortet jetzt Gemini, kostenlos.'), geminiStatist.B.ende()));
+        await p13.locator('.cv-status--fehler button', { hasText: 'Nochmal versuchen' }).click();
+        const gemAntwort = await warteBis(async () => /Hier antwortet jetzt Gemini/.test(await p13.locator('.cv-msg').last().innerText().catch(() => '')), { timeout: 12000 });
+        check(!!gemAntwort, '„Nochmal versuchen“: dieselbe Frage, jetzt beantwortet von Gemini');
+      }
+      await c13.close();
     }
   } catch (err) {
     fehlgeschlagen = err;

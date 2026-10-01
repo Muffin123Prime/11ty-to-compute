@@ -257,7 +257,7 @@ async function main() {
 
     // --------------------------------------------- 4. Claude, ohne Freigabe
     //
-    // Die KI ist Claude und läuft bei Anthropic. Bewiesen wird hier die
+    // Die KI läuft online: Gemini bei Google oder Claude bei Anthropic. Bewiesen wird hier die
     // Kehrseite: ohne Freigabe verlässt auch für Claude nichts den Rechner --
     // nicht der Schlüssel, nicht die Frage, nicht einmal der Name des Hosts
     // (die Schleuse lehnt ab, bevor ein Resolver gefragt wird).

@@ -197,7 +197,10 @@ Erweiterungen. Mehr in `docs/ERWEITERN.md`.
 - **Name dieser KI** – steht oben in der App und auf anderen Sticks („Anderer
   Stick: …“).
 - **KI** – Gemini (kostenlos) oder Claude verbinden, Schlüssel prüfen,
-  wechseln.
+  wechseln. Wer einen Schlüssel einfügt, bekommt diese KI als die, die ab
+  jetzt antwortet. Ein Google-Schlüssel (beginnt mit `AIza`) verbindet immer
+  Gemini, ein Anthropic-Schlüssel (`sk-ant-`) immer Claude – auch im falschen
+  Feld.
 - **Gedächtnis** – was sich die KI über dich gemerkt hat, mit Herkunft;
   einzeln **[Vergessen]** (mit Rückgängig) oder „Alles vergessen …“.
 - **Schutz** – PIN einrichten (4 bis 6 Ziffern). Mit PIN ist der Tresor
@@ -292,6 +295,8 @@ erst mit [Übernehmen] wahr.
 | Was du siehst | Was hilft |
 |---|---|
 | Der Chat sagt, es sei keine KI verbunden | **Einstellungen → KI**: Schlüssel einfügen, „Online gehen und verbinden“. |
+| „Das Guthaben bei Anthropic reicht nicht.“ | Daneben **[Kostenlos mit Gemini weiter]** antippen und einen Google-Schlüssel einfügen; ab dann antwortet Gemini. |
+| Im Chat gibt es nur ein Feld für Claude, oben fehlt die schwarze Pille | Im Browser läuft noch eine alte Fassung: die neue ZIP laden und dort den Starter doppelklicken (`docs/ERSTE-SCHRITTE.md`, 1.2) – er beendet die alte selbst. |
 | „Google-Limit erreicht“ | Die kostenlose Stufe ist für heute aufgebraucht. Morgen geht es weiter – oder Claude wählen. |
 | Unten links „Offline“, die KI antwortet nicht | Netzstufe auf Online stellen (**Einstellungen → Netzwerk**). |
 | „Neural OS ist aus.“ | Neural OS läuft nicht (Stick gezogen, beendet). Den Starter noch einmal doppelklicken. |

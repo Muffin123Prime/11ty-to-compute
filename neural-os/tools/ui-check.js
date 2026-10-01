@@ -1417,7 +1417,10 @@ async function pruefeGehirnGross(browser) {
       `${z ? z.themen : 0} Kreise nach ${ebene0Ms} ms ab Navigation · Route ${route.join('/')} ms · Tresor gebaut in ${aufbauMs} ms`);
 
     const t2 = Date.now();
-    await page.evaluate(() => document.querySelector('.gh').gehirn.tauchen(document.querySelector('.gh').gehirn.themenIds[0]));
+    // Angestossen, nicht abgewartet: Ob das Thema aufgeht, entscheidet das
+    // Warten darunter (30 s). Ein Versprechen, das nie aufgeht, hielte sonst
+    // die ganze Pruefung an, statt rot zu werden (unter Last so gesehen).
+    await page.evaluate(() => { document.querySelector('.gh').gehirn.tauchen(document.querySelector('.gh').gehirn.themenIds[0]); });
     const drin = await page.waitForFunction(() => { const g = document.querySelector('.gh').gehirn; return g.ebene === 1 && g.nodes >= 1000; }, null, { timeout: 30000 }).then(() => true, () => false);
     const ebene1Ms = Date.now() - t2;
     z = await gehirn();
@@ -1453,12 +1456,14 @@ async function pruefeGehirnGross(browser) {
       let maxDraw = 0;
       const t0 = performance.now();
       await new Promise((res) => {
+        // Kommen keine Bilder mehr, endet die Messung trotzdem -- mit wenigen Bildern, also rot.
+        const notaus = setTimeout(res, dauerMs + 3000);
         const step = () => {
           frames++;
           const t = (performance.now() - t0) / 1000;
           ev('pointermove', cx + Math.sin(t * 2.5) * 160, cy + Math.cos(t * 1.7) * 90);
           maxDraw = Math.max(maxDraw, g.stats().drawMs);
-          if (performance.now() - t0 < dauerMs) requestAnimationFrame(step); else res();
+          if (performance.now() - t0 < dauerMs) requestAnimationFrame(step); else { clearTimeout(notaus); res(); }
         };
         requestAnimationFrame(step);
       });

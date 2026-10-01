@@ -4,7 +4,8 @@
  * Die KI wählen und verbinden: Gemini (kostenlos) oder Claude.
  *
  *   GET    /api/ki                         -> Zustand beider Anbieter + der aktive (fragt NIE das Netz)
- *   POST   /api/ki/:anbieter/schluessel    { schluessel } -> prüft mit Probeaufruf, speichert im Tresor
+ *   POST   /api/ki/:anbieter/schluessel    { schluessel, aktivieren? } -> prüft mit Probeaufruf, speichert im Tresor;
+ *                                          mit aktivieren antwortet dieser Anbieter ab jetzt
  *   DELETE /api/ki/:anbieter/schluessel    -> vergisst den Schlüssel
  *   PATCH  /api/ki                         { anbieter?, modell? }
  *   POST   /api/ki/transkribieren          { audio (WAV, Base64, höchstens 60 s), chatId? } -> { text, sekunden, modell }
@@ -112,7 +113,7 @@ function register(router) {
     const controller = new AbortController();
     // Wer den Tab schliesst, bricht die Pruefung ab; ein fertiger Aufruf nicht mehr.
     rc.res.on('close', () => { if (!rc.res.writableEnded) controller.abort(); });
-    const zustand = await ki.schluesselSpeichern(rc.params.anbieter, body.schluessel, { signal: controller.signal });
+    const zustand = await ki.schluesselSpeichern(rc.params.anbieter, body.schluessel, { signal: controller.signal, aktivieren: body.aktivieren === true });
     return { ok: true, ...zustand };
   });
 

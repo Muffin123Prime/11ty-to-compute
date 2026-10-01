@@ -804,7 +804,8 @@ async function checkChat() {
 
 async function checkModels() {
   area('6 · Claude');
-  // Die KI ist Claude. Ohne Schlüssel und im Offline-Modus wird hier die
+  // Claude ist eine der beiden KIs (voreingestellt ist Gemini, kostenlos).
+  // Ohne Schlüssel und im Offline-Modus wird hier die
   // Zusage geprüft: ehrlicher Zustand, keine Verbindung, kein Schlüssel
   // heraus. Der ganze Weg MIT Antwort läuft danach gegen einen Statisten
   // (test/claude-statist.js), der die Anthropic-Schnittstelle spricht --
@@ -1816,7 +1817,7 @@ async function checkStick() {
       assert(typeof r.portabel === 'boolean', 'keine Aussage, ob diese Instanz portabel laeuft');
       assert(r.portabel === false ? r.von === null : !!r.von, 'portabel und Herkunft widersprechen sich');
       assert(Array.isArray(r.bekanntePlattformen) && r.bekanntePlattformen.length, 'keine Plattformliste');
-      // Die KI ist Claude; ein Modell auf dem Stick gibt es nicht mehr.
+      // Die KI laeuft online (Gemini oder Claude); ein Modell auf dem Stick gibt es nicht mehr.
       assert(!('modell' in r), 'die Selbstauskunft spricht noch von einem Modell auf dem Stick');
       assert(r.andereSysteme && typeof r.andereSysteme.erlaubt === 'boolean',
         'die Ansicht koennte nicht wissen, ob sie fuer Windows/Mac um Erlaubnis fragen muss');

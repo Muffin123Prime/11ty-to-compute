@@ -706,10 +706,18 @@ async function createApp(opts = {}) {
       if (kiDienst) {
         try {
           const z = kiDienst.zustand();
+          // Je Anbieter dasselbe in klein -- für `neural-os doctor`, das beide zeigt.
+          const je = {};
+          for (const [id, a] of Object.entries(z.anbieter || {})) {
+            je[id] = {
+              name: a.name, verbunden: a.verbunden, modell: a.modell, modellName: a.modellName,
+              schluesselVorhanden: a.schluesselVorhanden, gesperrt: a.gesperrt, grund: a.grund, netz: a.netz,
+            };
+          }
           anbieterZustand = {
             aktiv: z.aktiv, name: z.name, verbunden: z.verbunden, modell: z.modell, modellName: z.modellName,
             schluesselVorhanden: z.schluesselVorhanden, irgendeinSchluessel: z.irgendeinSchluessel,
-            gesperrt: z.gesperrt, grund: z.grund, grundCode: z.grundCode, netz: z.netz,
+            gesperrt: z.gesperrt, grund: z.grund, grundCode: z.grundCode, netz: z.netz, anbieter: je,
           };
         } catch (err) {
           anbieterZustand = { verbunden: false, grund: asNeuralError(err).message };
@@ -948,19 +956,23 @@ function startInhalte() {
   const willkommen = {
     title: 'Willkommen in Neural OS',
     body: [
-      'Dies ist deine eigene KI. Alles, was du hier schreibst, bleibt auf diesem Stick.',
+      'Dies ist deine eigene KI. Gespeichert wird alles auf diesem Stick. Zum Antworten',
+      'geht das Gespräch mit der KI ins Internet – zu Google (Gemini) oder Anthropic (Claude).',
       '',
       '## Wie es funktioniert',
       '',
-      '- **Chatten**: Die KI ist Claude. Sie antwortet, sucht im Internet und legt',
-      '  Termine, Notizen und Projekte selbst an, wenn du sie im Gespräch nennst.',
+      '- **Chatten**: Die KI ist Gemini von Google, kostenlos – oder, wenn du magst,',
+      '  Claude. Sie antwortet, sucht im Internet und legt Termine, Notizen und',
+      '  Projekte selbst an, wenn du sie im Gespräch nennst.',
       '- **Gedächtnis**: Was du über dich erzählst, merkt sie sich – und weiß es beim',
       '  nächsten Mal noch.',
       '- **Rückgängig**: Alles, was die KI anlegt, lässt sich zurücknehmen.',
+      '- **Die Insel**: die schwarze Pille oben in der Mitte. Dort fragst du die KI',
+      '  auch, während du in einem anderen Programm bist.',
       '',
       '## Erste Schritte',
       '',
-      '1. Claude verbinden: im Chat oder unter Einstellungen → Claude ([[Claude verbinden]]).',
+      '1. KI verbinden: im Chat oder unter Einstellungen → KI ([[KI verbinden]]).',
       '2. Einfach losschreiben.',
       '',
       'Ob Neural OS gerade online ist, steht unten links.',
@@ -975,19 +987,25 @@ function startInhalte() {
     tags: ['willkommen', 'anleitung'],
     pinned: true,
   };
-  const claude = {
-    title: 'Claude verbinden',
+  const ki = {
+    title: 'KI verbinden',
     body: [
-      'Neural OS benutzt Claude von Anthropic. Dafür braucht es einmal einen Schlüssel.',
+      'Neural OS antwortet mit **Gemini** von Google – kostenlos. Dafür braucht es einmal einen Schlüssel.',
       '',
-      '1. Auf **console.anthropic.com** anmelden und unter „API Keys“ einen Schlüssel erzeugen.',
-      '2. Im Chat oder unter **Einstellungen → Claude** den Schlüssel einfügen.',
-      '   Er wird sofort mit einer kleinen Anfrage geprüft.',
+      '1. Auf **aistudio.google.com/apikey** mit einem Google-Konto anmelden und auf',
+      '   „Create API key“ klicken.',
+      '2. Den Schlüssel kopieren (er beginnt mit „AIza“) und im Chat unter „Kostenlos',
+      '   mit Google“ einfügen – oder unter **Einstellungen → KI**. Er wird sofort mit',
+      '   einer kleinen Anfrage geprüft.',
       '3. Der Schlüssel liegt danach im Tresor auf dem Stick, nicht in einer offenen',
       '   Datei. Ist eine PIN eingerichtet, ist er damit geschützt.',
       '',
-      'Jede Antwort kostet bei Anthropic ein wenig Geld. Unter Einstellungen → Claude',
-      'steht eine Schätzung, wie viel bisher verbraucht wurde.',
+      'Kostenlos heißt: Google begrenzt die Anfragen je Tag und darf die Inhalte zur',
+      'Verbesserung nutzen.',
+      '',
+      'Lieber **Claude** von Anthropic? Den Schlüssel gibt es auf console.anthropic.com',
+      'unter „API Keys“; eingefügt wird er unter „Oder Claude“. Claude kostet je',
+      'Antwort ein wenig Geld; unter Einstellungen → KI steht eine Schätzung.',
       '',
       '#anleitung',
     ].join('\n'),
@@ -999,20 +1017,80 @@ function startInhalte() {
   return {
     vorAgenten: [
       { type: 'note', id: START.willkommen, data: willkommen },
-      { type: 'note', id: START.claude, data: claude },
+      { type: 'note', id: START.claude, data: ki },
     ],
     nachAgenten: [
-      { type: 'task', id: START.aufgabeClaude, data: { title: 'Claude verbinden', projectId: START.projekt, priority: 1 } },
+      { type: 'task', id: START.aufgabeClaude, data: { title: 'KI verbinden', projectId: START.projekt, priority: 1 } },
       { type: 'task', id: START.aufgabeGehirn, data: { title: 'Gehirn ansehen', projectId: START.projekt } },
       {
         type: 'project',
         id: START.projekt,
         data: { name: 'Mein erstes Projekt', description: 'Ein Platz, um Notizen, Aufgaben und Chats zu einem Vorhaben zu bündeln.' },
       },
-      kante(START.kanteLink, START.willkommen, START.claude, 'links-to', 'Wiki-Link [[Claude verbinden]] im Text'),
+      kante(START.kanteLink, START.willkommen, START.claude, 'links-to', 'Wiki-Link [[KI verbinden]] im Text'),
       kante(START.kanteClaude, START.aufgabeClaude, START.projekt, 'belongs-to', 'Aufgabe gehoert zu diesem Projekt'),
       kante(START.kanteGehirn, START.aufgabeGehirn, START.projekt, 'belongs-to', 'Aufgabe gehoert zu diesem Projekt'),
     ],
+  };
+}
+
+/**
+ * Die Startinhalte bis zum 01.10.2026: Sie stammen aus der Zeit, als Claude
+ * die einzige KI war ("Die KI ist Claude", "Claude verbinden"). Seit Gemini
+ * die Voreinstellung ist, fuehrten sie neue Nutzer zum falschen Schluessel.
+ * Nur noch zum Wiedererkennen da (startInhalteAuffrischen).
+ */
+function fruehereStartTexte() {
+  return {
+    [START.willkommen]: {
+      title: 'Willkommen in Neural OS',
+      body: [
+        'Dies ist deine eigene KI. Alles, was du hier schreibst, bleibt auf diesem Stick.',
+        '',
+        '## Wie es funktioniert',
+        '',
+        '- **Chatten**: Die KI ist Claude. Sie antwortet, sucht im Internet und legt',
+        '  Termine, Notizen und Projekte selbst an, wenn du sie im Gespräch nennst.',
+        '- **Gedächtnis**: Was du über dich erzählst, merkt sie sich – und weiß es beim',
+        '  nächsten Mal noch.',
+        '- **Rückgängig**: Alles, was die KI anlegt, lässt sich zurücknehmen.',
+        '',
+        '## Erste Schritte',
+        '',
+        '1. Claude verbinden: im Chat oder unter Einstellungen → Claude ([[Claude verbinden]]).',
+        '2. Einfach losschreiben.',
+        '',
+        'Ob Neural OS gerade online ist, steht unten links.',
+        '',
+        '## Und ohne Internet?',
+        '',
+        'Notizen, Kalender, Projekte und die Suche funktionieren weiter. Nur die KI',
+        'antwortet dann nicht – und sagt das auch, statt etwas zu erfinden.',
+        '',
+        '#willkommen #anleitung',
+      ].join('\n'),
+      tags: ['willkommen', 'anleitung'],
+      pinned: true,
+    },
+    [START.claude]: {
+      title: 'Claude verbinden',
+      body: [
+        'Neural OS benutzt Claude von Anthropic. Dafür braucht es einmal einen Schlüssel.',
+        '',
+        '1. Auf **console.anthropic.com** anmelden und unter „API Keys“ einen Schlüssel erzeugen.',
+        '2. Im Chat oder unter **Einstellungen → Claude** den Schlüssel einfügen.',
+        '   Er wird sofort mit einer kleinen Anfrage geprüft.',
+        '3. Der Schlüssel liegt danach im Tresor auf dem Stick, nicht in einer offenen',
+        '   Datei. Ist eine PIN eingerichtet, ist er damit geschützt.',
+        '',
+        'Jede Antwort kostet bei Anthropic ein wenig Geld. Unter Einstellungen → Claude',
+        'steht eine Schätzung, wie viel bisher verbraucht wurde.',
+        '',
+        '#anleitung',
+      ].join('\n'),
+      tags: ['anleitung'],
+    },
+    [START.aufgabeClaude]: { title: 'Claude verbinden', projectId: START.projekt, priority: 1 },
   };
 }
 
@@ -1074,6 +1152,103 @@ async function seedIfEmpty(app) {
 }
 
 /**
+ * Startinhalte von frueher auf den heutigen Stand bringen -- aber nur, was
+ * der Nutzer nie angefasst hat. Erkannt wird ein Satz an seiner festen
+ * Start-ID und daran, dass sein Inhalt noch genau der von frueher ist
+ * (derselbe Fingerabdruck) oder er seit dem Anlegen nie geaendert wurde
+ * (rev 1) und noch den alten Titel traegt. Was der Nutzer geschrieben,
+ * abgehakt oder angeheftet hat, bleibt, wie es ist.
+ *
+ * Warum ueberhaupt: die alte Einfuehrung sagte "Die KI ist Claude" und
+ * "Claude verbinden" -- wer Gemini nehmen wollte (die Voreinstellung,
+ * kostenlos), suchte nach dem Feld fuer den Claude-Schluessel (Nutzer am
+ * 01.10.2026). Geschrieben wird als ein Massenschreibvorgang (bulkWrite):
+ * die Ableitung ruht, bis Titel und Link beide neu sind, und die Kante
+ * zwischen ihnen behaelt ihre feste ID (nur ihr Grund wird neu). Kein
+ * Eintrag im Journal: es ist keine Aenderung des Nutzers. Ein Tresor von vor
+ * den festen IDs wird an denselben Merkmalen erkannt (fruehOhneFesteId).
+ *
+ * @returns {Promise<string[]>} die IDs der aufgefrischten Saetze
+ */
+async function startInhalteAuffrischen(app) {
+  const store = app && app.store;
+  if (!store || typeof store.get !== 'function') return [];
+  const schema = require('./store/schema');
+  const merge = require('./sync/merge');
+  const frueher = fruehereStartTexte();
+  const heute = new Map();
+  const { vorAgenten, nachAgenten } = startInhalte();
+  for (const r of [...vorAgenten, ...nachAgenten]) heute.set(r.id, r);
+  const alsFrueher = (id) => {
+    const alt = frueher[id];
+    const rec = store.get(id);
+    const neu = heute.get(id);
+    if (!alt || !rec || rec.deletedAt || !neu || rec.type !== neu.type) return null;
+    let gleich = false;
+    try {
+      gleich = merge.fingerprint({ type: rec.type, data: rec.data }) === merge.fingerprint({ type: rec.type, data: schema.validate(rec.type, alt) });
+    } catch { gleich = false; }
+    const unberuehrt = rec.rev === 1 && rec.data.title === alt.title;
+    return gleich || unberuehrt ? neu : null;
+  };
+  // Rang: erst das Ziel des Links (neuer Titel), dann die Einfuehrung (neuer Link), dann die Aufgabe.
+  const faellig = [];
+  // Einfuehrung und "Claude verbinden" nur zusammen: die eine verlinkt die
+  // andere ueber ihren Titel. Hat der Nutzer die Einfuehrung angefasst,
+  // bliebe sonst ein [[Claude verbinden]] ohne Ziel zurueck.
+  const willkommen = alsFrueher(START.willkommen);
+  const anleitung = alsFrueher(START.claude);
+  if (willkommen && anleitung) faellig.push({ id: anleitung.id, data: anleitung.data, rang: 0 }, { id: willkommen.id, data: willkommen.data, rang: 1 });
+  const aufgabe = alsFrueher(START.aufgabeClaude);
+  if (aufgabe) faellig.push({ id: aufgabe.id, data: aufgabe.data, rang: 2 });
+  // Ein Tresor von vor den festen IDs (vor dem 24.09.2026) hat seine
+  // Startinhalte unter zufaelligen IDs.
+  if (!faellig.length && !store.get(START.willkommen, { includeDeleted: true })) faellig.push(...fruehOhneFesteId(store, heute));
+  if (!faellig.length) return [];
+  const schreiben = () => {
+    for (const r of [...faellig].sort((a, b) => a.rang - b.rang)) store.update(r.id, r.data);
+  };
+  if (typeof app.bulkWrite === 'function') await app.bulkWrite(async () => schreiben());
+  else schreiben();
+  if (typeof store.flush === 'function') await store.flush();
+  return faellig.map((r) => r.id);
+}
+
+/**
+ * Die Startinhalte der ersten Fassungen (bis 24.09.2026) bekamen zufaellige
+ * IDs, und ihre Anleitung hiess je nach Fassung anders. Wiedererkannt werden
+ * sie an dem, was der Nutzer nie angefasst hat (rev 1): die angeheftete
+ * Einfuehrung "Willkommen in Neural OS", das Ziel ihres Links und dessen
+ * Aufgabe in "Mein erstes Projekt" -- jeweils genau einer, sonst nichts.
+ */
+const FRUEHE_ANLEITUNGEN = [
+  { anleitung: 'Claude verbinden', aufgabe: 'Claude verbinden' },
+  { anleitung: 'Lokales Modell einrichten', aufgabe: 'Lokales Modell installieren' },
+];
+
+function fruehOhneFesteId(store, heute) {
+  const unberuehrt = (r) => !!r && !r.deletedAt && r.rev === 1;
+  const genauEiner = (liste) => (liste.length === 1 ? liste[0] : null);
+  const w = genauEiner(store.list('note', { filter: { title: 'Willkommen in Neural OS' } }).items.filter(unberuehrt));
+  if (!w || w.data.pinned !== true) return [];
+  const text = String(w.data.body || '');
+  const paar = FRUEHE_ANLEITUNGEN.find((p) => text.includes(`[[${p.anleitung}]]`));
+  if (!paar) return [];
+  const a = genauEiner(store.list('note', { filter: { title: paar.anleitung } }).items.filter(unberuehrt));
+  if (!a) return [];
+  const raus = [
+    { id: a.id, data: heute.get(START.claude).data, rang: 0 },
+    { id: w.id, data: heute.get(START.willkommen).data, rang: 1 },
+  ];
+  const projekt = genauEiner(store.list('project', { filter: { name: 'Mein erstes Projekt' } }).items);
+  const t = projekt
+    ? genauEiner(store.list('task', { filter: { title: paar.aufgabe, projectId: projekt.id } }).items.filter(unberuehrt))
+    : null;
+  if (t) raus.push({ id: t.id, data: { ...heute.get(START.aufgabeClaude).data, projectId: projekt.id }, rang: 2 });
+  return raus;
+}
+
+/**
  * Zwei Instanzen dürfen nie denselben Tresor öffnen. Dünner Wrapper um den
  * Laufzettel (src/kernel/laufzettel.js, Stick-Bauplan 2.4): Eine Sperre von
  * einem anderen Rechner, einem früheren Start oder einem toten Prozess
@@ -1086,4 +1261,6 @@ async function acquireLock(paths, felder = {}) {
   return async () => { griff.freigeben(); };
 }
 
-module.exports = { createApp, seedIfEmpty, startBasen, acquireLock, sanitiseConfig, VERSION };
+module.exports = {
+  createApp, seedIfEmpty, startInhalteAuffrischen, startBasen, fruehereStartTexte, START_IDS: START, acquireLock, sanitiseConfig, VERSION,
+};

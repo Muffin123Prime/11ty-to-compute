@@ -953,6 +953,9 @@ export function starteInsel(ctx) {
       if (satz) e._zustand.appendChild(h('span', null, text(satz)));
       if (fehler && a.nichtVerbunden) {
         e._zustand.appendChild(h('button.insel-aktion.is-an', { type: 'button', onClick: () => navigieren('#/chat') }, text('Verbinden')));
+      } else if (fehler && a.fehlerCode === 'CLAUDE_GUTHABEN') {
+        // Kein Guthaben bei Anthropic: in den Einstellungen geht es kostenlos mit Gemini weiter.
+        e._zustand.appendChild(h('button.insel-aktion.is-an', { type: 'button', onClick: () => navigieren('#/settings') }, text('Kostenlos mit Gemini')));
       }
     }
     // Rueckfragen
@@ -2191,6 +2194,7 @@ export function starteInsel(ctx) {
         e.antwort.status = 'fehler';
         e.antwort.fehler = fehlerSatz(err);
         e.antwort.nichtVerbunden = nichtVerbunden(err);
+        e.antwort.fehlerCode = err.code || null;
         ergebnis = 'abgelehnt';
       } else if (err instanceof ApiError && err.isAborted) {
         e.antwort.status = 'aborted';
@@ -2269,6 +2273,7 @@ export function starteInsel(ctx) {
       case 'fehler':
         a.fehler = p.satz || 'Die KI konnte nicht antworten.';
         a.nichtVerbunden = nichtVerbunden(p);
+        a.fehlerCode = p.code || null;
         break;
       case 'fertig': {
         const d = p.record && p.record.data;

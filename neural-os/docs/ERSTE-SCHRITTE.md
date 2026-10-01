@@ -53,7 +53,8 @@ wir die Fassung, die einfach nur eine Datei ist:
    einfach zu, beendet sich Neural OS nach 10 Minuten von selbst.
 
 Noch einmal doppelklicken öffnet nur den Browser; ein zweites Neural OS startet
-nicht.
+nicht. Läuft noch eine andere Fassung (etwa die alte, wenn du gerade die neue
+ZIP geladen hast), beendet der Doppelklick sie und startet die neue.
 
 > **Windows warnt beim Doppelklick** („Der Computer wurde durch Windows
 > geschützt“): auf **Weitere Informationen** und dann **Trotzdem ausführen**.
@@ -94,6 +95,14 @@ im Chat unter „Oder Claude“ oder unter **Einstellungen → KI** einfügen.
 Unten links steht danach **Online verbunden · Gemini** (bzw. **· Claude**). Der
 Schlüssel liegt im Tresor dieser KI. Gib ihn nirgends sonst ein und schick ihn
 niemandem.
+
+**Steht im Chat nur ein Feld für Claude** (`sk-ant-…`) und oben in der Mitte
+keine schwarze Pille (die Insel), zeigt der Browser noch eine alte Fassung: die
+neue ZIP laden (1.2) und dort `Neural OS starten.bat` doppelklicken – läuft die
+alte noch, beendet der Starter sie selbst und öffnet die neue. Ein Tab, der
+danach noch die alte zeigt, kann zu. In der neuen Fassung ist es egal, in
+welches Feld der Schlüssel kommt: einer mit `AIza` verbindet immer Gemini, und
+Gemini antwortet ab dann.
 
 ---
 

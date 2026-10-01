@@ -8,7 +8,8 @@
  *   neural-os start --hintergrund [--open]
  *                              Starter fuer den Doppelklick: startet Neural OS
  *                              abgeloest im Hintergrund, oeffnet den Browser und
- *                              endet; laeuft es schon, nur den Browser
+ *                              endet; laeuft es schon, nur den Browser (laeuft
+ *                              dort eine andere Fassung, wird sie ersetzt)
  *   neural-os stop             ein laufendes Neural OS beenden ([Beenden])
  *   neural-os doctor           ehrlicher Bericht: was geht, was fehlt
  *   neural-os export [--dir D] [--format json|markdown|both] [--passphrase X]
@@ -36,10 +37,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
-const { createApp, seedIfEmpty, VERSION } = require('../src/app');
+const { createApp, seedIfEmpty, startInhalteAuffrischen, VERSION } = require('../src/app');
 const { asNeuralError } = require('../src/kernel/errors');
 const pathsMod = require('../src/kernel/paths');
 const laufzettel = require('../src/kernel/laufzettel');
+const bauMod = require('../src/kernel/bau');
 const logMod = require('../src/kernel/log');
 
 function parseArgs(argv) {
@@ -215,7 +217,9 @@ async function hochfahren(flags, { dienst, erreichbar = () => {}, beiStart = () 
   const instanz = laufzettel.neueInstanz();
   // Das Beenden-Recht für `neural-os stop`: steht nur im Laufzettel.
   const stopp = require('node:crypto').randomBytes(24).toString('base64url');
-  const zettel = await laufzettel.anlegen(paths, { instanz, heim, zustand: 'startet', stopp });
+  // Welche Fassung hier startet: Der Starter einer anderen ersetzt sie.
+  const bau = bauMod.kennung();
+  const zettel = await laufzettel.anlegen(paths, { instanz, heim, zustand: 'startet', stopp, ...(bau ? { bau } : {}) });
   const log = logMod.logger('start');
 
   const lage = { app: null, vorraum: null, boot: null, ende: null, waechter: null };
@@ -314,6 +318,15 @@ async function hochfahren(flags, { dienst, erreichbar = () => {}, beiStart = () 
     app.beenden = (grund) => beenden(grund || 'knopf');
 
     const seeded = await seedIfEmpty(app);
+    // Eine Einfuehrung von frueher ("Die KI ist Claude"), die nie angefasst
+    // wurde, bekommt den heutigen Text (Gemini zuerst).
+    if (!seeded) {
+      try {
+        await startInhalteAuffrischen(app);
+      } catch (err) {
+        log.warn(`Startinhalte nicht aufgefrischt: ${err && err.message}`);
+      }
+    }
     // Extensions come up only after the rest of the system is known healthy.
     const extensions = await app.loadModules({ safeMode: flags.safe === true });
     weiter();
@@ -399,11 +412,12 @@ async function cmdStart(flags) {
   console.log(`  Netzmodus     ${netLabel(app.config.network.mode)}${health.network.hardened ? ` ${D}(prozessweit durchgesetzt)${X}` : ` ${Y}(NICHT durchgesetzt)${X}`}`);
   console.log(`  Vault         ${health.vault.counts ? Object.entries(health.vault.counts).map(([k, v]) => `${v} ${k}`).join(', ') : '0 Einträge'}${app.vaultCrypto && app.vaultCrypto.enabled ? ' · verschlüsselt' : ''}`);
 
-  const kl = health.claude;
-  if (kl && kl.verbunden) {
-    console.log(`  Claude        ${mark(true)} verbunden ${D}(${kl.modell})${X}`);
+  // Der Anbieter, der antwortet (Gemini oder Claude), nicht mehr nur Claude.
+  const an = health.anbieter;
+  if (an && an.verbunden) {
+    console.log(`  Anbieter      ${mark(true)} ${an.name} verbunden ${D}(${an.modellName || an.modell})${X}`);
   } else {
-    console.log(`  Claude        ${Y}nicht verbunden${X} ${D}— ${(kl && kl.grund) || 'Claude ist nicht geladen.'}${X}`);
+    console.log(`  Anbieter      ${Y}nicht verbunden${X} ${D}— ${(an && an.grund) || 'Die KI ist nicht geladen.'}${X}`);
   }
   if (app.failures.length) {
     console.log(`  ${Y}Eingeschränkt${X}  ${app.failures.map((f) => f.subsystem).join(', ')} ${D}— 'neural-os doctor' zeigt Details${X}`);
@@ -528,16 +542,19 @@ async function cmdDienst(flags) {
 
 /* --------------------------------------------------------------- starter */
 
+const AELTERE_SATZ = 'Neural OS läuft schon (ältere Version). Bitte dort beenden.';
+const AELTERE_WEG = 'Das schwarze Fenster der alten Version schließen oder den Rechner neu starten, dann noch einmal doppelklicken.';
+
 /**
- * Läuft schon eines (oder startet gerade)? Dann dessen Adresse.
- * @returns {Promise<{url?:string, satz?:string}>}
+ * Läuft schon eines (oder startet gerade)? Dann dessen Adresse und Laufzettel.
+ * @returns {Promise<{url?:string, zettel?:object, satz?:string, grund?:string}>}
  */
 async function laufendesAbwarten(paths, dauertNoch) {
   const bis = Date.now() + WARTEN_MS;
   let aeltereVersucht = false;
   for (;;) {
     const befund = await laufzettel.pruefen(paths);
-    if (befund.zustand === 'laeuft') return { url: befund.url };
+    if (befund.zustand === 'laeuft') return { url: befund.url, zettel: befund.zettel };
     if (befund.zustand === 'aeltere') {
       // Eine Version von vor Paket S läuft noch (Sperre {pid, at}). Sie kennt
       // weder [Beenden] noch einen Stopp-Schlüssel, und der Nutzer hat in
@@ -545,7 +562,9 @@ async function laufendesAbwarten(paths, dauertNoch) {
       // selbst, sonst zeigt der Browser für immer die alte App (so gesehen
       // beim Nutzer nach dem Herunterladen einer neuen Fassung).
       if (aeltereVersucht || !befund.sicher || !(await aeltereBeenden(befund.pid))) {
-        return { satz: 'Neural OS läuft schon (ältere Version). Bitte dort beenden.' };
+        // Was ein Laie dann tun kann: Eine Version von vor Paket S lief im
+        // eigenen schwarzen Fenster; ein Neustart beendet sie in jedem Fall.
+        return { satz: `${AELTERE_SATZ}\n${AELTERE_WEG}` };
       }
       aeltereVersucht = true;
       sagen('Eine ältere Version lief noch und wurde beendet.');
@@ -575,6 +594,69 @@ async function aeltereBeenden(pid) {
     return false;
   }
   const bis = Date.now() + 10000;
+  while (Date.now() < bis) {
+    if (!laufzettel.pidLebt(pid)) return true;
+    await schlafen(100);
+  }
+  return false;
+}
+
+/**
+ * Läuft unter diesem Laufzettel eine andere Fassung als die dieses Starters?
+ * Ein Zettel ohne `bau` stammt von einer Fassung vor dem 01.10.2026. Lässt
+ * sich die eigene Kennung nicht bilden, wird nichts ersetzt.
+ */
+function andereFassung(zettel) {
+  if (!zettel || typeof zettel !== 'object') return false;
+  const meine = bauMod.kennung();
+  return !!meine && zettel.bau !== meine;
+}
+
+/**
+ * Ist das ein Neural OS? Die Befehlszeile ".../neural-os(.js) …" -- unter
+ * Windows ohne PowerShell genügt der Programmname node.exe.
+ */
+function istNeuralOs(info) {
+  const urteil = laufzettel.aelterePruefen(info, NaN);
+  if (urteil === 'neural') return true;
+  return urteil === 'unklar' && !!info && typeof info.name === 'string' && /^node(\.exe)?$/i.test(info.name);
+}
+
+/**
+ * Die laufende andere Fassung beenden, sauber, mit Speichern:
+ *   - Mac und Linux: SIGTERM -- der Dienst schließt dann wie bei [Beenden],
+ *     wirft aber, anders als [Beenden], auf dem Mac den Stick nicht aus
+ *     (Paket M): Die neue Fassung startet ja gleich von ihm.
+ *   - Windows: dort ist SIGTERM ein hartes Ende, also zuerst die Bitte mit
+ *     dem Beenden-Recht aus ihrem Laufzettel (wie `neural-os stop`, auch
+ *     gesperrt im Vorraum). Lehnt sie ab -- eine Fassung ohne dieses Recht
+ *     --, dann doch das harte Ende: ihr Speicher ist reines Anhängen, es geht
+ *     höchstens der letzte Satz verloren (wie bei aeltereBeenden).
+ * Ein Signal geht nur an einen Prozess, dessen Befehlszeile ein Neural OS
+ * ist: Die PID im Zettel belegt erst die Gesundheitsabfrage, das ist die
+ * zweite Sicherung. Dann bis zu 15 s warten.
+ * @returns {Promise<boolean>} beendet?
+ */
+async function andereBeenden(z) {
+  const pid = z && z.pid;
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  let gebeten = false;
+  if (process.platform === 'win32') {
+    try {
+      gebeten = (await beendenAnfragen(z.port, z.stopp)).status === 202;
+    } catch {
+      gebeten = false;
+    }
+  }
+  if (!gebeten) {
+    let info = null;
+    try { info = await laufzettel.prozessInfo(pid); } catch { info = null; }
+    if (!istNeuralOs(info)) return false;
+    try { process.kill(pid, 'SIGTERM'); } catch (err) {
+      return !!(err && err.code === 'ESRCH');
+    }
+  }
+  const bis = Date.now() + 15000;
   while (Date.now() < bis) {
     if (!laufzettel.pidLebt(pid)) return true;
     await schlafen(100);
@@ -634,8 +716,20 @@ async function cmdStarter(flags) {
     sagen('Neural OS startet … (dauert noch)');
   };
 
-  // 1. Läuft es schon? Dann nur der Browser.
-  const schon = await laufendesAbwarten(paths, dauertNoch);
+  // 1. Läuft es schon? Dann nur der Browser -- außer dort läuft eine andere
+  //    Fassung (die neue ZIP ist da, die alte lief noch): Die wird beendet,
+  //    dann startet diese. Sonst zeigte der Browser weiter die alte App (so
+  //    beim Nutzer am 01.10.2026: der neue Starter, und doch nur Claude).
+  let schon = await laufendesAbwarten(paths, dauertNoch);
+  if (schon.url && andereFassung(schon.zettel)) {
+    if (!(await andereBeenden(schon.zettel))) {
+      sagen('Eine andere Version von Neural OS läuft noch und ließ sich nicht beenden.');
+      sagen('Bitte den Rechner neu starten und dann noch einmal doppelklicken.');
+      return 1;
+    }
+    sagen('Eine andere Version von Neural OS lief noch und wurde beendet.');
+    schon = await laufendesAbwarten(paths, dauertNoch);
+  }
   if (schon.url) return browserAuf(flags, schon.url);
   if (schon.satz) { sagen(schon.satz); return 1; }
   if (schon.grund) return startScheitert(paths, schon.grund);
@@ -747,7 +841,7 @@ async function cmdStop(flags) {
   const befund = await laufzettel.pruefen(paths);
   if (befund.zustand === 'startet') { sagen('Neural OS startet gerade; gleich noch einmal versuchen.'); return 1; }
   if (befund.zustand === 'aeltere') {
-    if (!befund.sicher || !(await aeltereBeenden(befund.pid))) { sagen('Neural OS läuft schon (ältere Version). Bitte dort beenden.'); return 1; }
+    if (!befund.sicher || !(await aeltereBeenden(befund.pid))) { sagen(AELTERE_SATZ); sagen('Das schwarze Fenster der alten Version schließen oder den Rechner neu starten.'); return 1; }
     sagen('Eine ältere Version lief noch und wurde beendet.');
     return 0;
   }
@@ -800,16 +894,22 @@ async function cmdDoctor(flags) {
       console.log(`  ${mark(ok)} ${name}${typeof state === 'string' ? ` ${D}(${state})${X}` : ''}`);
     }
 
-    console.log(`\n${B}Claude${X}`);
-    const kl = h.claude;
-    if (!kl) {
+    // Beide Anbieter, der aktive zuerst: Gemini (Google, kostenlos) oder Claude (Anthropic).
+    console.log(`\n${B}KI-Anbieter${X}`);
+    const an = h.anbieter;
+    if (!an || !an.anbieter) {
       console.log(`  ${R}✗${X} nicht geladen`);
     } else {
-      console.log(`  ${mark(kl.verbunden)} ${kl.verbunden ? 'verbunden' : 'nicht verbunden'} ${D}(${kl.modell})${X}`);
-      console.log(`      ${D}Schlüssel: ${kl.schluesselVorhanden ? (kl.gesperrt ? 'im gesperrten Tresor' : 'im Tresor') : 'keiner'} · Netz: ${kl.netz ? `${kl.netz.modus}, ${kl.netz.erlaubt ? 'api.anthropic.com erlaubt' : 'api.anthropic.com gesperrt'}` : 'unbekannt'}${X}`);
-      if (!kl.verbunden && kl.grund) console.log(`      ${D}${kl.grund}${X}`);
+      const reihe = [an.aktiv, ...Object.keys(an.anbieter).filter((id) => id !== an.aktiv)];
+      for (const id of reihe) {
+        const z = an.anbieter[id] || {};
+        const ziel = id === 'gemini' ? 'generativelanguage.googleapis.com' : 'api.anthropic.com';
+        console.log(`  ${mark(!!z.verbunden)} ${z.name || id}${id === an.aktiv ? ' (antwortet)' : ''}: ${z.verbunden ? 'verbunden' : 'nicht verbunden'} ${D}(${z.modellName || z.modell || '?'})${X}`);
+        console.log(`      ${D}Schlüssel: ${z.schluesselVorhanden ? (z.gesperrt ? 'im gesperrten Tresor' : 'im Tresor') : 'keiner'} · Netz: ${z.netz ? `${z.netz.modus}, ${ziel} ${z.netz.erlaubt ? 'erlaubt' : 'gesperrt'}` : 'unbekannt'}${X}`);
+        if (!z.verbunden && z.grund && z.schluesselVorhanden) console.log(`      ${D}${z.grund}${X}`);
+      }
     }
-    console.log(`  ${D}Ohne Claude antwortet der Chat nicht – Notizen, Kalender und Suche funktionieren trotzdem.${X}`);
+    console.log(`  ${D}Ohne verbundene KI antwortet der Chat nicht – Notizen, Kalender und Suche funktionieren trotzdem.${X}`);
 
     // Automatik zuletzt und ausdruecklich: die Frage "läuft hier gerade etwas
     // ohne mich?" muss man beantwortet bekommen, ohne die Oberfläche zu

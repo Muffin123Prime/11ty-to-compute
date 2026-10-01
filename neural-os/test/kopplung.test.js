@@ -21,7 +21,7 @@ const path = require('node:path');
 
 const { test, tempHome } = require('./harness');
 
-const { createApp, seedIfEmpty } = require('../src/app');
+const { createApp, seedIfEmpty, startInhalteAuffrischen, fruehereStartTexte, START_IDS } = require('../src/app');
 const pathsMod = require('../src/kernel/paths');
 const merge = require('../src/sync/merge');
 const { createVaultCrypto } = require('../src/store/vaultcrypto');
@@ -1631,7 +1631,7 @@ test('Zwei schon benutzte Sticks koppeln: eine Startinhalt-Änderung auf nur ein
     const appB = await w.start(B, { name: 'Lena' });
     assert.equal(await seedIfEmpty(appA), true);
     assert.equal(await seedIfEmpty(appB), true);
-    const aufgabe = appA.store.list('task').items.find((t) => t.data.title === 'Claude verbinden');
+    const aufgabe = appA.store.list('task').items.find((t) => t.data.title === 'KI verbinden');
     appA.store.update(aufgabe.id, { status: 'done' });
     const will = appA.store.list('note').items.find((n) => n.data.title === 'Willkommen in Neural OS');
     appA.store.update(will.id, { pinned: false });
@@ -1641,8 +1641,42 @@ test('Zwei schon benutzte Sticks koppeln: eine Startinhalt-Änderung auf nur ein
     assert.deepEqual(konflikte, [0, 0, 0, 0]);
     assert.equal(kopien(appA).length + kopien(appB).length, 0, 'zweite Fassungen der Startinhalte');
     const tB = appB.store.list('task').items.map((t) => `${t.data.title}:${t.data.status}`).sort();
-    assert.ok(tB.includes('Claude verbinden:done') && !tB.includes('Claude verbinden:todo'), JSON.stringify(tB));
+    assert.ok(tB.includes('KI verbinden:done') && !tB.includes('KI verbinden:todo'), JSON.stringify(tB));
     assert.equal(appB.store.get(will.id).data.pinned, false);
+  });
+});
+
+test('Ein Stick mit der alten Einführung („Claude verbinden“) und ein neuer: nach dem Auffrischen koppeln sie ohne zweite Fassung', async () => {
+  await welt(async (w) => {
+    const A = w.stick('alt');
+    const B = w.stick('neu');
+    w.welt.add(A.root);
+    w.welt.add(B.root);
+    const appA = await w.start(A, { name: 'Max' });
+    const appB = await w.start(B, { name: 'Lena' });
+    assert.equal(await seedIfEmpty(appA), true);
+    assert.equal(await seedIfEmpty(appB), true);
+    // A wurde mit der Fassung bis zum 01.10.2026 angelegt: die alten Texte, dieselben IDs.
+    const alt = fruehereStartTexte();
+    appA.store.update(START_IDS.claude, alt[START_IDS.claude]);
+    appA.store.update(START_IDS.willkommen, alt[START_IDS.willkommen]);
+    appA.store.update(START_IDS.aufgabeClaude, alt[START_IDS.aufgabeClaude]);
+    await appA.store.flush();
+    assert.equal(appA.store.get(START_IDS.claude).data.title, 'Claude verbinden');
+    // Beim Start von A (bin/neural-os.js): aufgefrischt, weil der Inhalt noch genau der alte ist.
+    assert.equal((await startInhalteAuffrischen(appA)).length, 3);
+    await new Promise((r) => setTimeout(r, 30));
+    await koppeln(appA, appB, B);
+    const konflikte = [];
+    for (const a of [appA, appB, appA, appB]) konflikte.push((await a.kopplung.abgleichen()).konflikte);
+    assert.deepEqual(konflikte, [0, 0, 0, 0]);
+    assert.equal(kopien(appA).length + kopien(appB).length, 0, 'zweite Fassungen der Startinhalte');
+    for (const app of [appA, appB]) {
+      assert.equal(app.store.get(START_IDS.claude).data.title, 'KI verbinden');
+      assert.equal(app.store.list('note').items.filter((n) => n.data.title === 'Willkommen in Neural OS').length, 1);
+    }
+    const beiA = abgleichbar(appA);
+    for (const [id, h] of abgleichbar(appB)) assert.equal(beiA.get(id), h, `${id} ist auf beiden Sticks gleich`);
   });
 });
 
