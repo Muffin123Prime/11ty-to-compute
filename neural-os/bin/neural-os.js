@@ -2,28 +2,31 @@
 'use strict';
 
 /**
- * Neural OS command line.
+ * Neural OS -- die Kommandozeile.
  *
- *   neural-os [start]          start the local server in the foreground (Strg+C)
+ *   neural-os [start]          startet Neural OS im Vordergrund (Strg+C beendet)
  *   neural-os start --hintergrund [--open]
  *                              Starter fuer den Doppelklick: startet Neural OS
  *                              abgeloest im Hintergrund, oeffnet den Browser und
  *                              endet; laeuft es schon, nur den Browser
  *   neural-os stop             ein laufendes Neural OS beenden ([Beenden])
- *   neural-os doctor           report honestly what works and what does not
+ *   neural-os doctor           ehrlicher Bericht: was geht, was fehlt
  *   neural-os export [--dir D] [--format json|markdown|both] [--passphrase X]
+ *                              vollstaendige Sicherung
  *   neural-os import <dir>     [--mode merge|replace|fresh|restore] [--passphrase X]
- *   neural-os compact          snapshot the vault and truncate the log
+ *                              eine Sicherung zurueckspielen
+ *   neural-os compact          Zwischenstand schreiben und das Log kuerzen
  *   neural-os version
  *
- * Global flags: --home DIR  --port N  --host H  --log LEVEL  --no-harden
- *               --safe   (startet ohne die selbst eingefügten Erweiterungen)
- *               --open   (oeffnet die Oberflaeche im Browser)
+ * Fuer alle: --home DIR  --port N  --host H  --log LEVEL  --no-harden
+ *            --safe   (startet ohne die selbst eingefuegten Erweiterungen)
+ *            --open   (oeffnet die Oberflaeche im Browser)
  *
- *   neural-os stick prepare <pfad>   bereitet einen USB-Stick vor
+ *   neural-os stick prepare <pfad>   bereitet einen USB-Stick vor (neue KI)
  *   neural-os stick update  <pfad>   erneuert nur den Programmcode
+ *   neural-os stick runtime <pfad> <plattform>   legt eine Laufzeit nach
  *   neural-os stick verify  <pfad>   prueft einen Stick
- *               --passphrase P   (prefer NEURAL_OS_PASSPHRASE)
+ *               --passphrase P   (besser: NEURAL_OS_PASSPHRASE)
  *
  * Ist der Tresor mit einer PIN verschluesselt und keine Passphrase gegeben,
  * startet Neural OS gesperrt; die PIN kommt im Browser (Vorraum).

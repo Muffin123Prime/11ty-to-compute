@@ -33,6 +33,7 @@ const VORLAGE_BAT = path.join(WURZEL, 'tools', 'launchers', 'probelauf-windows.b
 const VORLAGE_CMD = path.join(WURZEL, 'tools', 'launchers', 'probelauf-macos.command');
 const PROJEKT_BAT = path.join(WURZEL, 'Probelauf - Windows.bat');
 const PROJEKT_CMD = path.join(WURZEL, 'Probelauf - Mac.command');
+const AUF_STICK_BAT = path.join(WURZEL, 'Probelauf auf den Stick legen.bat');
 
 function pl() {
   return require(SKRIPT);
@@ -410,8 +411,8 @@ test('Die Starter im Projektordner sind die Vorlagen, byte-genau (.bat ASCII mit
  * (test/start-dienst.test.js) und fassen die Fallen, die sonst erst am
  * fremden Rechner auffielen.
  */
-test('Die .bat Zeile für Zeile wie cmd.exe: Sprungziele, Anführungszeichen, Blöcke, rem, jeder Code außer 0 ist ein Fehler', () => {
-  const text = fs.readFileSync(VORLAGE_BAT, 'latin1');
+/** Die Regeln für jede .bat, wie cmd.exe sie liest. Gibt die Befehlszeilen zurück. */
+function batRegeln(text) {
   const zeilen = text.split('\r\n').map((z) => z.trim());
   const istRem = (z) => /^rem(\s|$)/i.test(z) || z.startsWith('::');
   const befehle = zeilen.filter((z) => z && !istRem(z));
@@ -444,6 +445,12 @@ test('Die .bat Zeile für Zeile wie cmd.exe: Sprungziele, Anführungszeichen, Bl
     assert.ok(tiefe >= 0, `Klammer zu ohne Klammer auf: ${z}`);
   }
   assert.equal(tiefe, 0, 'Klammerblock nicht geschlossen');
+  return befehle;
+}
+
+test('Die .bat Zeile für Zeile wie cmd.exe: Sprungziele, Anführungszeichen, Blöcke, rem, jeder Code außer 0 ist ein Fehler', () => {
+  const text = fs.readFileSync(VORLAGE_BAT, 'latin1');
+  const befehle = batRegeln(text);
 
   // Nach jedem Node-Aufruf zählt jeder Code außer 0. Ein Absturz meldet unter
   // Windows einen negativen Code (0xC0000135 = -1073741515), und
@@ -709,4 +716,78 @@ test('Auswertung fremder Ausgaben: netsh-Sperrbereiche und die mount-Zeile vom M
   assert.equal(zeile.noexec, false);
   assert.equal(zeile.noowners, true);
   assert.equal(pl().mountZeile(mount, '/Users/x/Downloads').punkt, '/');
+});
+
+// ---------------------------------------------------------------------------
+// Ein Doppelklick legt den Probelauf auf den Stick (Punkt 7 der Übergabe)
+// ---------------------------------------------------------------------------
+
+test('--auf-stick auto: genau ein Stick mit Neural OS bekommt den Probelauf, mit zwei Sätzen statt einer Liste', async () => {
+  const sticks = tempHome('probe-auto');
+  try {
+    const leer = path.join(sticks.home, 'LEER');
+    fs.mkdirSync(leer);
+    const stick = tempStick({ aufbau: 'inhalt' });
+    const ziel = path.join(sticks.home, 'NEURAL OS');
+    fs.renameSync(stick.root, ziel);
+    const r = await lauf([SKRIPT, '--auf-stick', 'auto', '--suche-in', sticks.home]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(fs.existsSync(path.join(ziel, 'Probelauf - Windows.bat')));
+    assert.ok(fs.existsSync(path.join(ziel, 'Probelauf - Mac.command')));
+    assert.ok(fs.existsSync(path.join(ziel, 'Inhalt', 'probelauf.js')));
+    assert.deepEqual(fs.readdirSync(leer), [], 'der leere Ordner wurde angefasst');
+    const zeilen = r.stdout.trim().split('\n');
+    assert.equal(zeilen.length, 2, r.stdout);
+    assert.ok(zeilen[0].startsWith('Der Probelauf liegt jetzt auf dem Stick '), zeilen[0]);
+    assert.match(zeilen[1], /„Probelauf - Windows“ doppelklicken/);
+
+    // Ohne "auto" und ohne Pfad heißt dasselbe.
+    const ohne = await lauf([SKRIPT, '--auf-stick', '--suche-in', sticks.home]);
+    assert.equal(ohne.code, 0, ohne.stderr);
+  } finally {
+    sticks.cleanup();
+  }
+});
+
+test('--auf-stick auto: kein oder zwei Sticks mit Neural OS – ein Satz, nichts geschrieben', async () => {
+  const keiner = tempHome('probe-auto-keiner');
+  const zwei = tempHome('probe-auto-zwei');
+  try {
+    fs.mkdirSync(path.join(keiner.home, 'LEER'));
+    const r0 = await lauf([SKRIPT, '--auf-stick', 'auto', '--suche-in', keiner.home]);
+    assert.equal(r0.code, 1);
+    assert.match(r0.stderr, /^Kein vorbereiteter Stick gefunden\./);
+    assert.match(r0.stderr, /\[Neue KI\]/);
+    assert.deepEqual(fs.readdirSync(path.join(keiner.home, 'LEER')), []);
+
+    const pfade = [];
+    for (const name of ['A', 'B']) {
+      const stick = tempStick({ aufbau: 'inhalt' });
+      const ziel = path.join(zwei.home, name);
+      fs.renameSync(stick.root, ziel);
+      pfade.push(ziel);
+    }
+    const r2 = await lauf([SKRIPT, '--auf-stick', 'auto', '--suche-in', zwei.home]);
+    assert.equal(r2.code, 1);
+    assert.match(r2.stderr, /^Es stecken mehrere Sticks mit Neural OS\./);
+    for (const p of pfade) assert.ok(!fs.existsSync(path.join(p, 'Probelauf - Windows.bat')), `${p} wurde beschrieben`);
+  } finally {
+    keiner.cleanup();
+    zwei.cleanup();
+  }
+});
+
+test('"Probelauf auf den Stick legen.bat": ASCII mit CRLF, sucht Node wie der Starter, ruft --auf-stick auto, bleibt offen', () => {
+  const text = fs.readFileSync(AUF_STICK_BAT, 'latin1');
+  assert.ok(!/[^\x00-\x7f]/.test(text), 'Nicht-ASCII-Zeichen');
+  assert.ok(!/[^\r]\n/.test(text), 'eine Zeile nur mit LF');
+  for (const stelle of ['%HIER%node.exe', 'node-v*', '%USERPROFILE%\\Downloads', 'where node']) {
+    assert.ok(text.includes(stelle), `sucht nicht: ${stelle}`);
+  }
+  const befehle = batRegeln(text);
+  const aufruf = befehle.find((z) => /^"%NODE%"/i.test(z));
+  assert.equal(aufruf, '"%NODE%" "%HIER%tools\\probelauf.js" --auf-stick auto');
+  // Das Fenster bleibt offen: Es sagt, was passiert ist.
+  assert.ok(befehle.includes('pause'));
+  assert.ok(befehle.indexOf('pause') > befehle.indexOf(aufruf));
 });

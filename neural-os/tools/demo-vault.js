@@ -68,8 +68,8 @@ async function befuellen(app) {
      'Drei Beete: Tomaten in die Südwand, Salat in den Halbschatten, Kräuter in die Kiste.\n\nBegriff :: Erklärung\nFruchtfolge :: Nicht zweimal hintereinander dieselbe Familie ins selbe Beet.\n\nSiehe [[Bewässerung]].',
      ['garten']],
     ['Bewässerung', 'Tropfschlauch mit Zeitschaltuhr, morgens um sechs.', ['garten', 'technik']],
-    ['Datenschutz im Alltag', 'Was ich wo preisgebe, und was nicht. Siehe [[Lokale Modelle]].', ['datenschutz']],
-    ['Lokale Modelle', 'Ollama, llama.cpp, LM Studio. Alle sprechen auf 127.0.0.1.', ['technik', 'datenschutz']],
+    ['Datenschutz im Alltag', 'Was ich wo preisgebe, und was nicht. Siehe [[Passwort-Manager]].', ['datenschutz']],
+    ['Passwort-Manager', 'Ein Master-Passwort, alles andere erzeugt der Manager. Zwei-Faktor überall, wo es geht.', ['technik', 'datenschutz']],
     ['Werkstatt – Grundlagen', 'Dübel, Schrauben, Holzmaße. Was wann gewartet wird, steht in [[Wartungsplan]].\n\nTODO: Bohrerständer kaufen', ['werkstatt']],
     ['Alte Notiz ohne Verbindung', 'Steht seit Monaten hier und zeigt auf nichts.', []],
   ];
@@ -104,7 +104,7 @@ async function befuellen(app) {
     ['Kühlschrank ausmessen', 'Nische ist 60 mal 178. Die Tür schlägt links an und lässt sich nicht wechseln.', ['haushalt']],
     ['Vorratshaltung', 'Reis, Linsen und Nudeln in Gläsern, Datum auf den Deckel. Was offen ist, kommt nach vorn.', ['haushalt']],
     ['Wäsche', 'Dreißig Grad reicht für fast alles. Handtücher bei sechzig, sonst riechen sie nach zwei Tagen.', ['haushalt']],
-    ['Backup-Plan', 'Eine Platte hier, eine bei den Eltern, einmal im Quartal tauschen. Nichts liegt nur an einem Ort. Gilt auch für [[Lokale Modelle]].', ['technik', 'datenschutz']],
+    ['Backup-Plan', 'Eine Platte hier, eine bei den Eltern, einmal im Quartal tauschen. Nichts liegt nur an einem Ort. Gilt auch für den [[Passwort-Manager]].', ['technik', 'datenschutz']],
     ['Passwörter', 'Alles im Verwalter, nichts im Browser. Die zwei wichtigsten kann ich auswendig, der Rest muss es nicht sein.', ['datenschutz']],
     ['Router', 'Gastnetz für alles, was nach Hause telefonieren will. Der Drucker hängt dort und nicht im Hauptnetz. Siehe [[Datenschutz im Alltag]].', ['technik', 'datenschutz']],
     ['Telefon aufräumen', 'Standortverlauf aus, Werbe-ID zurückgesetzt, alle Apps ohne Zweck entfernt. Gehört zu [[Datenschutz im Alltag]].', ['datenschutz']],
@@ -269,7 +269,7 @@ async function befuellen(app) {
     const run = s.create('run', { agentId: agent.id, goal: 'Notizen verschlagworten', status: 'done', result: 'Zwei Notizen ergänzt.', finishedAt: new Date().toISOString() });
     await withActor({ kind: 'agent', runId: run.id, agentId: agent.id }, async () => {
       s.update(ids['Bewässerung'], { body: 'Tropfschlauch mit Zeitschaltuhr, morgens um sechs.\n\nErgänzt: Druckminderer nicht vergessen.' });
-      s.update(ids['Lokale Modelle'], { tags: ['technik', 'datenschutz', 'modelle'] });
+      s.update(ids['Passwort-Manager'], { tags: ['technik', 'datenschutz', 'sicherheit'] });
     });
   }
 

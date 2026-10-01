@@ -194,6 +194,14 @@ but it is not an OS firewall and does not constrain a separate process.
 
 ## 7. `src/models/providers/*.js` and `src/models/registry.js`
 
+> **Stand 1. Oktober 2026:** Lokale Modellserver (Ollama, OpenAI-kompatibel)
+> gibt es nicht mehr; `ollama.js` und `openai.js` sind entfernt. Die Anbieter
+> sind `src/models/providers/anthropic.js` (Claude) und `gemini.js` (Gemini,
+> kostenlos), beide rohes HTTP, der Strom über `strom.js`; den Verbund beider
+> baut `src/models/ki.js`. Ihre Schnittstellen und die Fakten dazu stehen in
+> `docs/CLAUDE-ANBINDUNG.md`. Der Rest dieses Abschnitts beschreibt den
+> früheren Stand.
+
 Provider module exports:
 ```js
 module.exports = {

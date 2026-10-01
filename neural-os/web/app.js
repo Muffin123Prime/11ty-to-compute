@@ -680,6 +680,8 @@ function createShell() {
     if (ki) {
       api.kiSetzen(ki.id);
       if (lokal.kiSetzen(ki.id)) {
+        // Eine andere KI als vermutet: ihre Vorlieben vom Server gelten wieder.
+        uiGesehen = false;
         uiVomServer = true;
         try {
           state.set('theme', readTheme());
@@ -694,17 +696,21 @@ function createShell() {
     uiAnwenden(status && status.ui);
   }
 
-  /** Design und Seitenleisten aus config.ui (sie reisen mit dem Stick). */
+  /**
+   * Design und Seitenleisten aus config.ui (sie reisen mit dem Stick) -- nur
+   * beim ersten Status dieser KI. Danach gilt, was hier geklickt wird: Ein
+   * Status, der ankommt, bevor die neue Wahl gespeichert ist, holte sonst die
+   * alte zurück (gemessen: die eben eingeklappte Spalte sprang wieder auf).
+   */
   let uiVomServer = false;
   let uiGesehen = false;
   function uiAnwenden(ui) {
-    if (!ui || typeof ui !== 'object') return;
+    if (uiGesehen || !ui || typeof ui !== 'object') return;
+    uiGesehen = true;
     uiVomServer = true;
     try {
       if (['light', 'dark', 'system'].includes(ui.design)) state.set('theme', ui.design);
-      // Die Seiten nur beim ersten Mal: danach gilt, was hier geklickt wird.
-      if (!uiGesehen && ui.seiten && typeof ui.seiten === 'object') {
-        uiGesehen = true;
+      if (ui.seiten && typeof ui.seiten === 'object') {
         lokal.schreibenJson(STORAGE.seiten, ui.seiten);
         const mode = currentMode();
         state.set('seiten', { ...storedSides(mode), modus: mode });
@@ -721,6 +727,8 @@ function createShell() {
   }, 600);
   function uiSpeichern(patch) {
     if (uiVomServer) return;
+    // Hier wurde gewählt: Das gilt, auch wenn der erste Status noch kommt.
+    uiGesehen = true;
     uiSpeichernBald(patch);
   }
 

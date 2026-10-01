@@ -642,9 +642,9 @@ async function los(page, base, view, warten = 1000) {
   {
     const { c, p } = await mach('dark');
     await los(p, base, 'chat', 1400);
-    await step('Chat ohne Claude: „Verbinde Claude“', async () => {
+    await step('Chat ohne KI: „Verbinde eine KI“', async () => {
       await p.locator('.cv-verbinden').waitFor({ timeout: 4000 });
-      await shot(p, 'chat-verbinde-claude-dunkel');
+      await shot(p, 'chat-verbinde-ki-dunkel');
     });
     await c.close();
   }
@@ -654,27 +654,15 @@ async function los(page, base, view, warten = 1000) {
     const { c, p } = await mach('light');
     await los(p, base, 'network', 1500);
     await step('Netz: offline', async () => { await shot(p, 'netz-offline-hell'); });
-    await step('Netz: Ziel prüfen', async () => {
-      const feld = p.locator('input[type="text"], input:not([type])').first();
-      await feld.fill('api.openai.com');
-      await klick(p, /^Prüfen$/, { warten: 1500 });
-      await shot(p, 'netz-ziel-gepruft-hell');
-    });
-    await step('Netz: Protokoll', async () => {
+    // Die Ansicht ist schlicht (web/views/network.js): Zustand, Schalter, die
+    // Liste der Verbindungen -- wohin Neural OS wollte und ob es durfte.
+    await step('Netz: Verbindungen', async () => {
       await p.evaluate(() => {
-        const h = [...document.querySelectorAll('h2,h3')].find((x) => /Protokoll der Netzzugriffe/.test(x.textContent));
-        if (h) h.scrollIntoView({ block: 'center' });
+        const h = [...document.querySelectorAll('h2,h3')].find((x) => /^Verbindungen/.test(x.textContent.trim()));
+        if (h) h.scrollIntoView({ block: 'start' });
       });
       await p.waitForTimeout(700);
-      await shot(p, 'netz-protokoll-hell');
-    });
-    await step('Netz: Freigaben', async () => {
-      await p.evaluate(() => {
-        const h = [...document.querySelectorAll('h2,h3')].find((x) => /Aktive Freigaben/.test(x.textContent));
-        if (h) h.scrollIntoView({ block: 'center' });
-      });
-      await p.waitForTimeout(700);
-      await shot(p, 'netz-freigaben-hell');
+      await shot(p, 'netz-verbindungen-hell');
     });
     await c.close();
   }
@@ -684,15 +672,18 @@ async function los(page, base, view, warten = 1000) {
     const { c, p } = await mach('light');
     await los(p, base, 'settings', 1600);
     for (const [ueberschrift, name] of [
-      ['Tresor', 'einstellungen-tresor-hell'],
-      ['Verschlüsselung', 'einstellungen-verschluesselung-hell'],
+      ['Name dieser KI', 'einstellungen-name-hell'],
+      ['Gedächtnis', 'einstellungen-gedaechtnis-hell'],
+      ['Schutz', 'einstellungen-schutz-hell'],
+      ['iPad verbinden', 'einstellungen-ipad-hell'],
+      ['Speicher', 'einstellungen-speicher-hell'],
       ['Beobachtete Ordner', 'einstellungen-beobachtete-ordner-hell'],
-      ['Freigabe im lokalen Netz', 'einstellungen-lan-freigabe-hell'],
-      ['Online-Modelle', 'einstellungen-online-modelle-hell'],
       ['Diagnose', 'einstellungen-diagnose-hell'],
     ]) {
       await step(`Einstellungen: ${ueberschrift}`, async () => {
         const traf = await p.evaluate((t) => {
+          // Beobachtete Ordner und Diagnose liegen eingeklappt unter „Für Fortgeschrittene“.
+          for (const d of document.querySelectorAll('details')) d.open = true;
           const h = [...document.querySelectorAll('h2,h3')].find((x) => x.textContent.trim().startsWith(t));
           if (!h) return false;
           h.scrollIntoView({ block: 'start' });
@@ -721,28 +712,21 @@ async function los(page, base, view, warten = 1000) {
   {
     const { c, p } = await mach('dark');
     await los(p, base, 'workshop', 1800);
-    await step('Werkstatt: Vorlagen-Auswahl', async () => {
-      await klick(p, /^Vorlagen$/, { warten: 1400 });
-      await shot(p, 'werkstatt-vorlagen-dunkel');
-      await p.keyboard.press('Escape');
-      await p.waitForTimeout(700);
-    });
-    await step('Werkstatt: Modul aus der Vorlage', async () => {
-      // „Prüfen“ ist abgeschaltet, solange es nichts zu prüfen gibt. Erst die
-      // Vorlage laden, dann prüfen -- sonst fotografiert man einen toten Knopf.
-      await los(p, base, 'workshop', 1800);
-      // Der Knopf steckt in der Erklaerkarte, die ueber dem Editor liegt;
-      // Playwright kommt mit dem Mauszeiger nicht daran vorbei. Ob ein echter
-      // Klick durchkommt, ist Sache von tools/ui-check.js, nicht dieses hier.
-      const traf = await p.evaluate(() => {
-        const b = [...document.querySelectorAll('button')].find((x) => x.textContent.includes('laden'));
-        if (!b) return false;
-        b.click();
-        return true;
-      });
-      if (!traf) throw new Error('Der Knopf „Vorlage laden“ ist nicht da');
-      await p.waitForTimeout(1800);
-      await shot(p, 'werkstatt-modul-geladen-dunkel');
+    await step('Werkstatt: leer', async () => { await shot(p, 'werkstatt-dunkel'); });
+    await step('Werkstatt: Code eingefügt', async () => {
+      // Das Beispiel aus docs/ERWEITERN.md: ein Werkzeug für die Agenten.
+      const code = [
+        'module.exports = {',
+        "  manifest: { name: 'Offene Aufgaben', description: 'Gibt Agenten eine Liste der offenen Aufgaben.', kind: 'server', capabilities: ['records.read', 'tools.add'] },",
+        '  setup(api) {',
+        "    api.tool({ name: 'tasks.open', description: 'Listet alle Aufgaben, die noch nicht erledigt sind.', parameters: { type: 'object', properties: {} },",
+        "      run() { const t = api.records.list('task').filter((x) => x.data.status !== 'done'); return { anzahl: t.length }; } });",
+        '  },',
+        '};',
+      ].join('\n');
+      await p.locator('textarea[aria-label="Code einfügen"]').first().fill(code);
+      await p.waitForTimeout(400);
+      await shot(p, 'werkstatt-code-eingefuegt-dunkel');
     });
     await step('Werkstatt: Prüfbericht', async () => {
       await klick(p, /^Prüfen$/, { warten: 2800 });
@@ -763,24 +747,6 @@ async function los(page, base, view, warten = 1000) {
       await shot(p, 'tastenkuerzel-hell');
       await p.keyboard.press('Escape');
       await p.waitForTimeout(400);
-    });
-    await step('Netz: Freigabe erteilen', async () => {
-      await los(p, base, 'network', 1500);
-      // Das Formular steckt in einem zugeklappten Abschnitt; aufgeklappt zeigt
-      // es, was eine Freigabe alles benennen muss: Ziel, Zweck, Gueltigkeit.
-      await p.evaluate(() => {
-        for (const d of document.querySelectorAll('details')) d.open = true;
-      });
-      await p.waitForTimeout(600);
-      const traf = await p.evaluate(() => {
-        const b = [...document.querySelectorAll('button')].find((x) => /Freigabe erteilen/.test(x.textContent));
-        if (!b) return false;
-        b.scrollIntoView({ block: 'center' });
-        return true;
-      });
-      if (!traf) throw new Error('„Freigabe erteilen“ nicht gefunden');
-      await p.waitForTimeout(600);
-      await shot(p, 'netz-freigabe-erteilen-hell');
     });
     await step('Notiz: Verbindungsvorschläge (hell)', async () => {
       await los(p, base, 'notes', 1500);

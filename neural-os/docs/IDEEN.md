@@ -2,6 +2,15 @@
 
 Stand: 2026-09-21 · Neural OS 0.1.0
 
+> **Stand 1. Oktober 2026 – was sich seither geändert hat:** Eine KI auf dem
+> eigenen Rechner (Ollama, llama.cpp, LM Studio) gibt es nicht mehr; Neural OS
+> verbindet sich mit Gemini (kostenlos) oder Claude. Die Bereiche *Heute*,
+> *Vorschläge*, *Automatik*, *Zeitachse* und *Abgleich* (der alte
+> Geräte-Abgleich über das WLAN) sind aus der Oberfläche entfallen; Wissen
+> teilen jetzt gekoppelte Sticks (`docs/STICK.md`). Dieses Dokument ist ein Stück Geschichte: was darin über
+> diese Teile steht, beschreibt den damaligen Stand. Was heute gilt, steht in
+> `README.md`, `docs/ANLEITUNG.md` und `docs/STICK.md`.
+
 Du hast mich nach meinen eigenen Vorschlägen gefragt. Das waren acht.
 
 **Sieben davon sind inzwischen gebaut**, eine davon nur zur Hälfte (mit der

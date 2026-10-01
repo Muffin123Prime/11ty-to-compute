@@ -1,7 +1,9 @@
 # Claude-Anbindung — die Vorlage für den Online-Modus
 
 Entscheidung des Nutzers (22.09.2026): **online antwortet Claude (Anthropic)**,
-offline ein lokales Modell über Ollama. Dieses Dokument ist der Vertrag für
+offline ein lokales Modell über Ollama. *Inzwischen gibt es keine Offline-KI
+mehr (Ollama ist entfernt), und Gemini ist die kostenlose erste Wahl
+(Abschnitt 9); Claude bleibt die zweite.* Dieses Dokument ist der Vertrag für
 alle, die den Online-Modus bauen. Es stammt aus der aktuellen
 Schnittstellen-Referenz von Anthropic, nicht aus dem Gedächtnis — wer hier
 etwas ändert, prüft es vorher gegen die Referenz.

@@ -1,185 +1,221 @@
 # Neural OS auf dem USB-Stick
 
-Stick rein, starten antippen, läuft — mit allem, was deine KI über dich weiß.
+**Jeder Stick ist eine eigene KI.** Stick rein, Doppelklick, und im Browser
+öffnet sich die App mit allem, was *diese* KI weiß. Wissen teilen nur Sticks,
+die du miteinander **gekoppelt** hast.
 
-Der fremde Rechner braucht dafür **nichts**: kein Node, keine Installation,
-keine Administratorrechte. Alles liegt auf dem Stick. Die KI selbst ist Claude
-und braucht Internet; dein Schlüssel dafür liegt in deinem Tresor und reist mit.
+Der Rechner braucht dafür nichts: keine Installation, keine
+Administratorrechte. Das Programm und seine Laufzeit liegen auf dem Stick. Die
+KI antwortet online (Gemini kostenlos oder Claude); ihr Schlüssel liegt im
+Tresor des Sticks und reist mit.
 
-Alles Folgende findest du in Neural OS unter **Einstellungen → Stick**. Dort
-gibt es genau vier Knöpfe.
+In der App steht alles unter **Einstellungen → Speicher → Stick** (oder die
+Tasten `g` und dann `t`).
 
 ---
 
-## 1 · Stick vorbereiten
+## Was auf dem Stick liegt
 
-1. Stick einstecken. Neural OS sucht ihn selbst — unter Windows auf den
-   Laufwerken D: bis Z:, am Mac unter `/Volumes`, unter Linux unter `/media`
-   und `/run/media` — und trägt ihn ins Feld ein. Findet es keinen, steht
-   genau das da; dann **Neu suchen** oder den Ort von Hand eintragen.
-2. **Stick vorbereiten** tippen.
-3. Soll der Stick auch an Windows *und* am Mac starten, muss Neural OS dafür
-   einmal die Laufzeit von nodejs.org holen. Darum fragt der Knopf einmal:
-   **Erlauben** oder **Nur <dieses System>**. „Erlauben" gibt der Netzschleuse
-   genau eine Freigabe — nur für nodejs.org, höchstens 30 Minuten, und nach dem
-   Vorgang wird sie wieder zurückgezogen.
-4. Ein Balken läuft durch. Jede Bewegung darin kommt aus einem echten Schritt
-   (kopierte Bytes, begonnener Download), keine Animation.
-5. Danach: „Der Stick ist fertig", an welchen Rechnern er startet, und drei
-   Sätze, wie es weitergeht.
+```
+NEURAL OS (E:)
+  Inhalt                        Programm, Daten, Abgleich: nicht anfassen
+  LIESMICH
+  Neural OS starten - Mac
+  Neural OS starten - Windows
+```
 
-Was dabei passiert, entscheidet der Stick selbst:
+`LIESMICH` hat fünf Zeilen:
 
-| Der Stick ist … | Dann passiert |
+```
+Windows:  "Neural OS starten - Windows" doppelklicken.
+Mac:      "Neural OS starten - Mac" doppelklicken.
+Fertig:   in der App auf "Beenden".
+Deine Daten liegen im Ordner "Inhalt". Sichern = ganzen Stick kopieren.
+Geht etwas nicht, steht der Grund im Fenster, das dann offen bleibt.
+```
+
+Ein Doppelklick bleibt nötig: Windows und macOS starten aus Schutzgründen
+nichts von selbst vom Stick.
+
+## Starten
+
+**Windows:** Stick einstecken, im Explorer öffnen, **„Neural OS starten -
+Windows“** doppelklicken. Ein schwarzes Fenster zeigt „Neural OS startet …“,
+dann öffnet sich der Browser mit `http://127.0.0.1:2xxxx/` – die Adresse ist
+für diesen Stick immer dieselbe – und das Fenster schließt sich von selbst.
+Oben steht der Name der KI.
+
+**Mac:** Stick einstecken, im Finder öffnen, **„Neural OS starten - Mac“**
+doppelklicken. Fragt macOS nach dem Zugriff auf einen Wechseldatenträger:
+**Erlauben**. Im Terminal steht danach „Fertig. Dieses Fenster kann zu.“
+
+**Mit PIN** zeigt der Browser zuerst nur das Feld **„PIN“** und **[Öffnen]**.
+Falsch: „Falsche PIN.“, nach fünf Fehlversuchen „Zu oft falsch. Kurz warten.“
+
+**Noch einmal doppelklicken** öffnet nur den Browser mit derselben Adresse; ein
+zweites Neural OS startet nicht.
+
+Geht etwas schief, bleibt das Fenster offen und nennt genau einen Grund:
+
+| Satz im Fenster | Was es heißt |
 |---|---|
-| leer, oder ein Neural-OS-Stick ohne Wissen | Programm, Laufzeiten und dein Wissen kommen drauf. Das Original bleibt, wie es ist. |
-| schon ein Neural-OS-Stick mit Wissen | Das Wissen darauf bleibt **unberührt** — es kann neuer sein als das hier. Nur das Programm wird erneuert, fehlende Laufzeiten kommen dazu. |
-| der Stick, von dem Neural OS gerade läuft | Nur fehlende Laufzeiten kommen dazu. Das laufende Programm kann sich nicht selbst ersetzen. |
+| Dieser Rechner lässt keine Programme vom Stick starten. | Eine Richtlinie des Rechners (Schule, Firma) sperrt Programme vom Stick. An diesem Rechner hilft nichts; ein anderer Rechner ist nötig. |
+| Auf diesem Stick fehlt das Programm für Windows. / … für den Mac. | Der Stick wurde ohne diese Laufzeit vorbereitet. An einem Rechner mit Neural OS und Internet [Für Windows holen] bzw. [Für Mac holen]. |
+| Dieser Mac ist zu alt. Nötig ist macOS 11 oder neuer. | Die mitgelieferte Laufzeit verlangt macOS 11. |
+| macOS hat den Start blockiert: Systemeinstellungen › Datenschutz & Sicherheit › Dennoch öffnen. | Einmal dort „Dennoch öffnen“, dann noch einmal doppelklicken. |
+| Der Stick ist schreibgeschützt. | Schreibschutz-Schalter am Stick prüfen. |
+| Neural OS konnte nicht starten: | Darunter stehen die letzten Zeilen des Protokolls. |
 
-Scheitert eine Laufzeit (kein Internet, Schleuse zu), ist der Stick trotzdem
-fertig: er startet dann an Rechnern mit demselben Betriebssystem, und die
-Ansicht sagt, welches System fehlt und warum. Ein späterer Klick mit Internet
-holt es nach.
+## Beenden
 
-Danach liegt auf dem Stick:
+In der App unten links auf **[Beenden]**. Danach steht nur noch da:
 
-```
-DEIN-STICK/
-  Neural OS starten.bat        ← Windows: doppelklicken
-  Neural OS starten.command    ← Mac: beim ersten Mal Rechtsklick → Öffnen
-  Neural OS starten.sh         ← Linux
-  LIESMICH.txt
-  app/                         das Programm
-  runtime/                     die Laufzeit – deshalb braucht der PC nichts
-  data/                        DEIN WISSEN
-  Sicherungen/                 was „Jetzt sichern" hier ablegt
-  sync/
-  neural-os.portable           Markierung: "Daten liegen hier, nicht im PC"
-```
+- Windows: **„Gespeichert. Stick kann raus.“**
+- Mac: **„Gespeichert. Stick im Finder auswerfen.“**
 
-Platzbedarf (gemessen): rund 8 MB Programm und 80–120 MB je Laufzeit — bis zu
-vier Stück (Windows, Mac mit Apple-Chip, Mac mit Intel, dazu die des
-vorbereitenden Rechners), plus dein Wissen. Ein 1-GB-Stick reicht.
+Stick **ohne Beenden gezogen**: Neural OS beendet sich nach wenigen Sekunden
+von selbst. Ein offener Tab zeigt **„Neural OS ist aus.“** und darunter „Zum
+Öffnen den Starter auf dem Stick doppelklicken.“ Von der KI bleibt nichts
+sichtbar. Verloren gehen höchstens die letzten Sekunden – deshalb immer
+[Beenden] benutzen.
 
-## 2 · Jetzt sichern
+Browser zu, Stick steckt noch: Nach 10 Minuten ohne offenen Tab beendet sich
+Neural OS selbst.
 
-Ein Knopf. Steckt ein Stick (der aus dem Feld), landet die Sicherung auf dem
-Stick im Ordner `Sicherungen`; sonst im Sicherungsordner dieser Installation.
-Daneben steht still, wann zuletzt gesichert wurde und wo.
+**Auf dem Laptop bleibt nichts Inhaltliches zurück.** Das Programm schreibt nur
+auf den Stick. Der Browser merkt sich Ansicht und Adresse, nie Inhalte – kein
+Entwurf, kein Zwischenspeicher der Seite. Im Browserverlauf stehen nur Adressen.
 
-Jede Sicherung ist ein eigener Ordner mit Zeitstempel; eine ältere wird nie
-ersetzt. Sie enthält alles zum Zurückspielen (JSON) und eine lesbare Fassung
-(Markdown), samt Anhängen.
+## Zwei Sticks am selben Laptop
 
-## 3 · Von einer Sicherung wiederherstellen
+Stick B einstecken und seinen Starter doppelklicken: B öffnet sich unter einer
+**anderen Adresse** in einem eigenen Tab, mit eigenem Namen oben, und zeigt nur
+das Wissen von B. A und B können gleichzeitig laufen; keiner sieht etwas vom
+anderen, auch nicht im Browserspeicher. Ein alter Tab von A zeigt nach dem
+Beenden „Neural OS ist aus.“ – nie Daten von B.
 
-Klein darunter, weil man es selten braucht. Sicherung antippen (oder ihren
-Ordner eintragen) — Neural OS zeigt zuerst, was passieren würde: wie viele
-Einträge kommen, was verschwindet. Geschrieben ist bis dahin nichts. Erst dann
-wird **Wiederherstellen** frei.
+## Einen neuen Stick anlegen
 
-- **Ergänzen** nimmt nichts weg; nur was fehlt, kommt dazu.
-- **Gleiche ersetzen** überschreibt Einträge mit derselben Kennung.
-- **Nur in leeren Tresor** bricht ab, sobald hier etwas liegt.
-- **Alles ersetzen** löscht zuerst alles hier. Für einen frischen Rechner richtig.
+In der Stick-Ansicht unter **Andere Sticks**: einen leeren Stick einstecken.
+Nach wenigen Sekunden steht dort zum Beispiel
+**„Leerer Stick: E:\ · 14,2 GB frei“** mit zwei Knöpfen:
 
-Zugangstoken fürs lokale Netz und der Netzmodus reisen bewusst nicht mit.
+- **[Neue KI]** – der Stick bekommt eine eigene, leere KI.
+- **[Mit dieser KI gekoppelt]** – der neue Stick bekommt eine eigene KI und ist
+  sofort mit dieser gekoppelt. Hat diese KI eine PIN, kommt das Feld **„PIN für
+  den neuen Stick“** dazu: Gekoppelte Sticks sind entweder beide geschützt oder
+  beide nicht.
 
-## 4 · Beenden & abziehen
+Soll der Stick auch am anderen System starten (Windows *und* Mac), muss Neural
+OS die Laufzeit dafür einmal von nodejs.org holen. Dann kommt genau eine Frage
+mit zwei Knöpfen: **[Erlauben]** oder **[Nur Windows]** (bzw. **[Nur Mac]**).
+Liegt ein Teil schon ohne Netz bereit – etwa auf dem Stick, von dem Neural OS
+gerade läuft –, heißt der zweite Knopf **[Ohne Internet]**. „Erlauben“ gibt der
+Netzschleuse genau eine Freigabe: nur nodejs.org, höchstens 30 Minuten, und
+nach dem Vorgang wird sie zurückgezogen.
 
-Ein Knopf, eine Rückfrage. Dann:
+Während der Arbeit steht dort **„Wird vorbereitet … 42 %“**; der Balken bewegt
+sich nur, wenn wirklich etwas kopiert oder geladen wurde. Danach:
+**„Fertig. Stick kann raus.“**
 
-1. Läuft noch ein Kopiervorgang, passiert **nichts** — ein mitten im Schreiben
-   abgezogener Stick ist ein halber Stick.
-2. Dein Tresor wird auf den Stick geschrieben (fsync), bevor irgendwer
-   „abziehen" sagt.
-3. Läuft Neural OS **vom Laptop** und steht ein Stick im Feld, wird er
-   ausgeworfen, soweit das ohne Administrator geht: unter Windows über die
-   Shell („Auswerfen" wie im Kontextmenü), am Mac über `diskutil eject`.
-   Unter Linux wird nur der Schreibpuffer geleert. Das Laufwerk, auf dem das
-   Programm selbst liegt, wird nie ausgeworfen.
-4. Neural OS schließt sich sauber.
-5. Erst wenn der Server wirklich nicht mehr antwortet, steht da:
-   **„Jetzt kannst du den Stick abziehen."**
+Was sonst dastehen kann:
 
-Läuft Neural OS **vom Stick**, kann es ihn nicht selbst auswerfen — das
-Programm liegt ja darauf. Der Starter schließt sein Fenster dann selbst und
-gibt den Stick frei; abziehen geht, sobald die Meldung dasteht.
+| Satz | Bedeutung |
+|---|---|
+| Läuft bisher nur an Windows. [Für Mac holen] / Läuft bisher nur am Mac. [Für Windows holen] | Die Laufzeit für das andere System fehlt. Der Knopf holt sie einmal von nodejs.org. |
+| Ohne Internet geht das nicht. | Holen ging nicht – kein Netz. Später noch einmal tippen. |
+| Auf diesem Stick wohnt schon eine KI. | [Neue KI] überschreibt nie etwas. Dieser Stick erscheint dann als „Anderer Stick“. |
+| Windows sieht diesen Stick nicht. | Am Mac mit APFS formatiert. Für beide Systeme: exFAT. |
+| Programm auf dem Stick ist älter. [Erneuern] | Nur das Programm wird erneuert; das Wissen bleibt. |
 
-## Beim ersten Start auf einem fremden PC
+Dieselbe Laufzeit-Zeile steht oben unter **Dieser Stick**, wenn dem Stick, von
+dem Neural OS gerade läuft, ein System fehlt.
 
-- **Windows** zeigt eventuell „Windows hat den Start dieser App verhindert"
-  (SmartScreen). *Weitere Informationen* → *Trotzdem ausführen*. Die Datei ist
-  nicht bei Microsoft signiert; das heißt nicht, dass etwas nicht stimmt.
-- **Mac** zeigt beim ersten Mal eine Sicherheitswarnung. **Rechtsklick** auf
-  „Neural OS starten.command" → **Öffnen** → *Öffnen*. Nur beim ersten Mal.
-- **Linux** braucht eventuell das Ausführbar-Bit:
-  `chmod +x "Neural OS starten.sh"`
+**Dateisystem:** exFAT ist richtig für Windows und Mac. NTFS kann ein Mac nur
+lesen, APFS sieht Windows nicht. Ein 1-GB-Stick reicht: rund 8 MB Programm und
+80–120 MB je Laufzeit, dazu dein Wissen.
+
+## Koppeln
+
+1. A läuft, Stick B steckt (B muss nicht laufen). Unter **Andere Sticks** steht
+   **„Anderer Stick: Lena“ [Koppeln]**. Ohne Klick passiert nichts.
+2. Hat B eine PIN, kommt das Feld **„PIN von Lena“** dazu. Falsch: „Falsche PIN.“
+3. Ist die Schutzstufe ungleich, steht dort **„Lena hat eine PIN, dieser Stick
+   nicht.“ [PIN festlegen]** bzw. **„Dieser Stick hat eine PIN, Lena nicht.“**
+4. Danach steht unter **Gekoppelt**: **„Gekoppelt mit Lena · Lena übernimmt beim
+   nächsten Start“**, und sobald abgeglichen ist **„Gekoppelt mit Lena ·
+   abgeglichen 14:03“ [Jetzt abgleichen] [Entkoppeln]**. Steckt B nicht:
+   „Gekoppelt mit Lena · zuletzt gestern 16:40“.
+5. B zeigt beim nächsten Start einmal kurz: **„Gekoppelt mit Max.“**
+
+Ab dann wird **von selbst** abgeglichen, ohne Knopf und ohne Meldung: bei jedem
+Start, wenn der Partner-Stick eingesteckt wird, 20 Sekunden nach der letzten
+Änderung und beim Beenden. [Jetzt abgleichen] braucht man nur, wenn man nicht
+warten will; währenddessen steht „Gleiche ab …“ da.
+
+- **Zweimal verschieden geändert:** „„Einkaufsliste“ gab es zweimal verschieden
+  – beide sind da.“ [Ansehen]. Die zweite Fassung heißt „Einkaufsliste (Fassung
+  von Lena)“. Wer sie nicht will, löscht sie.
+- **[Entkoppeln]** fragt in der Seite: „Entkoppeln? Beide behalten, was sie
+  wissen.“ [Entkoppeln] [Abbrechen].
+- **Kopie eines Sticks** (Byte für Byte kopiert): „Zwei Sticks tragen dieselbe
+  KI.“ [Diesen Stick eigenständig machen]. Danach hat dieser Stick eine eigene
+  Kennung; Kopplungen müssen neu geknüpft werden.
+- **Verschiedene Programmstände:** „Lena hat eine ältere Version.“ [Lena
+  erneuern] bzw. „Lena hat eine neuere Version.“
+- **Drei Sticks:** „Gekoppelt mit Lena (über Lena auch: Tom)“.
+
+**Was geteilt wird:** Notizen, Projekte, Aufgaben, Termine, Begriffe,
+Erinnerungen, Chats, Nachrichten, Verknüpfungen, Anhänge und Löschungen.
+**Was nicht geteilt wird:** der KI-Schlüssel, die PIN, Einstellungen, Agenten,
+Zeitpläne, beobachtete Ordner und Freigaben.
+
+## Sicherung
+
+**Sichern = ganzen Stick kopieren.** Dazu gibt es in
+der Stick-Ansicht **[Jetzt sichern]**: eine vollständige Sicherung auf dem Stick
+im Ordner `Sicherungen`, jedes Mal ein neuer Ordner mit Zeitstempel; eine ältere
+wird nie ersetzt. Daneben steht still,
+wann zuletzt gesichert wurde und wo.
+
+**Von einer Sicherung wiederherstellen** steht klein darunter. Neural OS zeigt
+zuerst, was passieren würde – geschrieben ist bis dahin nichts. Erst dann wird
+**[Wiederherstellen]** frei.
 
 ## Die unbequemen Wahrheiten
 
-**Ein verlorener Stick ist ein verlorener Datenbestand — und ein gelesener.**
-Die meisten Sticks sind mit exFAT oder FAT32 formatiert; diese Dateisysteme
-kennen keine Zugriffsrechte. Wer den Stick findet, liest alles, auch die
-Sicherungen darauf. Deshalb: **Einstellungen → Verschlüsselung einschalten.**
-Passphrase verloren heißt Daten verloren; schreib sie irgendwo auf, aber nicht
-auf den Stick.
+- **Ein verlorener Stick ist ein gelesener.** exFAT und FAT32 kennen keine
+  Zugriffsrechte. Deshalb: **Einstellungen → Schutz → PIN einrichten.** Ohne
+  PIN kann jeder, der den Stick findet, alles lesen.
+- **Ein fremder Rechner ist ein fremder Rechner.** Solange Neural OS dort läuft,
+  kann dieser Rechner grundsätzlich mitlesen. Der Stick ist für deine Rechner
+  und für Rechner, denen du vertraust.
+- **Eine Sicherung auf demselben Stick** schützt vor einem kaputten Tresor,
+  nicht vor einem verlorenen Stick. Den Stick ab und zu auf den Laptop kopieren.
+- **Die KI braucht Internet.** Ohne Netz siehst du alles, was du hast, bekommst
+  aber keine neuen Antworten.
+- **Ein langsamer USB-2-Stick** macht die App träger; jede Änderung wird
+  geschrieben.
 
-**Ein fremder PC ist ein fremder PC.** Solange Neural OS dort läuft, kann dieser
-Rechner deine Daten grundsätzlich lesen. Der Stick ist gut für deine Rechner und
-Rechner, denen du vertraust.
+## Der Probelauf
 
-**Eine Sicherung gehört woanders hin.** Eine Sicherung auf dem Stick schützt vor
-einem kaputten Tresor, nicht vor einem verlorenen Stick. Sichere ab und zu vom
-Laptop auf den Stick *und* vom Stick auf den Laptop.
-
-**Claude braucht Internet.** Ohne Netz siehst du alles, was du hast — Notizen,
-Termine, Projekte, das Gehirn —, bekommst aber keine neuen Antworten.
-
-**Geschwindigkeit.** Ein langsamer USB-2-Stick macht die App spürbar träger,
-weil jede Änderung geschrieben wird. Ein USB-3-Stick fühlt sich an wie eine
-interne Platte.
-
-## Wenn etwas nicht geht
-
-| Problem | Abhilfe |
-|---|---|
-| „Kein Stick gefunden" | Stick steckt nicht oder ist noch nicht eingehängt: kurz warten, **Neu suchen**. Oder den Ort von Hand eintragen (`E:\`, `/Volumes/STICK`). |
-| „Es fehlt die Laufzeitumgebung für …" (beim Starten) | Der Stick wurde ohne diese Laufzeit vorbereitet. An einem Rechner mit Neural OS und Internet noch einmal **Stick vorbereiten** → **Erlauben**. Das Wissen auf dem Stick bleibt. |
-| „… fehlt: Die Netzschleuse hat den Zugriff … blockiert" | Du hast „Nur dieses System" gewählt oder die Schleuse ist zu. Noch einmal **Stick vorbereiten** → **Erlauben**. |
-| „Gerade läuft noch …" beim Beenden | Ein Kopiervorgang läuft. Warten, bis der Balken durch ist. |
-| „Ausgeworfen hat ihn Windows nicht" | Ein anderes Programm hat noch eine Datei darauf offen (z. B. ein Explorer-Fenster). Alles ist gespeichert; abziehen geht trotzdem. |
-| „Neural OS antwortet noch" | Das schwarze Fenster schließen; dann abziehen. |
-| Windows blockiert den Start | SmartScreen: *Weitere Informationen* → *Trotzdem ausführen*. |
-| Nach einer Erweiterung geht nichts mehr | `app/bin/neural-os.js start --safe` startet ohne Erweiterungen. |
-| Port belegt | Passiert automatisch — die App weicht aus und nennt die neue Adresse. |
-| Stick beim Kopieren abgezogen | Noch einmal **Stick vorbereiten**. Halb Kopiertes wird repariert; `data/` wird dabei nie angefasst. |
+Einiges lässt sich nur am echten Rechner prüfen: ob das Fenster unter Windows
+wirklich zugeht, ob eine Schul-Richtlinie Programme vom Stick sperrt, was
+Gatekeeper am Mac sagt. Dafür gibt es den **Probelauf** – ein Doppelklick je
+Rechner, ein paar Ja/Nein-Fragen, das Ergebnis zum Einfügen in den Chat. Die
+Schritte stehen in `docs/PROBELAUF.md`.
 
 ## Derselbe Weg über die Kommandozeile
 
 ```bash
-node bin/neural-os.js stick prepare /pfad/zum/stick
-node bin/neural-os.js stick prepare /pfad/zum/stick --include-vault
+node bin/neural-os.js stick prepare /pfad/zum/stick              # neue KI, alle Laufzeiten
 node bin/neural-os.js stick prepare /pfad/zum/stick --runtimes win-x64,darwin-arm64
-node bin/neural-os.js stick update  /pfad/zum/stick   # nur das Programm, data/ bleibt
-node bin/neural-os.js stick verify  /pfad/zum/stick   # prüft, schreibt nichts
+node bin/neural-os.js stick update  /pfad/zum/stick              # nur das Programm, das Wissen bleibt
+node bin/neural-os.js stick runtime /pfad/zum/stick darwin-x64   # eine Laufzeit nachlegen
+node bin/neural-os.js stick verify  /pfad/zum/stick              # prüft, schreibt nichts
 ```
 
-Es sind dieselben Funktionen wie hinter den Knöpfen (`src/portable/stick.js`),
-mit denselben Zusagen: nichts wird geschrieben, bevor feststeht, dass der Platz
-reicht; jeder Ordner landet in einem Zug; `data/` wird von einem Erneuern nie
-angefasst — das ist im Code erzwungen und durch einen Test belegt.
-
----
-
-## Zusammengefasst
-
-| | |
-|---|---|
-| Was der fremde PC braucht | **Nichts.** Die Laufzeit liegt auf dem Stick. |
-| Wo dein Wissen liegt | `<stick>/data` — und nur dort |
-| Die KI | Claude, online. Der Schlüssel reist im Tresor mit. |
-| Braucht es Internet? | Für Claude ja. Für den Stick nur einmal, für die Laufzeiten anderer Betriebssysteme. |
-| Wo steht das alles in der App? | **Einstellungen → Stick** |
-| Aufhören | **Beenden & abziehen** — erst wenn „Jetzt kannst du den Stick abziehen" dasteht, abziehen. |
-| Wichtigste Maßnahme | **Verschlüsselung einschalten.** Ein Stick geht verloren. |
+Es sind dieselben Funktionen wie hinter den Knöpfen (`src/portable/stick.js`):
+Nichts wird geschrieben, bevor feststeht, dass der Platz reicht; jeder Ordner
+landet in einem Zug; das Wissen in `Inhalt/data` wird von einem Erneuern nie
+angefasst – das ist im Code erzwungen und durch Tests belegt.

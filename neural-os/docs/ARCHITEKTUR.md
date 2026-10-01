@@ -4,6 +4,15 @@ Dieses Dokument beantwortet zuerst die unbequemen Fragen. Was geht wirklich,
 was geht nicht, und warum ich an mehreren Stellen etwas anderes gebaut habe,
 als die ursprüngliche Idee nahelegte.
 
+> **Stand 1. Oktober 2026 – was sich seither geändert hat:** Eine KI auf dem
+> eigenen Rechner (Ollama, llama.cpp, LM Studio) gibt es nicht mehr; Neural OS
+> verbindet sich mit Gemini (kostenlos) oder Claude. Die Bereiche *Heute*,
+> *Vorschläge*, *Automatik*, *Zeitachse* und *Abgleich* (der alte
+> Geräte-Abgleich über das WLAN) sind aus der Oberfläche entfallen; Wissen
+> teilen jetzt gekoppelte Sticks (`docs/STICK.md`). Dieses Dokument ist ein Stück Geschichte: was darin über
+> diese Teile steht, beschreibt den damaligen Stand. Was heute gilt, steht in
+> `README.md`, `docs/ANLEITUNG.md` und `docs/STICK.md`.
+
 ---
 
 ## 1. Die zentrale Frage: Kann eine Web-App wirklich offline funktionieren?

@@ -1011,11 +1011,19 @@ async function pruefeSchale(page, base, store, app) {
     'Die Leiste klappt weg, der Chat wird breiter', `${offen.chatBreite} → ${ohneLeiste.chatBreite} px`);
   check(ohneLeiste.fokus === 'Seitenleiste ausklappen',
     'Der Fokus landet auf dem Knopf, der sie zurückholt', ohneLeiste.fokus || '(nirgends)');
+  // Erst warten, bis die erste Wahl gespeichert ist (PATCH /config nach 600 ms):
+  // Danach kam einmal ein Status mit dem älteren Stand an und klappte die
+  // eben eingeklappte Spalte wieder auf (gefunden mit tools/screenshots.js).
+  await warte(500);
   await page.getByRole('button', { name: 'Übersicht einklappen' }).click();
   await warte(500);
   const nurChat = await zustand();
   check(nurChat.rechts === 'zu' && !nurChat.spalteSichtbar && nurChat.chatBreite >= nurChat.fensterBreite - 48,
     'Beide Seiten eingeklappt: nur der Chat bleibt', `Chat ${nurChat.chatBreite} von ${nurChat.fensterBreite} px`);
+  await warte(2500);
+  const spaeter = await zustand();
+  check(spaeter.links === 'zu' && spaeter.rechts === 'zu',
+    'und es bleibt so, auch nachdem gespeichert ist und der Status nachkommt', `Leiste ${spaeter.links}, Spalte ${spaeter.rechts}`);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await warte(900);
   const gemerkt = await zustand();

@@ -11,6 +11,9 @@
  * prüft ihn damit gleich mit.
  *
  *   node tools/probelauf.js --auf-stick <Stick-Wurzel>   Dateien auf einen Stick legen
+ *   node tools/probelauf.js --auf-stick auto              ... auf den einen eingesteckten
+ *                                                         Stick mit Neural OS (der Doppelklick
+ *                                                         "Probelauf auf den Stick legen.bat")
  *   node probelauf.js --start [--ort <Ordner>]            Starter (aus der .bat/.command)
  *   node probelauf.js --trocken [--ort <Ordner>]          nur messen, JSON auf stdout
  *   node probelauf.js --dienst ...                        intern
@@ -73,7 +76,11 @@ const TEXTE = {
   keineVorlagen: 'Die Starter-Vorlagen fehlen neben probelauf.js.',
   dauertNoch: 'Probelauf startet … (dauert noch)',
   startFehler: 'Probelauf konnte nicht starten:',
-  aufruf: 'Aufruf: node probelauf.js --start | --trocken | --auf-stick <Stick-Wurzel>',
+  aufruf: 'Aufruf: node probelauf.js --start | --trocken | --auf-stick <Stick-Wurzel>|auto',
+  keinStick: 'Kein vorbereiteter Stick gefunden. Erst in Neural OS unter Einstellungen › Speicher › Stick einen leeren Stick mit [Neue KI] vorbereiten, dann noch einmal.',
+  mehrereSticks: 'Es stecken mehrere Sticks mit Neural OS. Bitte nur einen einstecken, dann noch einmal.',
+  liegtAuf: 'Der Probelauf liegt jetzt auf dem Stick',
+  weiter: 'Jetzt auf dem Stick „Probelauf - Windows“ doppelklicken (am Mac: „Probelauf - Mac“).',
 };
 
 // ---------------------------------------------------------------------------
@@ -405,6 +412,47 @@ function fehler(text, code) {
   err.code = code || 'PROBELAUF';
   err.satz = text;
   return err;
+}
+
+/**
+ * `--auf-stick auto`: der eine eingesteckte Stick mit Neural OS und einer
+ * Laufzeit. Windows: die Laufwerke D: bis Z: (je höchstens 3 s, ein hängendes
+ * Netzlaufwerk hält nicht auf), Mac: /Volumes, Linux: /media und /run/media.
+ * Mit `--suche-in <Ordner>` gelten dessen Unterordner als die eingesteckten
+ * Sticks (Tests).
+ */
+async function sticksMitNeuralOs(sucheIn) {
+  const unterordner = (dir) => {
+    try {
+      return fs.readdirSync(dir).filter((n) => n.charAt(0) !== '.').sort()
+        .map((n) => path.join(dir, n)).filter(istOrdner);
+    } catch (_) {
+      return [];
+    }
+  };
+  let wurzeln = [];
+  if (sucheIn) {
+    wurzeln = unterordner(echt(sucheIn));
+  } else if (process.platform === 'win32') {
+    const buchstaben = 'DEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+    const staende = await Promise.all(buchstaben.map((b) => statMitGrenze(b + ':\\', STAT_GRENZE_MS)));
+    wurzeln = buchstaben.filter((b, i) => staende[i].code === null && !staende[i].zeitGrenze).map((b) => b + ':\\');
+  } else if (process.platform === 'darwin') {
+    wurzeln = unterordner('/Volumes');
+  } else {
+    let nutzer = '';
+    try {
+      nutzer = os.userInfo().username;
+    } catch (_) {
+      nutzer = process.env.USER || '';
+    }
+    if (nutzer) wurzeln = unterordner('/media/' + nutzer).concat(unterordner('/run/media/' + nutzer));
+  }
+  return wurzeln.filter((w) => {
+    if (!hatNeuralOs(w)) return false;
+    const a = aufbauVon(w);
+    return !!(a && hatLaufzeit(a.basis));
+  });
 }
 
 function aufStick(root) {
@@ -2069,7 +2117,8 @@ function argumente(argv) {
     if (x === '--trocken' || x === '--start' || x === '--dienst') a.modus = x.slice(2);
     else if (x === '--auf-stick') {
       a.modus = 'auf-stick';
-      a.stick = argv[++i];
+      // Ohne Pfad (oder "auto"): den eingesteckten Stick suchen.
+      if (argv[i + 1] !== undefined && argv[i + 1].slice(0, 2) !== '--') a.stick = argv[++i];
     } else if (x === '--ort') a.ort = argv[++i];
     else if (x === '--suche-in') a.sucheIn = argv[++i];
     else if (x === '--t0') a.t0 = Number(argv[++i]);
@@ -2081,13 +2130,29 @@ function argumente(argv) {
 async function hauptprogramm(argv) {
   const a = argumente(argv);
   if (a.modus === 'auf-stick') {
-    if (!a.stick) {
-      console.error(TEXTE.aufruf);
-      return 1;
+    const suchen = !a.stick || a.stick === 'auto';
+    let ziel = a.stick;
+    if (suchen) {
+      const sticks = await sticksMitNeuralOs(a.sucheIn);
+      if (!sticks.length) {
+        console.error(TEXTE.keinStick);
+        return 1;
+      }
+      if (sticks.length > 1) {
+        console.error(TEXTE.mehrereSticks);
+        return 1;
+      }
+      ziel = sticks[0];
     }
     try {
-      const r = aufStick(a.stick);
-      for (const d of r.dateien) console.log(path.relative(path.resolve(a.stick), d));
+      const r = aufStick(ziel);
+      if (suchen) {
+        // Der Doppelklick: zwei Sätze statt einer Dateiliste.
+        console.log(TEXTE.liegtAuf + ' ' + ziel + '.');
+        console.log(TEXTE.weiter);
+      } else {
+        for (const d of r.dateien) console.log(path.relative(path.resolve(ziel), d));
+      }
       return 0;
     } catch (err) {
       console.error(err.satz || err.message);

@@ -2,6 +2,15 @@
 
 Was du wissen solltest, bevor du diesem System dein Denken anvertraust.
 
+> **Stand 1. Oktober 2026 – was sich seither geändert hat:** Eine KI auf dem
+> eigenen Rechner (Ollama, llama.cpp, LM Studio) gibt es nicht mehr; Neural OS
+> verbindet sich mit Gemini (kostenlos) oder Claude. Die Bereiche *Heute*,
+> *Vorschläge*, *Automatik*, *Zeitachse* und *Abgleich* (der alte
+> Geräte-Abgleich über das WLAN) sind aus der Oberfläche entfallen; Wissen
+> teilen jetzt gekoppelte Sticks (`docs/STICK.md`). Dieses Dokument ist ein Stück Geschichte: was darin über
+> diese Teile steht, beschreibt den damaligen Stand. Was heute gilt, steht in
+> `README.md`, `docs/ANLEITUNG.md` und `docs/STICK.md`.
+
 Dieses Dokument ist nicht das Kleingedruckte. Es ist der Teil, den man normalerweise
 weglässt: die Fehler, die Grenzen, und die Stellen, an denen ich etwas behauptet
 habe, das sich später als falsch herausstellte.
