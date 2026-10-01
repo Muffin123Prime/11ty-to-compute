@@ -287,6 +287,7 @@ async function createApp(opts = {}) {
       claudeBasis: opts.claudeBasis,
       geminiBasis: opts.geminiBasis,
       basen: opts.anbieterBasen,
+      nachschlagenBasen: opts.nachschlagenBasen,
       konfigSpeichern: (patch) => app.saveConfig(patch),
     }))
     : null;

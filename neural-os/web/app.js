@@ -452,7 +452,7 @@ function createShell() {
     // (jede KI-Anfrage) meldet sich als network.allow. Den Status aendert
     // nur ein Wechsel des Modus.
     if (type === 'models.changed' || type === 'config.changed' || type.startsWith('vault.')
-      || type === 'network.mode' || type.startsWith('claude') || type.startsWith('gemini') || type === 'ki.anbieter') {
+      || type === 'network.mode' || /^(claude|gemini|mistral|groq|openrouter|ovh|openai)\b/.test(type) || type === 'ki.anbieter') {
       refreshStatusSoon();
     }
     if (type.startsWith('record.') && (payload.type === 'chat' || (payload.record && payload.record.type === 'chat'))) {

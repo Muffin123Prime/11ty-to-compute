@@ -170,6 +170,27 @@ function wissenModus(chat) {
 }
 
 /**
+ * Was eine KI ohne eigene Suche über ihre Suche wissen muss (alle außer
+ * Claude): Der feste Systemtext sagt "benutze die Websuche"; Mistral, Groq,
+ * OpenRouter und OVHcloud haben keine, Gemini auf der kostenlosen Stufe auch
+ * nicht (docs/CLAUDE-ANBINDUNG.md 9 und 10). Ohne diesen Satz behauptet ein
+ * Modell gern, es habe nachgesehen. Steht als eigener Block nach dem
+ * gecachten Anfang.
+ */
+function sucheHinweis(modul, mitNachschlagen) {
+  if (!modul || modul.kind === 'anthropic') return null;
+  const ehrlich = 'Für Nachrichten von heute, Preise, Öffnungszeiten oder Wetter sag dann ehrlich, dass du das gerade nicht nachsehen kannst – erfinde nichts.';
+  if (modul.kind === 'gemini') {
+    return mitNachschlagen
+      ? `Steht dir keine Websuche zur Verfügung, schlag in Wikipedia nach (wikipedia_suchen). ${ehrlich}`
+      : `Steht dir keine Websuche zur Verfügung: ${ehrlich.replace(/^Für/, 'für').replace(' sag dann ehrlich', ' sag ehrlich')}`;
+  }
+  return mitNachschlagen
+    ? `Eine Websuche hast du in diesem Gespräch nicht; nachschlagen kannst du in Wikipedia (wikipedia_suchen). ${ehrlich}`
+    : `Eine Websuche hast du in diesem Gespräch nicht. ${ehrlich}`;
+}
+
+/**
  * Der feste Systemtext. Knapp und für ein starkes Modell geschrieben: WAS
  * zu tun ist und WANN, keine Überbelehrung. Kein Datum, keine Uhrzeit, keine
  * Zufallszahl -- sonst ist der Cache bei jeder Anfrage ungültig.
@@ -432,6 +453,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
   const modulVon = () => (typeof claude.anbieterModul === 'function' ? claude.anbieterModul() : anthropic);
   const anbieterId = () => modulVon().anbieterId || 'claude';
   const tools = werkzeuge || createWerkzeuge({ store, bus, logger });
+  /** Nachschlagen in Wikipedia (src/models/nachschlagen.js), vom Verbund -- oder keins. */
+  const nachschlagen = claude && claude.nachschlagen && typeof claude.nachschlagen.ausfuehren === 'function' ? claude.nachschlagen : null;
 
   /** chatId -> {controller, messageId, startedAt} */
   const inflight = new Map();
@@ -812,6 +835,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
 
     // Welcher Block zuletzt begann: folgt Text auf Text, ist es derselbe Absatz.
     let letzterBlock = null;
+    const gesagt = new Set();
     const beiEreignis = (e) => {
       if (e.art === 'start' && e.block) {
         // Ein Textblock nach einem Werkzeug, einer Suche oder einem Gedanken
@@ -832,6 +856,9 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       if (e.art === 'text') {
         textDazu(e.delta);
       } else if (e.art === 'hinweis' && e.satz) {
+        // Derselbe Satz einmal je Zug -- auch wenn jede Werkzeugrunde neu ausweicht.
+        if (gesagt.has(e.satz)) return;
+        gesagt.add(e.satz);
         emit(onEvent, { type: 'hinweis', satz: e.satz });
       } else if (e.art === 'denken') {
         t.denken += e.delta;
@@ -937,6 +964,9 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
         // Die Anfrage für EINEN Anbieter: jeder übersetzt Verlauf und Anhänge anders.
         let wegGesagt = false;
         const bauen = (modul, m) => {
+          // Ohne eigene Suche (alle außer Claude): Nachschlagen in Wikipedia, mit einem ehrlichen Satz dazu.
+          const mitNachschlagen = !!nachschlagen && modul.kind !== 'anthropic' && !wissenModus(chat) && nachschlagen.verfuegbar();
+          const suche = wissenModus(chat) ? null : sucheHinweis(modul, mitNachschlagen);
           const { nachrichten, weg } = kuerzen(verlaufHerrichten([...basis, ...t.verlauf], modul));
           if (weg && t.runden === 1 && !wegGesagt) {
             wegGesagt = true;
@@ -951,8 +981,8 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
           });
           return modul.anfrageBauen({
             modell: m,
-            system,
-            werkzeuge: DEFINITIONEN,
+            system: suche ? [...system, { type: 'text', text: suche }] : system,
+            werkzeuge: mitNachschlagen ? [...DEFINITIONEN, nachschlagen.DEFINITION] : DEFINITIONEN,
             nachrichten: mitCachePunkt(mitAnhaengen.nachrichten),
             effort,
             // „Mein Wissen“: nur eigene Quellen, also keine Websuche.
@@ -968,7 +998,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
           beiEreignis,
         };
         const r = typeof claude.sendenAusweichend === 'function'
-          ? await claude.sendenAusweichend(bauen, { ...wie, modell, modul: anbieter })
+          ? await claude.sendenAusweichend(bauen, { ...wie, modell, modul: anbieter, bevorzugt: anbieter.anbieterId })
           : await claude.senden({ ...bauen(anbieter, modell), ...wie });
         if (r.modul && r.modul !== anbieter) {
           anbieter = r.modul;
@@ -1033,6 +1063,15 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
                 // Die Frage steht im Verlauf dort, wo sie gestellt wurde.
                 beiZeichen: t.text.length,
               });
+              continue;
+            }
+            if (nachschlagen && b.name === nachschlagen.NAME) {
+              const res = await nachschlagen.ausfuehren(b, r.eingabeFehler[b.id], {
+                tools, chatId: chat.id, messageId: assistant.id, scope, signal: controller.signal,
+              });
+              for (const q of res.quellen || []) quelleDazu(q.titel, q.url, 'gelesen');
+              for (const e of res.ereignisse) agentMelden({ ...e, werkzeug: b.name });
+              ergebnisse.push(res.toolResult);
               continue;
             }
             if (istEigenesWerkzeug(b.name)) {

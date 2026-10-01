@@ -5,11 +5,14 @@
  *  - "Alles per Knopfdruck, nichts einrichten, kein Schnickschnack." Jede
  *    Gruppe hat EINE Hauptaktion. Was nur Technik ist, liegt eingeklappt
  *    unter "Für Fortgeschrittene".
- *  - Die KI ist Gemini (kostenlos) oder Claude (kostet). Die Gruppe "KI"
- *    wählt, wer antwortet, und verbindet je Anbieter mit einem Feld und
- *    einem Knopf, wählt das Modell und nennt den bisherigen Verbrauch --
- *    bei Claude als Schätzung, weil die Rechnung Anthropic stellt; bei
- *    Gemini als Zahl der Anfragen, weil Google zählt statt zu berechnen.
+ *  - Die KI ist Gemini (kostenlos); weitere springen ein, wenn ein Limit
+ *    voll ist (Nutzer am 01.10.2026: "falls bei einem das Limit leer geht,
+ *    wechselt er zum nächsten"): Mistral, Groq, OpenRouter, OVHcloud ohne
+ *    Schlüssel, bezahlt OpenAI und Claude. Die Gruppe "KI" zeigt je Anbieter
+ *    seine Schlüssel (Maske, Zustand, nach vorn, einzeln entfernen), verbindet
+ *    mit einem Feld und einem Knopf, wählt beim Ersten das Modell und nennt
+ *    den bisherigen Verbrauch -- bei Claude als Schätzung, weil die Rechnung
+ *    Anthropic stellt; bei den kostenlosen als Zahl der Anfragen.
  *  - Schutz = PIN. 4-6 Ziffern, zweimal. "Dieses Gerät merken" legt den
  *    Schlüssel im Benutzerprofil dieses Rechners ab, nicht auf dem Stick.
  *    Was eine PIN kann und was nicht, steht in einem ehrlichen Satz mit der
@@ -62,7 +65,7 @@ export default {
       daten: {},
       fehler: {},
       ui: {
-        feldOffen: { gemini: false, claude: false },
+        feldOffen: {},      // je Anbieter: false | 'neu' | 'dazu' | 'ersetzen'
         pin: null,          // null | {schritt:'eins'|'zwei', erste:string}
         pinAendern: false,
         merkenFragen: false,
@@ -162,7 +165,7 @@ function abonnieren(self) {
     // Merkt sich die KI im Chat etwas (oder vergisst es anderswo), steht es sofort hier.
     const art = payload && (payload.type || (payload.record && payload.record.type));
     if (typ.startsWith('record.') && art === 'memory') neu.gedaechtnis();
-    else if (typ.startsWith('claude') || typ.startsWith('gemini') || typ === 'ki.anbieter') neu.ki();
+    else if (/^(claude|gemini|mistral|groq|openrouter|ovh|openai)\./.test(typ) || typ === 'ki.anbieter' || typ === 'ki.nachschlagen') neu.ki();
     else if (typ.startsWith('vault.')) neu.schutz();
     else if (typ === 'ipad.verbunden') {
       if (self.ui.ipad) self.ui.ipad.verbunden = (payload && payload.geraet) || 'iPad';
@@ -199,7 +202,7 @@ function geruestBauen(self) {
   self.container.appendChild(h('div.page.setv', null,
     self.dom.hinweis,
     gruppe(self, 'name', { titel: 'Name dieser KI', symbol: I.brand || I.cloud, satz: 'Steht oben in der App und auf anderen Sticks („Anderer Stick: …“).' }),
-    gruppe(self, 'ki', { titel: 'KI', symbol: I.brand || I.cloud, satz: 'Gemini (kostenlos) oder Claude. Antwortet, sucht im Internet, denkt mit.' }),
+    gruppe(self, 'ki', { titel: 'KI', symbol: I.brand || I.cloud, satz: 'Wer antwortet – und wer einspringt.' }),
     gruppe(self, 'gedaechtnis', { titel: 'Gedächtnis', symbol: SYMBOLE.gedaechtnis, satz: 'Was sich die KI über dich gemerkt hat. Sie liest es bei jeder Antwort mit.' }),
     gruppe(self, 'schutz', { titel: 'Schutz', symbol: I.lock, satz: 'Eine PIN, damit niemand liest, wer den Stick findet.' }),
     gruppe(self, 'ipad', { titel: 'iPad verbinden', symbol: SYMBOLE.ipad, satz: 'Das iPad als zweiter Bildschirm, im selben WLAN.' }),
@@ -511,20 +514,63 @@ async function vergessen(self, ids) {
 }
 
 /* ------------------------------------------------------------------ */
-/* KI: Gemini (kostenlos) oder Claude                                  */
+/* KI: Gemini (kostenlos) und weitere, die einspringen                 */
 /* ------------------------------------------------------------------ */
 
-/** Was je Anbieter fest ist: Name, Preis in einem Wort, wo es den Schlüssel gibt. */
+/**
+ * In dieser Reihenfolge stehen die Anbieter -- und in dieser springen sie
+ * ein, wenn einer am Limit ist (src/models/ki.js): kostenlos zuerst,
+ * OVHcloud ganz ohne Schlüssel, bezahlt zuletzt.
+ */
+const REIHE = ['gemini', 'mistral', 'groq', 'openrouter', 'ovh', 'openai', 'claude'];
+
+/** Was der Server für Gemini und Claude nicht mitschickt (die anderen bringen `info`). */
 const ANBIETER = {
   gemini: {
-    name: 'Gemini', wahl: 'Gemini (kostenlos)', platzhalter: 'AQ.… oder AIza…', label: 'Google-Schlüssel', host: 'generativelanguage.googleapis.com',
+    name: 'Gemini', platzhalter: 'AQ.… oder AIza…', label: 'Google-Schlüssel', etikett: 'kostenlos',
     hinweis: 'Schlüssel: aistudio.google.com/apikey → Create API key. Kostenlos; Google darf Inhalte zur Verbesserung nutzen.',
   },
   claude: {
-    name: 'Claude', wahl: 'Claude (kostet)', platzhalter: 'sk-ant-…', label: 'Claude-Schlüssel', host: 'api.anthropic.com',
+    name: 'Claude', platzhalter: 'sk-ant-…', label: 'Claude-Schlüssel', etikett: 'kostet',
     hinweis: 'Schlüssel: console.anthropic.com → API Keys. Kostet pro Nutzung; die Rechnung stellt Anthropic.',
   },
 };
+
+/** Name, Feld, Etikett und Satz eines Anbieters -- fest (Gemini, Claude) oder vom Server. */
+function beschreibung(id, c = {}) {
+  const fest = ANBIETER[id];
+  if (fest) return { ...fest, name: c.name || fest.name, host: c.host || '', ohneSchluessel: false };
+  const i = c.info || {};
+  const name = c.name || id;
+  return {
+    name,
+    platzhalter: i.platzhalter || 'Schlüssel einfügen',
+    label: `${name}-Schlüssel`,
+    etikett: i.ohneSchluessel ? 'ohne Schlüssel' : (i.kostenlos ? 'kostenlos' : 'kostet'),
+    hinweis: i.ohneSchluessel ? (i.hinweis || '') : `Schlüssel: ${i.seite || 'beim Anbieter'}. ${i.hinweis || ''}`.trim(),
+    host: c.host || '',
+    ohneSchluessel: i.ohneSchluessel === true,
+  };
+}
+
+/** "08:59" heute, "morgen 08:59", sonst das Datum. */
+function bisWann(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const uhr = d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+  const heute = new Date();
+  const morgen = new Date(heute.getFullYear(), heute.getMonth(), heute.getDate() + 1);
+  if (d.toDateString() === heute.toDateString()) return uhr;
+  if (d.toDateString() === morgen.toDateString()) return `morgen ${uhr}`;
+  return `${formatDate(d)} ${uhr}`;
+}
+
+function zugangWort(z) {
+  if (z.status === 'pause') return z.bis ? `am Limit bis ${bisWann(z.bis)}` : 'am Limit';
+  if (z.status === 'falsch') return 'wird nicht angenommen';
+  if (z.status === 'guthaben') return 'kein Guthaben';
+  return 'bereit';
+}
 
 async function kiNeu(self) {
   await laden(self, 'ki');
@@ -540,9 +586,10 @@ function zeichneKi(self) {
     body.appendChild(nichtAbrufbar(self.fehler.ki, 'Der Zustand der KI ist gerade nicht abrufbar'));
     return;
   }
-  const aktiv = k.aktiv === 'claude' ? 'claude' : 'gemini';
+  const ids = REIHE.filter((id) => k.anbieter[id]);
+  const aktiv = ids.includes(k.aktiv) ? k.aktiv : 'gemini';
   const a = k.anbieter[aktiv] || {};
-  const name = a.name || ANBIETER[aktiv].name;
+  const name = beschreibung(aktiv, a).name;
   if (k.verbunden) status(self, 'ki', 'accent', `Verbunden · ${a.modellName || name}`);
   else if (k.irgendeinSchluessel) status(self, 'ki', 'warn', 'Nicht erreichbar');
   else status(self, 'ki', null, 'Nicht verbunden');
@@ -555,126 +602,256 @@ function zeichneKi(self) {
     return;
   }
 
-  // 1. Wer antwortet.
-  body.appendChild(h('div.setv__feld', null,
-    h('span.label', null, text('Es antwortet')),
-    h('div.segmented.setv__segmente', { role: 'radiogroup', 'aria-label': 'KI' },
-      ['gemini', 'claude'].map((id) => h('button.segmented__option', {
-        type: 'button',
-        role: 'radio',
-        'aria-checked': id === aktiv ? 'true' : 'false',
-        class: id === aktiv ? 'is-active' : null,
-        onClick: async () => {
-          if (id === aktiv) return;
-          try {
-            await self.api.patch('/ki', { anbieter: id });
-            if (!self.alive) return;
-            self.ctx.toast(`${ANBIETER[id].name} antwortet ab der nächsten Nachricht.`, 'success');
-          } catch (err) {
-            self.ctx.toast(`Nicht gewechselt: ${fehlerText(err)}`, 'error');
-          }
-          await kiNeu(self);
-        },
-      }, text(ANBIETER[id].wahl))))));
+  // 1. Wer zuerst antwortet -- und wer einspringt.
+  const verbundene = ids.filter((id) => k.anbieter[id].verbunden);
+  const andere = verbundene.filter((id) => id !== aktiv).map((id) => k.anbieter[id].name);
+  if (!k.irgendeinSchluessel) {
+    body.appendChild(satz('Noch ist keine KI verbunden. Am einfachsten: unten den Google-Schlüssel einfügen – Gemini ist kostenlos.'));
+  } else if (andere.length) {
+    body.appendChild(satz(`Es antwortet zuerst ${name}. Ist ein Limit voll, springt von selbst die nächste ein: ${andere.join(', ')}.`));
+  } else {
+    body.appendChild(satz(`Es antwortet ${name}. Verbinde unten eine weitere KI – dann springt sie ein, wenn ein Limit voll ist.`));
+  }
 
-  // 2. Warum der Gewählte gerade nicht antwortet -- mit dem Knopf, der es behebt.
-  if (!k.verbunden && a.schluesselVorhanden) {
+  // 2. Warum der Erste gerade nicht antwortet -- mit dem Knopf, der es behebt.
+  if (!a.verbunden && a.schluesselVorhanden) {
     const zeile = h('div.setv__zeile.setv__warnung', null, icon((self.ctx.icons || {}).alert), h('span', null, text(a.grund || `${name} ist gerade nicht erreichbar.`)));
     if (a.grundCode === 'offline') {
       zeile.appendChild(knopf(self, 'Online gehen', () => netzModus(self, 'online'), { art: '.btn--accent.btn--small', schluessel: 'netz' }));
-    } else if (a.grundCode === 'schleuse') {
-      zeile.appendChild(knopf(self, `${name} freigeben`, () => hostFreigeben(self, ANBIETER[aktiv].host), { art: '.btn--accent.btn--small', schluessel: 'freigabe' }));
+    } else if (a.grundCode === 'schleuse' && a.host) {
+      zeile.appendChild(knopf(self, `${name} freigeben`, () => hostFreigeben(self, a.host), { art: '.btn--accent.btn--small', schluessel: 'freigabe' }));
     } else if (a.grundCode === 'schluessel-falsch') {
-      zeile.appendChild(knopf(self, 'Neu eingeben', () => { self.ui.feldOffen[aktiv] = true; zeichneKi(self); }, { art: '.btn--accent.btn--small' }));
+      zeile.appendChild(knopf(self, 'Neu eingeben', () => { self.ui.feldOffen[aktiv] = 'ersetzen'; zeichneKi(self); }, { art: '.btn--accent.btn--small' }));
     }
     body.appendChild(zeile);
   }
 
-  // 3. Je Anbieter: Schlüssel, Modell, Verbrauch.
-  for (const id of ['gemini', 'claude']) body.appendChild(anbieterBlock(self, id, k.anbieter[id] || {}, id === aktiv));
-}
-
-function anbieterBlock(self, id, c, istAktiv) {
-  const A = ANBIETER[id];
-  const block = h('section.setv__anbieter', { 'aria-label': A.name, dataset: { anbieter: id } });
-  const zustandWort = c.verbunden ? 'verbunden' : (c.schluesselVorhanden ? 'Schlüssel hinterlegt' : 'kein Schlüssel');
-  block.appendChild(h('div.setv__anbieter-kopf', null,
-    h('strong', null, text(A.name)),
-    h('span.setv__zustand', null,
-      c.verbunden ? h('span.dot.dot--accent', { 'aria-hidden': 'true' }) : null,
-      text(istAktiv ? `${zustandWort} · antwortet` : zustandWort))));
-
-  const fehlt = !c.schluesselVorhanden;
-  if (fehlt || self.ui.feldOffen[id]) {
-    const feld = h('input.input.setv__schluessel', {
-      type: 'text',
-      autocomplete: 'off',
-      spellcheck: 'false',
-      placeholder: A.platzhalter,
-      'aria-label': A.label,
-      attrs: { autocorrect: 'off', autocapitalize: 'off', 'data-1p-ignore': 'true', 'data-lpignore': 'true' },
-      onKeydown: (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); verbinden(); } },
-    });
-    const meldung = h('p.setv__meldung', { role: 'status' });
-    const verbinden = async () => {
-      const wert = feld.value.trim();
-      if (!wert) {
-        meldung.textContent = 'Bitte zuerst den Schlüssel einfügen.';
-        feld.focus();
-        return;
-      }
-      meldung.textContent = 'Wird mit einem kleinen Probeaufruf geprüft …';
-      meldung.className = 'setv__meldung';
-      try {
-        // Einfuegen heisst: diese KI soll antworten (oben steht, wer gerade antwortet; zurueck geht mit einem Tipp).
-        const z = await self.api.post(`/ki/${id}/schluessel`, { schluessel: wert, aktivieren: true }, { timeoutMs: 45000 });
-        if (!self.alive) return;
-        feld.value = '';
-        self.ui.feldOffen[id] = false;
-        // Ein Google-Schluessel im Claude-Feld (oder umgekehrt): der Server hat ihn richtig zugeordnet.
-        const wer = z && z.umgeleitet && ANBIETER[z.umgeleitet] ? ANBIETER[z.umgeleitet].name : A.name;
-        self.ctx.toast(z && z.umgeleitet
-          ? `Das war ein Schlüssel für ${wer} – ${wer} ist verbunden und antwortet ab jetzt.`
-          : `${wer} ist verbunden und antwortet ab jetzt.`, 'success');
-        await kiNeu(self);
-      } catch (err) {
-        if (!self.alive) return;
-        meldung.textContent = fehlerText(err) + (err && err.code === 'CLAUDE_GUTHABEN' ? ' Kostenlos geht es mit Gemini (oben).' : '');
-        meldung.className = 'setv__meldung is-danger';
-      }
-    };
-    block.appendChild(h('div.setv__zeile', null,
-      h('label.setv__feld.setv__feld--breit', null, h('span.label', null, text(fehlt ? 'Schlüssel einfügen' : 'Neuer Schlüssel')), feld),
-      knopf(self, fehlt ? 'Verbinden' : 'Ersetzen', verbinden, { art: '.btn--primary', schluessel: `${id}-verbinden` })));
-    block.appendChild(meldung);
-    block.appendChild(satz(A.hinweis, '.meta'));
-  } else {
-    const geprueft = c.geprueftAm ? `, geprüft ${timeAgo(c.geprueftAm)}` : '';
-    block.appendChild(h('div.setv__zeile', null,
-      satz(`Der Schlüssel ist hinterlegt${geprueft}`.replace(/\.?$/, '.')),
-      h('span.spacer'),
-      knopf(self, 'Anderen Schlüssel', () => { self.ui.feldOffen[id] = true; zeichneKi(self); }, { art: '.btn--ghost.btn--small' }),
-      knopf(self, 'Entfernen', async () => {
-        const ok = await self.ctx.confirm({
-          title: `${A.name}-Schlüssel entfernen?`,
-          message: `Danach antwortet ${A.name} nicht mehr, bis ein Schlüssel eingefügt wird. Deine Notizen, Termine und Chats bleiben.`,
-          confirmLabel: 'Entfernen',
-          danger: true,
-        });
-        if (!ok || !self.alive) return;
-        try {
-          await self.api.del(`/ki/${id}/schluessel`);
-          self.ctx.toast('Der Schlüssel ist entfernt.', 'success');
-        } catch (err) {
-          self.ctx.toast(`Nicht entfernt: ${fehlerText(err)}`, 'error');
-        }
-        await kiNeu(self);
-      }, { art: '.btn--ghost.btn--small' })));
+  // 3. Gemini, dann die weiteren -- jeder mit seinen Schlüsseln.
+  body.appendChild(anbieterBlock(self, 'gemini', k.anbieter.gemini || {}, aktiv === 'gemini', k));
+  body.appendChild(h('div.setv__unter', null,
+    h('h3', null, text('Weitere KIs')),
+    h('p', null, text('Sie springen ein, wenn ein Limit voll ist. Kostenlos sind Mistral, Groq und OpenRouter (je ein Schlüssel vom Anbieter) und OVHcloud ganz ohne Schlüssel.'))));
+  for (const id of ids) {
+    if (id !== 'gemini') body.appendChild(anbieterBlock(self, id, k.anbieter[id], id === aktiv, k));
   }
 
-  // Modell -- nur, wenn ein Schlüssel da ist; vorher gibt es nichts zu wählen.
+  // 4. Nachschlagen: die Suche für die KIs ohne eigene (src/models/nachschlagen.js).
+  if (k.nachschlagen) body.appendChild(nachschlagenBlock(self, k.nachschlagen));
+}
+
+function nachschlagenBlock(self, n) {
+  const block = h('section.setv__anbieter', { 'aria-label': 'Nachschlagen in Wikipedia', dataset: { anbieter: 'nachschlagen' } });
+  const wort = n.an ? (n.erreichbar ? 'an' : 'an · geht nur online') : 'aus';
+  block.appendChild(h('div.setv__anbieter-kopf', null,
+    h('strong', null, text('Nachschlagen in Wikipedia')),
+    h('span.setv__zustand', null,
+      n.an && n.erreichbar ? h('span.dot.dot--accent', { 'aria-hidden': 'true' }) : null,
+      text(wort))));
+  const schalten = async (an) => {
+    try {
+      await self.api.patch('/ki', { nachschlagen: an });
+      if (!self.alive) return;
+      self.ctx.toast(an ? 'Die KI schlägt ab jetzt in Wikipedia nach.' : 'Nachschlagen ist aus.', 'success');
+    } catch (err) {
+      self.ctx.toast(`Nicht geändert: ${fehlerText(err)}`, 'error');
+    }
+    await Promise.all([laden(self, 'ki'), laden(self, 'network')]);
+    if (self.alive) { zeichneKi(self); zeichneNetz(self); }
+  };
+  block.appendChild(h('div.setv__zeile', null,
+    satz(n.an
+      ? 'Die KIs ohne eigene Suche (alle außer Claude) schlagen in Wikipedia nach, wenn du etwas gesucht haben willst. Wikipedia erfährt nur die Suchwörter. Nachrichten von heute, Preise und Wetter findet es nicht.'
+      : 'Aus: Ohne eigene Suche kann die KI nichts nachschlagen. An heißt: Sie schlägt in Wikipedia nach (de.wikipedia.org, en.wikipedia.org stehen dann auf der Freigabeliste).', '.meta'),
+    knopf(self, n.an ? 'Ausschalten' : 'Einschalten', () => schalten(!n.an), { art: '.btn--ghost.btn--small', schluessel: 'nachschlagen' })));
+  return block;
+}
+
+/** Ein Feld für einen Schlüssel: verbinden, dazunehmen oder ersetzen. */
+function schluesselFeld(self, id, A, { modus = 'neu', ersetzt = null } = {}) {
+  const feld = h('input.input.setv__schluessel', {
+    type: 'text',
+    autocomplete: 'off',
+    spellcheck: 'false',
+    placeholder: A.platzhalter,
+    'aria-label': A.label,
+    attrs: { autocorrect: 'off', autocapitalize: 'off', 'data-1p-ignore': 'true', 'data-lpignore': 'true' },
+    onKeydown: (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); los(); } },
+  });
+  const meldung = h('p.setv__meldung', { role: 'status' });
+  const los = async () => {
+    const wert = feld.value.trim();
+    if (!wert) {
+      meldung.textContent = 'Bitte zuerst den Schlüssel einfügen.';
+      feld.focus();
+      return;
+    }
+    meldung.textContent = 'Wird mit einem kleinen Probeaufruf geprüft …';
+    meldung.className = 'setv__meldung';
+    try {
+      // Ein Google-Schlüssel heißt: Gemini soll antworten. Die weiteren springen ein
+      // (antworten zuerst erst nach „Zuerst fragen“) -- es sei denn, es ist die erste KI.
+      const z = await self.api.post(`/ki/${id}/schluessel`, {
+        schluessel: wert,
+        aktivieren: id === 'gemini',
+        zusaetzlich: modus === 'dazu',
+        ...(ersetzt ? { ersetzt } : {}),
+      }, { timeoutMs: 45000 });
+      if (!self.alive) return;
+      feld.value = '';
+      self.ui.feldOffen[id] = false;
+      const ziel = (z && z.umgeleitet) || id;
+      const wer = (z && z.anbieter && z.anbieter[ziel] && z.anbieter[ziel].name) || A.name;
+      const zuerst = z && z.aktiv === ziel;
+      self.ctx.toast(`${z && z.umgeleitet ? `Das war ein Schlüssel für ${wer} – ` : ''}${wer} ist verbunden${zuerst ? ' und antwortet ab jetzt' : ' und springt ein, wenn ein Limit voll ist'}.`, 'success');
+      await kiNeu(self);
+    } catch (err) {
+      if (!self.alive) return;
+      meldung.textContent = fehlerText(err) + (err && err.code === 'CLAUDE_GUTHABEN' ? ' Kostenlos geht es mit Gemini (oben).' : '');
+      meldung.className = 'setv__meldung is-danger';
+    }
+  };
+  const titel = modus === 'dazu' ? 'Weiterer Schlüssel' : (modus === 'ersetzen' ? 'Neuer Schlüssel' : 'Schlüssel einfügen');
+  const knopfText = modus === 'dazu' ? 'Hinzufügen' : (modus === 'ersetzen' ? 'Ersetzen' : 'Verbinden');
+  const teile = [
+    h('div.setv__zeile', null,
+      h('label.setv__feld.setv__feld--breit', null, h('span.label', null, text(titel)), feld),
+      knopf(self, knopfText, los, { art: '.btn--primary', schluessel: `${id}-verbinden` }),
+      modus !== 'neu' || id !== 'gemini'
+        ? knopf(self, 'Abbrechen', () => { self.ui.feldOffen[id] = false; zeichneKi(self); }, { art: '.btn--ghost' })
+        : null),
+    meldung,
+  ];
+  if (modus === 'dazu') {
+    teile.push(satz('Ein weiterer Schlüssel hilft, wenn er zu einem anderen Konto mit eigenem Limit gehört (etwa einem bezahlten). Mehrere kostenlose Konten nur für mehr Limit erlauben die Anbieter nicht – dafür lieber unten eine weitere KI verbinden.', '.meta'));
+  } else {
+    teile.push(satz(A.hinweis, '.meta'));
+  }
+  return teile;
+}
+
+function anbieterBlock(self, id, c, istAktiv, k) {
+  const A = beschreibung(id, c);
+  const block = h('section.setv__anbieter', { 'aria-label': A.name, dataset: { anbieter: id } });
+  const zugaenge = Array.isArray(c.zugaenge) ? c.zugaenge : [];
+  const amLimit = c.verbunden && zugaenge.length > 0 && zugaenge.every((z) => z.status !== 'bereit');
+  let wort;
+  if (c.verbunden) wort = amLimit ? 'am Limit' : (A.ohneSchluessel ? 'eingeschaltet' : 'verbunden');
+  else if (c.schluesselVorhanden) wort = A.ohneSchluessel ? 'eingeschaltet, nicht erreichbar' : 'Schlüssel hinterlegt';
+  else wort = A.ohneSchluessel ? 'aus' : 'kein Schlüssel';
+  const mehrereVerbunden = REIHE.filter((x) => k.anbieter[x] && k.anbieter[x].verbunden).length > 1;
+  block.appendChild(h('div.setv__anbieter-kopf', null,
+    h('strong', null, text(A.name)),
+    h('span.setv__etikett', { class: A.etikett === 'kostet' ? 'is-kostet' : '' }, text(A.etikett)),
+    h('span.setv__zustand', null,
+      c.verbunden ? h(`span.dot.dot--${amLimit ? 'warn' : 'accent'}`, { 'aria-hidden': 'true' }) : null,
+      text(istAktiv && c.verbunden && mehrereVerbunden ? `${wort} · antwortet zuerst` : (istAktiv && c.verbunden ? `${wort} · antwortet` : wort)))));
+
+  const offen = self.ui.feldOffen[id];
+  const zuerstKnopf = c.verbunden && !istAktiv
+    ? knopf(self, 'Zuerst fragen', async () => {
+      try {
+        await self.api.patch('/ki', { anbieter: id });
+        if (!self.alive) return;
+        self.ctx.toast(`${A.name} antwortet ab der nächsten Nachricht zuerst.`, 'success');
+      } catch (err) {
+        self.ctx.toast(`Nicht gewechselt: ${fehlerText(err)}`, 'error');
+      }
+      await kiNeu(self);
+    }, { art: '.btn--ghost.btn--small', schluessel: `${id}-zuerst` })
+    : null;
+
+  if (A.ohneSchluessel) {
+    // OVHcloud: kein Schlüssel, nur ein Schalter.
+    if (!c.schluesselVorhanden) {
+      block.appendChild(satz(A.hinweis, '.meta'));
+      block.appendChild(h('div.setv__zeile', null, knopf(self, 'Einschalten', async () => {
+        try {
+          const z = await self.api.post(`/ki/${id}/schluessel`, {}, { timeoutMs: 45000 });
+          if (!self.alive) return;
+          const zuerst = z && z.aktiv === id;
+          self.ctx.toast(`${A.name} ist eingeschaltet${zuerst ? ' und antwortet ab jetzt' : ' und springt ein, wenn ein Limit voll ist'}.`, 'success');
+        } catch (err) {
+          self.ctx.toast(`Nicht eingeschaltet: ${fehlerText(err)}`, 'error');
+        }
+        await kiNeu(self);
+      }, { art: '.btn--small', schluessel: `${id}-verbinden` })));
+    } else {
+      block.appendChild(h('div.setv__zeile', null,
+        satz(amLimit && zugaenge[0] && zugaenge[0].bis ? `Gerade am Limit (bis ${bisWann(zugaenge[0].bis)}). Ohne Schlüssel und ohne Konto.` : 'Ohne Schlüssel und ohne Konto. Langsam: 2 Anfragen je Minute und Modell.', '.meta'),
+        zuerstKnopf,
+        knopf(self, 'Ausschalten', async () => {
+          try {
+            await self.api.del(`/ki/${id}/schluessel`);
+            self.ctx.toast(`${A.name} ist ausgeschaltet.`, 'success');
+          } catch (err) {
+            self.ctx.toast(`Nicht ausgeschaltet: ${fehlerText(err)}`, 'error');
+          }
+          await kiNeu(self);
+        }, { art: '.btn--ghost.btn--small' })));
+    }
+  } else if (!c.schluesselVorhanden) {
+    // Kein Schlüssel: bei Gemini gleich das Feld, bei den anderen ein Knopf, der es öffnet.
+    if (id === 'gemini' || offen) {
+      for (const teil of schluesselFeld(self, id, A, { modus: 'neu' })) block.appendChild(teil);
+    } else {
+      block.appendChild(h('div.setv__zeile', null,
+        satz(A.hinweis, '.meta'),
+        knopf(self, 'Schlüssel einfügen', () => { self.ui.feldOffen[id] = 'neu'; zeichneKi(self); }, { art: '.btn--small' })));
+    }
+  } else {
+    // Die Schlüssel dieses Anbieters: Maske, Zustand, nach vorn, einzeln entfernen.
+    const liste = h('ul.setv__zugaenge', { 'aria-label': `Schlüssel für ${A.name}` });
+    zugaenge.forEach((z, i) => {
+      const art = z.status === 'bereit' ? 'is-ok' : (z.status === 'pause' ? 'is-pause' : 'is-falsch');
+      liste.appendChild(h('li.setv__zugang', { dataset: { zugang: z.id } },
+        h('span.setv__maske', null, text(z.maske || '…')),
+        h(`span.setv__zugang-status.${art}`, null, text(zugangWort(z))),
+        z.geprueftAm ? h('span.setv__zugang-zeit', null, text(`geprüft ${timeAgo(z.geprueftAm)}`)) : null,
+        h('span.spacer'),
+        i > 0 ? knopf(self, 'Zuerst fragen', async () => {
+          try {
+            await self.api.post(`/ki/${id}/zugaenge/${encodeURIComponent(z.id)}/vor`, {});
+            if (!self.alive) return;
+            self.ctx.toast(`Dieser Schlüssel wird jetzt zuerst gefragt.`, 'success');
+          } catch (err) {
+            self.ctx.toast(`Nicht geändert: ${fehlerText(err)}`, 'error');
+          }
+          await kiNeu(self);
+        }, { art: '.btn--ghost.btn--small', schluessel: `${id}-${z.id}-vor` }) : null,
+        knopf(self, 'Entfernen', async () => {
+          const letzter = zugaenge.length === 1;
+          const ok = await self.ctx.confirm({
+            title: letzter ? `${A.name}-Schlüssel entfernen?` : 'Diesen Schlüssel entfernen?',
+            message: letzter
+              ? `Danach antwortet ${A.name} nicht mehr, bis ein Schlüssel eingefügt wird. Deine Notizen, Termine und Chats bleiben.`
+              : `Der Schlüssel ${z.maske} wird vergessen. Die anderen bleiben.`,
+            confirmLabel: 'Entfernen',
+            danger: true,
+          });
+          if (!ok || !self.alive) return;
+          try {
+            await self.api.del(`/ki/${id}/schluessel?zugang=${encodeURIComponent(z.id)}`);
+            self.ctx.toast('Der Schlüssel ist entfernt.', 'success');
+          } catch (err) {
+            self.ctx.toast(`Nicht entfernt: ${fehlerText(err)}`, 'error');
+          }
+          await kiNeu(self);
+        }, { art: '.btn--ghost.btn--small' })));
+    });
+    block.appendChild(liste);
+    if (offen === 'dazu' || offen === 'ersetzen') {
+      const ersetzt = offen === 'ersetzen' && zugaenge[0] ? zugaenge[0].id : null;
+      for (const teil of schluesselFeld(self, id, A, { modus: offen, ersetzt })) block.appendChild(teil);
+    } else {
+      block.appendChild(h('div.setv__zeile', null,
+        zuerstKnopf,
+        knopf(self, 'Weiterer Schlüssel', () => { self.ui.feldOffen[id] = 'dazu'; zeichneKi(self); }, { art: '.btn--ghost.btn--small' })));
+    }
+  }
+
+  // Modell -- nur beim Ersten: die anderen nehmen ihr bestes, wenn sie einspringen.
   const modelle = Array.isArray(c.modelle) ? c.modelle : [];
-  if (!fehlt && modelle.length) {
+  if (istAktiv && c.schluesselVorhanden && modelle.length > 1) {
     const gewaehlt = modelle.find((m) => m.id === c.modell) || modelle[0];
     block.appendChild(h('div.setv__feld', null,
       h('span.label', null, text('Modell')),
@@ -687,7 +864,7 @@ function anbieterBlock(self, id, c, istAktiv) {
           onClick: async () => {
             if (m.id === c.modell) return;
             try {
-              // Das Modell gehört zu diesem Anbieter; PATCH /api/ki setzt es beim Aktiven.
+              // Das Modell gehört zu diesem Anbieter; PATCH /api/ki setzt es beim Ersten.
               await self.api.patch('/ki', { anbieter: id, modell: m.id });
               if (!self.alive) return;
               self.ctx.toast(`${m.name} antwortet ab der nächsten Nachricht.`, 'success');
@@ -696,7 +873,7 @@ function anbieterBlock(self, id, c, istAktiv) {
             }
             await kiNeu(self);
           },
-        }, text(m.name.replace(/^(Claude|Gemini) /, ''))))),
+        }, text(String(m.name || m.id).replace(/^(Claude|Gemini) /, ''))))),
       gewaehlt && gewaehlt.hinweis ? h('span.hint', null, text(gewaehlt.hinweis)) : null));
   }
 
@@ -1541,8 +1718,51 @@ const CSS = `
   padding-top: 12px;
   border-top: 1px solid var(--border);
 }
-.setv__anbieter-kopf { display: flex; align-items: baseline; gap: 10px; }
+.setv__anbieter-kopf { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
 .setv__anbieter-kopf strong { font-size: var(--fs-md); font-weight: 600; }
+.setv__anbieter-kopf .setv__zustand { margin-left: auto; }
+.setv__etikett {
+  padding: 1px 8px;
+  border-radius: var(--r-full);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--fg-muted);
+  font-size: var(--fs-xs, 12px);
+  line-height: 1.6;
+}
+.setv__etikett.is-kostet { background: var(--surface-3); }
+.setv__unter {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.setv__unter h3 { margin: 0; font-size: var(--fs-md); font-weight: 600; }
+.setv__unter p { color: var(--fg-muted); font-size: var(--fs-sm); line-height: var(--lh); }
+.setv__unter + .setv__anbieter { border-top: 0; padding-top: 4px; }
+.setv__zugaenge {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.setv__zugang {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 6px 6px 6px 12px;
+  border-radius: var(--r-3);
+  background: var(--surface-3);
+}
+.setv__maske { font-family: var(--font-mono); font-size: var(--fs-sm); }
+.setv__zugang-status { font-size: var(--fs-sm); color: var(--fg-muted); }
+.setv__zugang-status.is-ok { color: var(--accent); }
+.setv__zugang-status.is-pause { color: var(--warn); }
+.setv__zugang-status.is-falsch { color: var(--danger); }
+.setv__zugang-zeit { font-size: var(--fs-sm); color: var(--fg-subtle); }
 .setv__verbrauch {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

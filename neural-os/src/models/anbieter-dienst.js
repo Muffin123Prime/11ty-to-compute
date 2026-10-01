@@ -415,6 +415,8 @@ function createAnbieterDienst(profil, deps = {}) {
       kostenlos: profil.kostenlos === true,
       ohneSchluessel: profil.ohneSchluessel === true,
       info: profil.info || null,
+      // Der Host (kein Geheimnis): für den Knopf "freigeben", wenn die Schleuse ihn sperrt.
+      host,
       verbunden: grundCode === null,
       modell: m,
       modellName: namen(m),
@@ -582,17 +584,31 @@ function createAnbieterDienst(profil, deps = {}) {
     zugang(); // der Satz, wenn gar nichts geht (kein Schlüssel, gesperrt, offline, alle falsch)
     const versucht = new Set();
     let erster = null;
-    let vorige = null;
-    let vorigeArt = null;
+    // Der erste Versuch, der scheiterte, und warum: Davon spricht der Satz an
+    // den Nutzer ("Gemini 3.8 Flash hat sein Tageslimit erreicht – es antwortet
+    // Gemini 3.5 Flash-Lite"). Gesagt wird er erst, wenn der Ersatz wirklich
+    // antwortet -- Zwischenschritte, die auch scheitern, sagt niemand.
+    let anfang = null;
+    let anfangArt = null;
+    const melden = typeof beiEreignis === 'function' ? beiEreignis : () => {};
     for (let i = 0; i < MAX_VERSUCHE; i++) {
       const wahl = waehlen(wunsch, versucht);
       if (!wahl) break;
       versucht.add(wahl.k);
-      if (vorige && typeof beiEreignis === 'function') {
-        try { beiEreignis({ art: 'hinweis', satz: wechselSatz(vorige, wahl, vorigeArt) }); } catch { /* egal */ }
-      }
+      let ausstehend = anfang ? wechselSatz(anfang, wahl, anfangArt) : null;
+      const sagen = () => {
+        if (!ausstehend) return;
+        const satz = ausstehend;
+        ausstehend = null;
+        try { melden({ art: 'hinweis', satz }); } catch { /* egal */ }
+      };
+      const weiter = (e) => {
+        sagen();
+        try { melden(e); } catch { /* ein kaputter Zuhörer bricht keinen Aufruf ab */ }
+      };
       try {
-        const r = await aufruf(wahl);
+        const r = await aufruf(wahl, weiter);
+        sagen();
         letzterFehler = null;
         // Hat ein anderes Modell als gespeichert geantwortet, weil das
         // gespeicherte fehlt: das neue merken (nicht bei Pausen).
@@ -621,8 +637,10 @@ function createAnbieterDienst(profil, deps = {}) {
           fehlerMerken(err);
           throw err;
         }
-        vorige = wahl;
-        vorigeArt = art;
+        if (!anfang) {
+          anfang = wahl;
+          anfangArt = art;
+        }
       }
     }
     const fehler = erster || new NeuralError(`${P}_NICHT_VERBUNDEN`, GRUENDE['kein-schluessel'], { status: 409 });
@@ -639,8 +657,9 @@ function createAnbieterDienst(profil, deps = {}) {
    * Ausweichen dazu.
    */
   async function senden(opts) {
-    const { r, wahl } = await mitAusweichen(opts.modell, opts.signal, opts.beiEreignis, (w) => api.senden({
+    const { r, wahl } = await mitAusweichen(opts.modell, opts.signal, opts.beiEreignis, (w, beiEreignis) => api.senden({
       ...opts,
+      beiEreignis,
       gate: opts.gate || gate,
       basis,
       apiKey: w.zugang.schluessel,

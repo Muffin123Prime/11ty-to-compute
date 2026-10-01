@@ -343,6 +343,24 @@ async function main() {
       && /aistudio\.google\.com\/apikey/.test(chatText) && /Google darf Inhalte zur Verbesserung nutzen/.test(chatText)
       && await page.locator('.cv-verbinden input[aria-label="Google-Schlüssel"]').count() === 1,
     'Ohne KI: „Verbinde eine KI“ – Google zuerst, ein Feld, der Satz, wo es den Schlüssel gibt', chatText.replace(/\s+/g, ' ').slice(0, 90));
+    // Darunter (01.10.2026: "wenn es noch andere Optionen gibt … nehme ich auch
+    // jede andere"): ein Feld fuer jede andere kostenlose KI (zugeklappt) und
+    // OVHcloud ganz ohne Schluessel mit einem Knopf.
+    check(await page.locator('.cv-verbinden details.cv-verbinden__andere:not([open])').count() === 1
+      && /Oder eine andere kostenlose KI \(Mistral, Groq, OpenRouter\)/.test(chatText)
+      && !/console\.mistral\.ai/.test(chatText),
+    'Darunter zugeklappt: „Oder eine andere kostenlose KI (Mistral, Groq, OpenRouter)“');
+    check(await page.locator('.cv-verbinden button', { hasText: 'OVHcloud einschalten' }).count() === 1
+      && /Ganz ohne Schlüssel und ohne Konto: OVHcloud/.test(chatText),
+    'Und ganz ohne Schlüssel: „OVHcloud einschalten“ – mit dem Satz, dass es langsam ist');
+    await page.locator('.cv-verbinden details.cv-verbinden__andere > summary').click();
+    await page.waitForTimeout(200);
+    check(await page.locator('.cv-verbinden input[aria-label="Schlüssel einer anderen KI"]').isVisible()
+      && /console\.mistral\.ai/.test(await page.locator('.cv-verbinden').innerText())
+      && /erkennt am Schlüssel, von wem er ist/.test(await page.locator('.cv-verbinden').innerText()),
+    'Aufgeklappt: ein Feld für jeden Schlüssel – wo es ihn gibt, und dass Neural OS den Anbieter erkennt');
+    await page.locator('.cv-verbinden details.cv-verbinden__andere > summary').click();
+    await page.waitForTimeout(200);
     // Zugeklappt heisst: die Ueberschrift ist zu lesen, der Claude-Satz noch nicht.
     check(await page.locator('.cv-verbinden details.cv-verbinden__mehr:not([open])').count() === 1
       && /Oder Claude \(kostet pro Nutzung\)/.test(chatText)

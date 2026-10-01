@@ -28,6 +28,7 @@ const gemini = require('./providers/gemini');
 const openai = require('./providers/openai');
 const { NeuralError, ValidationError } = require('../kernel/errors');
 const { createAnbieterDienst } = require('./anbieter-dienst');
+const { createNachschlagen } = require('./nachschlagen');
 const { PROFIL: PROFIL_CLAUDE } = require('./claude');
 
 /**
@@ -185,6 +186,7 @@ function anbieterVonSchluessel(roh) {
  * @param {string} [deps.claudeBasis]   nur für Tests (Statist)
  * @param {string} [deps.geminiBasis]   nur für Tests (Statist)
  * @param {object} [deps.basen]         nur für Tests: {mistral: url, groq: url, …}
+ * @param {object} [deps.nachschlagenBasen] nur für Tests: {de: url, en: url} (Wikipedia-Statist)
  */
 function createKi(deps = {}) {
   const { config, bus } = deps;
@@ -194,12 +196,17 @@ function createKi(deps = {}) {
   delete gemeinsam.geminiBasis;
   delete gemeinsam.basis;
   delete gemeinsam.basen;
+  delete gemeinsam.nachschlagenBasen;
   const basen = deps.basen && typeof deps.basen === 'object' ? deps.basen : {};
   const dienste = {
     claude: createAnbieterDienst(PROFIL_CLAUDE, { ...gemeinsam, basis: deps.claudeBasis || deps.basis }),
     gemini: createAnbieterDienst(PROFIL_GEMINI, { ...gemeinsam, basis: deps.geminiBasis }),
   };
   for (const id of WEITERE) dienste[id] = createAnbieterDienst(profilFuer(id), { ...gemeinsam, basis: basen[id] });
+  // Nachschlagen in Wikipedia: die Suche für die, die keine eigene haben (src/models/nachschlagen.js).
+  const nachschlagen = deps.gate && typeof deps.gate.fetch === 'function'
+    ? createNachschlagen({ gate: deps.gate, config, konfigSpeichern: deps.konfigSpeichern, bus, basen: deps.nachschlagenBasen || null })
+    : null;
 
   function publish(name, payload) {
     if (!bus || typeof bus.publish !== 'function') return;
@@ -255,6 +262,7 @@ function createKi(deps = {}) {
       grund: a.verbunden ? null : (irgendein ? a.grund : KEINE.satz),
       letzterFehler: a.letzterFehler,
       anbieter: je,
+      nachschlagen: nachschlagen ? nachschlagen.zustand() : null,
     };
   }
 
@@ -272,7 +280,12 @@ function createKi(deps = {}) {
    * Anbieter und/oder Modell setzen (PATCH /api/ki). Das Modell gehört zu
    * dem Anbieter, der danach aktiv ist.
    */
-  function setzen({ anbieter, modell } = {}) {
+  function setzen({ anbieter, modell, nachschlagen: nachschlagenAn } = {}) {
+    if (nachschlagenAn !== undefined) {
+      if (typeof nachschlagenAn !== 'boolean') throw new ValidationError('„nachschlagen“ muss true oder false sein.');
+      if (!nachschlagen) throw new NeuralError('SUBSYSTEM_UNAVAILABLE', 'Nachschlagen gibt es in dieser Instanz nicht.', { status: 503 });
+      nachschlagen.setzen(nachschlagenAn);
+    }
     if (anbieter !== undefined) {
       dienst(anbieter);
       if (anbieter !== eingestellt()) {
@@ -321,6 +334,9 @@ function createKi(deps = {}) {
       speichern({ ki: { anbieter: ziel } });
       publish('ki.anbieter', { anbieter: ziel });
     }
+    // Eine KI ohne eigene Suche (alle außer Claude): Nachschlagen in Wikipedia
+    // geht von selbst an -- es sei denn, der Nutzer hat es je ausgeschaltet.
+    if (ziel !== 'claude' && nachschlagen) nachschlagen.vonSelbstAn();
     const z = zustand();
     return ziel !== anbieter ? { ...z, umgeleitet: ziel } : z;
   }
@@ -380,7 +396,7 @@ function createKi(deps = {}) {
    * werden nur gefragt, wenn sonst keiner kann (ein volles Limit vorher zu
    * fragen, kostet nur Wartezeit). Dazu, wer übersprungen wurde.
    */
-  function kandidaten() {
+  function kandidaten(bevorzugt) {
     const frei = [];
     const spaeter = [];
     for (const id of reihenfolge()) {
@@ -388,31 +404,54 @@ function createKi(deps = {}) {
       if (!z.verbunden) continue;
       (voll(z) ? spaeter : frei).push(id);
     }
+    // Wer in diesem Zug schon geantwortet hat (nach einem Ausweichen), zuerst.
+    const i = frei.indexOf(bevorzugt);
+    if (i > 0) frei.unshift(frei.splice(i, 1)[0]);
     return { liste: [...frei, ...spaeter], uebersprungen: frei.length ? spaeter : [] };
   }
 
+  /**
+   * @param {Function} bauen        (modul, modell) => {body, modell, …}
+   * @param {object} opts           wie senden, dazu `bevorzugt`: der Anbieter,
+   *   der in diesem Zug schon geantwortet hat (nach einem Ausweichen) -- er
+   *   wird zuerst gefragt, ohne dass der Satz zum Ausweichen noch einmal kommt.
+   */
   async function sendenAusweichend(bauen, opts = {}) {
     let erster = null;
-    let vorher = null;
+    // Der Erste, der nicht konnte (oder übersprungen wurde), und warum. Der
+    // Satz dazu kommt, sobald der Ersatz wirklich antwortet -- einer, nicht
+    // einer je Zwischenschritt.
+    let anfang = null;
     const a = aktiv();
-    const { liste, uebersprungen } = kandidaten();
+    const bevorzugt = typeof opts.bevorzugt === 'string' && opts.bevorzugt !== a ? opts.bevorzugt : null;
+    const { liste, uebersprungen } = kandidaten(bevorzugt);
     // Der Eingestellte ist gerade ganz am Limit: gleich der nächste, mit einem Satz dazu.
-    if (uebersprungen.includes(a)) vorher = { id: a, err: { code: 'KI_LIMIT' } };
+    if (uebersprungen.includes(a) && !(bevorzugt && liste[0] === bevorzugt)) anfang = { id: a, err: { code: 'KI_LIMIT' } };
+    const melden = typeof opts.beiEreignis === 'function' ? opts.beiEreignis : () => {};
     for (const id of liste) {
       const d = dienste[id];
-      if (vorher && typeof opts.beiEreignis === 'function') {
-        try { opts.beiEreignis({ art: 'hinweis', satz: `${dienste[vorher.id].name} ${grundWort(vorher.err)} – es antwortet ${d.name}.` }); } catch { /* egal */ }
-      }
+      let ausstehend = anfang && anfang.id !== id ? `${dienste[anfang.id].name} ${grundWort(anfang.err)} – es antwortet ${d.name}.` : null;
+      const sagen = () => {
+        if (!ausstehend) return;
+        const satz = ausstehend;
+        ausstehend = null;
+        try { melden({ art: 'hinweis', satz }); } catch { /* egal */ }
+      };
+      const beiEreignis = (e) => {
+        sagen();
+        try { melden(e); } catch { /* egal */ }
+      };
       const wunsch = id === a && d.modul.istModell(opts.modell) ? opts.modell : d.modell();
       const gebaut = bauen(d.modul, wunsch);
       try {
-        const r = await d.senden({ ...opts, ...gebaut });
+        const r = await d.senden({ ...opts, ...gebaut, beiEreignis });
+        sagen();
         return { ...r, anbieter: id, modul: d.modul };
       } catch (err) {
         const angekommen = Array.isArray(err && err.teilInhalt) && err.teilInhalt.length > 0;
         if (angekommen || !ausweichbar(err)) throw err;
         if (!erster) erster = err;
-        vorher = { id, err };
+        if (!anfang) anfang = { id, err };
       }
     }
     if (erster) throw erster;
@@ -449,10 +488,24 @@ function createKi(deps = {}) {
     return zustand();
   }
 
+  /**
+   * Beim Start einmal: Wer schon vor dem Nachschlagen eine KI ohne eigene
+   * Suche verbunden hatte, bekommt es jetzt -- wie beim Verbinden (es sei
+   * denn, er hat es je ausgeschaltet). `konfigSpeichern` braucht die fertige
+   * App, deshalb ruft src/app.js das auf, nicht createKi.
+   */
+  function einrichten() {
+    if (!nachschlagen) return false;
+    const ohneEigeneSuche = ANBIETER.filter((id) => id !== 'claude').some((id) => dienste[id].schluesselVorhanden());
+    return ohneEigeneSuche ? nachschlagen.vonSelbstAn() : false;
+  }
+
   return {
     ANBIETER,
     claude: dienste.claude,
     gemini: dienste.gemini,
+    nachschlagen,
+    einrichten,
     dienst,
     aktiv,
     aktiver,

@@ -46,7 +46,7 @@ export default {
     if (ctx.bus && typeof ctx.bus.on === 'function') {
       self.cleanups.push(ctx.bus.on('*', (payload, event) => {
         const typ = (event && event.type) || '';
-        if (typ === 'network.mode' || typ === 'network.attempt' || typ === 'network.grant' || typ === 'config.changed' || typ.startsWith('claude') || typ.startsWith('gemini') || typ === 'ki.anbieter') neu();
+        if (typ === 'network.mode' || typ === 'network.attempt' || typ === 'network.grant' || typ === 'config.changed' || /^(claude|gemini|mistral|groq|openrouter|ovh|openai)\b/.test(typ) || typ === 'ki.anbieter') neu();
       }));
     }
     await allesLaden(self);

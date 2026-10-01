@@ -327,6 +327,13 @@ async function hochfahren(flags, { dienst, erreichbar = () => {}, beiStart = () 
         log.warn(`Startinhalte nicht aufgefrischt: ${err && err.message}`);
       }
     }
+    // Wer schon eine KI ohne eigene Suche verbunden hatte, bekommt das
+    // Nachschlagen in Wikipedia -- wie beim Verbinden (src/models/ki.js).
+    try {
+      if (app.kiDienst && typeof app.kiDienst.einrichten === 'function') app.kiDienst.einrichten();
+    } catch (err) {
+      log.warn(`Nachschlagen nicht eingerichtet: ${err && err.message}`);
+    }
     // Extensions come up only after the rest of the system is known healthy.
     const extensions = await app.loadModules({ safeMode: flags.safe === true });
     weiter();

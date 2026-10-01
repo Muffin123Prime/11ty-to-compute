@@ -33,6 +33,8 @@ const http = require('node:http');
 const { createApp, seedIfEmpty } = require('../src/app');
 const { B, sse } = require('../test/claude-statist');
 const geminiStatist = require('../test/gemini-statist');
+const oaStatist = require('../test/openai-statist');
+const wikiStatist = require('../test/wikipedia-statist');
 const { anfrage } = require('../test/antwort-hilfe');
 const anhaengeServer = require('../src/models/anhaenge');
 const { findPlaywright, findChromium } = require('./lib/browser');
@@ -254,8 +256,14 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
   const statist = await langsamerStatist();
   // Gemini nur fuer das Umschreiben von Sprache (7c); es antwortet weiter Claude.
   const gemini = await geminiStatist.starten();
+  // Mistral (OpenAI-kompatibel) und Wikipedia für Abschnitt 11: einspringen und nachschlagen.
+  const mistral = await oaStatist.starten({ modelle: [{ id: 'mistral-small-latest', capabilities: { completion_chat: true } }] });
+  const wiki = await wikiStatist.starten();
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'neural-os-chatbeweis-'));
-  const app = await createApp({ home, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false, claudeBasis: statist.url, geminiBasis: gemini.url });
+  const app = await createApp({
+    home, port: 0, host: '127.0.0.1', logLevel: 'error', harden: false, claudeBasis: statist.url, geminiBasis: gemini.url,
+    anbieterBasen: { mistral: mistral.url }, nachschlagenBasen: { de: wiki.url, en: wiki.url },
+  });
   await seedIfEmpty(app);
   if (typeof app.loadModules === 'function') await app.loadModules({}).catch(() => {});
   const server = await app.listen();
@@ -1895,6 +1903,69 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       }
       await c13.close();
     }
+
+    // 11 · Der Wunsch vom 01.10.2026: "falls bei einem das Limit leer geht,
+    // wechselt er zum nächsten" -- und "der kann für mich Sachen suchen im
+    // Internet". Eine weitere KI wird in den Einstellungen verbunden; ist
+    // Gemini am Tageslimit, antwortet sie (mit einem Satz dazu) und schlägt
+    // in Wikipedia nach -- die Artikel stehen als Quellen unter der Antwort.
+    console.log(`\n${BO}11 · Weitere KIs: Mistral springt ein und schlägt in Wikipedia nach${X}`);
+    {
+      const { c: c14, p: p14 } = await neueSeite();
+      await p14.goto(`${base}/#/settings`, { waitUntil: 'domcontentloaded' });
+      const block = p14.locator('[data-anbieter="mistral"]');
+      await block.waitFor({ timeout: 8000 });
+      await block.getByRole('button', { name: 'Schlüssel einfügen' }).click();
+      await block.locator('input[aria-label="Mistral-Schlüssel"]').fill(mistral.schluessel);
+      await block.getByRole('button', { name: 'Verbinden' }).click();
+      const toast14 = await warteBis(async () => {
+        const t = await p14.locator('.toast').allInnerTexts().catch(() => []);
+        return t.find((x) => /Mistral ist verbunden/.test(x)) || null;
+      }, { timeout: 10000 });
+      const z14 = app.kiDienst.zustand();
+      check(z14.anbieter.mistral.verbunden === true && z14.aktiv === 'gemini' && /springt ein, wenn ein Limit voll ist/.test(String(toast14)),
+        'Einstellungen → KI → Mistral: Schlüssel einfügen, Verbinden – Mistral springt ein, Gemini bleibt die erste', String(toast14));
+      await warteBis(async () => /stat…cdef/.test(await block.innerText().catch(() => '')), { timeout: 5000 });
+      const blockText = await block.innerText();
+      check(/stat…cdef/.test(blockText) && /bereit/.test(blockText) && !blockText.includes(mistral.schluessel),
+        'Der Schlüssel steht nur als Maske da („stat…cdef · bereit“), nie im Klartext', blockText.replace(/\s+/g, ' ').slice(0, 100));
+      const kiText = (await p14.locator('[data-gruppe="ki"]').innerText()).replace(/\s+/g, ' ');
+      check(/Es antwortet zuerst Gemini\. Ist ein Limit voll, springt von selbst die nächste ein: Mistral/.test(kiText) && /Nachschlagen in Wikipedia/.test(kiText),
+        'Oben steht, wer zuerst antwortet und wer einspringt; unten „Nachschlagen in Wikipedia“', kiText.slice(0, 120));
+      await foto(p14, 'einstellungen-weitere-kis-1440');
+
+      // Online (Wikipedia steht seit dem Verbinden auf der Freigabeliste); Gemini ist am Tageslimit.
+      app.saveConfig({ network: { mode: 'online' } });
+      const tag = () => ({ status: 429, json: { error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'You exceeded your current quota.', details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' }] }] } } });
+      for (let i = 0; i < 8; i++) gemini.weiter(tag());
+      mistral.weiter(
+        oaStatist.antwort(oaStatist.B.aufruf('wikipedia_suchen', { suche: 'Brandenburger Tor' }), oaStatist.B.ende('tool_calls')),
+        oaStatist.antwort(oaStatist.B.text('Das Brandenburger Tor wurde von 1789 bis 1793 nach Entwürfen von Carl Gotthard Langhans gebaut.'), oaStatist.B.ende()),
+      );
+      await p14.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+      await p14.locator('.cv-composer__feld').waitFor({ timeout: 8000 });
+      await p14.locator('.cv-composer__feld').fill('Wann wurde das Brandenburger Tor gebaut? Such bitte nach.');
+      await p14.locator('.cv-composer__feld').press('Enter');
+      const antwort14 = await warteBis(async () => {
+        const t = await p14.locator('.cv-msg').last().innerText().catch(() => '');
+        return /Langhans gebaut/.test(t) ? t : null;
+      }, { timeout: 15000 });
+      check(!!antwort14, 'Gemini am Tageslimit: Mistral beantwortet die Frage', String(antwort14 || '').replace(/\s+/g, ' ').slice(0, 100));
+      const msgText = (await p14.locator('.cv-msg').last().innerText().catch(() => '')).replace(/\s+/g, ' ');
+      const saetze14 = (await p14.locator('.cv-msg').last().locator('.cv-status').allInnerTexts().catch(() => [])).map((x) => x.trim());
+      check(saetze14.filter((x) => x === 'Gemini ist gerade am Limit – es antwortet Mistral.').length === 1
+        && !saetze14.some((x) => /hat sein Tageslimit erreicht – es antwortet Gemini/.test(x)),
+      'Genau ein Satz sagt, warum jetzt Mistral antwortet: „Gemini ist gerade am Limit – es antwortet Mistral.“ (keine Zwischenschritte)', saetze14.join(' | ').slice(0, 160));
+      const quelle14 = p14.locator('.cv-msg').last().locator('.cv-quelle', { hasText: 'Brandenburger Tor – Wikipedia' });
+      check(await quelle14.count() >= 1 && /de\.wikipedia\.org/.test(await quelle14.first().innerText().catch(() => '')),
+        'Unter der Antwort: der Wikipedia-Artikel als Quelle (de.wikipedia.org)');
+      const anMistral = mistral.stromAnfragen()[0] && mistral.stromAnfragen()[0].body;
+      check(!!anMistral && (anMistral.tools || []).some((t) => t.function && t.function.name === 'wikipedia_suchen') && wiki.anfragen.length === 2,
+        'Mistral bekam das Werkzeug „wikipedia_suchen“, und Neural OS hat zweimal bei Wikipedia nachgefragt (suchen, Kurztexte)', `Wikipedia-Anfragen: ${wiki.anfragen.length}`);
+      await foto(p14, 'mistral-springt-ein-wikipedia-1440');
+      app.saveConfig({ network: { mode: 'offline' } });
+      await c14.close();
+    }
   } catch (err) {
     fehlgeschlagen = err;
     console.log(`\n${R}Abgebrochen:${X} ${err && err.message}`);
@@ -1927,6 +1998,8 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
   await app.close();
   await statist.close();
   await gemini.close();
+  await mistral.close();
+  await wiki.close();
   fs.rmSync(home, { recursive: true, force: true });
 
   const gut = ergebnisse.filter((e) => e.ok).length;

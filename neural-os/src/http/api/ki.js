@@ -7,7 +7,7 @@
  *   POST   /api/ki/:anbieter/schluessel    { schluessel, aktivieren? } -> prüft mit Probeaufruf, speichert im Tresor;
  *                                          mit aktivieren antwortet dieser Anbieter ab jetzt
  *   DELETE /api/ki/:anbieter/schluessel    -> vergisst den Schlüssel
- *   PATCH  /api/ki                         { anbieter?, modell? }
+ *   PATCH  /api/ki                         { anbieter?, modell?, nachschlagen? (Wikipedia an/aus) }
  *   POST   /api/ki/transkribieren          { audio (WAV, Base64, höchstens 60 s), chatId? } -> { text, sekunden, modell }
  *
  * `/api/ki/name` (Name dieser KI) liegt in src/http/api/system.js und ist
@@ -139,7 +139,7 @@ function register(router) {
   router.patch('/api/ki', async (rc) => {
     rc.requireOwner('Die Wahl der KI');
     const body = asObject(await rc.body());
-    return kiVon(rc).setzen({ anbieter: body.anbieter, modell: body.modell });
+    return kiVon(rc).setzen({ anbieter: body.anbieter, modell: body.modell, nachschlagen: body.nachschlagen });
   });
 }
 

@@ -688,7 +688,7 @@ function baueAnsicht(container, ctx) {
   // Die Verbinden-Karte wird neu gebaut, sobald sich der Claude-Zustand
   // aendert (Netzmodus, Tresor ...). Schluessel und Fehlersatz ueberleben das
   // hier -- nur im Speicher dieses Tabs, nie im Browser-Speicher.
-  const schluesselEntwurf = { gemini: '', claude: '' };
+  const schluesselEntwurf = { gemini: '', auto: '', claude: '' };
   let verbindenFehler = null; // {anbieter, satz}
   let verbindet = false;
   /** Claude hat kein Guthaben mehr: die Karte bietet Gemini an, obwohl Claude "verbunden" ist. */
@@ -1045,8 +1045,10 @@ function baueAnsicht(container, ctx) {
 
   /**
    * Die ruhige Karte, wenn die KI nicht antworten kann. Ohne Schluessel:
-   * "Verbinde eine KI" -- oben gross Google (kostenlos), darunter klein
-   * aufklappbar Claude (kostet). Ein Feld je Anbieter, ein Satz, wo es den
+   * "Verbinde eine KI" -- oben gross Google (kostenlos); darunter klein
+   * aufklappbar ein Feld fuer jede andere KI (der Anbieter ergibt sich aus
+   * dem Schluessel: Mistral, Groq, OpenRouter, OpenAI), OVHcloud ganz ohne
+   * Schluessel mit einem Knopf und Claude (kostet). Ein Satz, wo es den
    * Schluessel gibt -- und danach geht es sofort weiter. Ist Neural OS
    * offline, ist das derselbe eine Schritt: der Knopf sagt "Online gehen und
    * verbinden", und genau das tut der Klick.
@@ -1054,15 +1056,31 @@ function baueAnsicht(container, ctx) {
   const ANBIETER = {
     gemini: {
       name: 'Gemini', titel: 'Kostenlos mit Google', platzhalter: 'AQ.… oder AIza…', label: 'Google-Schlüssel',
-      link: 'https://aistudio.google.com/apikey', linkText: 'aistudio.google.com/apikey',
+      links: [{ href: 'https://aistudio.google.com/apikey', text: 'aistudio.google.com/apikey' }],
       satz: ' → Create API key. Kostenlos; Google darf Inhalte zur Verbesserung nutzen.',
+    },
+    auto: {
+      name: 'Die KI', titel: 'Oder eine andere kostenlose KI (Mistral, Groq, OpenRouter)', platzhalter: 'Schlüssel von Mistral, Groq oder OpenRouter', label: 'Schlüssel einer anderen KI',
+      vor: 'Kostenlos ohne Karte: ',
+      links: [
+        { href: 'https://console.mistral.ai/api-keys', text: 'console.mistral.ai' },
+        { href: 'https://console.groq.com/keys', text: 'console.groq.com/keys' },
+        { href: 'https://openrouter.ai/settings/keys', text: 'openrouter.ai/settings/keys' },
+      ],
+      satz: '. Neural OS erkennt am Schlüssel, von wem er ist.',
     },
     claude: {
       name: 'Claude', titel: 'Oder Claude (kostet pro Nutzung)', platzhalter: 'sk-ant-…', label: 'Claude-Schlüssel',
-      link: 'https://console.anthropic.com/settings/keys', linkText: 'console.anthropic.com',
+      links: [{ href: 'https://console.anthropic.com/settings/keys', text: 'console.anthropic.com' }],
       satz: ' → API Keys. Kostet pro Nutzung; die Rechnung stellt Anthropic.',
     },
   };
+
+  /** Der Name, den der Server fuer einen Anbieter nennt (Mistral, Groq, …) -- sonst der eigene. */
+  function anbieterName(z, id) {
+    const s = z && z.anbieter && z.anbieter[id] && z.anbieter[id].name;
+    return s || (ANBIETER[id] && ANBIETER[id].name) || 'Die KI';
+  }
 
   function baueVerbinden(kompakt) {
     const code = claude && claude.grundCode;
@@ -1119,9 +1137,90 @@ function baueAnsicht(container, ctx) {
       return karte;
     }
 
-    // Kein oder ein falscher Schluessel: ein Feld je Anbieter, Google zuerst.
+    // Kein oder ein falscher Schluessel: Google zuerst, darunter die anderen.
     const online = mussOnline();
     const knopfText = online ? 'Online gehen und verbinden' : 'Verbinden';
+
+    /**
+     * Verbinden -- fuer ein Feld (mit Schluessel) und fuer OVHcloud (ohne).
+     * `ui`: {knopf, feld?, zeige, ruhe} -- der Knopf zeigt, was gerade
+     * passiert; `ruhe` stellt ihn danach wieder her.
+     */
+    const verbindenLos = async (anbieter, schluessel, ui) => {
+      verbindenFehler = null;
+      verbindet = true;
+      ui.knopf.disabled = true;
+      if (ui.feld) ui.feld.disabled = true;
+      clear(ui.knopf);
+      ui.knopf.append(h('span.spinner.cv-spinner', { 'aria-hidden': 'true' }), h('span', null, text(online ? 'Gehe online …' : 'Prüfe …')));
+      // Die Zustimmung ist der Klick auf "Online gehen und verbinden".
+      // Scheitert danach die Pruefung, geht der Netzmodus zurueck -- der
+      // Klick galt beidem zusammen.
+      const vorher = online ? claude.netz.modus : null;
+      let umgeschaltet = false;
+      try {
+        if (online) {
+          await api.put('/network', { mode: 'online' });
+          umgeschaltet = true;
+        }
+        // Wer hier verbindet, will mit dieser KI weiterschreiben -- auch wenn vorher eine andere eingestellt war.
+        const z = await api.post(`/ki/${anbieter}/schluessel`, { ...(schluessel ? { schluessel } : {}), aktivieren: true }, { timeoutMs: 45000 });
+        claude = { ...z };
+        geminiAngebot = false;
+        // GET /api/ki sagt zusaetzlich, ob das Mikrofon ueber Gemini umschreiben kann.
+        claudeBald();
+        schluesselEntwurf[anbieter] = '';
+        if (ui.feld) ui.feld.value = '';
+        // Stand ein Schluessel im falschen Feld, hat der Server ihn richtig zugeordnet.
+        const ziel = (z && z.umgeleitet) || anbieter;
+        const wer = anbieterName(z, ziel);
+        ctx.toast(z && z.umgeleitet && anbieter !== 'auto' ? `Das war ein Schlüssel für ${wer} – ${wer} ist verbunden.` : `${wer} ist verbunden.`, 'success');
+        verbindet = false;
+        obenKey = null;
+        plane();
+        if (wartet) {
+          const t = wartet;
+          wartet = null;
+          // Was im Feld stand (samt Anhaengen), geht jetzt so ab, wie es dort steht.
+          if (t === AUS_DEM_FELD) absenden();
+          else senden(t);
+        } else {
+          feld.focus();
+        }
+      } catch (err) {
+        if (umgeschaltet && vorher) {
+          try { await api.put('/network', { mode: vorher }); } catch { /* der Status unten links zeigt, was gilt */ }
+        }
+        if (online && !umgeschaltet) {
+          verbindenFehler = { anbieter, satz: err && err.status === 403
+            ? 'Online schalten geht nur am Gerät selbst, auf dem Neural OS läuft.'
+            : `Nicht umgeschaltet: ${(err && err.message) || 'unbekannter Fehler'}` };
+        } else if (!/_OFFLINE$/.test(String(err && err.code))) {
+          // *_OFFLINE ohne Umschalten: der Zustand war veraltet; die neu
+          // gebaute Karte bietet "Online gehen und verbinden" an.
+          verbindenFehler = { anbieter, satz: (err && err.message) || 'Der Schlüssel ließ sich nicht prüfen.' };
+          if (err && err.code === 'CLAUDE_GUTHABEN') verbindenFehler.satz += ' Kostenlos geht es oben mit Google (Gemini).';
+        }
+        verbindet = false;
+        await claudeLaden();
+        if (!lebt) return;
+        obenKey = null;
+        plane();
+      } finally {
+        verbindet = false;
+        if (ui.knopf.isConnected) ui.ruhe();
+      }
+    };
+
+    const hinweisFuer = (A) => {
+      const p = h('p.cv-verbinden__hinweis', null, text(A.vor || 'Schlüssel: '));
+      A.links.forEach((l, i) => {
+        if (i) p.appendChild(text(' · '));
+        p.appendChild(h('a', { href: l.href, target: '_blank', rel: 'noopener noreferrer' }, text(l.text)));
+      });
+      p.appendChild(text(A.satz));
+      return p;
+    };
 
     const formFuer = (anbieter) => {
       const A = ANBIETER[anbieter];
@@ -1136,12 +1235,10 @@ function baueAnsicht(container, ctx) {
       });
       eingabeFeld.value = schluesselEntwurf[anbieter] || '';
       const eigenerFehler = h('p.cv-verbinden__fehler', { role: 'alert', hidden: true });
-      const zeige = (satz) => {
-        clear(eigenerFehler);
-        eigenerFehler.appendChild(text(satz));
+      if (verbindenFehler && verbindenFehler.anbieter === anbieter) {
+        eigenerFehler.appendChild(text(verbindenFehler.satz));
         eigenerFehler.hidden = false;
-      };
-      if (verbindenFehler && verbindenFehler.anbieter === anbieter) zeige(verbindenFehler.satz);
+      }
       const knopf = h('button.btn.btn--primary', { type: 'submit' }, h('span', null, text(knopfText)));
       const form = h('form.cv-verbinden__form', {
         onSubmit: async (e) => {
@@ -1152,97 +1249,61 @@ function baueAnsicht(container, ctx) {
             return;
           }
           schluesselEntwurf[anbieter] = eingabeFeld.value;
-          verbindenFehler = null;
-          verbindet = true;
-          knopf.disabled = true;
-          eingabeFeld.disabled = true;
-          clear(knopf);
-          knopf.append(h('span.spinner.cv-spinner', { 'aria-hidden': 'true' }), h('span', null, text(online ? 'Gehe online …' : 'Prüfe …')));
           eigenerFehler.hidden = true;
-          // Die Zustimmung ist der Klick auf "Online gehen und verbinden".
-          // Scheitert danach die Pruefung, geht der Netzmodus zurueck -- der
-          // Klick galt beidem zusammen.
-          const vorher = online ? claude.netz.modus : null;
-          let umgeschaltet = false;
-          try {
-            if (online) {
-              await api.put('/network', { mode: 'online' });
-              umgeschaltet = true;
-            }
-            // Wer hier einen Schluessel einfuegt, will mit dieser KI weiterschreiben -- auch wenn vorher eine andere eingestellt war.
-            const z = await api.post(`/ki/${anbieter}/schluessel`, { schluessel: wert, aktivieren: true }, { timeoutMs: 45000 });
-            claude = { ...z };
-            geminiAngebot = false;
-            // GET /api/ki sagt zusaetzlich, ob das Mikrofon ueber Gemini umschreiben kann.
-            claudeBald();
-            schluesselEntwurf[anbieter] = '';
-            eingabeFeld.value = '';
-            // Stand ein Google-Schluessel im Claude-Feld (oder umgekehrt), hat der Server ihn richtig zugeordnet.
-            const wer = z && z.umgeleitet && ANBIETER[z.umgeleitet] ? ANBIETER[z.umgeleitet].name : A.name;
-            ctx.toast(z && z.umgeleitet ? `Das war ein Schlüssel für ${wer} – ${wer} ist verbunden.` : `${wer} ist verbunden.`, 'success');
-            verbindet = false;
-            obenKey = null;
-            plane();
-            if (wartet) {
-              const t = wartet;
-              wartet = null;
-              // Was im Feld stand (samt Anhaengen), geht jetzt so ab, wie es dort steht.
-              if (t === AUS_DEM_FELD) absenden();
-              else senden(t);
-            } else {
-              feld.focus();
-            }
-          } catch (err) {
-            if (umgeschaltet && vorher) {
-              try { await api.put('/network', { mode: vorher }); } catch { /* der Status unten links zeigt, was gilt */ }
-            }
-            if (online && !umgeschaltet) {
-              verbindenFehler = { anbieter, satz: err && err.status === 403
-                ? 'Online schalten geht nur am Gerät selbst, auf dem Neural OS läuft.'
-                : `Nicht umgeschaltet: ${(err && err.message) || 'unbekannter Fehler'}` };
-            } else if (!/_OFFLINE$/.test(String(err && err.code))) {
-              // *_OFFLINE ohne Umschalten: der Zustand war veraltet; die neu
-              // gebaute Karte bietet "Online gehen und verbinden" an.
-              verbindenFehler = { anbieter, satz: (err && err.message) || 'Der Schlüssel ließ sich nicht prüfen.' };
-              if (err && err.code === 'CLAUDE_GUTHABEN') verbindenFehler.satz += ' Kostenlos geht es oben mit Google (Gemini).';
-            }
-            verbindet = false;
-            await claudeLaden();
-            if (!lebt) return;
-            obenKey = null;
-            plane();
-          } finally {
-            verbindet = false;
-            if (knopf.isConnected) {
+          await verbindenLos(anbieter, wert, {
+            knopf,
+            feld: eingabeFeld,
+            ruhe: () => {
               knopf.disabled = false;
               eingabeFeld.disabled = false;
               clear(knopf);
               knopf.appendChild(h('span', null, text(knopfText)));
-            }
-          }
+            },
+          });
         },
       }, eingabeFeld, knopf);
-      const hinweis = h('p.cv-verbinden__hinweis', null,
-        text('Schlüssel: '),
-        h('a', { href: A.link, target: '_blank', rel: 'noopener noreferrer' }, text(A.linkText)),
-        text(A.satz));
-      return { form, fehler: eigenerFehler, hinweis };
+      return { form, fehler: eigenerFehler, hinweis: hinweisFuer(A) };
     };
 
     const g = formFuer('gemini');
+    const andere = formFuer('auto');
     const c = formFuer('claude');
+    // OVHcloud: kein Konto, kein Schluessel -- ein Knopf.
+    const ovhText = online ? 'Online gehen und einschalten' : 'OVHcloud einschalten';
+    const ovhKnopf = h('button.btn', {
+      type: 'button',
+      onClick: () => verbindenLos('ovh', null, {
+        knopf: ovhKnopf,
+        ruhe: () => {
+          ovhKnopf.disabled = false;
+          clear(ovhKnopf);
+          ovhKnopf.appendChild(h('span', null, text(ovhText)));
+        },
+      }),
+    }, h('span', null, text(ovhText)));
+    const ovhFehler = h('p.cv-verbinden__fehler', { role: 'alert', hidden: !(verbindenFehler && verbindenFehler.anbieter === 'ovh') },
+      text(verbindenFehler && verbindenFehler.anbieter === 'ovh' ? verbindenFehler.satz : ''));
     // Ein abgelehnter Schluessel: das Feld des betroffenen Anbieters ist offen.
     const falschBei = code === 'schluessel-falsch' && claude ? claude.aktiv : null;
+    const andereOffen = (falschBei && falschBei !== 'gemini' && falschBei !== 'claude' && falschBei !== 'ovh')
+      || (verbindenFehler && verbindenFehler.anbieter === 'auto');
     karte.append(kopf('Verbinde eine KI'));
     if (geminiAngebot) {
       karte.append(h('p.cv-verbinden__text', null, text('Bei Anthropic ist kein Guthaben mehr. Kostenlos geht es mit Gemini von Google weiter – Schlüssel einfügen, dann antwortet Gemini.')));
     } else if (falschBei) {
-      karte.append(h('p.cv-verbinden__text', null, text(`Der gespeicherte ${ANBIETER[falschBei].name}-Schlüssel wird nicht mehr angenommen. Füge einen neuen ein – danach geht es sofort weiter.`)));
+      karte.append(h('p.cv-verbinden__text', null, text(`Der gespeicherte ${anbieterName(claude, falschBei)}-Schlüssel wird nicht mehr angenommen. Füge einen neuen ein – danach geht es sofort weiter.`)));
     }
     karte.append(
       h('h3.cv-verbinden__unter', null, text(ANBIETER.gemini.titel)),
       g.form, g.fehler, g.hinweis,
-      h('details.cv-verbinden__mehr', { open: falschBei === 'claude' ? '' : null },
+      h('details.cv-verbinden__andere', { open: andereOffen ? '' : null },
+        h('summary', null, text(ANBIETER.auto.titel)),
+        andere.form, andere.fehler, andere.hinweis),
+      h('div.cv-verbinden__ohne', null,
+        h('p.cv-verbinden__hinweis', null, text('Ganz ohne Schlüssel und ohne Konto: OVHcloud (aus Frankreich) – dafür langsam, 2 Anfragen je Minute.')),
+        ovhKnopf),
+      ovhFehler,
+      h('details.cv-verbinden__mehr', { open: falschBei === 'claude' || (verbindenFehler && verbindenFehler.anbieter === 'claude') ? '' : null },
         h('summary', null, text(ANBIETER.claude.titel)),
         c.form, c.fehler, c.hinweis));
     return karte;
@@ -3375,7 +3436,7 @@ function baueAnsicht(container, ctx) {
 
   offs.push(ctx.bus.on('*', (payload, event) => {
     const typ = (event && event.type) || '';
-    if (typ.startsWith('claude') || typ.startsWith('gemini') || typ === 'ki.anbieter' || typ === 'network.mode' || typ.startsWith('vault.')) claudeBald();
+    if (/^(claude|gemini|mistral|groq|openrouter|ovh|openai)\b/.test(typ) || typ === 'ki.anbieter' || typ === 'network.mode' || typ.startsWith('vault.')) claudeBald();
     if (!s || s.lauf || !payload || payload.chatId !== s.chatId) return;
     // Ein anderes Geraet (oder ein anderer Tab) schreibt in diesen Chat.
     if (typ === 'chat.message' && payload.record) {
@@ -3539,12 +3600,14 @@ const STIL = `
 .cv-verbinden__fehler { margin: 10px 0 0; font-size: var(--fs-sm); color: var(--danger); }
 .cv-verbinden__unter { margin: 0 0 10px; font-size: var(--fs-lg); font-weight: 500; letter-spacing: -0.01em; }
 .cv-verbinden--kompakt .cv-verbinden__unter { font-size: var(--fs-md); }
-.cv-verbinden__mehr { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border); }
-.cv-verbinden__mehr > summary { cursor: pointer; list-style: none; font-size: var(--fs-sm); color: var(--fg-muted); user-select: none; }
-.cv-verbinden__mehr > summary::-webkit-details-marker { display: none; }
-.cv-verbinden__mehr > summary::before { content: '›'; display: inline-block; width: 1em; transition: transform 0.15s; }
-.cv-verbinden__mehr[open] > summary::before { transform: rotate(90deg); }
-.cv-verbinden__mehr[open] > summary { margin-bottom: 10px; }
+.cv-verbinden__mehr, .cv-verbinden__andere { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border); }
+.cv-verbinden__mehr > summary, .cv-verbinden__andere > summary { cursor: pointer; list-style: none; font-size: var(--fs-sm); color: var(--fg-muted); user-select: none; }
+.cv-verbinden__mehr > summary::-webkit-details-marker, .cv-verbinden__andere > summary::-webkit-details-marker { display: none; }
+.cv-verbinden__mehr > summary::before, .cv-verbinden__andere > summary::before { content: '›'; display: inline-block; width: 1em; transition: transform 0.15s; }
+.cv-verbinden__mehr[open] > summary::before, .cv-verbinden__andere[open] > summary::before { transform: rotate(90deg); }
+.cv-verbinden__mehr[open] > summary, .cv-verbinden__andere[open] > summary { margin-bottom: 10px; }
+.cv-verbinden__ohne { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.cv-verbinden__ohne > .cv-verbinden__hinweis { flex: 1 1 240px; margin: 0; }
 .cv-spinner { width: 14px; height: 14px; border-width: 2px; }
 
 /* -- Nachrichten -- */

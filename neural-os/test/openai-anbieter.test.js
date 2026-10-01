@@ -299,7 +299,8 @@ test('Gemini am Tageslimit: es antwortet Mistral (mit einem Satz dazu), ohne Gem
     s.mistral.weiter(OA.antwort(OA.B.text('Hier antwortet Mistral.'), OA.B.ende()));
     const zwei = await strom(base, `/api/chats/${chatId}/messages`, { inhalt: 'Noch was' });
     assert.equal(textVon(zwei.ereignisse), 'Hier antwortet Mistral.', JSON.stringify(fehlerVon(zwei.ereignisse)));
-    assert.ok(hinweise(zwei.ereignisse).includes('Gemini ist gerade am Limit – es antwortet Mistral.'), JSON.stringify(hinweise(zwei.ereignisse)));
+    assert.deepEqual(hinweise(zwei.ereignisse), ['Gemini ist gerade am Limit – es antwortet Mistral.'],
+      'genau ein Satz -- nicht einer je Gemini-Modell, das auch am Limit war');
     assert.equal(zwei.ereignisse.find((e) => e.name === 'fertig').data.record.data.model.provider, 'mistral');
     const anMistral = s.mistral.stromAnfragen()[0].body;
     assert.ok(!JSON.stringify(anMistral).includes('Geheimer Gedanke'), 'Geminis Denktext geht nicht an Mistral');
