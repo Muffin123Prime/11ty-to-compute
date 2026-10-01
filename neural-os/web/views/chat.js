@@ -72,7 +72,7 @@ import {
   MAX_PDF_BYTES, MAX_JE_NACHRICHT, MOEGLICH,
 } from '../lib/anhaenge.js';
 import {
-  vorleser, vorlesenMoeglich, sprechText, stelleImText, hervorheben, hervorhebenMoeglich, MARKE as VORLESE_MARKE,
+  seitenVorleser, vorlesenMoeglich, sprechText, stelleImText, hervorheben, hervorhebenMoeglich, MARKE as VORLESE_MARKE,
 } from '../lib/vorlesen.js';
 import {
   sprechWeg, erkennungStarten, aufnahmeStarten, erkennungFehlerSatz, erkennungUntauglich, bytesAlsBase64, MAX_SEKUNDEN,
@@ -559,7 +559,7 @@ function zustandsSpeicher(api, chatId, m, version, beiFehler) {
 let vorleserDerSeite = null;
 
 function vl() {
-  if (!vorleserDerSeite && vorlesenMoeglich()) vorleserDerSeite = vorleser();
+  if (!vorleserDerSeite && vorlesenMoeglich()) vorleserDerSeite = seitenVorleser();
   return vorleserDerSeite;
 }
 

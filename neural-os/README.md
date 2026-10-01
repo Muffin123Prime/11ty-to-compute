@@ -20,6 +20,12 @@ und das iPad steht in **`docs/ERSTE-SCHRITTE.md`**.
 
 ## Was drin ist
 
+- **Die Insel** – die schwarze Pille oben in der Mitte, wie die „Dynamic
+  Island“ am iPhone: zeigt live, was läuft (KI schreibt, Timer, Termin gleich,
+  Agent), und klappt zu einem Gespräch mit deiner KI auf. Auf Wunsch sieht
+  die KI deinen Bildschirm mit, und die Insel schwebt in einem eigenen Fenster
+  **über allen anderen Programmen** (Chrome, Edge, Opera, Firefox am
+  Computer). Timer, Notizen, Kopiertes erklären, Sprechen mit Vorlesen.
 - **Chat** mit der KI: Antworten mit Bausteinen (Tabellen, Diagramme, Listen,
   Karten), mehrere Fassungen je Antwort, Quellen im Text, Bilder und PDF
   anhängen, Sprechen statt Tippen, Vorlesen. Im Modus **„Mein Wissen“**
@@ -137,6 +143,9 @@ lesen und schreiben, aber keine Einstellungen ändern. Einzelheiten in
   siehst du alles, was du hast, bekommst aber keine neuen Antworten.
 - **Die Netzschleuse wirkt auf Prozessebene.** Sie bindet diese Anwendung und
   allen Code darin, ist aber keine Firewall für andere Programme.
+- **Die Insel ist eine Webseite.** Sie sieht andere Programme nur, wenn du den
+  Bildschirm teilst, und klicken kann sie dort nicht. Über anderen Programmen
+  schwebt sie nicht in Safari und nicht auf dem iPad.
 - **Manches lässt sich nur am echten Rechner prüfen** – ob eine
   Schul-Richtlinie Programme vom Stick sperrt, was Gatekeeper am Mac sagt. Für
   jeden dieser Fälle gibt es einen Ausweg (am Mac den Notstart im Ordner

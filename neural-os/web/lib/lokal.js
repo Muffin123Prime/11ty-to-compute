@@ -43,6 +43,10 @@ export const ERLAUBT = Object.freeze([
   'erinnerung-mitteilung',
   // Stick-Ansicht: welche zweite Fassung schon angesehen ist (nur Kennungen).
   'fassungen-gesehen',
+  // Die Insel (lib/insel.js): die Kennung ihres Chats mit der Zeit der
+  // letzten Frage, und ob ein Bild vom geteilten Bildschirm mitgeht.
+  'insel-chat',
+  'insel-vorlieben',
 ]);
 
 /** Alte Schluessel aus der Zeit ohne Kennung -- beim Start weg. */

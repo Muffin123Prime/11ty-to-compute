@@ -318,10 +318,17 @@ function plusTag(day, n) {
 /**
  * Einhaengen. Einmal pro Anwendung (web/app.js).
  *
- * @param {{api:object, bus?:{on:Function}, navigate?:Function}} ctx
+ * `anzeige` (die Insel, lib/insel.js): Ist sie da, haengt sich jede Karte
+ * als Kapsel an die Insel -- oben in der Mitte, und mit ihr im schwebenden
+ * Fenster ueber anderen Programmen. `einhaengen(karte, e)` gibt false
+ * zurueck, wenn die Insel gerade nicht kann (PIN); dann liegt die Karte wie
+ * frueher im Kopf. `termine(items)` bekommt dieselbe Liste, die hier
+ * geladen wird -- die Insel zeigt daraus "In 12 Min · Zahnarzt".
+ *
+ * @param {{api:object, bus?:{on:Function}, navigate?:Function, anzeige?:{einhaengen:Function, termine?:Function}}} ctx
  * @returns {{stop:Function, zeige:Function, pruefe:Function}}
  */
-export function starteErinnerungen({ api, bus, navigate } = {}) {
+export function starteErinnerungen({ api, bus, navigate, anzeige = null } = {}) {
   if (typeof document === 'undefined' || !api) return { stop() {}, zeige() {}, pruefe() {} };
   ensureStyle();
   const erledigt = mengeLaden(ERLEDIGT_KEY);
@@ -397,6 +404,9 @@ export function starteErinnerungen({ api, bus, navigate } = {}) {
       .then((res) => {
         items = Array.isArray(res && res.items) ? res.items : [];
         ladeZeit = Date.now();
+        if (anzeige && typeof anzeige.termine === 'function') {
+          try { anzeige.termine(items); } catch { /* die Erinnerungen laufen trotzdem */ }
+        }
       })
       .catch(() => { /* kein Server, gesperrter Tresor: beim naechsten Mal */ })
       .finally(() => { laeuft = null; });
@@ -438,10 +448,14 @@ export function starteErinnerungen({ api, bus, navigate } = {}) {
         title: 'Schließen',
         onClick: () => schliessen(e.key),
       }, icon(GLYPH_CLOSE)));
-    box.appendChild(card);
+    let inInsel = false;
+    if (anzeige && typeof anzeige.einhaengen === 'function') {
+      try { inInsel = anzeige.einhaengen(card, e) !== false; } catch { inInsel = false; }
+    }
+    if (!inInsel) box.appendChild(card);
     offen.set(e.key, { eintrag: e, node: card, wann });
     beschriften();
-    platzieren();
+    if (!inInsel) platzieren();
 
     if (mitteilungAn() && !mitgeteilt.has(e.key)) {
       mitgeteilt.set(e.key, Date.now());

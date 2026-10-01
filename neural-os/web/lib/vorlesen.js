@@ -246,6 +246,18 @@ export function vorleser(deps = {}) {
   };
 }
 
+let derVorleser = null;
+
+/**
+ * DER Vorleser der Seite: Chat und Insel (lib/insel.js) teilen ihn. Zwei
+ * eigene Spieler wuerden sich gegenseitig abbrechen (speechSynthesis gibt
+ * es nur einmal), und jeder hielte sich danach noch fuer "spielt".
+ */
+export function seitenVorleser() {
+  if (!derVorleser) derVorleser = vorleser();
+  return derVorleser;
+}
+
 /* ------------------------------------------------------------------ */
 /* Den Satz im Text finden                                              */
 /* ------------------------------------------------------------------ */

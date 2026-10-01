@@ -556,6 +556,8 @@ function createShell() {
 
   function ausZeigen(wie) {
     aus = wie;
+    // Die Insel (lib/insel.js) hoert mit: ist Neural OS aus, schwebt nichts mehr.
+    state.set('aus', wie ? wie.art : null);
     let box = document.getElementById('aus');
     if (!wie) {
       if (box) box.remove();
@@ -2235,6 +2237,7 @@ function createShell() {
       ['?', 'Diese Übersicht'],
       ['Esc', 'Schließen'],
       [`${mod} Umschalt N`, 'Schnell festhalten – eine Zeile, von überall aus'],
+      [`${mod} Umschalt Leertaste`, 'Insel – frag deine KI, auch im schwebenden Fenster'],
       ...VIEWS.map((v) => [`g ${v.key}`, `Zu ${v.id === 'chat' ? 'einem neuen Chat' : v.title}`]),
     ];
     const titleId = 'shortcuts-title';
@@ -2451,7 +2454,19 @@ function createShell() {
     // Erst jetzt ist bekannt, ob Neural OS vom Stick laeuft.
     serviceWorkerFuer(state.get('status'));
     besitzerPruefen();
-    import('./lib/erinnerung.js').then((m) => m.starteErinnerungen({ api, bus, navigate })).catch((err) => console.warn('[neural-os] Erinnerungen nicht verfügbar:', err && err.message));
+    // Die Insel oben in der Mitte (lib/insel.js) -- und die Erinnerungen, die
+    // sich als Kapsel an sie haengen. Laedt die Insel nicht, erinnern sie wie
+    // frueher im Kopf.
+    import('./lib/insel.js')
+      .then((m) => m.starteInsel(baseContext()))
+      .catch((err) => {
+        console.warn('[neural-os] Insel nicht verfügbar:', err && err.message);
+        return null;
+      })
+      .then((insel) => import('./lib/erinnerung.js').then((m) => m.starteErinnerungen({
+        api, bus, navigate: insel ? insel.navigieren : navigate, anzeige: insel ? insel.erinnerungen : null,
+      })))
+      .catch((err) => console.warn('[neural-os] Erinnerungen nicht verfügbar:', err && err.message));
 
     on(window, 'beforeunload', () => {
       if (eventStream) eventStream.close();

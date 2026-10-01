@@ -9,11 +9,12 @@ prüfen ist, steht weiter unten – ungeschönt.
 ## Messwerte
 
 ```
-npm test                             1604 Tests, 0 fehlgeschlagen
+npm test                             1627 Tests, 0 fehlgeschlagen
 npm run check                        170 Funktionen über HTTP, 0 defekt
 npm run ui                           264 Prüfpunkte im Browser, alles in Ordnung
 npm run proof                        22 Prüfungen, ohne Freigabe geht nichts ins Netz
 node tools/chat-beweis.js            226 Punkte, alle Baustein-Arten im Browser
+node tools/insel-beweis.js           74 Punkte, die Insel samt schwebendem Fenster im Browser
 node tools/stick-trennung-check.js   17 Punkte, zwei Sticks im selben Browser, [Beenden] am Mac
 node tools/screenshots.js            106 Bilder, kein Schritt fehlt
 ```
@@ -21,9 +22,10 @@ node tools/screenshots.js            106 Bilder, kein Schritt fehlt
 Die Werkzeuge prüfen absichtlich Verschiedenes: `test` den Code, `check` jede
 Funktion über die echte HTTP-Schnittstelle, `ui` ob ein Klick in der
 Oberfläche wirklich bis in den Tresor durchschlägt, `chat-beweis` den Chat mit
-allen Baustein-Arten im echten Browser (mit nachgestellter KI), und
-`stick-trennung-check` zwei Sticks nacheinander im selben Browser; `proof`
-beweist, dass ohne Freigabe nichts ins Netz geht.
+allen Baustein-Arten im echten Browser (mit nachgestellter KI),
+`insel-beweis` die Insel (Fragen, Bildschirm zeigen, Timer, schwebendes
+Fenster, Sprechen) und `stick-trennung-check` zwei Sticks nacheinander im
+selben Browser; `proof` beweist, dass ohne Freigabe nichts ins Netz geht.
 
 ## Was es gibt
 
@@ -36,6 +38,20 @@ beweist, dass ohne Freigabe nichts ins Netz geht.
   Umwandeln, Markier-Menü, Code-Aktionen mit Sandkasten, Bilder und PDF,
   Sprechen, Vorlese-Spieler, Live-Fortschritt, Quellen im Text, Modus „Mein
   Wissen“, Gedächtnis, Hintergrund-Agenten mit Vorschlägen.
+- **Insel** (`web/lib/insel.js`) – die Pille oben in der Mitte, wie die
+  „Dynamic Island“ am iPhone: zeigt live, was gerade läuft (KI schreibt,
+  Timer, Termin gleich, Agent, Freigabe, Bildschirm geteilt, Mikrofon,
+  Vorlesen); Erinnerungen hängen sich als Kapsel an. Aufgeklappt ein
+  Gespräch mit der eigenen KI (derselbe Chat-Dienst mit allen Werkzeugen, als
+  echter Chat „Insel · …“), mit Rückfragen zum Antippen und dem, was die KI
+  angelegt hat. **Bildschirm zeigen**: mit jeder Frage geht ein frisches Bild
+  mit – die KI sieht, was in einem anderen Programm offen ist. **Über allen
+  Fenstern**: die Insel schwebt in einem eigenen kleinen Fenster über jedem
+  Programm (Document Picture-in-Picture: Chrome, Edge, Opera, Firefox am
+  Computer). Dazu Timer mit Ton und Mitteilung, „Notiz: …“, Kopiertes und
+  Markiertes als Bezug („Erklär mir das“, „Übersetz ins Deutsche“), Bilder
+  einfügen oder hineinziehen, Sprechen mit Vorlesen. Strg/⌘ + Umschalt +
+  Leertaste.
 - **Kalender** mit Serien, Erinnerungen, `.ics`; die KI legt Termine an,
   ändert und löscht sie (Werkzeuge mit Rückgängig).
 - **Notizen** als Wand zum Wiederfinden, `[[Links]]` (auch
@@ -97,5 +113,14 @@ diskutil (`test/mac-paket.test.js`). Der freiwillige Probelauf
    unproblematisch.
 6. **`npm run ui` und die Browser-Werkzeuge brauchen Playwright.** Neural OS
    selbst hat null Abhängigkeiten.
+7. **Die Insel ist eine Webseite.** Sie schwebt über anderen Programmen nur in
+   Chrome, Edge, Opera und Firefox am Computer (nicht in Safari, nicht auf dem
+   iPad – dort bleibt sie in Neural OS). Das schwebende Fenster gehört zum Tab:
+   wird der geschlossen, geht es mit zu. Sie sieht andere Programme nur, wenn
+   man den Bildschirm teilt, und nur im Moment einer Frage; klicken oder tippen
+   kann sie dort nicht. Ihr Tastenkürzel wirkt in Neural OS und im
+   schwebenden Fenster – ein Kürzel für den ganzen Computer kann eine Webseite
+   nicht anlegen. Wie groß das schwebende Fenster am echten Bildschirm ist,
+   ließ sich hier nicht messen (ohne Bildschirm nimmt Chromium die Tabgröße).
 
 Wie es weitergeht, steht in `docs/UEBERGABE.md`, Abschnitt 4.

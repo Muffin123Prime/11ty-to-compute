@@ -283,6 +283,8 @@ const CSS = `
 .gh__state .spinner { margin: 0 auto 10px; }
 .gh__count { color: var(--fg-muted); font-size: var(--fs-sm); white-space: nowrap; font-variant-numeric: tabular-nums; margin-right: var(--sp-1); }
 .gh__switch { margin-right: var(--sp-1); }
+/* Schmale Mitte (lib/insel.js misst den Kopf): die Zahl ist entbehrlich, der Umschalter nicht. */
+.topbar[data-eng="ja"] .gh__count { display: none; }
 .gh__switch .segmented__option { min-height: 28px; }
 
 /* Die ruhige Themenkarte liegt ueber den Leinwaenden. */

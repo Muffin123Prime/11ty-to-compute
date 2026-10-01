@@ -9,7 +9,68 @@ Gehirn, Werkstatt, Einstellungen**, darunter die letzten Chats, ganz unten
 **[Beenden]** und der Status („Offline“, „Online verbunden · Gemini“ …).
 Rechts stehen Kacheln mit dem, was gerade zählt (aktive Agenten, Termine von
 heute, die letzte Notiz, ein Ausschnitt aus dem Gehirn). Beide Seiten lassen
-sich ein- und ausklappen; eingeklappt bleibt nur der Chat.
+sich ein- und ausklappen; eingeklappt bleibt nur der Chat. Oben in der Mitte
+sitzt die **Insel**.
+
+---
+
+## Die Insel
+
+Die schwarze Pille oben in der Mitte – wie die „Dynamic Island“ am iPhone.
+
+**Sie zeigt, was gerade läuft:** die KI denkt oder schreibt (eine kleine
+Welle), ein Timer läuft ab, ein Termin beginnt gleich („In 12 Min ·
+Zahnarzt“), ein Agent arbeitet, eine Freigabe wartet, der Bildschirm wird
+geteilt, das Mikrofon hört zu. Das Wichtigste steht groß, ein Zweites als
+kleine Blase daneben. Kommt eine Antwort, während die Insel zu ist, leuchtet
+sie grün. Erinnerungen an Termine hängen sich als Kapsel daneben (× schließt
+sie).
+
+**Antippen** (oder **Strg/⌘ + Umschalt + Leertaste**) klappt sie auf: Dort
+fragst du deine KI – tippen oder mit dem Mikrofon sprechen (Mikrofon antippen,
+sprechen, noch einmal antippen; die Antwort wird dann vorgelesen). Es ist
+dieselbe KI wie im Chat, mit allem, was sie dort kann: Termine eintragen,
+Notizen anlegen, sich etwas merken, in deinem Wissen suchen. Rückfragen
+beantwortest du mit einem Tipp; was sie angelegt hat, steht unter der Antwort
+zum Antippen. Jedes Gespräch ist ein echter Chat „Insel · …“ unter „Zuletzt“
+(öffnen, weiterschreiben, löschen); **[+]** beginnt ein neues, nach zwei
+Stunden Ruhe beginnt sie selbst eins. Unter jeder Antwort: **Vorlesen,
+Kopieren, Als Notiz, Im Chat öffnen**.
+
+**Bildschirm zeigen** (das Bildschirm-Zeichen): Der Browser fragt, was du
+teilen willst – den ganzen Bildschirm, ein Fenster oder einen Tab. Solange
+geteilt wird, steht dort ein kleines Bild davon und „Ich sehe …“, und mit
+jeder Frage geht ein frisches Bild mit. So kann die KI sehen, was du gerade
+in einem **anderen Programm** vor dir hast („Was siehst du?“, „Erklär mir
+das“, „Hilf mir antworten“). Das Bild geht an deine KI (Gemini oder Claude)
+und liegt danach als Anhang im Insel-Chat. „Bildschirm geht mit“ antippen
+schickt die nächste Frage ohne Bild; **[Stopp]** beendet das Teilen. Am Mac
+muss der Browser einmal erlaubt werden (Systemeinstellungen → Datenschutz &
+Sicherheit → Bildschirm- & Systemaudioaufnahme).
+
+**Über allen Fenstern** (das Zeichen mit dem kleinen Fenster): Die Insel zieht
+in ein eigenes kleines Fenster, das über jedem Programm schwebt – auch wenn du
+in Word, im Browser oder in einem Spiel bist. Dort geht alles genauso; **[˄]**
+macht es klein (nur die Zeile mit dem, was läuft), die Pille antippen macht es
+wieder groß, **[↩]** holt die Insel zurück. Das geht in Chrome, Edge, Opera
+und Firefox am Computer, nicht in Safari und nicht auf dem iPad. Das Fenster
+gehört zum Tab von Neural OS: Schließt du den, geht es mit zu.
+
+**Ohne die KI, sofort:** „Timer 5 min“ (auch „Timer 8 min Nudeln“, „Timer
+1:30“, „Timer“ allein zeigt die Auswahl) – am Ende klingelt es, die Insel
+pulsiert, und auf Wunsch kommt eine Mitteilung. „Notiz: Milch kaufen“ legt
+eine Notiz an.
+
+**Worauf sich „das“ bezieht:** Hast du etwas **kopiert** (Strg+C, in jedem
+Programm), nehmen „Erklär mir das“, „Fass zusammen“, „Übersetz ins Deutsche“
+und „Hilf mir antworten“ den kopierten Text. **[Einfügen]** holt Text oder Bild
+aus der Zwischenablage; Bilder kannst du auch mit Strg+V einfügen oder auf die
+Insel ziehen. Hast du in Neural OS Text **markiert**, kommt er beim Öffnen
+mit (als Kärtchen, × nimmt ihn weg).
+
+**Was sie nicht kann:** In anderen Programmen klicken oder tippen. Von selbst
+zuhören. Ein Tastenkürzel für den ganzen Computer – Strg/⌘ + Umschalt +
+Leertaste gilt in Neural OS und im schwebenden Fenster.
 
 ---
 
@@ -178,6 +239,7 @@ nodejs.org an und zieht sie danach wieder zurück.
 |---|---|
 | **Strg+K** | Befehle und Suche über alles |
 | **Strg+Umschalt+N** | eine Zeile festhalten, ohne den Bereich zu wechseln |
+| **Strg+Umschalt+Leertaste** | die Insel auf- und zuklappen (am Mac ⌘ statt Strg) |
 | **g**, dann **c / k / n / p / a / g / w / e** | Chat, Kalender, Notizen, Projekte, Agenten, Gehirn, Werkstatt, Einstellungen |
 | **g**, dann **t** | Stick |
 | **?** | alle Tastenkürzel |

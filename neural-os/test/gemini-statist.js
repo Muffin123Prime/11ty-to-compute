@@ -148,7 +148,11 @@ function httpFehler(code, status, message, koepfe = {}) {
  * @param {number} [opts.schluesselFehlerStatus]  wie ein falscher Schlüssel abgelehnt wird (400, 401 oder 403)
  *
  * `weiter(a, b, …)` stellt die nächsten Antworten in die Schlange. Eine
- * Antwort ist `{sse:[…]}`, `{status, json}` oder `{sse, abbrechenNach:n}`.
+ * Antwort ist `{sse:[…]}`, `{status, json}` oder `{sse, abbrechenNach:n}`;
+ * mit `pauseMs` liegen zwischen zwei Ereignissen so viele Millisekunden
+ * (für Beweise im Browser: man soll das Schreiben sehen und mittendrin
+ * stoppen können). `abbrueche()` zählt Ströme, die der Client vorzeitig
+ * geschlossen hat.
  * Ist die Schlange leer, kommt ein 500 -- ein Test, der mehr Anfragen
  * auslöst als er erwartet, fällt auf.
  */
@@ -158,6 +162,7 @@ function starten({ schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schlu
   // Antworten für Aufrufe OHNE Strom (generateContent), z. B. das Umschreiben
   // einer Sprachaufnahme. Leer: die kleine Antwort des Probeaufrufs.
   const ohneStrom = [];
+  let abbrueche = 0;
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
@@ -228,7 +233,15 @@ function starten({ schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schlu
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
       const liste = naechste.sse;
       let i = 0;
+      let zu = false;
+      res.on('close', () => {
+        if (!res.writableEnded) {
+          zu = true;
+          abbrueche += 1;
+        }
+      });
       const schreiben = () => {
+        if (zu) return;
         if (naechste.abbrechenNach !== undefined && i >= naechste.abbrechenNach) {
           res.destroy();
           return;
@@ -247,8 +260,10 @@ function starten({ schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schlu
         }
         res.write(roh.slice(0, mitte));
         setImmediate(() => {
+          if (zu) return;
           res.write(roh.slice(mitte));
-          setImmediate(schreiben);
+          if (naechste.pauseMs) setTimeout(schreiben, naechste.pauseMs);
+          else setImmediate(schreiben);
         });
       };
       schreiben();
@@ -267,6 +282,7 @@ function starten({ schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schlu
         /** Nächste Antworten ohne Strom: {text, finishReason?} oder {status, json}. */
         weiterOhneStrom: (...antworten) => ohneStrom.push(...antworten),
         offen: () => schlange.length,
+        abbrueche: () => abbrueche,
         close: () => new Promise((r) => { server.closeAllConnections && server.closeAllConnections(); server.close(r); }),
       });
     });
