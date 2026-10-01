@@ -1828,10 +1828,9 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
    * Ergebnis ist ein Fehler, keine halbe Fassung.
    */
   async function einfacherAufruf({ chat, system, nachrichten, signal, beiText, purpose, maxTokens = 32000 }) {
-    const anbieter = modulVon();
     const modell = chat ? modellFuer(chat) : claude.modell();
-    const gebaut = anbieter.anfrageBauen({
-      modell,
+    const bauen = (modul, m) => modul.anfrageBauen({
+      modell: m,
       system: [{ type: 'text', text: system }],
       werkzeuge: [],
       nachrichten,
@@ -1839,8 +1838,7 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       websuche: false,
       maxTokens,
     });
-    const r = await claude.senden({
-      ...gebaut,
+    const wie = {
       gate,
       scope: chat ? `chat:${chat.id}` : 'global',
       purpose,
@@ -1848,7 +1846,12 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
       beiEreignis: (e) => {
         if (e && e.art === 'text' && e.delta && typeof beiText === 'function') beiText(e.delta);
       },
-    });
+    };
+    // Ist der Eingestellte am Limit, wandelt der nächste verbundene Anbieter um.
+    const r = typeof claude.sendenAusweichend === 'function'
+      ? await claude.sendenAusweichend(bauen, { ...wie, modell })
+      : await claude.senden({ ...bauen(modulVon(), modell), ...wie });
+    const anbieter = r.modul || modulVon();
     if (r.stopReason === 'refusal') {
       throw new NeuralError(anbieter.ABLEHNUNG.code, anbieter.ABLEHNUNG.satz, { status: 422 });
     }

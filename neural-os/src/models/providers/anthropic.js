@@ -691,9 +691,11 @@ function bloeckeZurueck(inhalt, { offeneSuche = false } = {}) {
     // Nach einem Anbieterwechsel: Geminis Denkblöcke haben keine Anthropic-
     // Signatur und fallen weg; an Text und Werkzeugaufrufen fällt nur das
     // Gemini-Eigene (`gemini`, die thoughtSignature) weg, der Inhalt bleibt.
-    if (b.gemini && DENKBLOECKE.has(b.type)) return;
-    const { gemini, ...rest } = b;
+    // Dasselbe für die OpenAI-kompatiblen Anbieter (Mistral, Groq, …: `openai`).
+    if ((b.gemini || b.openai) && DENKBLOECKE.has(b.type)) return;
+    const { gemini, openai, ...rest } = b;
     void gemini;
+    void openai;
     out.push(JSON.parse(JSON.stringify(rest)));
   });
   return out;

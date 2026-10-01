@@ -452,7 +452,7 @@ test('Gemini: falscher Schlüssel -> 400 "Der Google-Schlüssel stimmt nicht.", 
     assert.equal(kaputt.status, 400);
     assert.equal(statist.anfragen.length, 1, 'ein ungültiges Format wird gar nicht erst geprüft');
     assert.equal(statist.anfragen[0].liste, true, 'den falschen Schlüssel sagt schon die Modellliste -- ohne Probeaufruf');
-    const unbekannt = await anfrage(base, 'POST', '/api/ki/openai/schluessel', { schluessel: statist.schluessel });
+    const unbekannt = await anfrage(base, 'POST', '/api/ki/fantasie/schluessel', { schluessel: statist.schluessel });
     assert.equal(unbekannt.status, 400);
 
     await app.vaultCrypto.initialise('ein-langes-gutes-geheimnis');
@@ -478,7 +478,7 @@ test('Gemini: falscher Schlüssel -> 400 "Der Google-Schlüssel stimmt nicht.", 
     assert.equal(m.json.modell, 'gemini-3.5-flash-lite');
     assert.equal(app.config.gemini.modell, 'gemini-3.5-flash-lite');
     assert.equal((await anfrage(base, 'PATCH', '/api/ki', { modell: 'gpt-4' })).status, 400);
-    assert.equal((await anfrage(base, 'PATCH', '/api/ki', { anbieter: 'openai' })).status, 400);
+    assert.equal((await anfrage(base, 'PATCH', '/api/ki', { anbieter: 'fantasie' })).status, 400);
 
     const weg = await anfrage(base, 'DELETE', '/api/ki/gemini/schluessel');
     assert.equal(weg.json.geloescht, true);

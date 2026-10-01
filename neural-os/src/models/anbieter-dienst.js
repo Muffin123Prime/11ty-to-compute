@@ -314,6 +314,7 @@ function createAnbieterDienst(profil, deps = {}) {
 
   /** "AIza…x4Q9": woran man einen Schlüssel wiedererkennt, ohne ihn zu verraten. */
   function maske(schluessel) {
+    if (profil.ohneSchluessel === true) return 'ohne Schlüssel';
     const t = String(schluessel || '');
     return t.length > 12 ? `${t.slice(0, 4)}…${t.slice(-4)}` : '…';
   }
@@ -410,6 +411,10 @@ function createAnbieterDienst(profil, deps = {}) {
     return {
       anbieter: profil.id,
       name: profil.name,
+      // Für die Oberfläche: wo es den Schlüssel gibt, ob kostenlos, ob ganz ohne.
+      kostenlos: profil.kostenlos === true,
+      ohneSchluessel: profil.ohneSchluessel === true,
+      info: profil.info || null,
       verbunden: grundCode === null,
       modell: m,
       modellName: namen(m),

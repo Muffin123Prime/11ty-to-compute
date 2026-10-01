@@ -25,11 +25,18 @@
  */
 
 const gemini = require('./providers/gemini');
+const openai = require('./providers/openai');
 const { NeuralError, ValidationError } = require('../kernel/errors');
 const { createAnbieterDienst } = require('./anbieter-dienst');
 const { PROFIL: PROFIL_CLAUDE } = require('./claude');
 
-const ANBIETER = Object.freeze(['gemini', 'claude']);
+/**
+ * Alle Anbieter, in der Reihenfolge, in der sie einspringen: die kostenlosen
+ * zuerst (Gemini, Mistral, Groq, OpenRouter), dann OVHcloud ganz ohne
+ * Schlüssel (langsam), zuletzt die bezahlten (OpenAI, Claude).
+ */
+const ANBIETER = Object.freeze(['gemini', 'mistral', 'groq', 'openrouter', 'ovh', 'openai', 'claude']);
+const WEITERE = Object.freeze(['mistral', 'groq', 'openrouter', 'ovh', 'openai']);
 
 /* --------------------------------------------------------------- Gemini */
 
@@ -86,6 +93,60 @@ function createGemini(deps = {}) {
   return createAnbieterDienst(PROFIL_GEMINI, deps);
 }
 
+/* ------------------------------------------- OpenAI-kompatible Anbieter */
+
+/** Der Teil des Hostnamens, der auf der Sperrliste zählt. */
+function sperrMusterVon(host) {
+  const teile = String(host || '').split('.');
+  return teile.slice(-2).join('.');
+}
+
+/** Ein Anbieter aus src/models/providers/openai.js als Profil für den Dienst. */
+function profilFuer(id) {
+  const modul = openai.erstellen(id);
+  const V = modul.vorlage;
+  const pruefen = (roh) => {
+    if (V.ohneSchluessel) return 'ohne-schluessel';
+    if (typeof roh !== 'string' || !roh.trim()) throw new ValidationError(`Bitte den ${V.name}-Schlüssel einfügen.`);
+    const s = roh.trim();
+    if (/\s/.test(s)) throw new ValidationError('Im Schlüssel steht ein Leerzeichen oder Zeilenumbruch. Bitte genau so einfügen, wie er beim Anbieter steht.');
+    if (s.length < 16 || s.length > 400 || !/^[\x21-\x7e]+$/.test(s)) throw new ValidationError(`Das sieht nicht nach einem ${V.name}-Schlüssel aus.`);
+    if (V.schluesselPraefix && !s.startsWith(V.schluesselPraefix)) {
+      throw new ValidationError(`Ein ${V.name}-Schlüssel beginnt mit „${V.schluesselPraefix}“.`);
+    }
+    return s;
+  };
+  const ein = V.ohneSchluessel ? 'einschalten' : 'den Schlüssel einfügen';
+  return Object.freeze({
+    id,
+    name: V.name,
+    praefix: V.praefix,
+    modul,
+    schluesselDatei: `${id}-schluessel.json`,
+    verbrauchDatei: `${id}-verbrauch.json`,
+    gruende: Object.freeze({
+      'kein-schluessel': `${V.name} ist nicht verbunden. Unter Einstellungen → KI ${ein}.`,
+      gesperrt: `Der Tresor ist gesperrt. Erst mit der PIN entsperren, dann kann ${V.name} antworten.`,
+      offline: `Offline — ${V.name} ist gerade nicht erreichbar. Schalte auf „Online“, dann antwortet ${V.name}.`,
+      gesperrtDurchSchleuse: `Die Schleuse lässt ${modul.API_HOST} nicht durch. Unter Netzwerk freigeben.`,
+      'schluessel-falsch': `Der ${V.name}-Schlüssel stimmt nicht (mehr). Bitte unter Einstellungen → KI neu eingeben.`,
+    }),
+    anleitung: V.ohneSchluessel
+      ? `${V.name}: ${V.hinweis} Unter Einstellungen → KI einschalten.`
+      : `${V.name}: Schlüssel auf ${V.seite}, dann unter Einstellungen → KI einfügen. ${V.hinweis}`,
+    kostenlos: V.kostenlos === true,
+    verbrauchHinweis: V.hinweis,
+    schluesselPruefen: pruefen,
+    sperrMuster: sperrMusterVon(modul.API_HOST),
+    modellWechsel: true,
+    ohneSchluessel: V.ohneSchluessel === true,
+    info: Object.freeze({
+      seite: V.seite, platzhalter: V.platzhalter, hinweis: V.hinweis, kostenlos: V.kostenlos === true,
+      ohneSchluessel: V.ohneSchluessel === true, praefix: V.schluesselPraefix || null,
+    }),
+  });
+}
+
 /* -------------------------------------------------------------- Verbund */
 
 const KEINE = Object.freeze({
@@ -94,6 +155,10 @@ const KEINE = Object.freeze({
 });
 
 const ANLEITUNG = `${GEMINI_ANLEITUNG}\n\nOder Claude (kostet pro Nutzung): console.anthropic.com → API Keys, dann unter Einstellungen → KI bei Claude einfügen.`;
+
+/** Das eine Feld für jeden Schlüssel (Chat): der Anbieter ergibt sich aus dem Schlüssel. */
+const AUTO = 'auto';
+const UNBEKANNT_SATZ = 'Diesen Schlüssel erkenne ich nicht: Er passt zu keinem Anbieter, den Neural OS kennt (Google Gemini, Mistral, Groq, OpenRouter, OpenAI, Claude). Kopier ihn bitte noch einmal vollständig mit dem Kopier-Knopf des Anbieters.';
 
 /**
  * Wem ein Schluessel gehoert, an seinem Anfang: "AQ." oder "AIza" (Google;
@@ -104,7 +169,8 @@ function anbieterVonSchluessel(roh) {
   const s = typeof roh === 'string' ? roh.trim() : '';
   if (/^(AIza|AQ\.)/.test(s)) return 'gemini';
   if (/^sk-ant-/.test(s)) return 'claude';
-  return null;
+  // gsk_ (Groq), sk-or-v1- (OpenRouter), sk- (OpenAI); Mistral hat keine Vorsilbe.
+  return openai.vorlageVonSchluessel(s);
 }
 
 /**
@@ -118,6 +184,7 @@ function anbieterVonSchluessel(roh) {
  * @param {Function} [deps.konfigSpeichern]
  * @param {string} [deps.claudeBasis]   nur für Tests (Statist)
  * @param {string} [deps.geminiBasis]   nur für Tests (Statist)
+ * @param {object} [deps.basen]         nur für Tests: {mistral: url, groq: url, …}
  */
 function createKi(deps = {}) {
   const { config, bus } = deps;
@@ -126,10 +193,13 @@ function createKi(deps = {}) {
   delete gemeinsam.claudeBasis;
   delete gemeinsam.geminiBasis;
   delete gemeinsam.basis;
+  delete gemeinsam.basen;
+  const basen = deps.basen && typeof deps.basen === 'object' ? deps.basen : {};
   const dienste = {
     claude: createAnbieterDienst(PROFIL_CLAUDE, { ...gemeinsam, basis: deps.claudeBasis || deps.basis }),
     gemini: createAnbieterDienst(PROFIL_GEMINI, { ...gemeinsam, basis: deps.geminiBasis }),
   };
+  for (const id of WEITERE) dienste[id] = createAnbieterDienst(profilFuer(id), { ...gemeinsam, basis: basen[id] });
 
   function publish(name, payload) {
     if (!bus || typeof bus.publish !== 'function') return;
@@ -150,7 +220,7 @@ function createKi(deps = {}) {
   }
 
   function dienst(id) {
-    if (!ANBIETER.includes(id)) throw new ValidationError(`Unbekannter Anbieter „${id}“. Möglich: gemini, claude.`);
+    if (!ANBIETER.includes(id)) throw new ValidationError(`Unbekannter Anbieter „${id}“. Möglich: ${ANBIETER.join(', ')}.`);
     return dienste[id];
   }
 
@@ -166,7 +236,8 @@ function createKi(deps = {}) {
   /** Der Zustand beider Anbieter plus der aktive -- für GET /api/ki. Fragt nie das Netz. */
   function zustand() {
     const id = aktiv();
-    const je = { gemini: dienste.gemini.zustand(), claude: dienste.claude.zustand() };
+    const je = {};
+    for (const x of ANBIETER) je[x] = dienste[x].zustand();
     const a = je[id];
     const irgendein = ANBIETER.some((x) => je[x].schluesselVorhanden);
     return {
@@ -224,15 +295,28 @@ function createKi(deps = {}) {
    * Sprache, während Claude antwortet).
    */
   async function schluesselSpeichern(anbieter, roh, opts = {}) {
-    dienst(anbieter);
+    if (anbieter !== AUTO) dienst(anbieter);
+    else if (typeof roh !== 'string' || !roh.trim()) throw new ValidationError('Bitte den Schlüssel einfügen.');
+    else if (!anbieterVonSchluessel(roh) && (/\s/.test(roh.trim()) || roh.trim().length < 16 || roh.trim().length > 400)) {
+      throw new ValidationError('Das sieht nicht nach einem KI-Schlüssel aus. Bitte genau so einfügen, wie er beim Anbieter steht (mit dem Kopier-Knopf).');
+    }
     // Ein Schluessel verraet, wem er gehoert: Google-Schluessel beginnen mit
     // "AQ." (neu) oder "AIza", die von Anthropic mit "sk-ant-". Steht er im falschen Feld
     // (Nutzer am 01.10.2026: den Google-Schluessel ins Claude-Feld), wird er
     // trotzdem richtig verbunden -- statt "Der Claude-Schlüssel stimmt nicht".
     const erkannt = anbieterVonSchluessel(roh);
-    const ziel = erkannt && erkannt !== anbieter ? erkannt : anbieter;
+    // "auto" (das eine Feld im Chat): ohne erkennbare Vorsilbe kann es nur
+    // Mistral sein -- nimmt Mistral ihn nicht, kennt Neural OS ihn nicht.
+    const ziel = anbieter === AUTO ? (erkannt || 'mistral') : (erkannt && erkannt !== anbieter ? erkannt : anbieter);
     const d = dienst(ziel);
-    await d.schluesselSpeichern(roh, opts);
+    try {
+      await d.schluesselSpeichern(roh, opts);
+    } catch (err) {
+      if (anbieter === AUTO && !erkannt && err && err.code === 'MISTRAL_SCHLUESSEL_FALSCH') {
+        throw new NeuralError('KI_SCHLUESSEL_UNBEKANNT', UNBEKANNT_SATZ, { status: 400 });
+      }
+      throw err;
+    }
     if (!eingestellt() || (opts.aktivieren === true && eingestellt() !== ziel)) {
       speichern({ ki: { anbieter: ziel } });
       publish('ki.anbieter', { anbieter: ziel });
@@ -261,7 +345,9 @@ function createKi(deps = {}) {
   function ausweichbar(err) {
     const code = String((err && err.code) || '');
     if (!code || code === 'ABORTED') return false;
-    if (/_(OFFLINE|GESPERRT|KEIN_NETZ|STILLE|ABGEBROCHEN|ABGELEHNT)$/.test(code)) return false;
+    if (/_(OFFLINE|GESPERRT|KEIN_NETZ|STILLE|ABGEBROCHEN)$/.test(code)) return false;
+    // Eine abgelehnte ANTWORT (Inhalt) bleibt abgelehnt; eine abgelehnte ANFRAGE nimmt ein anderer vielleicht.
+    if (/_ABGELEHNT$/.test(code) && !/_ANFRAGE_ABGELEHNT$/.test(code)) return false;
     return /_(LIMIT|LIMIT_TAG|ZU_VIELE_ANFRAGEN|UEBERLASTET|NICHT_KOSTENLOS|MODELL_UNBEKANNT|SCHLUESSEL_FALSCH|API_AUS|SCHLUESSEL_GESPERRT|GUTHABEN|ORT|KEINE_BERECHTIGUNG|ANFRAGE_ABGELEHNT|FEHLER|ZEIT|NICHT_VERBUNDEN|ZU_GROSS)$/.test(code);
   }
 
@@ -283,13 +369,37 @@ function createKi(deps = {}) {
    * jeder Anbieter übersetzt Verlauf und Werkzeuge anders.
    * @returns {Promise<object>} die Antwort plus `anbieter` und `modul`
    */
+  /** Alle Schlüssel dieses Anbieters pausieren gerade (Limit, Überlastung)? */
+  function voll(z) {
+    return Array.isArray(z.zugaenge) && z.zugaenge.length > 0 && z.zugaenge.every((x) => x.status !== 'bereit');
+  }
+
+  /**
+   * Die verbundenen Anbieter in der Reihenfolge, in der sie gefragt werden:
+   * die mit freiem Limit zuerst, die gerade pausierenden zuletzt -- sie
+   * werden nur gefragt, wenn sonst keiner kann (ein volles Limit vorher zu
+   * fragen, kostet nur Wartezeit). Dazu, wer übersprungen wurde.
+   */
+  function kandidaten() {
+    const frei = [];
+    const spaeter = [];
+    for (const id of reihenfolge()) {
+      const z = dienste[id].zustand();
+      if (!z.verbunden) continue;
+      (voll(z) ? spaeter : frei).push(id);
+    }
+    return { liste: [...frei, ...spaeter], uebersprungen: frei.length ? spaeter : [] };
+  }
+
   async function sendenAusweichend(bauen, opts = {}) {
     let erster = null;
     let vorher = null;
     const a = aktiv();
-    for (const id of reihenfolge()) {
+    const { liste, uebersprungen } = kandidaten();
+    // Der Eingestellte ist gerade ganz am Limit: gleich der nächste, mit einem Satz dazu.
+    if (uebersprungen.includes(a)) vorher = { id: a, err: { code: 'KI_LIMIT' } };
+    for (const id of liste) {
       const d = dienste[id];
-      if (!d.zustand().verbunden) continue;
       if (vorher && typeof opts.beiEreignis === 'function') {
         try { opts.beiEreignis({ art: 'hinweis', satz: `${dienste[vorher.id].name} ${grundWort(vorher.err)} – es antwortet ${d.name}.` }); } catch { /* egal */ }
       }
@@ -313,9 +423,8 @@ function createKi(deps = {}) {
   /** Der Registry-Weg (Agenten, Zusammenfassen) mit demselben Ausweichen. */
   async function chatAusweichend(opts) {
     let erster = null;
-    for (const id of reihenfolge()) {
+    for (const id of kandidaten().liste) {
       const d = dienste[id];
-      if (!d.zustand().verbunden) continue;
       try {
         const r = await d.chat({ ...opts, model: id === aktiv() ? opts.model : undefined });
         return { ...r, anbieter: id };
@@ -360,7 +469,7 @@ function createKi(deps = {}) {
     schluesselSpeichern,
     schluesselLoeschen,
     zugangVor,
-    vergessen: () => { dienste.claude.vergessen(); dienste.gemini.vergessen(); },
+    vergessen: () => { for (const id of ANBIETER) dienste[id].vergessen(); },
     anleitung: () => ANLEITUNG,
     get basis() { return aktiver().basis; },
   };
@@ -369,8 +478,10 @@ function createKi(deps = {}) {
 module.exports = {
   createKi,
   createGemini,
+  profilFuer,
   anbieterVonSchluessel,
   ANBIETER,
+  WEITERE,
   PROFIL_GEMINI,
   GEMINI_ANLEITUNG,
   GEMINI_GRUENDE,

@@ -286,6 +286,7 @@ async function createApp(opts = {}) {
       paths, config, gate, bus, vaultCrypto, logger,
       claudeBasis: opts.claudeBasis,
       geminiBasis: opts.geminiBasis,
+      basen: opts.anbieterBasen,
       konfigSpeichern: (patch) => app.saveConfig(patch),
     }))
     : null;
