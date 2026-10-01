@@ -307,8 +307,8 @@ function createShell() {
   let ausUhr = null;
   /** Ist dieses Geraet das, auf dem Neural OS laeuft? null, solange unbekannt. */
   let besitzer = null;
-  /** Saetze zum Koppeln, die schon kamen (Satz -> Zeit): jeder nur einmal. */
-  const kopplungGezeigt = new Map();
+  /** Saetze zum Koppeln, die in diesem Tab schon kamen: jeder nur einmal. */
+  const kopplungGezeigt = new Set();
 
   /* ---------------------------------------------------------------- */
   /* Live-Ereignisse vom Server                                        */
@@ -633,16 +633,15 @@ function createShell() {
   }
 
   /**
-   * Ein Satz zum Koppeln, einmal: „Gekoppelt mit Max.“ kann als Ereignis UND
-   * im Status der Kopplung ankommen (dann, wenn der Tab erst nach dem Start
-   * zuhoerte), und die Stick-Ansicht fragt denselben Status.
+   * Ein Satz zum Koppeln, einmal je Tab: „Gekoppelt mit Max.“ kann als
+   * Ereignis UND im Status der Kopplung ankommen (der Server behaelt ihn, bis
+   * jemand fragt), und die Stick-Ansicht fragt denselben Status -- auch
+   * Minuten spaeter (Pruefung W2, Befund 8).
    */
   function kopplungHinweis(satz, { ton = 'success', ziel = null } = {}) {
     if (typeof satz !== 'string' || !satz.trim()) return;
-    const jetzt = Date.now();
-    const vorher = kopplungGezeigt.get(satz);
-    if (vorher && jetzt - vorher < 60000) return;
-    kopplungGezeigt.set(satz, jetzt);
+    if (kopplungGezeigt.has(satz)) return;
+    kopplungGezeigt.add(satz);
     toast(satz, ton, ziel ? { action: { label: 'Ansehen', run: () => navigate(ziel) }, timeout: 12000 } : { timeout: 6000 });
   }
 

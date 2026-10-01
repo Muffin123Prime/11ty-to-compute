@@ -2073,3 +2073,51 @@ test('PIN nach dem Koppeln: auch der Stick ohne PIN hält an und sagt es, bis er
     assert.equal(appB.kopplung.status().partner[0].zustand, 'aktiv');
   });
 });
+
+test('Entkoppeln, wenn sich kopplungen.json nicht schreiben lässt: B erfährt nichts, die Kopplung bleibt – auch nach dem Neustart (Prüfung W2, Befund 5)', async () => {
+  await welt(async (w) => {
+    const A = w.stick('a');
+    const B = w.stick('b');
+    w.welt.add(A.root);
+    w.welt.add(B.root);
+    let appA = await w.start(A, { name: 'Max' });
+    const appB = await w.start(B, { name: 'Lena' });
+    await koppeln(appA, appB, B);
+    await appA.kopplung.abgleichen();
+    const idA = appA.identitaet.id;
+    const idB = appB.identitaet.id;
+    const nachricht = path.join(B.sync, 'koppeln', `${idA}.entkoppelt`);
+
+    const echtesOpen = fs.openSync;
+    let einmal = true;
+    fs.openSync = function voll(p, ...rest) {
+      if (einmal && String(p).includes('kopplungen.json') && String(p).includes('.tmp')) {
+        einmal = false;
+        throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      }
+      return echtesOpen.call(this, p, ...rest);
+    };
+    try {
+      await assert.rejects(() => appA.kopplung.entkoppeln(idB), (err) => /kopplungen\.json/.test(err.message));
+    } finally {
+      fs.openSync = echtesOpen;
+    }
+    assert.equal(einmal, false, 'Vorbedingung: der Schreibfehler kam');
+    assert.ok(appA.kopplung.status().partner.some((p) => p.id === idB), 'A hält B für entkoppelt, obwohl nichts gespeichert ist');
+    assert.equal(fs.existsSync(nachricht), false, 'B hat die Entkoppel-Nachricht trotzdem bekommen');
+    assert.equal(fs.existsSync(path.join(A.sync, 'koppeln', `${idB}.abmeldung`)), false, 'die Abmeldung liegt trotzdem auf A');
+
+    // Nach dem Neustart: beide sind noch gekoppelt, und B nimmt nichts an.
+    await w.stop(appA);
+    appA = await w.start(A);
+    assert.ok(appA.kopplung.status().partner.some((p) => p.id === idB), 'nach dem Neustart ist B nicht mehr gekoppelt');
+    const r = await appB.kopplung.annehmen();
+    assert.deepEqual(r.entkoppelt, []);
+    assert.ok(appB.kopplung.status().partner.some((p) => p.id === idA));
+
+    // Lässt es sich wieder schreiben, geht Entkoppeln wie immer.
+    await appA.kopplung.entkoppeln(idB);
+    assert.equal(appA.kopplung.status().partner.length, 0);
+    assert.ok(fs.existsSync(nachricht), 'keine Entkoppel-Nachricht auf B');
+  });
+});

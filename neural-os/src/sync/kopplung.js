@@ -1219,7 +1219,19 @@ function createKopplung(deps = {}) {
       const kandidat = steckt.get(id) || null;
       const stick = kandidat && (await traegt(kandidat.pfad, id)) ? kandidat : null;
 
+      // Erst haltbar, dann dem Partner sagen: Ließe sich kopplungen.json
+      // nicht schreiben (Stick voll, gerade gezogen), hätte der Partner die
+      // Entkoppel-Nachricht schon, und nach einem Neustart stünde er hier
+      // wieder als gekoppelt (Prüfung W2, Befund 5). Dann bleibt alles, wie
+      // es war, und der Fehler geht an die Oberfläche.
+      const partnerVorher = z.partner;
       z.partner = z.partner.filter((x) => x.id !== id);
+      try {
+        sichern();
+      } catch (err) {
+        z.partner = partnerVorher;
+        throw err;
+      }
       let zugestellt = false;
       if (stick) {
         try {
@@ -1242,8 +1254,12 @@ function createKopplung(deps = {}) {
             log.warn(`Die Abmeldung ließ sich nicht auf diesen Stick legen: ${err.message}`);
           }
         }
+        try {
+          sichern();
+        } catch (err) {
+          log.warn(`Die ausstehende Entkoppel-Nachricht ließ sich nicht sichern: ${err.message}`);
+        }
       }
-      sichern();
       steckt.delete(id);
       neuer.delete(id);
       gabelungen.delete(id);

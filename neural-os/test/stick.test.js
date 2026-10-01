@@ -2191,6 +2191,78 @@ test('einrichten: der eigene Stick bekommt nur fehlende Laufzeiten, das Programm
   }
 });
 
+test('einrichten: bricht es waehrend der Laufzeiten ab, wohnt noch keine KI auf dem Stick, und [Neue KI] faengt von vorn an (Pruefung W2, Befund 1)', async () => {
+  const stick = tempHome('stick-abbruch-lz');
+  const src = tempHome('stick-abbruch-lz-src');
+  try {
+    makeSource(src.home);
+    const andere = ['win-x64', 'darwin-arm64'].filter((p) => p !== LOCAL_PLATFORM);
+    const { routes } = laufzeitArchive(andere);
+    const tool = createStick({ gate: fakeGate(routes) });
+    const basis = path.join(stick.home, 'Inhalt');
+
+    // Der Tab geht zu, waehrend die erste Laufzeit fuer ein anderes System kommt.
+    const controller = new AbortController();
+    let beiLaufzeit = null;
+    await assert.rejects(
+      () => tool.einrichten(stick.home, {
+        sourceRoot: src.home,
+        plattformen: andere,
+        signal: controller.signal,
+        onProgress(e) {
+          if (!beiLaufzeit && e.phase === 'runtime' && e.platform && e.platform !== LOCAL_PLATFORM) {
+            beiLaufzeit = e.message;
+            controller.abort();
+          }
+        },
+      }),
+      (err) => err.code === 'ABORTED',
+    );
+    assert.ok(beiLaufzeit, 'Vorbedingung: der Abbruch kam waehrend einer Laufzeit');
+    assert.ok(fs.existsSync(path.join(basis, 'app', 'package.json')), 'Vorbedingung: das Programm lag schon auf dem Stick');
+    assert.equal(fs.existsSync(path.join(basis, 'neural-os.portable')), false, 'ein Marker auf einem halben Stick');
+    assert.equal(fs.existsSync(path.join(basis, 'data', 'config.json')), false, 'auf dem halben Stick wohnt schon eine KI');
+
+    // Die Ansicht zeigt ihn wieder als leeren Stick, und der Klick darauf geht.
+    assert.equal(tool.einrichtenPlan(stick.home, { plattformen: andere }).fall, 'neu');
+    const vorschau = tool.preview(stick.home, { action: 'prepare', includeRuntimes: andere, sourceRoot: src.home });
+    assert.deepEqual(vorschau.blockers.map((b) => b.code), [], JSON.stringify(vorschau.blockers));
+    const r = await tool.einrichten(stick.home, { sourceRoot: src.home, plattformen: andere });
+    assert.equal(r.fall, 'neu');
+    assert.deepEqual(r.fehlend, []);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(basis, 'neural-os.portable'), 'utf8')).kiId, r.ki.id);
+    const konfig = JSON.parse(fs.readFileSync(path.join(basis, 'data', 'config.json'), 'utf8'));
+    assert.equal(konfig.sync.deviceId, r.ki.id);
+
+    // Ein Stick, den eine aeltere Fassung halb vorbereitet hat: config.json
+    // ohne Marker. Auch dort wohnt noch keine KI -- [Neue KI] ersetzt sie.
+    const alt = tempHome('stick-abbruch-lz-alt');
+    try {
+      fs.mkdirSync(path.join(alt.home, 'Inhalt', 'data'), { recursive: true });
+      fs.writeFileSync(path.join(alt.home, 'Inhalt', 'data', 'config.json'), JSON.stringify({ sync: { deviceId: 'dev_000000000000000000000000' } }));
+      assert.equal(tool.einrichtenPlan(alt.home, { andereSysteme: false }).fall, 'neu');
+      const v = tool.preview(alt.home, { action: 'prepare', includeRuntimes: [], sourceRoot: src.home });
+      assert.ok(!v.blockers.some((b) => b.code === 'KI_VORHANDEN'), JSON.stringify(v.blockers));
+      const neu = await tool.einrichten(alt.home, { sourceRoot: src.home, andereSysteme: false });
+      assert.equal(neu.fall, 'neu');
+      const k2 = JSON.parse(fs.readFileSync(path.join(alt.home, 'Inhalt', 'data', 'config.json'), 'utf8'));
+      assert.equal(k2.sync.deviceId, neu.ki.id, 'die halbe Identitaet blieb stehen');
+      // Wohnt dagegen mehr als die Identitaet dort, bleibt es beim Satz.
+      fs.writeFileSync(path.join(alt.home, 'Inhalt', 'data', 'notiz.txt'), 'Wissen');
+      fs.rmSync(path.join(alt.home, 'Inhalt', 'neural-os.portable'));
+      await assert.rejects(
+        () => tool.einrichten(alt.home, { sourceRoot: src.home, andereSysteme: false }),
+        (err) => err.code === 'KI_VORHANDEN',
+      );
+    } finally {
+      alt.cleanup();
+    }
+  } finally {
+    stick.cleanup();
+    src.cleanup();
+  }
+});
+
 /* ------------------------------------------ Laufwerke finden, auswerfen */
 
 test('findeLaufwerke findet eingehaengte Sticks und sagt ehrlich, wenn keiner da ist', async () => {
@@ -2830,6 +2902,67 @@ test('HTTP: andereSysteme "ohneNetz" holt nichts aus dem Netz und legt keine Fre
       medien.cleanup();
     }
   }, { kopplung: { automatisch: false, einhaengepunkte: () => [] } });
+});
+
+test('HTTP: sagt die Vorschau vor dem Strom ab (Stick voll), ist die Freigabe fuer nodejs.org schon wieder zurueckgezogen (Pruefung W2, Befund 2)', async () => {
+  await withApp(async ({ app, req }) => {
+    const medien = tempHome('stick-voll-freigabe');
+    const ziel = path.join(medien.home, 'VOLL');
+    fs.mkdirSync(ziel);
+    const stickMod = require('../src/portable/stick');
+    const gate = fakeGate({});
+    app.stick = createStick({ gate, paths: app.paths, config: app.config, freeBytes: () => 1024 });
+    try {
+      const aktivVorher = app.gate.listGrants().length;
+      const lauf = await req('POST', '/api/stick/einrichten', { path: ziel, ki: 'neu', erlaubnis: true });
+      assert.equal(lauf.status, 507, lauf.text);
+      assert.equal(lauf.json.error.code, 'STICK_FULL');
+      assert.equal(lauf.events.length, 0, 'es wurde doch ein Strom geoeffnet');
+      assert.deepEqual(fs.readdirSync(ziel), [], 'trotz Absage wurde geschrieben');
+      assert.equal(gate.calls.length, 0, 'trotz Absage ging etwas ins Netz');
+      // Die Freigabe gab es (sonst prueft der Test nichts) -- und sie ist zu.
+      const unsere = app.gate.listGrants({ includeInactive: true }).filter((g) => g.data.scope === stickMod.RUNTIME_SCOPE);
+      assert.equal(unsere.length, 1, 'Vorbedingung: "Erlauben" hat eine Freigabe angelegt');
+      assert.equal(unsere[0].data.revoked, true, 'die Freigabe blieb nach der Absage 30 Minuten offen');
+      assert.equal(app.gate.listGrants().length, aktivVorher);
+    } finally {
+      medien.cleanup();
+    }
+  }, { kopplung: { automatisch: false, einhaengepunkte: () => [] } });
+});
+
+test('HTTP [Mit dieser KI gekoppelt]: ist diese KI ein Zwilling, kommt der Satz vor dem Vorbereiten, und auf den Stick kommt nichts (Pruefung W2, Befund 3)', async () => {
+  const punkte = [];
+  await withApp(async ({ app, req }) => {
+    const medien = tempHome('stick-zwilling');
+    const ziel = path.join(medien.home, 'LEER');
+    const kopie = path.join(medien.home, 'KOPIE');
+    fs.mkdirSync(ziel);
+    // Ein Stick, auf den jemand diese KI samt Marker kopiert hat.
+    fs.mkdirSync(path.join(kopie, 'data'), { recursive: true });
+    fs.mkdirSync(path.join(kopie, 'app'), { recursive: true });
+    fs.writeFileSync(path.join(kopie, 'app', 'package.json'), JSON.stringify({ name: 'neural-os', version: require('../package.json').version }));
+    fs.writeFileSync(path.join(kopie, paths.PORTABLE_MARKER), JSON.stringify({
+      neuralOsPortable: true, dataDir: 'data', appDir: 'app', kiId: app.identitaet.id, name: app.identitaet.name,
+    }));
+    punkte.push(kopie);
+    app.stick = createStick({ paths: app.paths, config: app.config });
+    try {
+      const stand = await req('GET', '/api/kopplung?suchen=1');
+      assert.equal(stand.status, 200, stand.text);
+      assert.equal(stand.json.selbst.zwilling, true, 'Vorbedingung: diese KI sieht sich als Zwilling');
+
+      const lauf = await req('POST', '/api/stick/einrichten', { path: ziel, ki: 'gekoppelt', andereSysteme: false });
+      assert.equal(lauf.status, 409, lauf.text);
+      assert.equal(lauf.json.error.code, 'KOPPLUNG_ZWILLING');
+      assert.equal(lauf.json.error.message, 'Zwei Sticks tragen dieselbe KI.');
+      assert.equal(lauf.events.length, 0, 'es wurde doch ein Strom geoeffnet');
+      assert.deepEqual(fs.readdirSync(ziel), [], 'der Stick wurde vorbereitet und stuende ungekoppelt da');
+      assert.equal(app.kopplung.status().partner.length, 0);
+    } finally {
+      medien.cleanup();
+    }
+  }, { kopplung: { automatisch: false, einhaengepunkte: () => [...punkte] } });
 });
 
 module.exports = { name: 'stick', tests: drain() };

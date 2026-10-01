@@ -432,6 +432,21 @@ function kiEintraege(dataDir) {
   }
 }
 
+/**
+ * Wohnt im Datenordner schon eine KI? Die Eintraege, die dafuer zaehlen.
+ *
+ * Ein abgebrochenes Vorbereiten hinterlaesst hoechstens die Identitaet
+ * (config.json) ohne Marker -- dort wohnt noch keine KI, und ein neues
+ * [Neue KI] darf sie ersetzen. Sonst stuende der Stick als „Leerer Stick“ da
+ * und jeder Klick endete in „Auf diesem Stick wohnt schon eine KI.“
+ * (Pruefung W2, Befund 1).
+ */
+function kiBewohnt(basis) {
+  const eintraege = kiEintraege(dataDirIn(basis));
+  if (eintraege.length && !readMarker(basis) && eintraege.every((n) => n === 'config.json')) return [];
+  return eintraege;
+}
+
 /** Der naechste Ordner nach oben, den es wirklich gibt. Fuer eine Vorschau auf einen Pfad, der noch nicht existiert. */
 function nearestExisting(dir) {
   let probe = path.resolve(dir);
@@ -2420,7 +2435,7 @@ function createStick(deps = {}) {
 
     // ---- wohnt hier schon eine KI? Vor dem ersten Byte. ----
     const dataDir = dataDirIn(basis);
-    const belegt = kiEintraege(dataDir);
+    const belegt = kiBewohnt(basis);
     if (belegt.length) throw new KiVorhandenError({ dataDir, entries: belegt.length });
 
     const plan = resolvePlatforms(opts.includeRuntimes);
@@ -2500,11 +2515,9 @@ function createStick(deps = {}) {
     let totalBytes = written.bytes;
     let totalFiles = written.files;
 
-    // ---- data and sync directories, and the KI that lives here ----
+    // ---- data and sync directories; die KI selbst erst ganz am Schluss ----
     mkdirp(dataDir, 0o700);
     mkdirp(path.join(basis, LAYOUT.sync), 0o700);
-    const ki = kiAnlegen(dataDir, wunschName, wurzel);
-    totalFiles += 1;
 
     // ---- runtimes ----
     const runtimes = [];
@@ -2565,6 +2578,11 @@ function createStick(deps = {}) {
     warnings.push(...launchers.warnings);
     spotlightAus(wurzel);
     writeFileAtomic(path.join(wurzel, LAYOUT.readme), renderReadme());
+    // Die KI und ihr Marker kommen zuletzt, unmittelbar nacheinander: Bricht
+    // das Vorbereiten vorher ab (Laufzeit, Tab zu, Stick gezogen), wohnt hier
+    // noch keine KI, und ein neues [Neue KI] faengt von vorn an.
+    const ki = kiAnlegen(dataDir, wunschName, wurzel);
+    totalFiles += 1;
     writeMarker(basis, {
       kiId: ki.id,
       name: ki.name,
@@ -2823,7 +2841,7 @@ function createStick(deps = {}) {
 
     // ---- Datenordner auf dem Stick: wohnt hier schon eine KI? ----
     const dataDir = dataDirIn(basis);
-    const dataEntries = kiEintraege(dataDir);
+    const dataEntries = kiBewohnt(basis);
     if (action === 'prepare' && dataEntries.length) {
       block(new KiVorhandenError({ dataDir, entries: dataEntries.length }));
     }

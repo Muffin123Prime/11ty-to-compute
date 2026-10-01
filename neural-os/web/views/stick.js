@@ -159,7 +159,17 @@ function fehlendSaetze(fehlend) {
 
 /** Liegt `pfad` in `basis` oder ist er es? (ein vorbereiteter Stick steht unter „…/Inhalt“) */
 function unter(pfad, basis) {
-  return pfad === basis || pfad.startsWith(`${basis}/`) || pfad.startsWith(`${basis}\\`);
+  if (pfad === basis) return true;
+  // Eine Laufwerkswurzel endet schon auf dem Trenner: „E:\“ und „/Volumes/X/“.
+  const ohne = basis.replace(/[\\/]+$/, '');
+  return pfad.startsWith(`${ohne}/`) || pfad.startsWith(`${ohne}\\`);
+}
+
+/** Ist `pfad` der Stick an `wurzel` -- die Wurzel selbst oder sein Ordner „Inhalt“ (Bauplan 1.1)? */
+function stickAn(pfad, wurzel) {
+  if (pfad === wurzel) return true;
+  const ohne = wurzel.replace(/[\\/]+$/, '');
+  return pfad === `${ohne}/Inhalt` || pfad === `${ohne}\\Inhalt`;
 }
 
 /** Für Selektoren. Der Stiltext heißt hier STIL -- `CSS` ist das des Browsers. */
@@ -261,7 +271,10 @@ export default {
     if (!self.alive) return;
     alleNeu(self);
     await ladeSicherung(self);
-    if (self.alive) renderSichern(self);
+    // Schon wieder weg? Dann keinen Takt und keine Abos mehr anlegen -- sie
+    // hingen sonst für immer (Prüfung W2, Befund 9).
+    if (!self.alive) return;
+    renderSichern(self);
     beobachten(self);
   },
 
@@ -505,6 +518,13 @@ function schreibtGerade(self) {
 /** Der Vorgang zu einem Stick -- über den Pfad, oder über die Kennung der KI, die er eben bekam. */
 function vorgangFuer(self, { pfad = null, id = null } = {}) {
   if (pfad && self.vorgaenge.has(`pfad:${pfad}`)) return self.vorgaenge.get(`pfad:${pfad}`);
+  // Ein eben vorbereiteter Stick steht unter „…/Inhalt“, sein Vorgang am Pfad,
+  // der angetippt wurde -- auch wenn er scheiterte und kein Ergebnis hat.
+  if (pfad) {
+    for (const [k, v] of self.vorgaenge) {
+      if (k.startsWith('pfad:') && v.art === 'einrichten' && k.slice(5) !== pfad && stickAn(pfad, k.slice(5))) return v;
+    }
+  }
   if (id) {
     for (const v of self.vorgaenge.values()) {
       if (v.art === 'einrichten' && v.ergebnis && v.ergebnis.ki && v.ergebnis.ki.id === id) return v;
@@ -565,7 +585,13 @@ async function stromLauf(self, schluessel, art, route, body, extra = {}) {
       },
     });
   } catch (err) {
-    v.fehler = err && err.isAborted ? 'Abgebrochen. Auf dem Stick steht der Stand von vorher.' : fehlerText(err);
+    // Erneuern und Laufzeit holen tauschen erst am Ende aus -- dann steht der
+    // Stand von vorher da. Ein abgebrochenes Vorbereiten hinterlässt einen
+    // Stick ohne KI, der sich neu vorbereiten lässt.
+    const abbruch = art === 'einrichten'
+      ? 'Abgebrochen – der Stick ist nicht fertig. Noch einmal tippen, dann beginnt es von vorn.'
+      : 'Abgebrochen. Auf dem Stick steht der Stand von vorher.';
+    v.fehler = err && err.isAborted ? abbruch : fehlerText(err);
     v.code = (err && err.code) || null;
     v.details = (err && err.details) || null;
   } finally {
@@ -667,8 +693,11 @@ async function koppeln(self, g, schluessel, pinFeld) {
   const vorher = self.vorgaenge.get(schluessel);
   if (vorher && vorher.laeuft) return;
   const pin = String(self.pins.get(pinFeld) || '');
-  if (g.pin && !PIN_RE.test(pin)) {
-    fehlerSetzen(self, schluessel, PIN_SATZ, 'koppeln');
+  // Der andere Stick kann auch mit einer Passphrase geschützt sein: Was
+  // stimmt, sagt der Server („Falsche PIN.“), hier zählt nur „nicht leer“.
+  if (g.pin && !pin.trim()) {
+    fehlerSetzen(self, schluessel, `Erst die PIN von ${g.name || 'dem anderen Stick'} eingeben.`, 'koppeln');
+    fokusAufFeld(self, pinFeld);
     return;
   }
   const v = neuerVorgang(self, schluessel, 'koppeln');
@@ -693,8 +722,18 @@ async function koppeln(self, g, schluessel, pinFeld) {
   }
   if (!self.alive) return;
   alleNeu(self);
+  // Nach „Falsche PIN.“ gleich wieder ins Feld (Prüfung W2, Befund 10).
+  if (v.code === 'FALSCHE_PIN') fokusAufFeld(self, pinFeld);
   await ladeKopplung(self);
   nachZiehen(self);
+}
+
+/** Den Cursor in ein PIN-Feld setzen, sobald es (neu) gezeichnet ist. */
+function fokusAufFeld(self, feldSchluessel) {
+  const feld = self.container && self.container.querySelector(`[data-feld="${escape(feldSchluessel)}"]`);
+  if (feld) {
+    try { feld.focus(); } catch { /* weg */ }
+  }
 }
 
 /* --- [Jetzt abgleichen] --- */
@@ -751,6 +790,9 @@ async function entkoppeln(self, p) {
     if (!self.alive || (err && err.isAborted)) return;
     v.fehler = fehlerText(err);
     v.code = (err && err.code) || null;
+    // Die Rückfrage verdrängte sonst die Meldung, und es sähe aus, als täte
+    // der Knopf nichts (Prüfung W2, Befund 4).
+    self.entkoppeln = null;
   } finally {
     v.laeuft = false;
   }
@@ -1053,12 +1095,14 @@ function knopf(self, o) {
  * soll die PIN nicht speichern wollen (wie in den Einstellungen). Die Punkte
  * macht CSS (-webkit-text-security).
  */
-function pinFeld(self, feldSchluessel, beschriftung, onEnter) {
+function pinFeld(self, feldSchluessel, beschriftung, onEnter, { nurZiffern = true } = {}) {
   const feld = h('input.input.stickv__pin', {
     type: 'text',
-    inputmode: 'numeric',
+    // Die PIN eines neuen Sticks legt diese App fest: 4 bis 6 Ziffern. Die
+    // eines anderen Sticks kann auch eine Passphrase sein (Prüfung W2, Befund 6).
+    inputmode: nurZiffern ? 'numeric' : null,
     autocomplete: 'off',
-    maxlength: '6',
+    maxlength: nurZiffern ? '6' : '200',
     spellcheck: 'false',
     value: self.pins.get(feldSchluessel) || '',
     'aria-label': beschriftung,
@@ -1066,7 +1110,7 @@ function pinFeld(self, feldSchluessel, beschriftung, onEnter) {
     attrs: { autocorrect: 'off', autocapitalize: 'off', 'data-1p-ignore': 'true', 'data-lpignore': 'true', enterkeyhint: 'done' },
     onInput: (ev) => {
       const el = ev.currentTarget;
-      const sauber = el.value.replace(/[^0-9]/g, '').slice(0, 6);
+      const sauber = nurZiffern ? el.value.replace(/[^0-9]/g, '').slice(0, 6) : el.value;
       if (sauber !== el.value) el.value = sauber;
       self.pins.set(feldSchluessel, sauber);
     },
@@ -1313,7 +1357,8 @@ function renderAndere(self) {
 function stickReihe(self, g) {
   const schluessel = `pfad:${g.pfad}`;
   const v = vorgangFuer(self, { pfad: g.pfad, id: g.id });
-  const name = g.name || 'ohne Namen';
+  // Ein Stick ohne Namen (vorbereitet mit einem älteren Programm): die Sätze aus 1.6.
+  const programmSatz = (wie) => (g.name ? `${g.name} hat eine ${wie} Version.` : `Programm auf dem Stick ist ${wie === 'ältere' ? 'älter' : 'neuer'}.`);
   // Während er vorbereitet wird, bleibt er der leere Stick, den man angetippt
   // hat. Danach zeigt er, was er jetzt ist („Anderer Stick: …“ [Koppeln]),
   // und darunter steht „Fertig. Stick kann raus.“
@@ -1323,14 +1368,14 @@ function stickReihe(self, g) {
     return reihe(self, {
       art: 'aelter',
       schluessel,
-      satz: `${name} hat eine ältere Version.`,
+      satz: programmSatz('ältere'),
       knoepfe: v && v.laeuft ? [] : [erneuernKnopf(self, g, schluessel)],
       vorgang: v,
       data: { pfad: g.pfad },
     });
   }
   if (g.zustand === 'neuer') {
-    return reihe(self, { art: 'neuer', schluessel, satz: `${name} hat eine neuere Version.`, vorgang: v, data: { pfad: g.pfad } });
+    return reihe(self, { art: 'neuer', schluessel, satz: programmSatz('neuere'), vorgang: v, data: { pfad: g.pfad } });
   }
   // Ein Stick ohne KI (leer, oder nur das Programm drauf) bekommt eine.
   if (g.zustand === 'leer' || !g.id) return leerReihe(self, g.pfad, g.frei, v);
@@ -1381,7 +1426,7 @@ function fremdReihe(self, g, v) {
   const los = () => koppeln(self, g, schluessel, feldSchluessel);
   const knoepfe = [];
   if (!(v && v.laeuft)) {
-    if (g.pin) knoepfe.push(pinFeld(self, feldSchluessel, `PIN von ${name}`, los));
+    if (g.pin) knoepfe.push(pinFeld(self, feldSchluessel, `PIN von ${name}`, los, { nurZiffern: false }));
     knoepfe.push(knopf(self, {
       beschriftung: 'Koppeln',
       art: 'primary',

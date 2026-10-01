@@ -189,6 +189,15 @@ function koppelnVorbereiten(rc, ki, pin) {
     throw new NeuralError('KOPPELN_FEHLT', 'Koppeln gibt es noch nicht.', { status: 501 });
   }
   if (pin !== undefined && pin !== null && typeof pin !== 'string') throw new ValidationError('"pin" muss Text sein.');
+  // Gilt diese KI als Kopie einer anderen, scheitert das Koppeln -- erst NACH
+  // dem Vorbereiten, und der neue Stick stuende ungekoppelt da. Deshalb vorher
+  // (Pruefung W2, Befund 3).
+  if (typeof kopplung.status === 'function') {
+    const stand = kopplung.status();
+    if (stand && stand.selbst && stand.selbst.zwilling) {
+      throw new NeuralError('KOPPLUNG_ZWILLING', 'Zwei Sticks tragen dieselbe KI.', { status: 409 });
+    }
+  }
   const vc = rc.ctx.vaultCrypto;
   const mitPin = !!(vc && vc.enabled);
   if (mitPin) {
@@ -323,18 +332,33 @@ function openStreamOrExplain(rc, what) {
  * kommt als `fehler`-Ereignis, weil es vorher niemand wissen konnte.
  */
 async function streamed(rc, { what, root, previewOpts, vorschauVon, run, danach }) {
-  const vorschau = typeof vorschauVon === 'function'
-    ? vorschauVon()
-    : stickOf(rc, 'preview').preview(root, previewOpts);
-  if (vorschau.blockers.length) {
-    const erste = vorschau.blockers[0];
-    throw new NeuralError(erste.code, erste.message, {
-      status: erste.status || 409,
-      details: { blockers: vorschau.blockers, root: vorschau.root },
-    });
+  // Was danach aufzuraeumen ist (die Freigabe fuer nodejs.org), gilt auch fuer
+  // jede Absage vor dem Strom: ein Hindernis in der Vorschau (Stick voll,
+  // schon eine KI darauf), kein freier Platz fuer einen Strom. Sonst bliebe
+  // die Freigabe 30 Minuten offen, und der naechste Stick laedt ohne Frage
+  // (Pruefung W2, Befund 2).
+  const aufraeumen = () => {
+    if (typeof danach !== 'function') return;
+    try { danach(); } catch { /* Aufräumen darf die Antwort nicht verhindern */ }
+  };
+  let vorschau;
+  let stream;
+  try {
+    vorschau = typeof vorschauVon === 'function'
+      ? vorschauVon()
+      : stickOf(rc, 'preview').preview(root, previewOpts);
+    if (vorschau.blockers.length) {
+      const erste = vorschau.blockers[0];
+      throw new NeuralError(erste.code, erste.message, {
+        status: erste.status || 409,
+        details: { blockers: vorschau.blockers, root: vorschau.root },
+      });
+    }
+    stream = openStreamOrExplain(rc, what);
+  } catch (err) {
+    aufraeumen();
+    throw err;
   }
-
-  const stream = openStreamOrExplain(rc, what);
   // Ein geschlossener Tab darf keine lange Kopie zu Ende laufen lassen.
   const controller = new AbortController();
   stream.onClose(() => controller.abort());
@@ -360,9 +384,7 @@ async function streamed(rc, { what, root, previewOpts, vorschauVon, run, danach 
     }
     if (e.status >= 500 && e.code === 'INTERNAL_ERROR') rc.log.error(`Stick ${what}: ${e.stack || e.message}`);
   } finally {
-    if (typeof danach === 'function') {
-      try { danach(); } catch { /* Aufräumen darf den Strom nicht offen lassen */ }
-    }
+    aufraeumen();
     stream.close();
   }
   return undefined; // der Strom hat die Antwort übernommen
@@ -666,15 +688,8 @@ function register(router) {
     return streamed(rc, {
       what: 'Stick vorbereiten',
       root,
-      vorschauVon: () => {
-        try {
-          return vorschauVon();
-        } catch (err) {
-          // Die Absage vor dem Strom darf keine Freigabe zurücklassen.
-          erlaubnisZurueckziehen(rc, grantId);
-          throw err;
-        }
-      },
+      // Die Absage vor dem Strom zieht die Freigabe zurück (streamed, danach).
+      vorschauVon,
       run: async ({ signal, onProgress }) => {
         const r = await stick.einrichten(root, {
           eigenerStick,
@@ -778,14 +793,7 @@ function register(router) {
     return streamed(rc, {
       what: `Laufzeit ${namen} holen`,
       root,
-      vorschauVon: () => {
-        try {
-          return stick.preview(root, { action: 'runtime', platform: platforms[0] });
-        } catch (err) {
-          erlaubnisZurueckziehen(rc, grantId);
-          throw err;
-        }
-      },
+      vorschauVon: () => stick.preview(root, { action: 'runtime', platform: platforms[0] }),
       run: async ({ signal, onProgress }) => {
         const geholt = [];
         const fehlend = [];
