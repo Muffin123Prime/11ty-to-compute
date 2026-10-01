@@ -9,12 +9,12 @@ prüfen ist, steht weiter unten – ungeschönt.
 ## Messwerte
 
 ```
-npm test                             1596 Tests, 0 fehlgeschlagen
+npm test                             1604 Tests, 0 fehlgeschlagen
 npm run check                        170 Funktionen über HTTP, 0 defekt
-npm run ui                           261 Prüfpunkte im Browser, alles in Ordnung
+npm run ui                           264 Prüfpunkte im Browser, alles in Ordnung
 npm run proof                        22 Prüfungen, ohne Freigabe geht nichts ins Netz
 node tools/chat-beweis.js            226 Punkte, alle Baustein-Arten im Browser
-node tools/stick-trennung-check.js   15 Punkte, zwei Sticks im selben Browser
+node tools/stick-trennung-check.js   17 Punkte, zwei Sticks im selben Browser, [Beenden] am Mac
 node tools/screenshots.js            106 Bilder, kein Schritt fehlt
 ```
 
@@ -53,17 +53,25 @@ beweist, dass ohne Freigabe nichts ins Netz geht.
   gekoppelt], Laufzeiten für Windows und Mac (offline vom eigenen Stick, sonst
   einmal von nodejs.org), Koppeln über verschlüsselte Postfächer mit beiden
   Fassungen bei Konflikten, Zwillings-Erkennung, [Beenden] mit Endtext, zwei
-  Sticks im selben Browser streng getrennt (`web/lib/lokal.js`).
+  Sticks im selben Browser streng getrennt (`web/lib/lokal.js`). Am Mac ein
+  Programm statt Terminal-Fenster („Neural OS starten - Mac“, Notstart im
+  Inhalt), und nach [Beenden] wirft der Mac den Stick selbst aus (Paket M).
 
 ## Nur am echten Rechner prüfbar
 
 Hier gibt es keinen Windows-PC und keinen Mac. Ob das schwarze Fenster unter
 Windows wirklich zugeht, ob Schul-Richtlinien Programme vom Stick sperren, ob
-die Ports 20000–29999 frei sind, was Gatekeeper und die Frage nach dem
-Wechseldatenträger am Mac tun und ob Auswerfen ohne Administrator geht, klärt
-der Probelauf (`docs/PROBELAUF.md`, Bauplan Teil 3). Bis dahin ist all das
-**Annahme**. Paket M (Mac ohne Terminal-Fenster, automatisches Auswerfen) wird
-erst nach dem Probelauf gebaut.
+die Ports 20000–29999 frei sind, was Gatekeeper zum Mac-Programm sagt, ob die
+Frage nach dem Wechseldatenträger kommt und ob `diskutil eject` ohne
+Administrator geht, ist **Annahme** (Bauplan Teil 3). Paket M ist trotzdem
+gebaut, auf Wunsch des Nutzers vor dem Probelauf, und so, dass jede Annahme
+einen Ausweg hat: Öffnet macOS das Programm nicht, gibt es den Notstart im
+Ordner „Inhalt“ (der bisherige Start im Terminal); kann der Mac nicht
+auswerfen, sagt der Endtext „Stick im Finder auswerfen.“ Belegt ist, was ohne
+Mac geht: Das Skript im Programm läuft unter dash mit nachgestellten
+Mac-Befehlen, der Helfer fürs Auswerfen unter sh gegen ein nachgestelltes
+diskutil (`test/mac-paket.test.js`). Der freiwillige Probelauf
+(`docs/PROBELAUF.md`) macht aus den Annahmen Belege.
 
 ## Bewusst entfernt
 

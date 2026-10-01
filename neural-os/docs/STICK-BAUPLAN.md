@@ -111,8 +111,10 @@ Windows:  "Neural OS starten - Windows" doppelklicken.
 Mac:      "Neural OS starten - Mac" doppelklicken.
 Fertig:   in der App auf "Beenden".
 Deine Daten liegen im Ordner "Inhalt". Sichern = ganzen Stick kopieren.
-Geht etwas nicht, steht der Grund im Fenster, das dann offen bleibt.
+Geht etwas nicht, steht der Grund im Fenster. Mac-Notstart: Inhalt > "Notstart - Mac".
 ```
+
+(Die fünfte Zeile nennt seit Paket M den Notstart; vorher: „Geht etwas nicht, steht der Grund im Fenster, das dann offen bleibt.“)
 
 ### 1.2 Windows
 
@@ -137,6 +139,8 @@ Geht etwas schief, bleibt das Fenster offen und zeigt genau einen der folgenden 
 4. Der Browser öffnet sich, wie unter Windows. Den Rest schließt ⌘W; Neural OS läuft weiter.
 5. Ein Mac-Fenster ganz ohne Terminal kommt erst mit Paket M, und nur dann, wenn der Probelauf es erlaubt.
 
+**Stand seit Paket M (01.10.2026):** „Neural OS starten - Mac“ ist ein Programm (`.app` mit einem sh-Skript, `tools/launchers/start-macos-app.sh`): kein Terminal-Fenster, die Frage nach dem Wechseldatenträger stellt macOS dann für „Neural OS starten - Mac“, Fehlersätze stehen in einem Dialog. Der Ablauf oben mit dem Terminal ist der **Notstart**: „Notstart - Mac“ im Ordner „Inhalt“.
+
 Mögliche Fehlersätze (das Fenster bleibt offen):
 - **„Dieser Mac ist zu alt. Nötig ist macOS 11 oder neuer.“** Belegt: Die mitgelieferte Node 22 verlangt macOS ab 11.0.
 - **„macOS hat den Start blockiert: Systemeinstellungen › Datenschutz & Sicherheit › Dennoch öffnen.“**
@@ -149,6 +153,7 @@ Mögliche Fehlersätze (das Fenster bleibt offen):
 - In der App auf **[Beenden]** tippen. Der Platz des Knopfs gehört zum Oberflächen-Umbau, die Beschriftung ist festgelegt. Die Seite zeigt dann nur noch:
   - Windows: **„Gespeichert. Stick kann raus.“**
   - Mac: **„Gespeichert. Stick im Finder auswerfen.“** Das automatische Auswerfen kommt erst mit Paket M.
+  - Seit Paket M am Mac: **„Gespeichert. Stick kann raus, sobald er aus dem Finder verschwindet.“**, wenn `diskutil info` den Stick als auswerfbar meldet; ein Helfer wirft ihn aus, sobald Neural OS zu ist. Sonst bleibt es beim Satz oben.
 - Stick **ohne Beenden gezogen**: Neural OS beendet sich innerhalb von etwa 4 s von selbst. Ein offener Tab zeigt **„Neural OS ist aus.“** und darunter **„Zum Öffnen den Starter auf dem Stick doppelklicken.“** Von der KI bleibt nichts sichtbar.
 - **Browser zu, Stick steckt noch:** Nach 10 min ohne offenen Tab beendet sich Neural OS selbst. Zum Weitermachen wieder doppelklicken.
 - Auf dem Laptop bleibt nichts Inhaltliches zurück: kein Entwurf und kein Service-Worker-Cache. Im Browserverlauf stehen nur Adressen.
@@ -203,7 +208,7 @@ Mögliche Fehlersätze (das Fenster bleibt offen):
 | Starter Mac, Erfolg | Fertig. Dieses Fenster kann zu. | – |
 | Starter, Fehler | Dieser Rechner lässt keine Programme vom Stick starten. · Auf diesem Stick fehlt das Programm für Windows. · Auf diesem Stick fehlt das Programm für den Mac. · Dieser Mac ist zu alt. Nötig ist macOS 11 oder neuer. · macOS hat den Start blockiert: Systemeinstellungen › Datenschutz & Sicherheit › Dennoch öffnen. · Der Stick ist schreibgeschützt. · Neural OS konnte nicht starten: | – |
 | Vorraum | PIN · Falsche PIN. · Zu oft falsch. Kurz warten. | [Öffnen] |
-| Nach Beenden | Gespeichert. Stick kann raus. · (Mac) Gespeichert. Stick im Finder auswerfen. | – |
+| Nach Beenden | Gespeichert. Stick kann raus. · (Mac, wirft selbst aus) Gespeichert. Stick kann raus, sobald er aus dem Finder verschwindet. · (Mac, kann es nicht) Gespeichert. Stick im Finder auswerfen. | – |
 | Verbindung weg | Neural OS ist aus. / Zum Öffnen den Starter auf dem Stick doppelklicken. | – |
 | Stick-Ansicht | Leerer Stick: E:\ · 14,2 GB frei · PIN für den neuen Stick · Wird vorbereitet … 42 % · Fertig. Stick kann raus. · Läuft bisher nur an Windows. · Läuft bisher nur am Mac. · Ohne Internet geht das nicht. · Auf diesem Stick wohnt schon eine KI. · Windows sieht diesen Stick nicht. · Programm auf dem Stick ist älter. | [Neue KI] [Mit dieser KI gekoppelt] [Für Mac holen] [Für Windows holen] [Erneuern] |
 | Kopplung | Anderer Stick: Lena · PIN von Lena · Falsche PIN. · Lena hat eine PIN, dieser Stick nicht. · Dieser Stick hat eine PIN, Lena nicht. · Gekoppelt mit Lena · abgeglichen 14:03 · Gekoppelt mit Lena · zuletzt gestern 16:40 · Gekoppelt mit Lena · Lena übernimmt beim nächsten Start · Gleiche ab … · Gekoppelt mit Max. · „X“ gab es zweimal verschieden – beide sind da. · Entkoppeln? Beide behalten, was sie wissen. · Zwei Sticks tragen dieselbe KI. · Lena hat eine ältere Version. · Lena hat eine neuere Version. · Gekoppelt mit Lena (über Lena auch: Tom) | [Koppeln] [Jetzt abgleichen] [Entkoppeln] [Abbrechen] [Ansehen] [PIN festlegen] [Diesen Stick eigenständig machen] [Lena erneuern] |
@@ -998,6 +1003,13 @@ Paket M wird **nur** umgesetzt, soweit der Probelauf es erlaubt:
   - Mac, wenn `diskutil info` `Ejectable` meldet.
   - Ablauf: `beenden` startet einen abgelösten Helfer mit `cwd` außerhalb des Sticks und einem Programm des Systems. Der Helfer wartet, bis die PID weg ist, und wirft dann aus.
   - Der Endtext wird dann „Gespeichert. Stick kann raus.“ auf beiden Systemen.
+
+**Umsetzung (01.10.2026, auf Wunsch des Nutzers vor dem Probelauf):**
+- `.app` statt `.command`: gebaut. `Neural OS starten - Mac.app` (Info.plist, Skript `Contents/MacOS/neural-os-starten`) wird beim Vorbereiten und Erneuern geschrieben; das `.command` liegt als `Inhalt/Notstart - Mac.command` daneben, ein altes `.command` in der Wurzel wird beim Erneuern entfernt. Fehler zeigt `osascript` (`display alert`, der Satz als Argument, nie im AppleScript-Text). App Translocation wird erkannt und nennt den Notstart.
+- Terminal schließt sich selbst: entfällt, das Programm öffnet keins. Der Notstart behält das Fenster.
+- Automatisch auswerfen, Mac: gebaut. `POST /api/system/beenden` fragt `diskutil info -plist` (Ejectable, nicht Internal, unter /Volumes); dann startet `/bin/sh` mit `cwd /` abgelöst, wartet auf die PID des Dienstes und ruft `diskutil eject` (bis zu fünf Versuche). Endtext: „Gespeichert. Stick kann raus, sobald er aus dem Finder verschwindet.“ – ehrlich auch, wenn das Auswerfen doch scheitert.
+- Automatisch auswerfen, Windows: bewusst nicht. USB-Sticks stehen dort ab Werk auf „Schnelles Entfernen“, der Endtext „Gespeichert. Stick kann raus.“ stimmt ohne Auswerfen, und PowerShell kann auf Schulrechnern gesperrt sein.
+- Belege ohne Mac: `test/mac-paket.test.js` (Skript unter dash mit nachgestellten Mac-Befehlen, Helfer unter sh gegen ein nachgestelltes diskutil, HTTP), `tools/stick-trennung-check.js` Schritt 6. Der Probelauf bleibt der Weg, die Annahmen zu belegen.
 
 ---
 

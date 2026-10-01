@@ -1764,11 +1764,13 @@ async function checkStick() {
       assert(files.length > 0, 'Laufzeitordner ist leer');
       return `${LOCAL_PLATFORM}: ${files.join(', ')}`;
     });
-    await check('In der Wurzel nur Inhalt, LIESMICH und die Starter fuer Windows und Mac; LIESMICH hat fuenf Zeilen', async () => {
+    await check('In der Wurzel nur Inhalt, LIESMICH und die Starter fuer Windows und Mac (Programm, Notstart im Inhalt); LIESMICH hat fuenf Zeilen', async () => {
       const sichtbar = fs.readdirSync(tmp).filter((n) => !n.startsWith('.')).sort();
-      const soll = ['Inhalt', 'LIESMICH.txt', 'Neural OS starten - Mac.command', 'Neural OS starten - Windows.bat'];
+      const soll = ['Inhalt', 'LIESMICH.txt', 'Neural OS starten - Mac.app', 'Neural OS starten - Windows.bat'];
       assert(sichtbar.join('|') === soll.join('|'), `Wurzel: ${sichtbar.join(', ')}`);
       assert(fs.existsSync(inhalt(tmp, 'Starter fuer Linux.sh')), 'der Linux-Starter fehlt im Inhalt');
+      assert(fs.existsSync(inhalt(tmp, 'Notstart - Mac.command')), 'der Mac-Notstart fehlt im Inhalt');
+      assert(fs.existsSync(path.join(tmp, 'Neural OS starten - Mac.app', 'Contents', 'MacOS', 'neural-os-starten')), 'im Mac-Programm fehlt das Skript');
       const bat = fs.readFileSync(path.join(tmp, 'Neural OS starten - Windows.bat'), 'utf8');
       assert(bat.includes('\r\n'), 'die .bat hat kein CRLF');
       const zeilen = fs.readFileSync(path.join(tmp, 'LIESMICH.txt'), 'utf8').replace(/\r?\n$/, '').split(/\r?\n/);

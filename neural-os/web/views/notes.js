@@ -2036,12 +2036,21 @@ export default {
       // stand es im Gehirn als loses „image.png“ unter „Unverbunden“.
       const abgelegt = new Set();
       let gespeicherterText = String(data.body || '');
-      sheetCleanups.push(() => {
+      const bilderAufraeumen = (opts) => {
         for (const id of abgelegt) {
           if (gespeicherterText.includes(`/api/notizen/dateien/${id}`)) continue;
-          api.del(`/records/${encodeURIComponent(id)}`).catch(() => { /* bleibt liegen */ });
+          api.del(`/records/${encodeURIComponent(id)}`, opts).catch(() => { /* bleibt liegen */ });
         }
         abgelegt.clear();
+      };
+      // Geht der Tab mitten im Bearbeiten zu, laeuft das Aufraeumen als
+      // keepalive weiter. Nicht beim Wechsel in den Zwischenspeicher des
+      // Browsers (persisted): von dort kommt die Seite samt Editor zurueck.
+      const beimSchliessen = (event) => { if (!(event && event.persisted)) bilderAufraeumen({ keepalive: true }); };
+      window.addEventListener('pagehide', beimSchliessen);
+      sheetCleanups.push(() => {
+        window.removeEventListener('pagehide', beimSchliessen);
+        bilderAufraeumen();
       });
 
       const editor = createNoteEditor(host, {

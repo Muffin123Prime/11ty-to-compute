@@ -1866,11 +1866,16 @@ async function pruefePruefrunde2(browser) {
             const s = g.screenPosition(nid);
             const x = c.left + s.x;
             const y = c.top + s.y;
+            const krumen = [...document.querySelectorAll('.gh__crumb')];
+            const letzte = krumen[krumen.length - 1];
             return {
               gewaehlt: g.selectedId === nid,
               steht: k.top - root.top > 40 ? 'unten' : 'rechts',
               css: getComputedStyle(karte).getPropertyValue('--gh-karte').trim(),
               darunter: x >= k.left && x <= k.right && y >= k.top && y <= k.bottom,
+              krumen: krumen.length,
+              pfad: krumen.map((b) => b.innerText.replace(/\s+/g, ' ').trim()).join(' › '),
+              letzteGanz: letzte ? letzte.scrollWidth <= letzte.clientWidth + 1 : null,
             };
           }, id);
           if (!r.gewaehlt) continue;
@@ -1884,6 +1889,10 @@ async function pruefePruefrunde2(browser) {
         check(gezaehlt >= 3 && lage && lage.steht === lage.css && verdeckt === 0,
           `Gehirn bei ${vw}×${vh}: die Karte steht, wo das CSS sie hinlegt, und verdeckt keinen gewählten Knoten`,
           lage ? `Karte ${lage.steht}, CSS „${lage.css}“, ${verdeckt} von ${gezaehlt} verdeckt` : `${gezaehlt} gewählt`);
+        // Eng wird es neben der offenen Karte: die aktuelle Stufe bleibt ganz, gekuerzt wird darueber.
+        check(!!lage && lage.krumen >= 3 && lage.letzteGanz === true,
+          `Gehirn bei ${vw}×${vh} mit offener Karte: die aktuelle Stufe im Pfad bleibt ganz lesbar`,
+          lage ? `${lage.pfad} (${lage.krumen} Stufen)` : '');
         await context.close();
       }
       check(lagen.has('unten') && lagen.has('rechts'), 'Gehirn: schmal steht die Karte unten, breit rechts', [...lagen].join(', '));
@@ -2495,16 +2504,16 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
   await page.locator('[data-neu="notiz"]').click();
   await warte(400);
   await page.locator('.nw__edit-title').fill('Am Strand');
-  const bildEinfuegen = async () => {
-    await page.locator('.nos-ne__area').click();
-    await page.evaluate(() => {
+  const bildEinfuegen = async (seite = page) => {
+    await seite.locator('.nos-ne__area').click();
+    await seite.evaluate(() => {
       const feld = document.querySelector('.nos-ne__area');
       const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0));
       const dt = new DataTransfer();
       dt.items.add(new File([png], 'strand.png', { type: 'image/png' }));
       feld.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
     });
-    await page.waitForFunction(() => /\/api\/notizen\/dateien\//.test(document.querySelector('.nos-ne__area').value), null, { timeout: 5000 }).catch(() => {});
+    await seite.waitForFunction(() => /\/api\/notizen\/dateien\//.test(document.querySelector('.nos-ne__area').value), null, { timeout: 5000 }).catch(() => {});
   };
   await bildEinfuegen();
   const bilderMit = store.count('file');
@@ -2528,6 +2537,26 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
   const nzStrandBild = nzStrand ? store.edges.for(nzStrand.id, { direction: 'out' }).find((e) => (store.get(e.data.to) || {}).type === 'file') : null;
   check(!!nzStrandBild && store.count('file') === bilderVorher + 1,
     'Mit [Speichern] bleibt das Bild – verbunden mit seiner Notiz', `${store.count('file')} Bilder, Kante ${nzStrandBild ? 'da' : 'fehlt'}`);
+  // Und geht der Tab mitten im Bearbeiten zu, kommt das eingefuegte Bild auch weg (keepalive).
+  {
+    const vorherZu = store.count('file');
+    const kontext = await page.context().browser().newContext({ viewport: { width: 1280, height: 860 }, serviceWorkers: 'block' });
+    const tab = await kontext.newPage();
+    await tab.goto(`${base}/#/notes`, { waitUntil: 'domcontentloaded' });
+    await dismissWelcome(tab);
+    await tab.waitForTimeout(1200);
+    await tab.locator('[data-nw-plus]').click();
+    await tab.locator('[data-neu="notiz"]').click();
+    await tab.waitForTimeout(400);
+    await tab.locator('.nw__edit-title').fill('Tab gleich zu');
+    await bildEinfuegen(tab);
+    const mitBild = store.count('file');
+    await tab.close({ runBeforeUnload: false });
+    for (let i = 0; i < 30 && store.count('file') !== vorherZu; i++) await warte(100);
+    await kontext.close().catch(() => {});
+    check(mitBild === vorherZu + 1 && store.count('file') === vorherZu,
+      'Ein Bild eingefügt, dann den Tab geschlossen: auch dann bleibt kein loses Bild', `${vorherZu} → ${mitBild} → ${store.count('file')} Bilder`);
+  }
 
   /* --- Projekte: das zuletzt geaenderte oben, abhaken wirkt --- */
   const projekt = store.create('project', { name: 'Auto verkaufen', description: 'Inserat, Probefahrt, Übergabe.' });

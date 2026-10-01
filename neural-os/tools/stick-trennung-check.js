@@ -19,6 +19,9 @@
  *  4. Laeuft danach B unter derselben Adresse, schreibt der alte Tab von A
  *     nie in B (409 KI_GEWECHSELT), und B sieht keinen Schluessel von A.
  *  5. Oben steht der Name von B; [Beenden] zeigt „Gespeichert. Stick kann raus.“
+ *  6. Am Mac (Plattform und diskutil nachgestellt) zeigt [Beenden] „Gespeichert.
+ *     Stick kann raus, sobald er aus dem Finder verschwindet.“ und startet den
+ *     Helfer, der den Stick auswirft, sobald der Dienst weg ist (Paket M).
  *
  * Laeuft, wenn Playwright und Chromium da sind; sonst sagt es das ehrlich
  * und endet mit 2. Nichts verlaesst 127.0.0.1.
@@ -234,6 +237,33 @@ const speicherVon = (p) => p.evaluate(() => {
     const nochDa = (await pB.locator('#aus').innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
     check(nochDa === erwartet, 'Auch nachdem Neural OS aus ist, bleibt es beim Endtext (nicht „Neural OS ist aus.“)', nochDa);
     apps = apps.filter((a) => a !== appB);
+
+    /* 6 · Am Mac wirft [Beenden] den Stick selbst aus (Paket M) */
+    console.log(`\n${BO}6 · Am Mac: [Beenden] wirft den Stick selbst aus${X}`);
+    const C = stick(wurzel, 'StickC');
+    const appC = await starten({ home: C.data, appDir: C.appDir }, port);
+    apps.push(appC);
+    // Einen Mac gibt es hier nicht: Plattform und diskutil sind nachgestellt,
+    // der Ablauf (Antwort, Endtext, Helfer mit dieser PID) ist echt.
+    const helfer = [];
+    appC.plattform = 'darwin';
+    appC.macAuswerfbar = async () => ({ punkt: '/Volumes/STICKC', geraet: 'disk4s1' });
+    appC.auswerfenNachEnde = (o) => { helfer.push(o); };
+    const pC = await ctx.newPage();
+    pC.on('pageerror', (e) => fehler.push(e.message));
+    await pC.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
+    await pC.locator('.cv-composer__feld').waitFor({ timeout: 10000 }).catch(() => {});
+    await pC.getByRole('button', { name: 'Neural OS beenden' }).click();
+    const endeC = pC.locator('#aus');
+    await endeC.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    const endeTextC = (await endeC.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+    const mac = 'Gespeichert. Stick kann raus, sobald er aus dem Finder verschwindet.';
+    check(endeTextC === mac, `Danach steht „${mac}“`, endeTextC);
+    await warteBis(async () => helfer.length > 0, { timeout: 5000 });
+    check(helfer.length === 1 && helfer[0].punkt === '/Volumes/STICKC' && helfer[0].pid === process.pid,
+      'und der Helfer zum Auswerfen startet mit der PID des Dienstes und dem Einhängepunkt', JSON.stringify(helfer));
+    await pC.waitForTimeout(1500);
+    apps = apps.filter((a) => a !== appC);
     check(fehler.length === 0, 'Keine Fehler in den Seiten', fehler.slice(0, 3).join(' | '));
   } catch (err) {
     console.log(`\n${R}Abgebrochen:${X} ${err && err.message}`);

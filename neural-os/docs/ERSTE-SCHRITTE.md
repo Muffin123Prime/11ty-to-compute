@@ -123,7 +123,7 @@ Auf dem Stick liegt danach:
 NEURAL OS (E:)
   Inhalt                          Programm, Daten, Abgleich: nicht anfassen
   LIESMICH
-  Neural OS starten - Mac
+  Neural OS starten - Mac         unter Windows als Ordner „… - Mac.app“ zu sehen
   Neural OS starten - Windows
 ```
 
@@ -131,15 +131,19 @@ NEURAL OS (E:)
 
 Stick in einen Windows-Rechner stecken, im Explorer öffnen und **„Neural OS
 starten - Windows“** doppelklicken. Am Mac im Finder **„Neural OS starten -
-Mac“** doppelklicken (fragt macOS nach dem Zugriff auf einen
-Wechseldatenträger: **Erlauben**). Der Browser öffnet sich, oben steht der Name
-dieser KI.
+Mac“** doppelklicken – das ist ein kleines Programm, ein Terminal-Fenster
+gibt es nicht (fragt macOS nach dem Zugriff auf einen Wechseldatenträger:
+**Erlauben**). Der Browser öffnet sich, oben steht der Name dieser KI.
+
+> **Öffnet der Mac das Programm nicht:** im Ordner **„Inhalt“** auf dem Stick
+> **„Notstart - Mac“** doppelklicken. Das ist derselbe Start im Terminal.
 
 Alles, was du dort schreibst, landet auf dem Stick – nicht auf dem Rechner.
 
 **Aufhören:** unten links **[Beenden]**. Danach steht nur noch
-**„Gespeichert. Stick kann raus.“** (am Mac: „Gespeichert. Stick im Finder
-auswerfen.“).
+**„Gespeichert. Stick kann raus.“** Am Mac wirft Neural OS den Stick selbst
+aus; dort steht „Gespeichert. Stick kann raus, sobald er aus dem Finder
+verschwindet.“
 
 **Der Name der KI** steht unter **Einstellungen → Name dieser KI**.
 
@@ -224,7 +228,9 @@ Bildschirme dafür (über dein WLAN, wie in Teil 3).
 ## Was sich hier nicht prüfen ließ
 
 Ehrlichkeitshalber: Die Starter für Windows und Mac konnten bei der Entwicklung
-nur auf Linux ausprobiert werden, nicht auf einem echten Windows oder Mac. Ob
-das Fenster unter Windows wirklich zugeht, ob eine Schul-Richtlinie Programme
-vom Stick sperrt und was Gatekeeper am Mac sagt, klärt der **Probelauf** – ein
+nur auf Linux ausprobiert werden, mit nachgestellten Mac-Befehlen, nicht auf
+einem echten Windows oder Mac. Für alles, was dort anders sein könnte, gibt es
+einen Ausweg: am Mac den Notstart im Ordner „Inhalt“, und kann ein Mac den
+Stick nicht selbst auswerfen, sagt der Endtext „Stick im Finder auswerfen.“
+Wer es genau wissen will, macht den freiwilligen **Probelauf** – ein
 Doppelklick je Rechner. Die Schritte stehen in `docs/PROBELAUF.md`.

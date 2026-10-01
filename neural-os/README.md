@@ -138,8 +138,10 @@ lesen und schreiben, aber keine Einstellungen ändern. Einzelheiten in
 - **Die Netzschleuse wirkt auf Prozessebene.** Sie bindet diese Anwendung und
   allen Code darin, ist aber keine Firewall für andere Programme.
 - **Manches lässt sich nur am echten Rechner prüfen** – ob eine
-  Schul-Richtlinie Programme vom Stick sperrt, was Gatekeeper am Mac sagt. Dafür
-  gibt es den Probelauf (`docs/PROBELAUF.md`).
+  Schul-Richtlinie Programme vom Stick sperrt, was Gatekeeper am Mac sagt. Für
+  jeden dieser Fälle gibt es einen Ausweg (am Mac den Notstart im Ordner
+  „Inhalt“); wer es genau wissen will, macht den freiwilligen Probelauf
+  (`docs/PROBELAUF.md`).
 
 `docs/STATUS.md` führt, was getestet ist – und was nicht.
 `docs/EINGESTAENDNIS.md` sagt, wo ich mich geirrt habe und was ich nicht

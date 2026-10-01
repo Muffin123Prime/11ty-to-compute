@@ -572,8 +572,15 @@ function createShell() {
     let titel;
     let satz;
     if (wie.art === 'beendet') {
+      // Am Mac wirft ein Helfer den Stick aus, sobald Neural OS zu ist
+      // (Paket M, danach 'auswerfen-auto'); geht das dort nicht, wirft man
+      // ihn im Finder aus. Windows: Schnelles Entfernen, er kann gleich raus.
+      const MAC = {
+        'auswerfen-auto': 'Gespeichert. Stick kann raus, sobald er aus dem Finder verschwindet.',
+        auswerfen: 'Gespeichert. Stick im Finder auswerfen.',
+      };
       titel = stick
-        ? (wie.danach === 'auswerfen' ? 'Gespeichert. Stick im Finder auswerfen.' : 'Gespeichert. Stick kann raus.')
+        ? (MAC[wie.danach] || 'Gespeichert. Stick kann raus.')
         : 'Gespeichert. Neural OS ist aus.';
       satz = stick ? null : 'Zum Öffnen „Neural OS starten“ doppelklicken.';
     } else {

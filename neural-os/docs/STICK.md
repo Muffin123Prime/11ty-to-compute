@@ -20,7 +20,7 @@ Tasten `g` und dann `t`).
 NEURAL OS (E:)
   Inhalt                        Programm, Daten, Abgleich: nicht anfassen
   LIESMICH
-  Neural OS starten - Mac
+  Neural OS starten - Mac       ein Programm; Windows zeigt es als Ordner „… - Mac.app“
   Neural OS starten - Windows
 ```
 
@@ -31,7 +31,7 @@ Windows:  "Neural OS starten - Windows" doppelklicken.
 Mac:      "Neural OS starten - Mac" doppelklicken.
 Fertig:   in der App auf "Beenden".
 Deine Daten liegen im Ordner "Inhalt". Sichern = ganzen Stick kopieren.
-Geht etwas nicht, steht der Grund im Fenster, das dann offen bleibt.
+Geht etwas nicht, steht der Grund im Fenster. Mac-Notstart: Inhalt > "Notstart - Mac".
 ```
 
 Ein Doppelklick bleibt nötig: Windows und macOS starten aus Schutzgründen
@@ -46,8 +46,13 @@ für diesen Stick immer dieselbe – und das Fenster schließt sich von selbst.
 Oben steht der Name der KI.
 
 **Mac:** Stick einstecken, im Finder öffnen, **„Neural OS starten - Mac“**
-doppelklicken. Fragt macOS nach dem Zugriff auf einen Wechseldatenträger:
-**Erlauben**. Im Terminal steht danach „Fertig. Dieses Fenster kann zu.“
+doppelklicken. Das ist ein kleines Programm: Es öffnet kein Terminal-Fenster,
+nur den Browser. Fragt macOS nach dem Zugriff auf einen Wechseldatenträger:
+**Erlauben**. Geht etwas nicht, steht der Grund in einem Dialog.
+
+**Notstart am Mac:** Öffnet macOS das Programm gar nicht, im Ordner
+**„Inhalt“** **„Notstart - Mac“** doppelklicken. Das ist derselbe Start im
+Terminal; dort steht danach „Fertig. Dieses Fenster kann zu.“
 
 **Mit PIN** zeigt der Browser zuerst nur das Feld **„PIN“** und **[Öffnen]**.
 Falsch: „Falsche PIN.“, nach fünf Fehlversuchen „Zu oft falsch. Kurz warten.“
@@ -55,9 +60,10 @@ Falsch: „Falsche PIN.“, nach fünf Fehlversuchen „Zu oft falsch. Kurz wart
 **Noch einmal doppelklicken** öffnet nur den Browser mit derselben Adresse; ein
 zweites Neural OS startet nicht.
 
-Geht etwas schief, bleibt das Fenster offen und nennt genau einen Grund:
+Geht etwas schief, bleibt das Fenster offen (am Mac: ein Dialog) und nennt
+genau einen Grund:
 
-| Satz im Fenster | Was es heißt |
+| Satz | Was es heißt |
 |---|---|
 | Dieser Rechner lässt keine Programme vom Stick starten. | Eine Richtlinie des Rechners (Schule, Firma) sperrt Programme vom Stick. An diesem Rechner hilft nichts; ein anderer Rechner ist nötig. |
 | Auf diesem Stick fehlt das Programm für Windows. / … für den Mac. | Der Stick wurde ohne diese Laufzeit vorbereitet. An einem Rechner mit Neural OS und Internet [Für Windows holen] bzw. [Für Mac holen]. |
@@ -70,8 +76,12 @@ Geht etwas schief, bleibt das Fenster offen und nennt genau einen Grund:
 
 In der App unten links auf **[Beenden]**. Danach steht nur noch da:
 
-- Windows: **„Gespeichert. Stick kann raus.“**
-- Mac: **„Gespeichert. Stick im Finder auswerfen.“**
+- Windows: **„Gespeichert. Stick kann raus.“** USB-Sticks sind unter Windows
+  auf „Schnelles Entfernen“ eingestellt; Auswerfen ist nicht nötig.
+- Mac: **„Gespeichert. Stick kann raus, sobald er aus dem Finder
+  verschwindet.“** Neural OS wirft den Stick selbst aus, sobald es zu ist.
+  Kann dieser Mac das nicht, steht dort **„Gespeichert. Stick im Finder
+  auswerfen.“**
 
 Stick **ohne Beenden gezogen**: Neural OS beendet sich nach wenigen Sekunden
 von selbst. Ein offener Tab zeigt **„Neural OS ist aus.“** und darunter „Zum
@@ -197,13 +207,15 @@ zuerst, was passieren würde – geschrieben ist bis dahin nichts. Erst dann wir
 - **Ein langsamer USB-2-Stick** macht die App träger; jede Änderung wird
   geschrieben.
 
-## Der Probelauf
+## Der Probelauf (freiwillig)
 
-Einiges lässt sich nur am echten Rechner prüfen: ob das Fenster unter Windows
-wirklich zugeht, ob eine Schul-Richtlinie Programme vom Stick sperrt, was
-Gatekeeper am Mac sagt. Dafür gibt es den **Probelauf** – ein Doppelklick je
-Rechner, ein paar Ja/Nein-Fragen, das Ergebnis zum Einfügen in den Chat. Die
-Schritte stehen in `docs/PROBELAUF.md`.
+Einiges ließ sich bei der Entwicklung nur nachstellen, nicht am echten Rechner
+prüfen: ob das Fenster unter Windows wirklich zugeht, ob eine Schul-Richtlinie
+Programme vom Stick sperrt, was Gatekeeper zum Mac-Programm sagt. Für jeden
+dieser Fälle gibt es einen Ausweg (Notstart, Endtext ohne Auswerfen). Wer es
+genau wissen will, macht den **Probelauf** – ein Doppelklick je Rechner, ein
+paar Ja/Nein-Fragen, das Ergebnis zum Einfügen in den Chat. Die Schritte stehen
+in `docs/PROBELAUF.md`.
 
 ## Derselbe Weg über die Kommandozeile
 

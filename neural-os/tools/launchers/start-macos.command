@@ -1,6 +1,11 @@
 #!/bin/sh
 # ---------------------------------------------------------------------------
-#  Neural OS - Starter für macOS (auf dem Stick)
+#  Neural OS - Notstart für macOS im Terminal (auf dem Stick)
+#
+#  Der übliche Start ist das Programm „Neural OS starten - Mac“ in der
+#  Wurzel des Sticks, ohne Terminal (Paket M, start-macos-app.sh). Dieses
+#  Skript liegt als „Notstart - Mac“ im Ordner „Inhalt“, für den Fall, dass
+#  macOS das Programm nicht öffnet.
 #
 #  Doppelklick im Finder: Neural OS startet im Hintergrund, der Browser geht
 #  auf, und hier steht „Fertig. Dieses Fenster kann zu.“ Neural OS läuft

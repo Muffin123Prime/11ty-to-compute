@@ -1,6 +1,10 @@
-# Probelauf – Schritt für Schritt
+# Probelauf – Schritt für Schritt (freiwillig)
 
-Der Probelauf klärt am echten Rechner, was sich bei der Entwicklung nicht
+Neural OS ist fertig und braucht den Probelauf nicht: Für alles, was am echten
+Rechner anders sein könnte, gibt es einen Ausweg (am Mac den Notstart im Ordner
+„Inhalt“). Der Probelauf ist für den, der es genau wissen will.
+
+Er klärt am echten Rechner, was sich bei der Entwicklung nicht
 prüfen ließ: ob das schwarze Fenster unter Windows wirklich zugeht, ob eine
 Schul-Richtlinie Programme vom Stick sperrt, was Gatekeeper am Mac sagt. Er
 startet Neural OS **nicht** und ändert nichts an deinen Daten; er misst nur und
@@ -103,9 +107,9 @@ Wenn stattdessen etwas anderes kommt – auch das ist ein Ergebnis:
 
 ## Was danach passiert
 
-Aus den Texten aus Teil B und C entscheidet sich, ob alles so bleiben kann
-(etwa das Fenster, das sich von selbst schließt) oder ob etwas nachgebaut wird,
-zum Beispiel ein Mac-Start ganz ohne Terminal-Fenster (Paket M im Bauplan).
+Aus den Texten aus Teil B und C zeigt sich, ob alles so läuft wie bei der
+Entwicklung nachgestellt (etwa das Fenster, das sich von selbst schließt, und
+das Mac-Programm ohne Terminal aus Paket M) oder ob etwas nachgebessert wird.
 Die Probelauf-Dateien dürfen auf dem Stick bleiben; sie stören nicht. Wer sie
 nicht will, löscht „Probelauf - Windows“, „Probelauf - Mac“ und den Ordner
 `PROBELAUF` wieder.

@@ -748,7 +748,7 @@ test('Starter Windows (Stick und Projektordner): ASCII, CRLF, kein NEURAL_OS_HOM
 });
 
 test('Starter Mac und Linux: sh, LF, kein NEURAL_OS_HOME, macOS-11-Probe, Quarantäne, Erfolg ohne Halt', () => {
-  for (const name of ['start-macos.command', 'start-linux.sh']) {
+  for (const name of ['start-macos.command', 'start-macos-app.sh', 'start-linux.sh']) {
     const datei = path.join(WURZEL, 'tools', 'launchers', name);
     const text = fs.readFileSync(datei, 'utf8');
     assert.ok(text.startsWith('#!/bin/sh\n'), `${name}: Shebang`);

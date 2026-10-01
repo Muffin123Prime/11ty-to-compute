@@ -157,13 +157,25 @@ const ZIEL_PLATTFORMEN = ['win-x64', 'darwin-arm64', 'darwin-x64'];
  */
 const LAUNCHERS = [
   { source: 'start-windows.bat', target: 'Neural OS starten - Windows.bat', eol: 'crlf', executable: false, ort: 'wurzel' },
-  { source: 'start-macos.command', target: 'Neural OS starten - Mac.command', eol: 'lf', executable: true, ort: 'wurzel' },
+  // Der Mac startet ohne Terminal-Fenster: ein Programm-Buendel mit einem
+  // sh-Skript darin (Paket M). Der Finder zeigt es als „Neural OS starten - Mac“.
+  { source: 'start-macos-app.sh', target: 'Neural OS starten - Mac.app', eol: 'lf', executable: true, ort: 'wurzel', buendel: true },
+  // Der Notausgang, falls macOS das Programm nicht oeffnet: derselbe Start im Terminal.
+  { source: 'start-macos.command', target: 'Notstart - Mac.command', eol: 'lf', executable: true, ort: 'basis' },
   // Linux ist kein Geraet des Nutzers; der Starter liegt deshalb im Inhalt.
   { source: 'start-linux.sh', target: 'Starter fuer Linux.sh', eol: 'lf', executable: true, ort: 'basis' },
 ];
 
-/** Die Starter-Namen von vor Paket R; beim Erneuern werden sie entfernt. */
-const ALTE_STARTER = ['Neural OS starten.bat', 'Neural OS starten.command', 'Neural OS starten.sh'];
+/** Das Skript im Mac-Buendel: Contents/MacOS/<dieser Name>. */
+const MAC_APP_PROGRAMM = 'neural-os-starten';
+
+/**
+ * Starter, die es nicht mehr gibt; beim Vorbereiten und Erneuern werden sie
+ * entfernt. Die ersten drei sind von vor Paket R, der vierte von vor Paket M
+ * (der Mac-Starter war ein .command in der Wurzel; heute liegt er als
+ * „Notstart - Mac“ im Inhalt).
+ */
+const ALTE_STARTER = ['Neural OS starten.bat', 'Neural OS starten.command', 'Neural OS starten.sh', 'Neural OS starten - Mac.command'];
 
 /**
  * Die Saetze der Stick-Ansicht (Bauplan 1.8, woertlich). Sie stehen hier,
@@ -1104,14 +1116,66 @@ function toEol(text, kind) {
  * The .bat has to be CRLF: cmd.exe is the one interpreter still in wide use
  * that mis-parses a LF-only batch file, and the repository stores LF.
  */
-/** Wo ein Starter auf diesem Stick liegt: Windows und Mac in der Wurzel, Linux im Inhalt. */
+/** Wo ein Starter auf diesem Stick liegt: Windows und Mac in der Wurzel, Notstart und Linux im Inhalt. */
 function launcherPath(lage, launcher) {
   return path.join(launcher.ort === 'basis' ? lage.basis : lage.wurzel, launcher.target);
+}
+
+/** Die Datei, auf die es ankommt: beim Mac-Buendel das Skript darin. */
+function launcherDatei(lage, launcher) {
+  const ort = launcherPath(lage, launcher);
+  return launcher.buendel ? path.join(ort, 'Contents', 'MacOS', MAC_APP_PROGRAMM) : ort;
+}
+
+/**
+ * Die Info.plist des Mac-Starters. Kein Dock-Symbol (LSUIElement): Das
+ * Skript laeuft nur, bis der Browser aufgeht. macOS 11, weil die
+ * mitgelieferte Node 22 es verlangt.
+ */
+function macInfoPlist(version) {
+  const v = /^[0-9][0-9A-Za-z.+-]{0,40}$/.test(String(version || '')) ? String(version) : '1';
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    '  <key>CFBundleDevelopmentRegion</key>',
+    '  <string>de</string>',
+    '  <key>CFBundleExecutable</key>',
+    `  <string>${MAC_APP_PROGRAMM}</string>`,
+    '  <key>CFBundleIdentifier</key>',
+    '  <string>de.neural-os.starter</string>',
+    '  <key>CFBundleName</key>',
+    '  <string>Neural OS</string>',
+    '  <key>CFBundlePackageType</key>',
+    '  <string>APPL</string>',
+    '  <key>CFBundleShortVersionString</key>',
+    `  <string>${v}</string>`,
+    '  <key>CFBundleVersion</key>',
+    `  <string>${v}</string>`,
+    '  <key>LSMinimumSystemVersion</key>',
+    '  <string>11.0</string>',
+    '  <key>LSUIElement</key>',
+    '  <true/>',
+    '</dict>',
+    '</plist>',
+    '',
+  ].join('\n');
+}
+
+/** Das Buendel „Neural OS starten - Mac.app“: Info.plist und das ausfuehrbare Skript. */
+function macAppSchreiben(buendel, skript, version) {
+  // Lag dort eine Datei gleichen Namens (nie von uns), weicht sie dem Ordner.
+  try { if (fs.statSync(buendel).isFile()) fs.rmSync(buendel, { force: true }); } catch { /* gibt es nicht */ }
+  mkdirp(path.join(buendel, 'Contents', 'MacOS'));
+  writeFileAtomic(path.join(buendel, 'Contents', 'Info.plist'), macInfoPlist(version), 0o644);
+  writeFileAtomic(path.join(buendel, 'Contents', 'MacOS', MAC_APP_PROGRAMM), skript, 0o755);
 }
 
 function deployLaunchers(lage, sourceRoot) {
   const written = [];
   const warnings = [];
+  const version = appVersion(sourceRoot);
   for (const launcher of LAUNCHERS) {
     const src = path.join(sourceRoot, 'tools', 'launchers', launcher.source);
     let raw;
@@ -1125,7 +1189,8 @@ function deployLaunchers(lage, sourceRoot) {
       continue;
     }
     const target = launcherPath(lage, launcher);
-    writeFileAtomic(target, toEol(raw, launcher.eol), launcher.executable ? 0o755 : 0o644);
+    if (launcher.buendel) macAppSchreiben(target, toEol(raw, launcher.eol), version);
+    else writeFileAtomic(target, toEol(raw, launcher.eol), launcher.executable ? 0o755 : 0o644);
     written.push(launcher.target);
   }
   // Die Starter von vor Paket R: ein Doppelklick darauf soll nicht mehr
@@ -1175,7 +1240,7 @@ const LIESMICH_ZEILEN = Object.freeze([
   'Mac:      "Neural OS starten - Mac" doppelklicken.',
   'Fertig:   in der App auf "Beenden".',
   'Deine Daten liegen im Ordner "Inhalt". Sichern = ganzen Stick kopieren.',
-  'Geht etwas nicht, steht der Grund im Fenster, das dann offen bleibt.',
+  'Geht etwas nicht, steht der Grund im Fenster. Mac-Notstart: Inhalt > "Notstart - Mac".',
 ]);
 
 function renderReadme() {
@@ -1702,6 +1767,92 @@ async function auswerfen(pfad, opts = {}) {
   return { ausgeworfen: null, wie: 'sync', grund: r && r.code === 0 ? null : 'sync ließ sich nicht ausführen.' };
 }
 
+/* ------------------------------- Mac: nach [Beenden] selbst auswerfen */
+
+/** Eine Zeichenkette aus einer plist: & < > " ' stehen dort als Entitaeten. */
+function plistText(roh) {
+  return String(roh)
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * Kann dieser Mac den Stick an `wurzel` selbst auswerfen (Paket M)?
+ *
+ * `diskutil info -plist` sagt es, ohne Administrator: auswerfbar
+ * (Ejectable) und nicht eingebaut (Internal). Zurueck kommt der
+ * Einhaengepunkt unter /Volumes, sonst null -- dann bleibt es beim Satz
+ * „Gespeichert. Stick im Finder auswerfen.“
+ *
+ * @param {string} wurzel  die Wurzel des Sticks (dort, wo „Inhalt“ liegt)
+ * @param {{platform?:string, run?:Function}} [opts] Attrappen fuer Tests
+ * @returns {Promise<{punkt:string, geraet:string|null}|null>}
+ */
+async function macAuswerfbar(wurzel, { platform = process.platform, run = ausfuehren } = {}) {
+  if (platform !== 'darwin' || typeof wurzel !== 'string' || !wurzel) return null;
+  let r;
+  try {
+    r = await run('/usr/sbin/diskutil', ['info', '-plist', wurzel], { timeoutMs: 5000 });
+  } catch {
+    return null;
+  }
+  if (!r || r.code !== 0 || !r.stdout) return null;
+  const plist = String(r.stdout);
+  const wahr = (key) => new RegExp(`<key>${key}</key>\\s*<true\\s*/>`).test(plist);
+  const text = (key) => {
+    const m = new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`).exec(plist);
+    return m ? plistText(m[1]) : null;
+  };
+  const punkt = text('MountPoint');
+  if (!punkt || !punkt.startsWith('/Volumes/')) return null;
+  if (!wahr('Ejectable') || wahr('Internal')) return null;
+  return { punkt, geraet: text('DeviceIdentifier') };
+}
+
+/**
+ * Der Helfer, der nach dem Ende des Dienstes auswirft. Er laeuft mit dem
+ * /bin/sh des Systems, im Arbeitsverzeichnis /, und haelt nichts auf dem
+ * Stick offen. Erst wenn der Dienst weg ist (seine PID; die Laufzeit liegt
+ * selbst auf dem Stick), ruft er diskutil -- bei „noch in Benutzung“ bis zu
+ * fuenfmal, je eine Sekunde spaeter. Wartet er laenger als 60 s, gibt er auf.
+ *   $1 PID des Dienstes, $2 Einhaengepunkt, $3 diskutil (fuer Tests)
+ */
+const MAC_AUSWERFEN_SKRIPT = [
+  'PID=$1; PUNKT=$2; DISKUTIL=${3:-/usr/sbin/diskutil}',
+  'i=0',
+  'while kill -0 "$PID" 2>/dev/null; do',
+  '  i=$((i + 1)); [ "$i" -gt 300 ] && exit 3',
+  '  sleep 0.2',
+  'done',
+  'sleep 0.5',
+  'n=0',
+  'until "$DISKUTIL" eject "$PUNKT" >/dev/null 2>&1; do',
+  '  n=$((n + 1)); [ "$n" -ge 5 ] && exit 2',
+  '  sleep 1',
+  'done',
+  'exit 0',
+  '',
+].join('\n');
+
+/**
+ * Den Helfer starten: abgeloest, ohne Ausgabe, ausserhalb des Sticks. Er
+ * ueberlebt den Dienst und wirft aus, sobald der weg ist.
+ *
+ * @param {{pid?:number, punkt:string, diskutil?:string, spawn?:Function}} o
+ * @returns {object|null} der Kindprozess
+ */
+function auswerfenNachEnde({ pid = process.pid, punkt, diskutil = '/usr/sbin/diskutil', spawn: starten = spawn } = {}) {
+  if (typeof punkt !== 'string' || !punkt) return null;
+  const kind = starten('/bin/sh', ['-c', MAC_AUSWERFEN_SKRIPT, 'neural-os-auswerfen', String(pid), punkt, diskutil], {
+    cwd: '/',
+    detached: true,
+    stdio: 'ignore',
+  });
+  if (kind && typeof kind.unref === 'function') kind.unref();
+  return kind;
+}
+
 /* ------------------------------------------- Dateisystem des Sticks (Mac) */
 
 /**
@@ -1960,7 +2111,7 @@ function createStick(deps = {}) {
   function modeWitnesses(lage) {
     const list = [{ path: dataDirIn(lage.basis), mode: 0o700 }];
     for (const launcher of LAUNCHERS) {
-      list.push({ path: launcherPath(lage, launcher), mode: launcher.executable ? 0o755 : 0o644 });
+      list.push({ path: launcherDatei(lage, launcher), mode: launcher.executable ? 0o755 : 0o644 });
     }
     return list;
   }
@@ -3017,7 +3168,10 @@ function createStick(deps = {}) {
 
     for (const launcher of LAUNCHERS) {
       const file = launcherPath(lage, launcher);
-      const present = fs.existsSync(file);
+      // Beim Mac-Buendel zaehlt, ob Skript und Info.plist darin liegen.
+      const present = launcher.buendel
+        ? fs.existsSync(launcherDatei(lage, launcher)) && fs.existsSync(path.join(file, 'Contents', 'Info.plist'))
+        : fs.existsSync(file);
       layout.launchers[launcher.target] = { path: file, exists: present };
       if (!present) {
         add('warn', 'LAUNCHER_MISSING', `Der Starter "${launcher.target}" fehlt.`,
@@ -3436,6 +3590,11 @@ module.exports = {
   LAYOUT,
   EXCLUDED_NAMES,
   LAUNCHERS,
+  MAC_APP_PROGRAMM,
+  MAC_AUSWERFEN_SKRIPT,
+  macAuswerfbar,
+  auswerfenNachEnde,
+  macInfoPlist,
   ALTE_STARTER,
   RUNTIME_SCOPE,
   DIST_HOST,

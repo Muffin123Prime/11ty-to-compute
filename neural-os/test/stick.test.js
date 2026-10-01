@@ -210,7 +210,7 @@ test('prepare legt das vollstaendige Stick-Layout an', async () => {
     // Bauplan 1.1 / 2.10.4: in der Wurzel nur Inhalt, LIESMICH und die zwei
     // Starter; alles andere im Inhalt. Die Spotlight-Sperre ist unsichtbar.
     const sichtbar = fs.readdirSync(stick.home).filter((n) => !n.startsWith('.')).sort();
-    assert.deepEqual(sichtbar, ['Inhalt', 'LIESMICH.txt', 'Neural OS starten - Mac.command', 'Neural OS starten - Windows.bat']);
+    assert.deepEqual(sichtbar, ['Inhalt', 'LIESMICH.txt', 'Neural OS starten - Mac.app', 'Neural OS starten - Windows.bat']);
     assert.ok(fs.existsSync(path.join(stick.home, '.metadata_never_index')), '.metadata_never_index fehlt');
     for (const n of fs.readdirSync(stick.home)) assert.ok(!/[()&!%]/.test(n), `Sonderzeichen im Namen: ${n}`);
     for (const rel of [
@@ -222,10 +222,13 @@ test('prepare legt das vollstaendige Stick-Layout an', async () => {
       'Inhalt/data/config.json',
       'Inhalt/sync',
       'Inhalt/Starter fuer Linux.sh',
+      'Inhalt/Notstart - Mac.command',
+      'Neural OS starten - Mac.app/Contents/Info.plist',
+      'Neural OS starten - Mac.app/Contents/MacOS/neural-os-starten',
     ]) {
       assert.ok(fs.existsSync(path.join(stick.home, rel)), `${rel} fehlt auf dem Stick`);
     }
-    for (const alt of ['Neural OS starten.bat', 'Neural OS starten.command', 'Neural OS starten.sh']) {
+    for (const alt of ['Neural OS starten.bat', 'Neural OS starten.command', 'Neural OS starten.sh', 'Neural OS starten - Mac.command']) {
       assert.ok(!fs.existsSync(path.join(stick.home, alt)), `alter Starter ${alt} liegt in der Wurzel`);
     }
 
@@ -233,14 +236,25 @@ test('prepare legt das vollstaendige Stick-Layout an', async () => {
     const bat = fs.readFileSync(path.join(stick.home, 'Neural OS starten - Windows.bat'), 'utf8');
     assert.ok(bat.includes('\r\n'), 'die .bat muss CRLF-Zeilenenden haben');
     assert.ok(bat.includes('chcp 65001'), 'die .bat muss die Konsole auf UTF-8 stellen');
-    for (const name of ['Inhalt/Starter fuer Linux.sh', 'Neural OS starten - Mac.command']) {
+    const macProgramm = 'Neural OS starten - Mac.app/Contents/MacOS/neural-os-starten';
+    for (const name of ['Inhalt/Starter fuer Linux.sh', 'Inhalt/Notstart - Mac.command', macProgramm]) {
       const script = fs.readFileSync(path.join(stick.home, name), 'utf8');
       assert.ok(script.startsWith('#!/bin/sh'), `${name} braucht eine Shebang-Zeile`);
       assert.ok(!script.includes('\r\n'), `${name} darf keine CRLF-Zeilenenden haben`);
       assert.ok((fs.statSync(path.join(stick.home, name)).mode & 0o111) !== 0, `${name} muss ausfuehrbar sein`);
     }
-    assert.ok(fs.readFileSync(path.join(stick.home, 'Neural OS starten - Mac.command'), 'utf8').includes('xattr -d com.apple.quarantine'),
-      'der macOS-Starter muss das Quarantaene-Merkmal entfernen');
+    for (const name of ['Inhalt/Notstart - Mac.command', macProgramm]) {
+      assert.ok(fs.readFileSync(path.join(stick.home, name), 'utf8').includes('xattr -d com.apple.quarantine'),
+        `${name}: der macOS-Starter muss das Quarantaene-Merkmal entfernen`);
+    }
+    // Das Buendel: ein Programm (APPL), dessen Skript so heisst wie in der Info.plist, ohne Dock-Symbol, ab macOS 11.
+    const plist = fs.readFileSync(path.join(stick.home, 'Neural OS starten - Mac.app/Contents/Info.plist'), 'utf8');
+    assert.match(plist, /<key>CFBundleExecutable<\/key>\s*<string>neural-os-starten<\/string>/);
+    assert.match(plist, /<key>CFBundlePackageType<\/key>\s*<string>APPL<\/string>/);
+    assert.match(plist, /<key>LSMinimumSystemVersion<\/key>\s*<string>11\.0<\/string>/);
+    assert.match(plist, /<key>LSUIElement<\/key>\s*<true\/>/);
+    assert.match(plist, /<key>CFBundleShortVersionString<\/key>\s*<string>[0-9]/, 'die Version des Programms steht im Buendel');
+    assert.ok(!plist.includes('\r'), 'die Info.plist hat LF');
 
     // Die LIESMICH: genau die fuenf Zeilen aus Bauplan 1.1, sonst nichts.
     const readme = fs.readFileSync(path.join(stick.home, 'LIESMICH.txt'), 'utf8');
@@ -249,7 +263,7 @@ test('prepare legt das vollstaendige Stick-Layout an', async () => {
       'Mac:      "Neural OS starten - Mac" doppelklicken.',
       'Fertig:   in der App auf "Beenden".',
       'Deine Daten liegen im Ordner "Inhalt". Sichern = ganzen Stick kopieren.',
-      'Geht etwas nicht, steht der Grund im Fenster, das dann offen bleibt.',
+      'Geht etwas nicht, steht der Grund im Fenster. Mac-Notstart: Inhalt > "Notstart - Mac".',
     ]);
     assert.ok(!/Festplatte|Rechtsklick/.test(readme), 'die alten Ratschlaege sind weg');
   } finally {
@@ -1470,7 +1484,7 @@ test('alter Aufbau (alles in der Wurzel): update erneuert an Ort und Stelle, ver
     fs.mkdirSync(path.join(stick.home, 'data'), { recursive: true });
     fs.writeFileSync(path.join(stick.home, 'data', 'config.json'), '{"sync":{"deviceId":"dev_000000000000000000000001"}}');
     fs.writeFileSync(path.join(stick.home, 'neural-os.portable'), JSON.stringify({ neuralOsPortable: true, dataDir: 'data', appDir: 'app', createdAt: '2026-01-01T00:00:00.000Z', kiId: 'dev_000000000000000000000001' }));
-    for (const alt of ['Neural OS starten.bat', 'Neural OS starten.command', 'Neural OS starten.sh']) fs.writeFileSync(path.join(stick.home, alt), 'alt');
+    for (const alt of ['Neural OS starten.bat', 'Neural OS starten.command', 'Neural OS starten.sh', 'Neural OS starten - Mac.command']) fs.writeFileSync(path.join(stick.home, alt), 'alt');
 
     const lage = stickMod.aufbauVon(stick.home);
     assert.deepEqual(lage, { wurzel: path.resolve(stick.home), basis: path.resolve(stick.home), aufbau: 'alt', istStick: true });
@@ -1498,10 +1512,10 @@ test('alter Aufbau (alles in der Wurzel): update erneuert an Ort und Stelle, ver
     assert.ok(!fs.existsSync(path.join(stick.home, 'Inhalt')), 'ein bestehender Stick wurde umgebaut');
     assert.deepEqual(snapshotDir(path.join(stick.home, 'data')), daten, 'data/ wurde angefasst');
     assert.ok(fs.existsSync(path.join(stick.home, 'app', 'bin', 'neural-os.js')));
-    for (const alt of ['Neural OS starten.bat', 'Neural OS starten.command', 'Neural OS starten.sh']) {
+    for (const alt of ['Neural OS starten.bat', 'Neural OS starten.command', 'Neural OS starten.sh', 'Neural OS starten - Mac.command']) {
       assert.ok(!fs.existsSync(path.join(stick.home, alt)), `${alt} liegt noch da`);
     }
-    for (const n of ['Neural OS starten - Windows.bat', 'Neural OS starten - Mac.command', 'Starter fuer Linux.sh', 'LIESMICH.txt']) {
+    for (const n of ['Neural OS starten - Windows.bat', 'Neural OS starten - Mac.app/Contents/MacOS/neural-os-starten', 'Notstart - Mac.command', 'Starter fuer Linux.sh', 'LIESMICH.txt']) {
       assert.ok(fs.existsSync(path.join(stick.home, n)), `${n} fehlt`);
     }
     const marker = JSON.parse(fs.readFileSync(path.join(stick.home, 'neural-os.portable'), 'utf8'));

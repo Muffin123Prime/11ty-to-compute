@@ -201,7 +201,8 @@ function meldePinNoetig(error) {
  * @param {string} method
  * @param {string} path
  * @param {any} body JSON-serialisable, or undefined
- * @param {{query?:object, signal?:AbortSignal, timeoutMs?:number, headers?:object, raw?:boolean}} [opts]
+ * @param {{query?:object, signal?:AbortSignal, timeoutMs?:number, headers?:object, raw?:boolean, keepalive?:boolean}} [opts]
+ *   `keepalive`: die Anfrage laeuft weiter, wenn die Seite gerade zugeht (Aufraeumen beim Schliessen des Tabs).
  */
 async function request(method, path, body, opts = {}) {
   const url = withQuery(resolveUrl(path), opts.query);
@@ -235,6 +236,7 @@ async function request(method, path, body, opts = {}) {
       // following redirects cannot be used to walk the UI off this server.
       redirect: 'follow',
       mode: 'same-origin',
+      ...(opts.keepalive === true ? { keepalive: true } : {}),
     });
   } catch (err) {
     throw asTransportError(err);

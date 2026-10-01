@@ -148,6 +148,10 @@ const CSS = `
   background: none; color: var(--fg-muted); font: inherit; font-size: var(--fs-base); cursor: pointer;
   max-width: 240px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* Wird es eng (offene Karte, schmales Fenster), kuerzen erst die Stufen
+   darueber („Mein…“), die aktuelle bleibt ganz lesbar -- frueher wurde jede
+   gleich gekuerzt: „Mein Wis› Schul› Biologie“, ohne Zahl (Pruefer, Runde 2). */
+.gh__crumb:not([aria-current="page"]) { flex-shrink: 12; min-width: 3.2em; }
 .gh__crumb:hover { background: var(--surface-3); color: var(--fg); }
 .gh__crumb[aria-current="page"] { color: var(--fg); font-weight: 500; cursor: default; }
 .gh__crumb[aria-current="page"]:hover { background: none; }
@@ -288,6 +292,11 @@ const CSS = `
 
 /* Bei offener Karte ruecken Suche und Art-Chips links neben sie. */
 @container gehirn (width > 760px) {
+  /* Der Pfad reicht bis an die Karte, nie darunter; passen Pfad und Suche
+     nicht nebeneinander, rueckt die Suche unter den Pfad -- frueher bekam
+     der Pfad dann nur noch ~140 px und war abgeschnitten (Pruefer, Runde 2). */
+  .gh[data-karte="offen"] .gh__top { flex-wrap: wrap; }
+  .gh[data-karte="offen"] .gh__left { min-width: min(300px, 100%); max-width: calc(100% - min(340px, 100% - 28px) - 12px); }
   .gh[data-karte="offen"] .gh__tools { margin-right: calc(min(340px, 100% - 28px) + 12px); }
   /* Neben der Karte wird es eng: das Suchfeld gibt dem Pfad Platz. */
   .gh[data-karte="offen"] .gh__search { width: 190px; }
@@ -1431,14 +1440,25 @@ function istSchmal(self) {
   return self.dom.root.getBoundingClientRect().width <= 760;
 }
 
-/** Der Rand, den Einpassen und Hinzoomen frei lassen: so breit (rechts) oder hoch (unten) wie die offene Karte. */
+/**
+ * Der Rand, den Einpassen und Hinzoomen frei lassen: so breit (rechts) oder
+ * hoch (unten) wie die offene Karte -- und oben bis unter Pfad und Suche.
+ * Neben der offenen Karte rueckt die Suche unter den Pfad (CSS); mit dem
+ * festen Rand von 72 px lag dann eine Bereichsbeschriftung darunter.
+ */
 function kartenRand(self, offen) {
-  if (!offen) return { right: 72, bottom: 48 };
+  // Ohne Karte der Rand vom Start (setPadding beim Aufbau).
+  if (!offen) return { top: 72, right: 72, bottom: 48 };
   const root = self.dom.root.getBoundingClientRect();
+  let top = 72;
+  try {
+    const oben = self.dom.top.getBoundingClientRect();
+    if (oben.height) top = Math.max(72, Math.round(oben.bottom - root.top) + 12);
+  } catch { /* ohne Masse bleibt der feste Rand */ }
   // Unten waechst die Karte mit ihrem Inhalt bis 52 % der Hoehe (CSS): so viel bleibt frei.
-  if (istSchmal(self)) return { right: 72, bottom: Math.round(root.height * 0.52) + 16 };
+  if (istSchmal(self)) return { top, right: 72, bottom: Math.round(root.height * 0.52) + 16 };
   const card = self.dom.card.getBoundingClientRect();
-  return { right: card.width ? Math.round(root.right - card.left) + 24 : 340 + 28 + 24, bottom: 48 };
+  return { top, right: card.width ? Math.round(root.right - card.left) + 24 : 340 + 28 + 24, bottom: 48 };
 }
 
 function openNode(self, node) {
