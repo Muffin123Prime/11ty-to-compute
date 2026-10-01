@@ -50,13 +50,22 @@ selben Browser; `proof` beweist, dass ohne Freigabe nichts ins Netz geht.
   Umwandeln, Markier-Menü, Code-Aktionen mit Sandkasten, Bilder und PDF,
   Sprechen, Vorlese-Spieler, Live-Fortschritt, Quellen im Text, Modus „Mein
   Wissen“, Gedächtnis, Hintergrund-Agenten mit Vorschlägen.
-- **Insel** (`web/lib/insel.js`) – die Pille oben in der Mitte, wie die
-  „Dynamic Island“ am iPhone: zeigt live, was gerade läuft (KI schreibt,
-  Timer, Termin gleich, Agent, Freigabe, Bildschirm geteilt, Mikrofon,
-  Vorlesen); Erinnerungen hängen sich als Kapsel an. Aufgeklappt ein
-  Gespräch mit der eigenen KI (derselbe Chat-Dienst mit allen Werkzeugen, als
-  echter Chat „Insel · …“), mit Rückfragen zum Antippen und dem, was die KI
-  angelegt hat. **Bildschirm zeigen**: mit jeder Frage geht ein frisches Bild
+- **Insel** (`web/lib/insel.js`, das Wesen `insel-wesen.js`, das Ohr
+  `insel-ohr.js`, reine Logik `insel-logik.js`) – ein kleines Wesen am rechten
+  Rand (am Telefon unten rechts), das ausweicht, wo Knöpfe, rechte Spalte oder
+  Eingabefeld sind: ruht, hört zu (der Ring folgt dem echten Mikrofon), denkt,
+  spricht, frisst, freut sich, ist verwirrt, schläft – nur CSS, ohne
+  Dauerschleife, mit „weniger Bewegung“. Daneben kleine Schilder mit dem, was
+  läuft (KI schreibt, Timer, Termin gleich, Agent, Freigabe, Bildschirm
+  geteilt, Mikrofon, Vorlesen); Erinnerungen als eine Zeile. Antippen: es
+  wächst zu einem Fenster am Rand (400 px, höchstens 80 % hoch; am Telefon
+  85 %), mit dem Gespräch mit der eigenen KI (derselbe Chat-Dienst mit allen
+  Werkzeugen, als echter Chat „Insel · …“), Rückfragen zum Antippen und dem,
+  was die KI angelegt hat. **Live**: es hört zu, merkt am Raumgeräusch, wann
+  du fertig bist (1,2 s Stille), schreibt es auf (Spracherkennung des
+  Browsers oder, etwa in Opera, Gemini), antwortet laut und hört wieder zu;
+  Antippen unterbricht. **Dateien füttern**: auf das Wesen ziehen – Bilder,
+  PDF, Text bis 200 KB; was es nicht lesen kann, sagt es. **Bildschirm zeigen**: mit jeder Frage geht ein frisches Bild
   mit – die KI sieht, was in einem anderen Programm offen ist. **Über allen
   Fenstern**: die Insel schwebt in einem eigenen kleinen Fenster über jedem
   Programm (Document Picture-in-Picture: Chrome, Edge, Opera, Firefox am

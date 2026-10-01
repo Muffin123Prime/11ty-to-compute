@@ -20,12 +20,15 @@ und das iPad steht in **`docs/ERSTE-SCHRITTE.md`**.
 
 ## Was drin ist
 
-- **Die Insel** – die schwarze Pille oben in der Mitte, wie die „Dynamic
-  Island“ am iPhone: zeigt live, was läuft (KI schreibt, Timer, Termin gleich,
-  Agent), und klappt zu einem Gespräch mit deiner KI auf. Auf Wunsch sieht
-  die KI deinen Bildschirm mit, und die Insel schwebt in einem eigenen Fenster
-  **über allen anderen Programmen** (Chrome, Edge, Opera, Firefox am
-  Computer). Timer, Notizen, Kopiertes erklären, Sprechen mit Vorlesen.
+- **Die Insel** – ein kleines Wesen am rechten Rand (die „Dynamic Island“
+  von Neural OS): zeigt live, was läuft (KI schreibt, Timer, Termin gleich,
+  Agent), und wächst beim Antippen zu einem Gespräch mit deiner KI – nicht
+  über den ganzen Bildschirm. **Live** sprechen (es hört zu, antwortet laut
+  und hört wieder zu), Dateien auf das Wesen ziehen (es „frisst“ sie und
+  wertet sie aus). Auf Wunsch sieht die KI deinen Bildschirm mit, und die
+  Insel schwebt in einem eigenen Fenster **über allen anderen Programmen**
+  (Chrome, Edge, Opera, Firefox am Computer). Timer, Notizen, Kopiertes
+  erklären, Vorlesen.
 - **Chat** mit der KI: Antworten mit Bausteinen (Tabellen, Diagramme, Listen,
   Karten), mehrere Fassungen je Antwort, Quellen im Text, Bilder und PDF
   anhängen, Sprechen statt Tippen, Vorlesen. Im Modus **„Mein Wissen“**

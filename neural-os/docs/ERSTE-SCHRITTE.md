@@ -118,8 +118,9 @@ Unten links steht danach **Online verbunden · Gemini** (bzw. **· Claude**). De
 Schlüssel liegt im Tresor dieser KI. Gib ihn nirgends sonst ein und schick ihn
 niemandem.
 
-**Steht im Chat nur ein Feld für Claude** (`sk-ant-…`) und oben in der Mitte
-keine schwarze Pille (die Insel), zeigt der Browser noch eine alte Fassung: die
+**Steht im Chat nur ein Feld für Claude** (`sk-ant-…`), oder steht oben in der
+Mitte noch die schwarze Pille statt des kleinen Wesens am rechten Rand (die
+Insel), zeigt der Browser noch eine alte Fassung: die
 neue ZIP laden (1.2) und dort `Neural OS starten.bat` doppelklicken – läuft die
 alte noch, beendet der Starter sie selbst und öffnet die neue. Ein Tab, der
 danach noch die alte zeigt, kann zu. In der neuen Fassung ist es egal, in

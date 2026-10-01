@@ -1,7 +1,11 @@
 /**
  * lib/insel-logik.js -- das Rechnen hinter der Insel (lib/insel.js), ohne
  * Browser: Zeiten, kleine Befehle, die Rangfolge der Live-Anzeigen,
- * Bildmasse, die Saetze zu Fehlern.
+ * Bildmasse, die Saetze zu Fehlern -- und seit der Insel als kleines Wesen
+ * am Rand: in welchem Zustand das Wesen ist (ruht, hoert zu, denkt,
+ * spricht, frisst, freut sich, verwirrt, schlaeft), wann jemand fertig
+ * gesprochen hat (Stille nach Sprache), welche Datei es essen kann, wo es
+ * am Rand sitzt, ohne einen Knopf zu verdecken, und wie gross es aufgeht.
  *
  * Rein und ohne Importe: test/insel.test.js laedt genau diese Datei, als
  * .mjs kopiert -- wie die anderen Tests der Oberflaeche.
@@ -27,9 +31,9 @@ export const KLINGELN_MS = 60000;
  * (POST /api/chats, systemPrompt) und ist dort fuer jeden lesbar.
  */
 export const SYSTEM_ANWEISUNG = [
-  'Ich frage dich über die Insel: das kleine Fenster oben in Neural OS, das auch über anderen Programmen schweben kann.',
-  'Antworte deshalb kurz: meist ein bis vier Sätze, Listen höchstens fünf Punkte – außer ich will ausdrücklich mehr.',
-  'Ein Bild in meiner Nachricht ist ein Bildschirmfoto von dem, was ich gerade sehe (ein anderes Programm, eine Webseite, ein Dokument). Sage ich „das“, „hier“ oder „dieses“, meine ich das Bild oder den mitgeschickten Text.',
+  'Ich frage dich über die Insel: das kleine Wesen am Rand von Neural OS, das auch über anderen Programmen schweben kann.',
+  'Antworte deshalb kurz: meist ein bis vier Sätze, Listen höchstens fünf Punkte – außer ich will ausdrücklich mehr. Oft spreche ich mit dir und du liest vor: Schreib so, dass es sich gut vorlesen lässt.',
+  'Ein Bild in meiner Nachricht ist ein Bildschirmfoto von dem, was ich gerade sehe (ein anderes Programm, eine Webseite, ein Dokument) – oder eine Datei, die ich dir gegeben habe. Sage ich „das“, „hier“ oder „dieses“, meine ich das Bild, die Datei oder den mitgeschickten Text.',
   'Steht in meiner Nachricht, was gerade in Neural OS offen ist, lies es mit eintrag_lesen nach, bevor du darüber sprichst.',
   'Kannst du etwas für mich erledigen (Termin, Notiz, merken), tu es mit deinen Werkzeugen und sag es in einem Satz.',
 ].join('\n');
@@ -471,22 +475,51 @@ export function zaunFuer(textWert) {
   return '`'.repeat(Math.max(3, laengste + 1));
 }
 
+/** So viel geht hoechstens in EINE Nachricht (der Server nimmt 200.000 Zeichen; Luft fuer Kopf und Zaeune). */
+export const MAX_NACHRICHT_ZEICHEN = 190000;
+/** So viel einer gegessenen Textdatei geht mit (wie im Chat). */
+export const MAX_DATEI_ZEICHEN = 150000;
+
 /**
  * Die Frage mit dem, worauf sie sich bezieht -- Text aus der
- * Zwischenablage, eine Markierung, eine abgelegte Textdatei.
+ * Zwischenablage, eine Markierung, eine gegessene Textdatei -- und ehrlich,
+ * was davon gekuerzt oder weggelassen werden musste. Jeder Text darf seine
+ * eigene Grenze tragen (`max`, sonst MAX_KONTEXT_ZEICHEN); zusammen bleibt
+ * alles unter `gesamt` Zeichen.
  * @param {string} frage
- * @param {{name:string, text:string}[]} texte
+ * @param {{name:string, text:string, max?:number}[]} texte
+ * @returns {{inhalt:string, gekuerzt:string[], weggelassen:string[]}}
  */
-export function frageMitTexten(frage, texte = []) {
+export function textePlanen(frage, texte = [], gesamt = MAX_NACHRICHT_ZEICHEN) {
   let out = String(frage || '').trim();
+  const gekuerzt = [];
+  const weggelassen = [];
   for (const t of Array.isArray(texte) ? texte : []) {
     if (!t || !String(t.text || '').trim()) continue;
+    const name = t.name || 'Text';
+    const kopf = `**${name}:**`;
     let inhalt = String(t.text).replace(/\r\n?/g, '\n');
-    if (inhalt.length > MAX_KONTEXT_ZEICHEN) inhalt = `${inhalt.slice(0, MAX_KONTEXT_ZEICHEN)}\n[… gekürzt]`;
+    const eigene = Number(t.max) > 0 ? Number(t.max) : MAX_KONTEXT_ZEICHEN;
+    // Platz fuer Trenner, Kopf, zwei Zaeune und "[… gekuerzt]".
+    const platz = gesamt - out.length - kopf.length - 40;
+    const max = Math.min(eigene, platz);
+    if (max < 200) {
+      weggelassen.push(name);
+      continue;
+    }
+    if (inhalt.length > max) {
+      inhalt = `${inhalt.slice(0, max)}\n[… gekürzt]`;
+      gekuerzt.push(name);
+    }
     const z = zaunFuer(inhalt);
-    out += `${out ? '\n\n' : ''}**${t.name || 'Text'}:**\n${z}\n${inhalt}\n${z}`;
+    out += `${out ? '\n\n' : ''}${kopf}\n${z}\n${inhalt}\n${z}`;
   }
-  return out;
+  return { inhalt: out, gekuerzt, weggelassen };
+}
+
+/** Wie textePlanen, nur der Text. */
+export function frageMitTexten(frage, texte = [], gesamt = MAX_NACHRICHT_ZEICHEN) {
+  return textePlanen(frage, texte, gesamt).inhalt;
 }
 
 /**
@@ -604,9 +637,534 @@ export function istKuerzel(event) {
   return leer && event.shiftKey && (event.ctrlKey || event.metaKey) && !event.altKey;
 }
 
+/* ------------------------------------------------------------------ */
+/* Das Wesen: in welchem Zustand es ist                                 */
+/* ------------------------------------------------------------------ */
+
+/** Die Zustaende des Wesens (lib/insel-wesen.js zeichnet jeden). */
+export const WESEN_ZUSTAENDE = Object.freeze(['ruht', 'hoert', 'denkt', 'spricht', 'frisst', 'freut', 'verwirrt', 'schlaeft']);
+/** So lange freut es sich, wenn eine Antwort fertig ist. */
+export const FREUT_MS = 1800;
+/** So lange schaut es verwirrt, wenn etwas schiefging. */
+export const VERWIRRT_MS = 3200;
+
+/**
+ * Der Zustand des Wesens -- aus dem, was gerade WIRKLICH passiert, nie
+ * geraten. Der Reihe nach: Ist Neural OS aus, schlaeft es. Dann kurze
+ * Reaktionen (es isst eine Datei, es ist verwirrt), dann was laeuft (das
+ * Mikrofon hoert, es liest vor oder die Antwort kommt Wort fuer Wort, es
+ * wartet auf das erste Wort), dann die kurze Freude ueber eine fertige
+ * Antwort. Ist keine KI verbunden, schlaeft es auch -- erst danach ruht es.
+ * @param {{aus?:boolean, verbunden?:boolean|null, frisst?:boolean, verwirrtBis?:number,
+ *   hoert?:boolean, spricht?:boolean, schreibt?:boolean, denkt?:boolean, freutBis?:number, jetzt?:number}} e
+ * @returns {'ruht'|'hoert'|'denkt'|'spricht'|'frisst'|'freut'|'verwirrt'|'schlaeft'}
+ */
+export function wesenZustand(e = {}) {
+  const jetzt = Number.isFinite(e.jetzt) ? e.jetzt : 0;
+  if (e.aus) return 'schlaeft';
+  if (e.frisst) return 'frisst';
+  if (Number(e.verwirrtBis) > jetzt) return 'verwirrt';
+  if (e.hoert) return 'hoert';
+  if (e.spricht || e.schreibt) return 'spricht';
+  if (e.denkt) return 'denkt';
+  if (Number(e.freutBis) > jetzt) return 'freut';
+  if (e.verbunden === false) return 'schlaeft';
+  return 'ruht';
+}
+
+/**
+ * Die eine Zeile unter dem grossen Wesen: kurz, was es gerade tut.
+ * @param {string} zustand  aus wesenZustand
+ * @param {{aus?:boolean, liest?:boolean, schritt?:string, satz?:string, datei?:string, live?:boolean}} [x]
+ */
+export function wesenSatz(zustand, x = {}) {
+  switch (zustand) {
+    case 'schlaeft':
+      return x.aus ? 'Neural OS ist aus – ich schlafe.' : 'Ich schlafe – deine KI ist noch nicht verbunden.';
+    case 'frisst':
+      return x.datei ? `Mmh – ich lese „${kurzText(x.datei, 40)}“ …` : 'Mmh – ich lese …';
+    case 'verwirrt':
+      return kurzText(x.satz || 'Das ging nicht.', 90);
+    case 'hoert':
+      return 'Ich höre zu …';
+    case 'spricht':
+      return x.liest ? 'Ich spreche … – zum Unterbrechen tippen' : 'Ich schreibe …';
+    case 'denkt':
+      return x.schritt ? kurzText(x.schritt, 70) : 'Ich denke …';
+    case 'freut':
+      return 'Fertig.';
+    default:
+      return x.live ? 'Ich höre gleich wieder zu …' : 'Was kann ich für dich tun?';
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Live: ein echtes Hin und Her                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Die Phasen des Gespraechs mit Live: zuhoeren -> (Stille) verstehen ->
+ * denken -> antworten (schreiben, dann vorlesen) -> wieder zuhoeren.
+ * `liveSchritt` sagt, was nach einem Ereignis kommt -- null heisst: Live
+ * ist aus. Ein Ereignis, das in einer Phase nichts bedeutet, aendert nichts.
+ */
+export const LIVE_PHASEN = Object.freeze(['hoert', 'versteht', 'denkt', 'schreibt', 'spricht']);
+
+export function liveSchritt(phase, ereignis) {
+  if (ereignis === 'aus' || ereignis === 'mikrofonFehler' || ereignis === 'nichtsGehoert' || ereignis === 'nichtVerbunden') return null;
+  if (!phase) return ereignis === 'an' ? 'hoert' : null;
+  switch (ereignis) {
+    case 'stille': return phase === 'hoert' ? 'versteht' : phase;
+    case 'text': return phase === 'versteht' || phase === 'hoert' ? 'denkt' : phase;
+    case 'nichtVerstanden': return phase === 'versteht' ? 'hoert' : phase;
+    case 'erstesWort': return phase === 'denkt' ? 'schreibt' : phase;
+    case 'antwortFertig': return phase === 'denkt' || phase === 'schreibt' ? 'spricht' : phase;
+    case 'ohneVorlesen': return phase === 'denkt' || phase === 'schreibt' ? 'hoert' : phase;
+    case 'vorgelesen': return phase === 'spricht' ? 'hoert' : phase;
+    case 'unterbrechen': return phase === 'spricht' ? 'hoert' : phase;
+    case 'antwortFehler': return phase === 'denkt' || phase === 'schreibt' || phase === 'spricht' ? 'hoert' : phase;
+    default: return phase;
+  }
+}
+
+/** Die eine Zeile, die sagt, wo das Gespraech steht. */
+export function liveSatz(phase) {
+  return {
+    hoert: 'Ich höre zu …',
+    versteht: 'Ich denke …',
+    denkt: 'Ich denke …',
+    schreibt: 'Ich antworte …',
+    spricht: 'Ich spreche … – zum Unterbrechen tippen',
+  }[phase] || '';
+}
+
+/**
+ * Geht Live hier? Es braucht ein Mikrofon und einen Weg von Sprache zu
+ * Text: die Erkennung des Browsers, oder eine Aufnahme, die Gemini
+ * umschreibt. Sonst ein ehrlicher Satz -- und es bleibt beim Tippen.
+ * @param {{sicher?:boolean, mikrofon?:boolean, weg?:'erkennung'|'aufnahme'|null}} b
+ * @returns {{ok:boolean, satz:string|null}}
+ */
+export function liveMoeglich({ sicher = true, mikrofon = true, weg = null } = {}) {
+  if (!sicher) return { ok: false, satz: 'Live geht nur, wenn Neural OS auf diesem Gerät läuft (127.0.0.1) – über das WLAN erlaubt der Browser kein Mikrofon.' };
+  if (!mikrofon) return { ok: false, satz: 'Dieser Browser gibt kein Mikrofon her – hier geht nur Tippen.' };
+  if (!weg) return { ok: false, satz: 'Für Live braucht es Sprache zu Text: Dieser Browser kann das nicht selbst, und ohne Google-Schlüssel (Gemini, kostenlos) kann ich es nicht umschreiben. Unter Einstellungen → KI verbinden.' };
+  return { ok: true, satz: null };
+}
+
+/* ------------------------------------------------------------------ */
+/* Stille erkennen: wann jemand fertig gesprochen hat                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Die Grenzen der Stille-Erkennung. RMS ist die mittlere Lautstaerke eines
+ * Stuecks (0 = still, 1 = voll ausgesteuert). Der Grund-Pegel des Raums
+ * wird in den ersten KALIBRIER_MS gemessen; Sprache ist deutlich lauter
+ * als er (FAKTOR_SPRACHE), Stille kaum (FAKTOR_STILLE). Untergrenzen,
+ * damit ein sehr stilles Mikrofon nicht jedes Rauschen fuer Sprache haelt.
+ */
+export const STILLE = Object.freeze({
+  STILLE_MS: 1200,
+  MAX_MS: 60000,
+  MIN_SPRACHE_MS: 220,
+  KALIBRIER_MS: 400,
+  SPRACHE_MIN: 0.02,
+  STILLE_MIN: 0.012,
+  BODEN_MAX: 0.02,
+  FAKTOR_SPRACHE: 3,
+  FAKTOR_STILLE: 1.8,
+});
+
+/** Ein neuer Zustand fuer eine Aufnahme, die jetzt beginnt. */
+export function stilleNeu(jetzt, grenzen = {}) {
+  return {
+    g: { ...STILLE, ...grenzen },
+    beginn: jetzt,
+    proben: [],
+    boden: null,
+    lautSeit: null,
+    gesprochen: false,
+    spracheBeginn: null,
+    stilleSeit: null,
+    ende: null,
+  };
+}
+
+/** Die Schwellen aus dem gemessenen Grund-Pegel. */
+export function stilleSchwellen(boden, grenzen = STILLE) {
+  const b = Math.min(Number(boden) || 0, grenzen.BODEN_MAX);
+  return {
+    sprache: Math.max(grenzen.SPRACHE_MIN, b * grenzen.FAKTOR_SPRACHE),
+    stille: Math.max(grenzen.STILLE_MIN, b * grenzen.FAKTOR_STILLE),
+  };
+}
+
+/**
+ * Ein Messwert mehr. Liefert den neuen Zustand und hoechstens ein
+ * Ereignis: 'sprache' (sie hat begonnen), 'stille' (nach Sprache lange
+ * genug still: fertig), 'grenze' (MAX_MS erreicht, es wurde gesprochen),
+ * 'nichts' (MAX_MS erreicht, und nie gesprochen). Nach 'stille', 'grenze'
+ * oder 'nichts' kommt nichts mehr.
+ * @returns {{z:object, ereignis:null|'sprache'|'stille'|'grenze'|'nichts'}}
+ */
+export function stilleSchritt(z, rms, jetzt) {
+  if (!z || z.ende) return { z, ereignis: null };
+  const g = z.g;
+  const wert = Math.max(0, Number(rms) || 0);
+  const n = { ...z };
+  const seit = jetzt - z.beginn;
+  if (n.boden === null) {
+    n.proben = [...z.proben, wert];
+    if (seit >= g.KALIBRIER_MS) {
+      // Der leiseste Teil der ersten Stuecke: wer sofort losredet, macht Pausen zwischen den Silben.
+      const sortiert = [...n.proben].sort((a, b) => a - b);
+      n.boden = sortiert[Math.floor(sortiert.length * 0.2)] || 0;
+    }
+  }
+  const s = stilleSchwellen(n.boden === null ? 0 : n.boden, g);
+  let ereignis = null;
+  if (wert >= s.sprache) {
+    if (n.lautSeit === null) n.lautSeit = jetzt;
+    n.stilleSeit = null;
+    if (!n.gesprochen && jetzt - n.lautSeit >= g.MIN_SPRACHE_MS) {
+      n.gesprochen = true;
+      n.spracheBeginn = n.lautSeit;
+      ereignis = 'sprache';
+    }
+  } else {
+    if (wert < s.stille) n.lautSeit = null;
+    if (n.gesprochen) {
+      if (wert < s.stille) {
+        if (n.stilleSeit === null) n.stilleSeit = jetzt;
+        if (jetzt - n.stilleSeit >= g.STILLE_MS) {
+          n.ende = 'stille';
+          return { z: n, ereignis: 'stille' };
+        }
+      } else {
+        n.stilleSeit = null;
+      }
+    }
+  }
+  if (seit >= g.MAX_MS) {
+    n.ende = n.gesprochen ? 'grenze' : 'nichts';
+    return { z: n, ereignis: n.ende };
+  }
+  return { z: n, ereignis };
+}
+
+/** Lautstaerke eines Stuecks Samples (Float32, -1..1) als RMS. */
+export function rmsVon(samples) {
+  const n = samples ? samples.length : 0;
+  if (!n) return 0;
+  let summe = 0;
+  for (let i = 0; i < n; i += 1) summe += samples[i] * samples[i];
+  return Math.sqrt(summe / n);
+}
+
+/** RMS als Pegel 0..1 fuer den Ring ums Wesen (Sprache liegt grob bei 0,02-0,3). */
+export function pegelAusRms(rms) {
+  const r = Math.max(0, Number(rms) || 0);
+  if (r <= 0.004) return 0;
+  // Logarithmisch: leises Sprechen soll man schon sehen.
+  return Math.max(0, Math.min(1, (Math.log10(r) + 2.4) / 1.9));
+}
+
+/* ------------------------------------------------------------------ */
+/* Dateien: was das Wesen essen kann                                    */
+/* ------------------------------------------------------------------ */
+
+/** Grenzen wie der Server (src/models/anhaenge.js) -- und fuer Textdateien 200 KB. */
+export const DATEI = Object.freeze({
+  BILD_ARTEN: Object.freeze(['image/png', 'image/jpeg', 'image/webp', 'image/gif']),
+  PDF_ART: 'application/pdf',
+  MAX_PDF_BYTES: 20 * 1024 * 1024,
+  /** Groessere Fotos werden verkleinert (lib/anhaenge.js); ueber dieser Grenze nimmt der Browser sie nicht sicher auf. */
+  MAX_BILD_ROH_BYTES: 40 * 1024 * 1024,
+  MAX_TEXT_BYTES: 200 * 1024,
+});
+
+const DATEI_ENDUNG = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', jfif: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', pdf: 'application/pdf',
+};
+const DATEI_ALIAS = { 'image/jpg': 'image/jpeg', 'image/pjpeg': 'image/jpeg', 'application/x-pdf': 'application/pdf' };
+const TEXT_ENDUNG = /\.(txt|text|md|markdown|csv|tsv|json|log|xml|ya?ml|ini|toml|ics|vcf|srt|html?|css|js|mjs|ts|py|sh|bat|sql|tex)$/i;
+
+/** Der Satz, was das Wesen isst. */
+export const ESSBAR = 'Ich nehme Bilder (PNG, JPG, WEBP, GIF), PDF und Textdateien (.txt, .md, .csv, .json).';
+
+function kb(bytes) {
+  return Math.max(1, Math.round(Number(bytes) / 1024)).toLocaleString('de-DE');
+}
+function mbText(bytes) {
+  return (Number(bytes) / (1024 * 1024)).toLocaleString('de-DE', { maximumFractionDigits: 1 });
+}
+
+/**
+ * Kann das Wesen diese Datei essen? Nach der Angabe des Browsers, und nur
+ * wenn er nichts sagt nach der Endung -- wie der Chat (lib/anhaenge.js).
+ * Ob der Inhalt stimmt, prueft der Server an den ersten Bytes.
+ * @param {{name?:string, type?:string, size?:number}} datei
+ * @returns {{art:'bild'|'pdf'|'text', mime:string, satz:null} | {art:null, grund:'art'|'gross'|'leer', satz:string}}
+ */
+export function dateiPruefen(datei = {}) {
+  const name = String((datei && datei.name) || 'Datei');
+  const roh = String((datei && datei.type) || '').toLowerCase().trim();
+  const typ = DATEI_ALIAS[roh] || roh;
+  const groesse = Number(datei && datei.size);
+  const g = Number.isFinite(groesse) ? groesse : 0;
+  let art = null;
+  let mime = typ;
+  if (DATEI.BILD_ARTEN.includes(typ)) art = 'bild';
+  else if (typ === DATEI.PDF_ART) art = 'pdf';
+  else if (!typ || typ === 'application/octet-stream') {
+    const endung = (/\.([a-z0-9]+)$/i.exec(name) || [])[1];
+    const aus = endung ? DATEI_ENDUNG[endung.toLowerCase()] : null;
+    if (aus) {
+      art = aus === DATEI.PDF_ART ? 'pdf' : 'bild';
+      mime = aus;
+    }
+  }
+  if (!art && (typ.startsWith('text/') || /json|csv|xml/.test(typ) || TEXT_ENDUNG.test(name))) {
+    art = 'text';
+    mime = typ || 'text/plain';
+  }
+  const kurz = kurzText(name, 48);
+  if (!art) return { art: null, grund: 'art', satz: `„${kurz}“ kann ich nicht lesen. ${ESSBAR}` };
+  if (Number.isFinite(groesse) && g <= 0) return { art: null, grund: 'leer', satz: `„${kurz}“ ist leer.` };
+  if (art === 'text' && g > DATEI.MAX_TEXT_BYTES) {
+    return { art: null, grund: 'gross', satz: `„${kurz}“ ist zu groß für mich (${kb(g)} KB) – Textdateien bis ${kb(DATEI.MAX_TEXT_BYTES)} KB.` };
+  }
+  if (art === 'pdf' && g > DATEI.MAX_PDF_BYTES) {
+    return { art: null, grund: 'gross', satz: `„${kurz}“ ist zu groß (${mbText(g)} MB, erlaubt sind ${mbText(DATEI.MAX_PDF_BYTES)} MB).` };
+  }
+  if (art === 'bild' && g > DATEI.MAX_BILD_ROH_BYTES) {
+    return { art: null, grund: 'gross', satz: `„${kurz}“ ist zu groß (${mbText(g)} MB). Bilder bis ${mbText(DATEI.MAX_BILD_ROH_BYTES)} MB.` };
+  }
+  return { art, mime, satz: null };
+}
+
+/** Was mitgeht, wenn jemand nur Dateien gibt und nichts dazu schreibt. */
+export function dateienAuftrag(anzahl) {
+  return Number(anzahl) > 1 ? 'Werte diese Dateien aus.' : 'Werte diese Datei aus.';
+}
+
+/** Das kleine Schild auf der Datei, die ins Maul fliegt: "PDF", "TXT", "BILD". */
+export function dateiKuerzel(name, art) {
+  if (art === 'bild') return 'BILD';
+  if (art === 'pdf') return 'PDF';
+  const endung = (/\.([a-z0-9]{1,5})$/i.exec(String(name || '')) || [])[1];
+  return endung ? endung.toUpperCase().slice(0, 4) : 'TEXT';
+}
+
+/* ------------------------------------------------------------------ */
+/* Wo das Wesen sitzt, und wie gross es aufgeht                         */
+/* ------------------------------------------------------------------ */
+
+/** Masse am Rand. */
+export const LAGE = Object.freeze({
+  RAND: 16,
+  GROESSE: 60,
+  GROESSE_FINGER: 56,
+  /** So breit ist die Spur am rechten Rand, wenn die Spalte zu ist (Groesse + Rand). */
+  SPUR: 76,
+  ABSTAND: 8,
+  PANEL_BREITE: 400,
+  PANEL_HOEHE_MAX: 760,
+  TELEFON_BIS: 600,
+});
+
+/**
+ * Bekommt das Wesen eine eigene Spur am rechten Rand? Ab 1000 px stehen
+ * die Spalten nebeneinander (web/app.css). Ist die rechte Spalte zu, reicht
+ * der Inhalt sonst bis an den Rand -- dort lagen Knoepfe (der Sonntag im
+ * Kalender, Schalter in den Einstellungen). Mit der Spur verdeckt es nichts.
+ * Ist die Spalte offen, sitzt es ueber ihr; darunter (Telefon, iPad hoch)
+ * schwebt es unten rechts.
+ */
+export function randSpur({ breite, rechtsOffen }) {
+  return Number(breite) >= 1000 && !rechtsOffen;
+}
+
+/**
+ * Wo am rechten Rand das Wesen sitzt: moeglichst im unteren Drittel der
+ * Mitte (am Telefon unten), aber nie auf einem Knopf. `hindernisse` sind
+ * die Bedienelemente, die waagrecht in seinem Streifen liegen ({top,
+ * bottom} in Pixeln). Sitzt es schon frei (`aktuell`), bleibt es dort --
+ * ein Wesen, das bei jeder Kleinigkeit huepft, stoert. Nur wenn es weit
+ * weg von seiner Wunschstelle sitzt (mehr als `heimweh`) und die frei ist,
+ * geht es heim.
+ * @returns {{y:number, frei:boolean}}  y = obere Kante
+ */
+export function dockLage({
+  hoehe, telefon = false, groesse = LAGE.GROESSE, oben = 72, unten = LAGE.RAND, hindernisse = [], aktuell = null, abstand = LAGE.ABSTAND, heimweh = 160,
+} = {}) {
+  const h = Math.max(0, Number(hoehe) || 0);
+  const minY = Math.max(0, Math.round(oben));
+  const maxY = Math.max(minY, Math.round(h - unten - groesse));
+  const bevorzugt = Math.min(maxY, Math.max(minY, telefon ? maxY : Math.round(h * 0.6 - groesse / 2)));
+  // Belegte Bereiche, mit Abstand, sortiert und zusammengefasst.
+  const belegt = (Array.isArray(hindernisse) ? hindernisse : [])
+    .filter((r) => r && Number.isFinite(r.top) && Number.isFinite(r.bottom) && r.bottom > r.top)
+    .map((r) => [r.top - abstand, r.bottom + abstand])
+    .sort((a, b) => a[0] - b[0]);
+  const zusammen = [];
+  for (const [a, b] of belegt) {
+    const letzte = zusammen[zusammen.length - 1];
+    if (letzte && a <= letzte[1]) letzte[1] = Math.max(letzte[1], b);
+    else zusammen.push([a, b]);
+  }
+  const frei = (y) => y >= minY && y <= maxY && !zusammen.some(([a, b]) => y < b && y + groesse > a);
+  if (Number.isFinite(aktuell) && frei(Math.round(aktuell))) {
+    const nah = Math.abs(Math.round(aktuell) - bevorzugt) <= heimweh;
+    if (nah || !frei(bevorzugt)) return { y: Math.round(aktuell), frei: true };
+  }
+  // Kandidaten: die Wunschstelle und jede Kante eines belegten Bereichs -- vom Hindernis WEG
+  // gerundet (Bildschirmpunkte sind krumm: 1014,375); sonst laege es um einen Bruchteil darauf.
+  const kandidaten = [bevorzugt];
+  for (const [a, b] of zusammen) kandidaten.push(Math.ceil(b), Math.floor(a - groesse));
+  let best = null;
+  for (const y of kandidaten) {
+    const c = Math.min(maxY, Math.max(minY, y));
+    if (!frei(c)) continue;
+    const d = Math.abs(c - bevorzugt);
+    if (best === null || d < best.d || (d === best.d && c > best.y)) best = { y: c, d };
+  }
+  if (best) return { y: best.y, frei: true };
+  return { y: bevorzugt, frei: false };
+}
+
+/**
+ * Wie gross die Insel aufgeht: am Rechner und iPad ein Feld am rechten Rand
+ * (400 px breit, hoechstens 80 % der Hoehe) -- nie der ganze Bildschirm.
+ * Am Telefon ein Blatt von unten (85 % der Hoehe).
+ * @returns {{art:'feld'|'blatt', breite:number, hoehe:number, rechts:number, unten:number}}
+ */
+export function panelLage({ breite, hoehe }) {
+  const b = Math.max(0, Number(breite) || 0);
+  const h = Math.max(0, Number(hoehe) || 0);
+  if (b < LAGE.TELEFON_BIS) {
+    return { art: 'blatt', breite: b, hoehe: Math.round(h * 0.85), rechts: 0, unten: 0 };
+  }
+  const rand = LAGE.RAND;
+  return {
+    art: 'feld',
+    breite: Math.min(LAGE.PANEL_BREITE, b - 2 * rand),
+    hoehe: Math.round(Math.max(280, Math.min(h * 0.8, LAGE.PANEL_HOEHE_MAX, h - 2 * rand))),
+    rechts: rand,
+    unten: rand,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Was die KI unterwegs tut: suchen, lesen, nachsehen                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Eine Zeile zu einem Arbeitsschritt aus dem Strom (Ereignis `agent`):
+ * "Sucht im Internet: „Wetter Berlin“", danach "Gesucht: „Wetter Berlin“ ·
+ * 5 Treffer". Jedes andere Werkzeug der Recherche (etwa das Nachschlagen in
+ * Wikipedia: "Wikipedia: „Brandenburger Tor“" · "2 Artikel gefunden") steht
+ * mit seinem eigenen Titel da -- die Insel muss das Werkzeug nicht kennen.
+ * Was etwas anlegt (Termin, Notiz), zeigt die Insel als Karte; dafuer gibt
+ * es hier null.
+ * @param {{rolle?:string, titel?:string, schritt?:string, zustand?:string, ergebnis?:string, wirkung?:Array, werkzeug?:string}} a
+ * @returns {{text:string, laeuft:boolean, fehler:boolean, art:'suche'|'lesen'|'nachschlagen'|'wissen'|'werkzeug'}|null}
+ */
+export function schrittSatz(a) {
+  if (!a || typeof a !== 'object') return null;
+  if (Array.isArray(a.wirkung) && a.wirkung.length && a.zustand !== 'laeuft') return null;
+  const laeuft = a.zustand === 'laeuft';
+  const fehler = a.zustand === 'fehler';
+  const titel = String(a.titel || '');
+  const erg = a.ergebnis ? String(a.ergebnis) : '';
+  // Danach steht, was herauskam; ging es schief und sagt niemand warum, steht das da.
+  const dazu = (satz) => {
+    if (laeuft) return satz;
+    if (erg) return `${satz} · ${kurzText(erg, 60)}`;
+    return fehler ? `${satz} · ging nicht` : satz;
+  };
+  if (a.rolle === 'recherche') {
+    const q = /^Sucht:\s*(.*)$/.exec(titel);
+    const l = /^Liest:\s*(.*)$/.exec(titel);
+    if (q) return { text: laeuft ? `Sucht im Internet: „${kurzText(q[1], 60)}“` : dazu(`Gesucht: „${kurzText(q[1], 60)}“`), laeuft, fehler, art: 'suche' };
+    if (l) {
+      if (laeuft) return { text: `Liest: ${kurzText(l[1], 60)}`, laeuft, fehler, art: 'lesen' };
+      if (!fehler && /^Gelesen:/.test(erg)) return { text: kurzText(erg, 90), laeuft, fehler, art: 'lesen' };
+      return { text: fehler ? dazu(`Nicht gelesen: ${kurzText(l[1], 60)}`) : `Gelesen: ${kurzText(l[1], 60)}`, laeuft, fehler, art: 'lesen' };
+    }
+    if (titel && titel !== 'Recherche') {
+      const nachschlagen = /wikipedia|lexikon|nachschlag/i.test(`${a.werkzeug || ''} ${titel} ${a.schritt || ''}`);
+      return { text: dazu(kurzText(titel, 70)), laeuft, fehler, art: nachschlagen ? 'nachschlagen' : 'suche' };
+    }
+    return { text: laeuft ? 'Sucht im Internet' : dazu('Im Internet gesucht'), laeuft, fehler, art: 'suche' };
+  }
+  if (a.rolle === 'wissen') {
+    const q = /^Sucht in deinem Wissen:\s*(.*)$/.exec(titel);
+    if (q) return { text: laeuft ? `Sucht in deinem Wissen: ${kurzText(q[1], 60)}` : dazu(`In deinem Wissen gesucht: ${kurzText(q[1], 60)}`), laeuft, fehler, art: 'wissen' };
+    return { text: laeuft ? kurzText(titel || 'Sieht in deinem Wissen nach', 70) : dazu(kurzText(titel || 'In deinem Wissen nachgesehen', 70)), laeuft, fehler, art: 'wissen' };
+  }
+  const satz = kurzText(titel || a.schritt || 'Arbeitsschritt', 70);
+  return { text: laeuft ? satz : dazu(satz), laeuft, fehler, art: 'werkzeug' };
+}
+
+/** Der Rechnername einer Quelle, ohne "www." ("wetter.de"); ein Eintrag aus dem eigenen Wissen hat keinen. */
+export function quelleHost(url) {
+  const m = /^https?:\/\/([^/?#:]+)/i.exec(String(url || ''));
+  return m ? m[1].toLowerCase().replace(/^www\./, '') : '';
+}
+
+/* ------------------------------------------------------------------ */
+/* Die kleinen Schilder neben dem Wesen                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Ein Schild neben dem Wesen (zu): kurz, was lebt -- "4:59 Tee", "In 12
+ * Min · Zahnarzt", "Hört zu". `ton`: 'ki' (der Akzent), 'aufnahme' (ein
+ * roter Punkt: Mikrofon oder Bildschirm sind offen), 'leise'.
+ * @returns {{text:string, ton:'ki'|'aufnahme'|'leise', symbol:string}|null}
+ */
+export function chipFuer(a, jetzt) {
+  if (!a) return null;
+  switch (a.art) {
+    case 'timer': {
+      const rest = uhrText(Math.max(0, (a.endeMs || 0) - jetzt));
+      return { text: a.titel && a.titel !== 'Timer' ? `${rest} ${kurzText(a.titel, 18)}` : rest, ton: 'leise', symbol: 'timer' };
+    }
+    case 'termin':
+      return { text: `${terminWann(a.startMs, jetzt)} · ${kurzText(a.titel || 'Termin', 22)}`, ton: 'ki', symbol: 'termin' };
+    case 'freigabe': {
+      const n = Number(a.anzahl) || 0;
+      return { text: n === 1 ? '1 Freigabe' : `${n} Freigaben`, ton: 'leise', symbol: 'freigabe' };
+    }
+    case 'agent':
+      return { text: kurzText(`Agent: ${a.titel || 'arbeitet'}`, 30), ton: 'leise', symbol: 'agent' };
+    case 'hoeren':
+      return { text: 'Hört zu', ton: 'aufnahme', symbol: 'mikro' };
+    case 'teilen':
+      return { text: 'Sieht deinen Bildschirm', ton: 'aufnahme', symbol: 'bildschirm' };
+    case 'vorlesen':
+      return { text: 'Liest vor', ton: 'ki', symbol: 'vorlesen' };
+    case 'antwort':
+      return { text: a.phase === 'schreibt' ? 'Schreibt …' : (a.phase === 'werkzeug' && a.schritt ? kurzText(a.schritt, 30) : 'Denkt …'), ton: 'ki', symbol: 'welle' };
+    case 'neu':
+      return { text: kurzText(a.vorschau || 'Antwort ist da', 34), ton: 'ki', symbol: 'neu' };
+    case 'rueckfrage':
+      return { text: 'Eine Rückfrage', ton: 'ki', symbol: 'hinweis' };
+    case 'fehler':
+      return { text: kurzText(a.satz || 'Das ging nicht.', 34), ton: 'leise', symbol: 'hinweis' };
+    default:
+      return null;
+  }
+}
+
+/** Neben dem Wesen stehen hoechstens so viele Schilder -- der Rest steht drin. */
+export const MAX_CHIPS = 2;
+
 export default {
   uhrText, dauerWorte, wandzeitMs, dauerFinden, befehl, timerNeu, timerPruefen, naechsterTermin, terminWann,
-  RANG, ordnen, kompakt, aktivitaetText, kurzText, ohneOffenenBaustein, zaunFuer, frageMitTexten, kontextWahl,
+  RANG, ordnen, kompakt, aktivitaetText, kurzText, ohneOffenenBaustein, zaunFuer, frageMitTexten, textePlanen, kontextWahl,
   offenHinweis, chatTitel, gespraechAbgelaufen, bildName, bildMasse, schwebenMoeglich, teilenMoeglich,
   teilenFehlerSatz, schwebenFehlerSatz, fensterMasse, kuerzelText, istKuerzel,
+  wesenZustand, wesenSatz, liveSchritt, liveSatz, liveMoeglich, stilleNeu, stilleSchwellen, stilleSchritt, rmsVon, pegelAusRms,
+  dateiPruefen, dateienAuftrag, dateiKuerzel, randSpur, dockLage, panelLage, schrittSatz, quelleHost, chipFuer,
 };

@@ -335,6 +335,308 @@ test('Vorlagen und Anweisung: deutsch, kurz, ehrlich', async () => {
   assert.deepEqual(L.fensterMasse(true), { width: 440, height: 620 });
 });
 
+/* ---------------------------------------------------------------- Das Wesen */
+
+test('wesenZustand: was wirklich passiert, in fester Rangfolge -- aus schlaeft vor allem', async () => {
+  const L = await laden();
+  const z = (e) => L.wesenZustand({ jetzt: JETZT, ...e });
+  assert.equal(z({}), 'ruht');
+  assert.equal(z({ aus: true, hoert: true, frisst: true }), 'schlaeft', 'Neural OS ist aus: es schlaeft, auch wenn gerade etwas lief');
+  assert.equal(z({ frisst: true, hoert: true, verwirrtBis: JETZT + 1000 }), 'frisst', 'Essen geht vor');
+  assert.equal(z({ verwirrtBis: JETZT + 1000, hoert: true }), 'verwirrt');
+  assert.equal(z({ verwirrtBis: JETZT - 1 }), 'ruht', 'Verwirrung vergeht');
+  assert.equal(z({ hoert: true, spricht: true, denkt: true }), 'hoert', 'das Mikrofon geht vor dem Sprechen');
+  assert.equal(z({ spricht: true, denkt: true }), 'spricht');
+  assert.equal(z({ schreibt: true, denkt: true }), 'spricht', 'Wort fuer Wort: der Mund bewegt sich');
+  assert.equal(z({ denkt: true, freutBis: JETZT + 500 }), 'denkt');
+  assert.equal(z({ freutBis: JETZT + 500 }), 'freut');
+  assert.equal(z({ freutBis: JETZT - 1 }), 'ruht');
+  assert.equal(z({ verbunden: false }), 'schlaeft', 'ohne verbundene KI schlaeft es');
+  assert.equal(z({ verbunden: false, hoert: true }), 'hoert', 'weckt man es, hoert es trotzdem zu');
+  assert.equal(z({ verbunden: null }), 'ruht', 'unbekannt ist nicht "nicht verbunden"');
+  for (const name of ['ruht', 'hoert', 'denkt', 'spricht', 'frisst', 'freut', 'verwirrt', 'schlaeft']) assert.ok(L.WESEN_ZUSTAENDE.includes(name), name);
+});
+
+test('wesenSatz: eine kurze Zeile je Zustand, ehrlich und deutsch', async () => {
+  const L = await laden();
+  assert.equal(L.wesenSatz('ruht'), 'Was kann ich für dich tun?');
+  assert.equal(L.wesenSatz('hoert'), 'Ich höre zu …');
+  assert.equal(L.wesenSatz('denkt'), 'Ich denke …');
+  assert.equal(L.wesenSatz('denkt', { schritt: 'Sucht im Internet …' }), 'Sucht im Internet …');
+  assert.equal(L.wesenSatz('spricht', { liest: true }), 'Ich spreche … – zum Unterbrechen tippen');
+  assert.equal(L.wesenSatz('spricht'), 'Ich schreibe …');
+  assert.equal(L.wesenSatz('frisst', { datei: 'Bericht.pdf' }), 'Mmh – ich lese „Bericht.pdf“ …');
+  assert.match(L.wesenSatz('schlaeft'), /nicht verbunden/);
+  assert.match(L.wesenSatz('schlaeft', { aus: true }), /Neural OS ist aus/);
+  assert.equal(L.wesenSatz('verwirrt', { satz: 'Kein Netz.' }), 'Kein Netz.');
+  assert.equal(L.wesenSatz('freut'), 'Fertig.');
+});
+
+/* ---------------------------------------------------------------- Live */
+
+test('liveSchritt: ein echtes Hin und Her -- zuhoeren, verstehen, denken, antworten, vorlesen, wieder zuhoeren', async () => {
+  const L = await laden();
+  let p = L.liveSchritt(null, 'an');
+  assert.equal(p, 'hoert');
+  const folge = [['stille', 'versteht'], ['text', 'denkt'], ['erstesWort', 'schreibt'], ['antwortFertig', 'spricht'], ['vorgelesen', 'hoert']];
+  for (const [ereignis, erwartet] of folge) {
+    p = L.liveSchritt(p, ereignis);
+    assert.equal(p, erwartet, `${ereignis} -> ${erwartet}`);
+  }
+  assert.equal(L.liveSchritt('spricht', 'unterbrechen'), 'hoert', 'Antippen, waehrend es spricht: es hoert wieder zu');
+  assert.equal(L.liveSchritt('versteht', 'nichtVerstanden'), 'hoert', 'nichts verstanden: weiter zuhoeren');
+  assert.equal(L.liveSchritt('schreibt', 'ohneVorlesen'), 'hoert', 'ohne Stimme: gleich wieder zuhoeren');
+  assert.equal(L.liveSchritt('denkt', 'antwortFehler'), 'hoert');
+  assert.equal(L.liveSchritt('hoert', 'text'), 'denkt', 'die Erkennung des Browsers liefert den Text direkt');
+  for (const aus of ['aus', 'mikrofonFehler', 'nichtsGehoert', 'nichtVerbunden']) assert.equal(L.liveSchritt('hoert', aus), null, aus);
+  assert.equal(L.liveSchritt('hoert', 'vorgelesen'), 'hoert', 'was in einer Phase nichts bedeutet, aendert nichts');
+  assert.equal(L.liveSchritt(null, 'stille'), null, 'aus bleibt aus');
+  for (const ph of L.LIVE_PHASEN) assert.ok(L.liveSatz(ph).length > 0, ph);
+  assert.equal(L.liveSatz('hoert'), 'Ich höre zu …');
+  assert.equal(L.liveSatz('denkt'), 'Ich denke …');
+  assert.equal(L.liveSatz('spricht'), 'Ich spreche … – zum Unterbrechen tippen');
+});
+
+test('liveMoeglich: ohne Mikrofon oder ohne Weg zu Text ein ehrlicher Satz', async () => {
+  const L = await laden();
+  assert.deepEqual(L.liveMoeglich({ mikrofon: true, weg: 'aufnahme' }), { ok: true, satz: null }, 'Opera: Aufnahme, Gemini schreibt um');
+  assert.deepEqual(L.liveMoeglich({ mikrofon: true, weg: 'erkennung' }), { ok: true, satz: null });
+  assert.match(L.liveMoeglich({ mikrofon: true, weg: null }).satz, /Google-Schlüssel/);
+  assert.match(L.liveMoeglich({ mikrofon: false, weg: 'aufnahme' }).satz, /kein Mikrofon/);
+  assert.match(L.liveMoeglich({ sicher: false, weg: 'aufnahme' }).satz, /WLAN/);
+});
+
+/** Spielt eine Folge [ms, rms] in Stuecken von 50 ms ab und sammelt die Ereignisse mit Zeit. */
+function abspielen(L, folge, grenzen = {}) {
+  let z = L.stilleNeu(0, grenzen);
+  let t = 0;
+  const ereignisse = [];
+  for (const [dauer, rms] of folge) {
+    for (let i = 0; i < dauer; i += 50) {
+      t += 50;
+      const r = L.stilleSchritt(z, rms, t);
+      z = r.z;
+      if (r.ereignis) ereignisse.push([r.ereignis, t]);
+    }
+  }
+  return { ereignisse, z };
+}
+
+test('stilleSchritt: nach Sprache 1,2 s still -- fertig; vorher nicht', async () => {
+  const L = await laden();
+  const { ereignisse, z } = abspielen(L, [[500, 0.003], [1500, 0.12], [2000, 0.004]]);
+  assert.deepEqual(ereignisse.map((e) => e[0]), ['sprache', 'stille']);
+  const [, stilleBei] = ereignisse[1];
+  assert.ok(stilleBei >= 2000 + 1200 && stilleBei <= 2000 + 1300, `fertig nach 1,2 s Stille: ${stilleBei}`);
+  assert.ok(z.spracheBeginn >= 500 && z.spracheBeginn <= 600, `Sprache begann bei ${z.spracheBeginn}`);
+  assert.equal(L.stilleSchritt(z, 0.2, 99999).ereignis, null, 'danach kommt nichts mehr');
+});
+
+test('stilleSchritt: eine Atempause ist kein Ende, ein Klick ist keine Sprache', async () => {
+  const L = await laden();
+  const pause = abspielen(L, [[500, 0.003], [1000, 0.1], [700, 0.004], [1000, 0.1], [1400, 0.004]]);
+  assert.deepEqual(pause.ereignisse.map((e) => e[0]), ['sprache', 'stille'], 'nur EIN Ende -- nach der langen Pause');
+  assert.ok(pause.ereignisse[1][1] > 500 + 1000 + 700 + 1000, 'die kurze Pause beendet nichts');
+  const klick = abspielen(L, [[500, 0.003], [100, 0.3], [3000, 0.003]]);
+  assert.deepEqual(klick.ereignisse, [], 'ein kurzes Klacken (100 ms) ist keine Sprache');
+});
+
+test('stilleSchritt: eine Minute nichts -- "nichts"; eine Minute Rede -- "grenze"', async () => {
+  const L = await laden();
+  const nichts = abspielen(L, [[61000, 0.003]]);
+  assert.deepEqual(nichts.ereignisse.map((e) => e[0]), ['nichts']);
+  assert.equal(nichts.ereignisse[0][1], 60000);
+  const rede = abspielen(L, [[300, 0.003], [61000, 0.1]]);
+  assert.deepEqual(rede.ereignisse.map((e) => e[0]), ['sprache', 'grenze']);
+  assert.equal(L.STILLE.STILLE_MS, 1200);
+  assert.equal(L.STILLE.MAX_MS, 60000);
+});
+
+test('stilleSchritt: in einem lauten Raum steigen die Schwellen -- das Rauschen ist keine Sprache', async () => {
+  const L = await laden();
+  // Rauschen 0,015: mit festen Schwellen (0,02) waere jedes Aufbrausen "Sprache".
+  const laut = abspielen(L, [[500, 0.015], [1000, 0.03], [2000, 0.015]]);
+  assert.deepEqual(laut.ereignisse, [], `0,03 in einem Raum mit 0,015 Rauschen ist keine Sprache: ${JSON.stringify(laut.ereignisse)}`);
+  const s = L.stilleSchwellen(0.015);
+  assert.ok(s.sprache > 0.04 && s.stille > 0.025, JSON.stringify(s));
+  const deutlich = abspielen(L, [[500, 0.015], [1000, 0.15], [2000, 0.016]]);
+  assert.deepEqual(deutlich.ereignisse.map((e) => e[0]), ['sprache', 'stille']);
+  assert.deepEqual(L.stilleSchwellen(0.5), L.stilleSchwellen(L.STILLE.BODEN_MAX), 'wer sofort laut redet, verschiebt die Schwellen nicht ins Unendliche');
+});
+
+test('rmsVon und pegelAusRms: Lautstaerke messen, als Ring zeigen', async () => {
+  const L = await laden();
+  assert.equal(L.rmsVon(new Float32Array(0)), 0);
+  assert.ok(Math.abs(L.rmsVon(Float32Array.from([0.5, -0.5, 0.5, -0.5])) - 0.5) < 1e-9);
+  assert.equal(L.pegelAusRms(0), 0);
+  assert.equal(L.pegelAusRms(0.002), 0, 'Rauschen zeigt keinen Ring');
+  assert.ok(L.pegelAusRms(0.02) > 0.1 && L.pegelAusRms(0.02) < L.pegelAusRms(0.2));
+  assert.equal(L.pegelAusRms(1), 1);
+});
+
+/* ---------------------------------------------------------------- Dateien */
+
+test('dateiPruefen: Bilder, PDF und Textdateien isst es -- alles andere ehrlich nicht', async () => {
+  const L = await laden();
+  const p = (name, type, size = 1000) => L.dateiPruefen({ name, type, size });
+  assert.deepEqual(p('foto.png', 'image/png'), { art: 'bild', mime: 'image/png', satz: null });
+  assert.equal(p('foto.JPG', '').art, 'bild', 'ohne Typ: die Endung zaehlt');
+  assert.equal(p('foto.jpg', 'image/jpg').mime, 'image/jpeg');
+  assert.equal(p('Rechnung.pdf', 'application/pdf').art, 'pdf');
+  assert.equal(p('Rechnung.pdf', '').art, 'pdf', 'manche Systeme liefern bei PDF keinen Typ');
+  for (const name of ['notizen.txt', 'liste.md', 'tabelle.csv', 'daten.json']) assert.equal(p(name, '').art, 'text', name);
+  assert.equal(p('x', 'text/plain').art, 'text');
+  assert.equal(p('daten.json', 'application/json').art, 'text');
+  const zip = p('Archiv.zip', 'application/zip');
+  assert.equal(zip.art, null);
+  assert.equal(zip.grund, 'art');
+  assert.match(zip.satz, /^„Archiv\.zip“ kann ich nicht lesen\. Ich nehme Bilder/);
+  assert.equal(p('film.mp4', 'video/mp4').art, null);
+  const gross = p('buch.txt', 'text/plain', 250 * 1024);
+  assert.equal(gross.grund, 'gross');
+  assert.match(gross.satz, /250 KB/);
+  assert.equal(p('genau.txt', 'text/plain', 200 * 1024).art, 'text', '200 KB gehen noch');
+  assert.equal(p('leer.txt', 'text/plain', 0).grund, 'leer');
+  assert.equal(p('riesig.pdf', 'application/pdf', 21 * 1024 * 1024).grund, 'gross');
+  assert.equal(p('handyfoto.jpg', 'image/jpeg', 9 * 1024 * 1024).art, 'bild', 'grosse Fotos werden verkleinert, nicht abgelehnt');
+});
+
+test('dateienAuftrag, dateiKuerzel: was mitgeht, was auf der Datei steht', async () => {
+  const L = await laden();
+  assert.equal(L.dateienAuftrag(1), 'Werte diese Datei aus.');
+  assert.equal(L.dateienAuftrag(3), 'Werte diese Dateien aus.');
+  assert.equal(L.dateiKuerzel('a.pdf', 'pdf'), 'PDF');
+  assert.equal(L.dateiKuerzel('a.png', 'bild'), 'BILD');
+  assert.equal(L.dateiKuerzel('liste.csv', 'text'), 'CSV');
+  assert.equal(L.dateiKuerzel('ohne', 'text'), 'TEXT');
+});
+
+test('textePlanen: eine Textdatei darf mehr mitbringen -- zusammen bleibt alles unter der Grenze, und es sagt, was fehlt', async () => {
+  const L = await laden();
+  const datei = { name: 'buch.txt', text: 'x'.repeat(50000), max: L.MAX_DATEI_ZEICHEN };
+  const eins = L.textePlanen('Werte diese Datei aus.', [datei]);
+  assert.ok(eins.inhalt.includes('x'.repeat(50000)), 'eine Datei geht ganz mit (nicht nur 12.000 Zeichen)');
+  assert.deepEqual(eins.gekuerzt, []);
+  const lang = L.textePlanen('F', [{ name: 'lang.txt', text: 'y'.repeat(L.MAX_DATEI_ZEICHEN + 10), max: L.MAX_DATEI_ZEICHEN }]);
+  assert.deepEqual(lang.gekuerzt, ['lang.txt']);
+  assert.ok(lang.inhalt.includes('[… gekürzt]'));
+  const zwei = L.textePlanen('F', [
+    { name: 'a.txt', text: 'a'.repeat(140000), max: L.MAX_DATEI_ZEICHEN },
+    { name: 'b.txt', text: 'b'.repeat(140000), max: L.MAX_DATEI_ZEICHEN },
+  ]);
+  assert.ok(zwei.inhalt.length <= L.MAX_NACHRICHT_ZEICHEN, `zusammen unter der Grenze: ${zwei.inhalt.length}`);
+  assert.deepEqual(zwei.gekuerzt, ['b.txt'], 'die zweite wird gekuerzt, damit beide hineinpassen');
+  const drei = L.textePlanen('F', [
+    { name: 'a.txt', text: 'a'.repeat(150000), max: L.MAX_DATEI_ZEICHEN },
+    { name: 'b.txt', text: 'b'.repeat(40000), max: L.MAX_DATEI_ZEICHEN },
+    { name: 'c.txt', text: 'c'.repeat(9000), max: L.MAX_DATEI_ZEICHEN },
+  ]);
+  assert.deepEqual(drei.weggelassen, ['c.txt'], 'was keinen Platz mehr hat, faellt weg -- und das wird gesagt');
+  assert.equal(L.frageMitTexten('Nur so', []), 'Nur so', 'frageMitTexten bleibt, wie es war');
+});
+
+/* ---------------------------------------------------------------- Lage */
+
+test('randSpur: ab 1000 px mit zugeklappter Spalte bekommt das Wesen eine eigene Spur', async () => {
+  const L = await laden();
+  assert.equal(L.randSpur({ breite: 1024, rechtsOffen: false }), true);
+  assert.equal(L.randSpur({ breite: 1180, rechtsOffen: false }), true, 'iPad quer');
+  assert.equal(L.randSpur({ breite: 1440, rechtsOffen: true }), false, 'offene Spalte: es sitzt ueber ihr');
+  assert.equal(L.randSpur({ breite: 820, rechtsOffen: false }), false, 'iPad hoch: es schwebt unten rechts');
+  assert.equal(L.randSpur({ breite: 390, rechtsOffen: false }), false);
+});
+
+test('dockLage: im unteren Drittel der Mitte, nie auf einem Knopf -- und es bleibt, wo es frei sitzt', async () => {
+  const L = await laden();
+  const frei = L.dockLage({ hoehe: 900 });
+  assert.deepEqual(frei, { y: 510, frei: true }, '60 % der Hoehe, mittig');
+  // Ein Knopf genau dort: es rueckt an die naechste freie Stelle.
+  const knopf = L.dockLage({ hoehe: 900, hindernisse: [{ top: 500, bottom: 540 }] });
+  assert.ok(knopf.frei && (knopf.y >= 548 || knopf.y + 60 <= 492), JSON.stringify(knopf));
+  assert.ok(Math.abs(knopf.y - 510) <= 52, 'so nah wie moeglich an der Wunschstelle');
+  // Bleibt, solange es frei sitzt -- nah an der Wunschstelle, oder weil die Wunschstelle belegt ist.
+  assert.deepEqual(L.dockLage({ hoehe: 900, aktuell: 420 }), { y: 420, frei: true }, 'kleine Wege macht es nicht');
+  assert.deepEqual(L.dockLage({ hoehe: 900, aktuell: 300, hindernisse: [{ top: 480, bottom: 600 }] }), { y: 300, frei: true });
+  assert.notEqual(L.dockLage({ hoehe: 900, aktuell: 420, hindernisse: [{ top: 440, bottom: 460 }] }).y, 420, 'ein neuer Knopf darunter: es rueckt weg');
+  // Weit weg (ein Dialog hatte es verdraengt) und die Wunschstelle ist wieder frei: es geht heim.
+  assert.deepEqual(L.dockLage({ hoehe: 900, aktuell: 130 }), { y: 510, frei: true }, 'Heimweh');
+  // Telefon: unten rechts, ueber dem Eingabefeld.
+  const tel = L.dockLage({ hoehe: 844, telefon: true, groesse: 56, unten: 12, hindernisse: [{ top: 759, bottom: 803 }] });
+  assert.ok(tel.frei && tel.y + 56 <= 759 - 8 && tel.y > 600, JSON.stringify(tel));
+  // Alles belegt: es sitzt an der Wunschstelle und sagt, dass es nicht frei ist.
+  assert.deepEqual(L.dockLage({ hoehe: 900, hindernisse: [{ top: 0, bottom: 900 }] }), { y: 510, frei: false });
+  // Krumme Bildschirmpunkte (wie getBoundingClientRect sie liefert): die freie Stelle unter einem Knopf
+  // ist trotzdem frei -- gemessen im Kalender am iPad hoch, wo das Wesen sonst auf dem Sonntag sass.
+  const krumm = L.dockLage({
+    hoehe: 1180,
+    oben: 73.5,
+    hindernisse: [{ top: 230.4, bottom: 821.6 }, { top: 887.2, bottom: 952.8 }, { top: 962.1, bottom: 1014.375 }],
+  });
+  assert.ok(krumm.frei && krumm.y >= 1014.375 + 8, JSON.stringify(krumm));
+  // Zwischen zwei Knoepfen ist zu wenig Platz: nicht dazwischenquetschen.
+  const eng = L.dockLage({ hoehe: 900, hindernisse: [{ top: 440, bottom: 500 }, { top: 540, bottom: 600 }] });
+  assert.ok(eng.y >= 608 || eng.y + 60 <= 432, JSON.stringify(eng));
+});
+
+test('panelLage: am Rechner und iPad ein Feld am Rand, nie der ganze Bildschirm; am Telefon ein Blatt', async () => {
+  const L = await laden();
+  for (const [b, hh] of [[1440, 900], [1280, 800], [1024, 768], [1180, 820], [820, 1180]]) {
+    const p = L.panelLage({ breite: b, hoehe: hh });
+    assert.equal(p.art, 'feld', `${b}x${hh}`);
+    assert.ok(p.breite <= 420 && p.breite >= 380, `${b}x${hh}: ${p.breite} px breit`);
+    assert.ok(p.hoehe <= hh * 0.8 + 1 && p.hoehe <= 760, `${b}x${hh}: ${p.hoehe} px hoch`);
+    assert.ok(p.breite < b * 0.5, 'nimmt nicht den ganzen Bildschirm');
+  }
+  const tel = L.panelLage({ breite: 390, hoehe: 844 });
+  assert.equal(tel.art, 'blatt');
+  assert.equal(tel.hoehe, Math.round(844 * 0.85));
+});
+
+/* ---------------------------------------------------------------- Suchen */
+
+test('schrittSatz: "Sucht im Internet: …" waehrend, "Gesucht: … · 5 Treffer" danach', async () => {
+  const L = await laden();
+  assert.deepEqual(L.schrittSatz({ rolle: 'recherche', titel: 'Sucht: Wetter Berlin', zustand: 'laeuft' }),
+    { text: 'Sucht im Internet: „Wetter Berlin“', laeuft: true, fehler: false, art: 'suche' });
+  assert.equal(L.schrittSatz({ rolle: 'recherche', titel: 'Sucht: Wetter Berlin', zustand: 'fertig', ergebnis: '5 Treffer' }).text, 'Gesucht: „Wetter Berlin“ · 5 Treffer');
+  assert.equal(L.schrittSatz({ rolle: 'recherche', titel: 'Liest: https://x.de/a', zustand: 'laeuft' }).text, 'Liest: https://x.de/a');
+  assert.equal(L.schrittSatz({ rolle: 'recherche', titel: 'Liest: https://x.de/a', zustand: 'fertig', ergebnis: 'Gelesen: Seite A' }).text, 'Gelesen: Seite A');
+  const f = L.schrittSatz({ rolle: 'recherche', titel: 'Sucht: x', zustand: 'fehler', ergebnis: 'Zu viele Anfragen' });
+  assert.equal(f.fehler, true);
+  assert.match(f.text, /Zu viele Anfragen/);
+  assert.equal(L.schrittSatz({ rolle: 'wissen', titel: 'Sucht in deinem Wissen: „Oma“', zustand: 'laeuft' }).art, 'wissen');
+  assert.equal(L.schrittSatz({ rolle: 'termin', titel: 'Zahnarzt', zustand: 'fertig', wirkung: [{ id: 'event_1' }] }), null, 'was etwas anlegt, steht als Karte da');
+  assert.equal(L.schrittSatz(null), null);
+  assert.equal(L.quelleHost('https://www.wetter.de/berlin?x=1'), 'wetter.de');
+  assert.equal(L.quelleHost('#/notes?id=note_1'), '');
+});
+
+test('schrittSatz: jedes andere Werkzeug der Recherche steht mit seinem Titel da -- Wikipedia nachschlagen zum Beispiel', async () => {
+  const L = await laden();
+  const wiki = { rolle: 'recherche', titel: 'Wikipedia: „Brandenburger Tor“', schritt: 'Schlägt nach', werkzeug: 'wikipedia_suchen' };
+  assert.deepEqual(L.schrittSatz({ ...wiki, zustand: 'laeuft' }), { text: 'Wikipedia: „Brandenburger Tor“', laeuft: true, fehler: false, art: 'nachschlagen' });
+  assert.equal(L.schrittSatz({ ...wiki, zustand: 'fertig', ergebnis: '2 Artikel gefunden' }).text, 'Wikipedia: „Brandenburger Tor“ · 2 Artikel gefunden');
+  const kaputt = L.schrittSatz({ ...wiki, zustand: 'fehler' });
+  assert.equal(kaputt.fehler, true);
+  assert.equal(kaputt.text, 'Wikipedia: „Brandenburger Tor“ · ging nicht', 'ein Fehler ohne Grund sagt trotzdem, dass es nicht ging');
+  // Ein Werkzeug, das die Insel noch nie gesehen hat: sein Titel, sein Ergebnis -- ohne Sonderfall.
+  assert.equal(L.schrittSatz({ rolle: 'recherche', titel: 'Fahrplan: Berlin – Hamburg', zustand: 'fertig', ergebnis: '3 Verbindungen' }).text, 'Fahrplan: Berlin – Hamburg · 3 Verbindungen');
+  assert.equal(L.schrittSatz({ rolle: 'recherche', titel: 'Recherche', zustand: 'fertig' }).text, 'Im Internet gesucht', 'der Notname der Recherche bleibt die allgemeine Zeile');
+  assert.equal(L.quelleHost('https://de.wikipedia.org/wiki/Brandenburger_Tor'), 'de.wikipedia.org');
+});
+
+test('chipFuer: kurze Schilder neben dem Wesen -- Mikrofon und Bildschirm mit rotem Punkt', async () => {
+  const L = await laden();
+  assert.deepEqual(L.chipFuer({ art: 'timer', titel: 'Tee', endeMs: JETZT + 65000 }, JETZT), { text: '1:05 Tee', ton: 'leise', symbol: 'timer' });
+  assert.equal(L.chipFuer({ art: 'timer', titel: 'Timer', endeMs: JETZT + 5000 }, JETZT).text, '0:05');
+  assert.equal(L.chipFuer({ art: 'termin', titel: 'Zahnarzt', startMs: JETZT + 12 * MIN }, JETZT).text, 'In 12 Min · Zahnarzt');
+  assert.equal(L.chipFuer({ art: 'hoeren' }, JETZT).ton, 'aufnahme');
+  assert.equal(L.chipFuer({ art: 'teilen' }, JETZT).ton, 'aufnahme');
+  assert.equal(L.chipFuer({ art: 'freigabe', anzahl: 2 }, JETZT).text, '2 Freigaben');
+  assert.equal(L.chipFuer({ art: 'antwort', phase: 'schreibt' }, JETZT).text, 'Schreibt …');
+  assert.equal(L.chipFuer({ art: 'unbekannt' }, JETZT), null);
+});
+
 test('naechsterTermin: was als Kapsel haengt oder weggeklickt ist, ueberspringt er -- der naechste kommt dran', async () => {
   const L = await laden();
   const ev = (id, start) => ({ id, data: { title: id, start, end: '2026-10-01T16:00' } });

@@ -27,7 +27,7 @@
  * sees no new worker and keeps the old cache.
  */
 
-const VERSION = 'v21';
+const VERSION = 'v22';
 const CACHE_NAME = `neural-os-shell-${VERSION}`;
 
 /**
@@ -93,6 +93,8 @@ const SHELL_ASSETS = [
   // Die Insel: sie steht auf jeder Seite.
   './lib/insel.js',
   './lib/insel-logik.js',
+  './lib/insel-wesen.js',
+  './lib/insel-ohr.js',
 ];
 
 self.addEventListener('install', (event) => {
