@@ -38,7 +38,7 @@
 
 const crypto = require('node:crypto');
 
-const { extractLinks, buildIndex } = require('../graph/derive');
+const { extractLinks, buildIndex, linkKeys, sectionBase, indexKey } = require('../graph/derive');
 const { fold } = require('../store/search');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -612,37 +612,45 @@ function detectLink(ctx) {
   // resolves is a working link; anything it does not is a real gap.
   const index = buildIndex(store);
 
-  /** folded target -> {target, subject, referrers:string[]} */
+  /** Schluessel des fehlenden Titels -> {titel, link, subject, referrers:string[]} */
   const missing = new Map();
   for (const note of notesOf(store)) {
     const body = bodyOf(note);
     if (!body) continue;
-    for (const target of extractLinks(body).wikiLinks) {
-      const key = fold(target);
-      if (!key || index.byTitle.has(key)) continue;
+    for (const link of extractLinks(body).wikiLinks) {
+      // Dieselben Schluessel wie beim Aufloesen (derive.linkKeys): auch
+      // [[Name#Abschnitt]] und [[Projekt  Alpha]]. Sonst meldete die
+      // Assistenz Luecken, die der Graph laengst verbunden hat.
+      const keys = linkKeys(link);
+      if (!keys.length || keys.some((k) => index.byTitle.has(k))) continue;
+      // Fehlt bei [[Name#Abschnitt]] das Ziel, wird "Name" angelegt -- wie
+      // "anlegen?" in der Notizansicht.
+      const titel = sectionBase(link) || link;
+      const key = indexKey(titel);
+      if (!key) continue;
       const entry = missing.get(key);
       if (entry) {
         if (!entry.referrers.includes(note.id)) entry.referrers.push(note.id);
       } else {
-        missing.set(key, { target, subject: note, referrers: [note.id] });
+        missing.set(key, { titel, link, subject: note, referrers: [note.id] });
       }
     }
   }
 
   const out = [];
-  for (const { target, subject, referrers } of missing.values()) {
+  for (const { titel, link, subject, referrers } of missing.values()) {
     const sourceTitle = titleOf(subject) || 'Ohne Titel';
     const body = `Diese Notiz entstand aus einem Verweis in „${sourceTitle}“.\n\n`
-      + `Dort steht [[${target}]], aber es gab noch keinen Eintrag mit diesem Titel.`;
-    const action = { op: 'createNote', title: target, body, tags: [], linkFrom: subject.id };
+      + `Dort steht [[${link}]], aber es gab noch keinen Eintrag mit diesem Titel.`;
+    const action = { op: 'createNote', title: titel, body, tags: [], linkFrom: subject.id };
     const others = referrers.length > 1 ? ` (und ${referrers.length - 1} weitere Notiz${referrers.length === 2 ? '' : 'en'})` : '';
     out.push({
       kind: 'link',
       key: proposalKey('link', [subject.id], action),
-      title: `„${clip(target, 60)}“ wird verlinkt, gibt es aber nicht`,
-      detail: `„${clip(sourceTitle, 60)}“${others} verweist mit [[${clip(target, 60)}]] ins Leere. `
+      title: `„${clip(titel, 60)}“ wird verlinkt, gibt es aber nicht`,
+      detail: `„${clip(sourceTitle, 60)}“${others} verweist mit [[${clip(link, 60)}]] ins Leere. `
         + '„Übernehmen“ legt die Notiz mit einem kurzen Hinweis an und verknüpft sie mit der Fundstelle.',
-      reason: `Kein Eintrag trägt den Titel „${clip(target, 60)}“ — verglichen genau so, wie der Graph Wiki-Links auflöst.`,
+      reason: `Kein Eintrag trägt den Titel „${clip(titel, 60)}“ — verglichen genau so, wie der Graph Wiki-Links auflöst.`,
       recordIds: [subject.id, ...referrers.slice(1, 6)],
       action,
       confidence: 0.7,

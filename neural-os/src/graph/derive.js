@@ -227,6 +227,39 @@ function extractLinks(text) {
   return { wikiLinks, tags, urls };
 }
 
+/** Ein Bild aus dem Ablagefach, wie der Notiz-Editor es einsetzt: `![name](/api/notizen/dateien/<id>)`. */
+const FILE_REF_RE = /\/api\/notizen\/dateien\/([A-Za-z0-9_-]{1,80})/g;
+
+/**
+ * Verweise auf Bilder, die im Tresor liegen, ohne Code. Jedes eingefuegte
+ * Bild ist ein `file`-Satz; ohne Kante zu seiner Notiz stand es im Gehirn
+ * unter "Unverbunden", je Bild einmal (Pruefer, Runde 2).
+ * @returns {string[]} ids, in der Reihenfolge des Textes
+ */
+function fileRefs(text) {
+  if (typeof text !== 'string' || !text.includes('/api/notizen/dateien/')) return [];
+  const masked = maskInlineCode(maskFenced(text));
+  const ids = [];
+  FILE_REF_RE.lastIndex = 0;
+  let m;
+  while ((m = FILE_REF_RE.exec(masked)) !== null) {
+    if (!ids.includes(m[1])) ids.push(m[1]);
+  }
+  return ids;
+}
+
+/**
+ * Laesst sich `tag` als #wort in einen Text schreiben, ohne dass das Lesen
+ * etwas anderes daraus macht? "2025", "3d-druck", "v1.2" und "c++" nicht:
+ * der Text kennt sie als "", "", "v1" und "c".
+ */
+function isTextTag(tag) {
+  const t = typeof tag === 'string' ? tag : '';
+  if (!t || t.length > 64) return false;
+  const found = extractLinks(`#${t}`).tags;
+  return found.length === 1 && found[0] === t;
+}
+
 /* ----------------------------------------------------------------- index */
 
 function titleOf(record) {
@@ -237,6 +270,71 @@ function titleOf(record) {
 }
 
 /**
+ * Der Schluessel, unter dem ein Titel oder ein [[Link]]-Ziel gesucht wird --
+ * EINE Regel fuer Ableitung, Titelverzeichnis und Ansicht (POST
+ * /api/notizen/aufloesen). Frueher fasste die Ableitung Leerzeichen
+ * zusammen, das Verzeichnis nicht: "Projekt  Alpha" stand in der Ansicht
+ * verbunden da und hatte im Netz keine Kante (Pruefer, Runde 2).
+ *
+ * Gefaltet wie die Suche (`fold`), Leerraum zusammengefasst. `[`, `]` und
+ * `|` zaehlen als Leerzeichen, weil ein [[Link]] sie nicht tragen kann: so
+ * verbindet [[Rechnung bezahlt]] -- so setzt die Liste hinter "[[" den Titel
+ * ein (web/lib/editor.js) -- mit der Notiz "Rechnung [bezahlt]".
+ */
+function indexKey(value) {
+  if (!value) return '';
+  return fold(String(value).replace(/[[\]|]/g, ' ').replace(/\s+/g, ' ').trim());
+}
+
+/**
+ * Bei [[Name#Abschnitt]] (Obsidian) der Name ohne den Abschnitt, sonst null.
+ * Ein Abschnitt beginnt mit einem Buchstaben, einer Ziffer oder Leerraum:
+ * "C#" und "C#-Kurs" sind Titel, keine Abschnitte. web/views/notes.js
+ * (abschnittName) rechnet genauso.
+ */
+function sectionBase(target) {
+  const text = typeof target === 'string' ? target : '';
+  const at = text.indexOf('#');
+  if (at <= 0) return null;
+  const name = text.slice(0, at).trim();
+  const section = text.slice(at + 1);
+  if (!name || !section.trim() || !/^[\p{L}\p{N}\s]/u.test(section)) return null;
+  return name;
+}
+
+/**
+ * Die Schluessel eines [[Link]]-Ziels, in der Reihenfolge, in der sie
+ * gelten: erst der ganze Text (es gibt Titel mit "#"), dann bei
+ * [[Name#Abschnitt]] der Name. Frueher wurde [[Zellatmung#Ablauf]] nie
+ * aufgeloest -- nach einem Obsidian-Import gestrichelt, mit dem Angebot,
+ * "Zellatmung#Ablauf" anzulegen (Pruefer, Runde 2).
+ */
+function linkKeys(target) {
+  const keys = [];
+  const whole = indexKey(target);
+  if (whole) keys.push(whole);
+  const base = sectionBase(target);
+  const baseKey = base ? indexKey(base) : '';
+  if (baseKey && !keys.includes(baseKey)) keys.push(baseKey);
+  return keys;
+}
+
+/** Die Schluessel eines Satzes: sein Titel und (bei Begriffen) die Aliase, ohne Doppelte. */
+function keysOf(record) {
+  const keys = [];
+  const add = (value) => {
+    const key = indexKey(value);
+    if (key && !keys.includes(key)) keys.push(key);
+  };
+  add(titleOf(record));
+  const aliases = record && record.type === 'entity' && record.data ? record.data.aliases : null;
+  if (Array.isArray(aliases)) {
+    for (const alias of aliases) if (typeof alias === 'string') add(alias);
+  }
+  return keys;
+}
+
+/**
  * Build the title -> id lookup used to resolve `[[wiki links]]` and `#tags`.
  *
  * Built once per `deriveFor` call and reused across a whole `scanAll`, which is
@@ -244,12 +342,19 @@ function titleOf(record) {
  * walked oldest-first so a title collision always resolves to the same record
  * no matter when the scan runs.
  *
+ * `{live:true}` baut dazu, was das zwischengespeicherte Verzeichnis zum
+ * Nachfuehren braucht: je Schluessel ALLE Saetze, die ihn tragen
+ * (`holders`), und je Satz seine Schluessel (`keysById`).
+ *
  * @param {object} store
+ * @param {{live?:boolean}} [opts]
  * @returns {{byTitle:Map<string,string>, byEntity:Map<string,string>, size:number}}
  */
-function buildIndex(store) {
+function buildIndex(store, opts = {}) {
   const byTitle = new Map();
   const byEntity = new Map();
+  const holders = opts.live ? new Map() : null;
+  const keysById = opts.live ? new Map() : null;
   for (const type of TITLE_TYPES) {
     let items;
     try {
@@ -258,22 +363,47 @@ function buildIndex(store) {
       continue; // a store that does not know this type simply has none
     }
     for (const rec of items) {
-      const keys = [];
-      const title = titleOf(rec);
-      if (title) keys.push(fold(title));
-      if (type === 'entity' && Array.isArray(rec.data.aliases)) {
-        for (const alias of rec.data.aliases) {
-          if (typeof alias === 'string' && alias.trim()) keys.push(fold(alias.trim()));
-        }
-      }
+      const keys = keysOf(rec);
       for (const key of keys) {
-        if (!key) continue;
         if (!byTitle.has(key)) byTitle.set(key, rec.id);
         if (type === 'entity' && !byEntity.has(key)) byEntity.set(key, rec.id);
+        if (holders) addHolder(holders, key, rec.id);
       }
+      if (keysById && keys.length) keysById.set(rec.id, keys);
     }
   }
-  return { byTitle, byEntity, size: byTitle.size };
+  const index = { byTitle, byEntity, size: byTitle.size };
+  if (holders) Object.assign(index, { holders, keysById });
+  return index;
+}
+
+/*
+ * `holders` haelt je Schluessel eine id -- oder ein Set, wenn ihn mehrere
+ * Saetze tragen. Fast jeder Titel ist einmalig; ein Set je Titel waere bei
+ * 50 000 Notizen Speicher fuer nichts.
+ */
+function addHolder(holders, key, id) {
+  const current = holders.get(key);
+  if (current === undefined) holders.set(key, id);
+  else if (typeof current === 'string') {
+    if (current !== id) holders.set(key, new Set([current, id]));
+  } else current.add(id);
+}
+
+function removeHolder(holders, key, id) {
+  const current = holders.get(key);
+  if (current === id) holders.delete(key);
+  else if (current && typeof current !== 'string') {
+    current.delete(id);
+    if (current.size === 1) holders.set(key, current.values().next().value);
+    else if (!current.size) holders.delete(key);
+  }
+}
+
+function holdersOf(holders, key) {
+  const current = holders.get(key);
+  if (current === undefined) return [];
+  return typeof current === 'string' ? [current] : [...current];
 }
 
 
@@ -300,11 +430,6 @@ function invalidateIndex(store) {
   if (store && typeof store === 'object') INDEX_CACHE.delete(store);
 }
 
-/** Fold a title the same way the index keys do. */
-function indexKey(value) {
-  return value ? fold(String(value).trim()) : '';
-}
-
 /**
  * Index for `store`, built once and then kept current.
  * @param {object} store
@@ -313,11 +438,11 @@ function indexKey(value) {
 function indexFor(store, record) {
   let index = INDEX_CACHE.get(store);
   if (!index) {
-    index = buildIndex(store);
+    index = buildIndex(store, { live: true });
     index.validate = true;
     INDEX_CACHE.set(store, index);
   }
-  if (record) upsertIntoIndex(index, record);
+  if (record) upsertIntoIndex(index, record, store);
   return index;
 }
 
@@ -327,49 +452,65 @@ function indexFor(store, record) {
  * `keysById` exists so a rename costs O(1) instead of a walk over the whole
  * index. Without it the upsert alone was 1,9 ms per write at 5 000 notes --
  * the same O(n)-per-write shape the cache was introduced to remove, just
- * moved one layer down.
+ * moved one layer down. A write that leaves the titles alone (most of them)
+ * stops at the first comparison.
+ *
+ * Einen Titel, den mehrere Saetze tragen, bekommt der, den auch ein frisch
+ * gebautes Verzeichnis waehlen wuerde (`pickOwner`). Frueher kannte das
+ * Verzeichnis nur den aeltesten Traeger: wurde der umbenannt, verschwand
+ * der Titel ganz, obwohl eine zweite Notiz ihn trug -- [[Zellkern]] fuehrte
+ * in der Ansicht zur zweiten, im Netz nirgendwohin, und erst ein Neustart
+ * half (Pruefer, Runde 2).
  */
-function upsertIntoIndex(index, record) {
+function upsertIntoIndex(index, record, store) {
   if (!record || !record.id || !TITLE_TYPES.includes(record.type)) return;
-  if (!index.keysById) index.keysById = buildReverse(index);
-  // Remove whatever this record used to be keyed under; a rename must not
-  // leave its old title resolving to it.
-  const previous = index.keysById.get(record.id);
-  if (previous) {
-    for (const key of previous) {
-      if (index.byTitle.get(key) === record.id) index.byTitle.delete(key);
-      if (index.byEntity.get(key) === record.id) index.byEntity.delete(key);
-    }
-    index.keysById.delete(record.id);
+  if (!index.holders) Object.assign(index, buildIndex(store, { live: true }));
+  const before = index.keysById.get(record.id) || [];
+  const after = record.deletedAt ? [] : keysOf(record);
+  if (before.length === after.length && before.every((key, i) => key === after[i])) return;
+  if (after.length) index.keysById.set(record.id, after);
+  else index.keysById.delete(record.id);
+  for (const key of before) {
+    if (!after.includes(key)) removeHolder(index.holders, key, record.id);
   }
-  if (record.deletedAt) return;
-  const keys = [];
-  const title = titleOf(record);
-  if (title) keys.push(indexKey(title));
-  if (record.type === 'entity' && Array.isArray(record.data && record.data.aliases)) {
-    for (const alias of record.data.aliases) {
-      if (typeof alias === 'string' && alias.trim()) keys.push(indexKey(alias));
-    }
-  }
-  const own = [];
-  for (const key of keys) {
-    if (!key) continue;
-    if (!index.byTitle.has(key)) { index.byTitle.set(key, record.id); own.push(key); }
-    if (record.type === 'entity' && !index.byEntity.has(key)) index.byEntity.set(key, record.id);
-  }
-  if (own.length) index.keysById.set(record.id, own);
+  for (const key of after) addHolder(index.holders, key, record.id);
+  for (const key of new Set([...before, ...after])) pickOwner(index, store, key);
   index.size = index.byTitle.size;
 }
 
-/** id -> keys, derived once from a freshly built index. */
-function buildReverse(index) {
-  const reverse = new Map();
-  for (const [key, id] of index.byTitle) {
-    const list = reverse.get(id);
-    if (list) list.push(key);
-    else reverse.set(id, [key]);
+/**
+ * Wem ein Schluessel gehoert -- wie in `buildIndex`: erst die Art (Reihenfolge
+ * TITLE_TYPES, eine Notiz vor einem Termin), dann der aeltere Satz. Ein
+ * Traeger, den es nicht mehr gibt oder der den Titel nicht mehr traegt (das
+ * Verzeichnis hat es nicht erfahren), faellt dabei heraus.
+ */
+function pickOwner(index, store, key) {
+  let owner = null;
+  let entity = null;
+  for (const id of holdersOf(index.holders, key)) {
+    let rec = null;
+    try { rec = store.get(id); } catch { rec = null; }
+    if (!rec || rec.deletedAt || !keysOf(rec).includes(key)) {
+      removeHolder(index.holders, key, id);
+      // Beim naechsten Schreiben wird der Satz wieder ganz eingetragen.
+      index.keysById.delete(id);
+      continue;
+    }
+    if (!owner || ranksBefore(rec, owner)) owner = rec;
+    if (rec.type === 'entity' && (!entity || ranksBefore(rec, entity))) entity = rec;
   }
-  return reverse;
+  if (owner) index.byTitle.set(key, owner.id);
+  else index.byTitle.delete(key);
+  if (entity) index.byEntity.set(key, entity.id);
+  else index.byEntity.delete(key);
+}
+
+function ranksBefore(a, b) {
+  const ta = TITLE_TYPES.indexOf(a.type);
+  const tb = TITLE_TYPES.indexOf(b.type);
+  if (ta !== tb) return ta < tb;
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt;
+  return a.id < b.id;
 }
 
 /**
@@ -387,13 +528,33 @@ function lookupTitle(store, index, key) {
   } catch {
     record = null;
   }
-  if (record && !record.deletedAt && indexKey(titleOf(record)) === key) return id;
+  // Auch ein Alias ist ein gueltiger Treffer -- frueher baute jeder
+  // [[Alias]] das ganze Verzeichnis neu, weil nur der Titel zaehlte.
+  if (record && !record.deletedAt && keysOf(record).includes(key)) return id;
   INDEX_CACHE.delete(store);
-  const fresh = buildIndex(store);
+  const fresh = buildIndex(store, { live: true });
   fresh.validate = true;
   INDEX_CACHE.set(store, fresh);
   Object.assign(index, fresh);
   return index.byTitle.get(key) || null;
+}
+
+/**
+ * Ein [[Link]]-Ziel aufloesen. Die Ableitung UND die Ansicht (POST
+ * /api/notizen/aufloesen) fragen hier, mit demselben Verzeichnis: was die
+ * Ansicht durchgezogen zeigt, ist im Netz eine Kante, und umgekehrt.
+ * @param {object} store
+ * @param {string} target  so, wie es zwischen [[ und ]] steht (ohne |Beschriftung)
+ * @param {object} [index] das Verzeichnis eines laufenden scanAll
+ * @returns {string|null} id
+ */
+function resolveLink(store, target, index) {
+  const idx = index && index.byTitle ? index : indexFor(store);
+  for (const key of linkKeys(target)) {
+    const id = lookupTitle(store, idx, key);
+    if (id) return id;
+  }
+  return null;
 }
 
 /* ---------------------------------------------------------------- derive */
@@ -440,7 +601,7 @@ function desiredEdges(store, record, index) {
     if (!text) continue;
     const found = extractLinks(text);
     for (const title of found.wikiLinks) {
-      const target = lookupTitle(store, index, fold(title));
+      const target = resolveLink(store, title, index);
       if (target && target !== record.id && live(target)) {
         want(target, 'links-to', `Wiki-Link [[${title}]] im Text`);
       } else if (!target) {
@@ -448,6 +609,11 @@ function desiredEdges(store, record, index) {
       }
     }
     inlineTags.push(...found.tags);
+    // Ein Bild im Text haengt an seinem Text (siehe fileRefs).
+    for (const id of fileRefs(text)) {
+      const file = live(id);
+      if (file && file.type === 'file') want(id, 'links-to', 'Bild im Text');
+    }
   }
 
   const tagField = TAG_FIELD[record.type];
@@ -456,7 +622,7 @@ function desiredEdges(store, record, index) {
     if (typeof raw !== 'string') continue;
     const tag = raw.trim().replace(/^#/, '');
     if (!tag) continue;
-    const target = index.byEntity.get(fold(tag));
+    const target = index.byEntity.get(indexKey(tag));
     if (target && target !== record.id && live(target)) {
       want(target, 'tagged', `Schlagwort #${tag}`);
     } else if (!target) {
@@ -653,7 +819,7 @@ function nachziehen(store, record, opts = {}) {
     }
     const textTypen = Object.keys(TEXT_FIELDS);
     for (const t of titel) {
-      const key = fold(t);
+      const key = indexKey(t);
       if (!key) continue;
       let kandidaten = [];
       const woerter = t.replace(/"/g, ' ').trim();
@@ -674,7 +840,8 @@ function nachziehen(store, record, opts = {}) {
         for (const field of TEXT_FIELDS[kand.type] || []) {
           const text = typeof d[field] === 'string' ? d[field] : '';
           if (!text.includes('[[')) continue;
-          if (extractLinks(text).wikiLinks.some((w) => fold(w) === key)) { trifft = true; break; }
+          // Dieselben Schluessel wie beim Aufloesen: auch [[Name#Abschnitt]].
+          if (extractLinks(text).wikiLinks.some((w) => linkKeys(w).includes(key))) { trifft = true; break; }
         }
         if (trifft) quellen.add(kand.id);
       }
@@ -690,6 +857,37 @@ function nachziehen(store, record, opts = {}) {
     } catch { /* eine Quelle, die inzwischen weg ist */ }
   }
   return out;
+}
+
+/**
+ * Wer traegt die Titel eines eben geloeschten Satzes jetzt? Zwei Notizen
+ * "Zellkern": wird die aeltere geloescht, gehoert der Titel der juengeren,
+ * und die [[Zellkern]]-Links anderer Notizen muessen auf sie zeigen
+ * (`nachziehen` mit dem Nachfolger). Ohne das loeste die Ansicht den Link
+ * schon zur zweiten auf, das Netz erst, wenn die Quelle neu gespeichert
+ * wurde -- derselbe Widerspruch wie beim Umbenennen (Pruefer, Runde 2).
+ *
+ * @param {object} store
+ * @param {object} record  der geloeschte Satz, wie das Ereignis ihn bringt
+ * @returns {object[]} die neuen Traeger (gespeicherte Fassung), ohne Doppelte
+ */
+function titelNachfolger(store, record) {
+  if (!store || !record || !record.id || !TITLE_TYPES.includes(record.type)) return [];
+  const keys = keysOf(record);
+  if (!keys.length) return [];
+  // Auch ein endgueltig geloeschter Satz kommt ohne deletedAt; fuer das
+  // Verzeichnis ist er weg.
+  const weg = record.deletedAt ? record : { ...record, deletedAt: new Date().toISOString() };
+  const index = indexFor(store, weg);
+  const out = new Map();
+  for (const key of keys) {
+    const id = index.byTitle.get(key);
+    if (!id || id === record.id || out.has(id)) continue;
+    let rec = null;
+    try { rec = store.get(id); } catch { rec = null; }
+    if (rec && !rec.deletedAt) out.set(id, rec);
+  }
+  return [...out.values()];
 }
 
 /**
@@ -766,8 +964,15 @@ module.exports = {
   extractLinks,
   deriveFor,
   nachziehen,
+  titelNachfolger,
   scanAll,
   buildIndex,
+  indexKey,
+  linkKeys,
+  sectionBase,
+  resolveLink,
+  fileRefs,
+  isTextTag,
   OWNED_KINDS,
   TEXT_FIELDS,
   SCAN_TYPES,

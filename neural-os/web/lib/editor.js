@@ -735,6 +735,18 @@ export function completionContext(value, caret) {
 }
 
 /**
+ * Ein Titel so, wie er zwischen [[ und ]] stehen kann. `[` und `]` beenden
+ * den Link, `|` beginnt seine Beschriftung -- "Rechnung [bezahlt]" ergab
+ * [[Rechnung [bezahlt]]] (kein Link) und "Ein|Aus" einen Link auf "Ein"
+ * (Pruefer, Runde 2). Sie werden Leerzeichen, Leerraum wird zusammengefasst;
+ * der Server liest den Titel nach derselben Regel (src/graph/derive.js
+ * indexKey), also verbindet [[Rechnung bezahlt]] mit "Rechnung [bezahlt]".
+ */
+export function linkText(titel) {
+  return String(titel === null || titel === undefined ? '' : titel).replace(/[[\]|]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
  * Die gewaehlte Vervollstaendigung einsetzen.
  *
  * Alle Aenderungsfunktionen hier geben neben dem ganzen neuen Text auch den
@@ -753,7 +765,7 @@ export function applyCompletion(value, ctx, insert) {
     const rest = /^[^\]\n]{0,80}\]\]/.exec(v.slice(caret, caret + 90));
     if (rest) end = caret + rest[0].length;
     const start = ctx.start - 2;
-    const piece = `[[${String(insert).trim()}]]`;
+    const piece = `[[${linkText(insert)}]]`;
     return { value: v.slice(0, start) + piece + v.slice(end), caret: start + piece.length, from: start, to: end, insert: piece };
   }
   const rest = TAG_CHARS_RE.exec(v.slice(caret, caret + 80));

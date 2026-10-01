@@ -17,9 +17,10 @@
  * - **Verbindungsvorschlaege** nach dem Speichern: der Server rechnet sie
  *   (suggestLinks) und schickt 'graph.vorschlaege'; die Karte "Ich habe N
  *   moegliche Verbindungen gefunden" bietet [Alle verbinden] [Bearbeiten]
- *   [Ablehnen]. Verbinden legt manuelle Kanten an (Vertrag C) und laesst sich
- *   rueckgaengig machen; Ablehnen merkt sich das Paar, damit der Vorschlag
- *   nicht wiederkommt.
+ *   [Alle ablehnen]; unter "Bearbeiten" [Ausgewählte verbinden] und
+ *   [Abgewählte ablehnen]. Verbinden legt manuelle Kanten an (Vertrag C) und
+ *   laesst sich rueckgaengig machen; Ablehnen merkt sich das Paar, damit der
+ *   Vorschlag nicht wiederkommt.
  * - **Live** ueber den Bus: eine neue Kante ('graph.kante') erscheint in
  *   "Verknuepft mit" mit einer leichten Bewegung, eine neue Notiz auf der
  *   Wand, ohne Neuladen.
@@ -31,8 +32,9 @@
  * Link speichern, Text speichern -- alles in wenigen Sekunden.
  *
  * Reine Funktionen (tagsVon, sichtbareNotizen, zaehleTags, titelAusText,
- * artInfo, kantenText, vorschlagsSatz, zielFuer) sind ohne Browser pruefbar:
- * test/notizen-editor.test.js.
+ * artInfo, kantenText, vorschlagsSatz, zielFuer, wandAuswahl, kartenWahl,
+ * schlagworteZumBearbeiten, linkSchluessel ...) sind ohne Browser pruefbar:
+ * test/notizen-editor.test.js und test/notizen-pruefrunde.test.js.
  */
 
 import { renderMarkdown, extractPlain, extractLinks, setzeHaken } from '../lib/markdown.js';
@@ -89,6 +91,7 @@ const ART = {
   chat: ['Chat', 'chat'],
   agent: ['Agent', 'agent'],
   entity: ['Begriff', 'term'],
+  run: ['Lauf', 'agent'],
 };
 const ENTITY_ART = {
   person: ['Person', 'user'],
@@ -147,6 +150,7 @@ const CSS = `
 .nw__tag-count { color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
 .nw__tag.is-active .nw__tag-count { color: inherit; opacity: 0.8; }
 .nw__hint { margin: -8px 0 var(--sp-2); font-size: var(--fs-xs); color: var(--fg-subtle); }
+.nw__hint--schluss { margin: var(--sp-3) 0 0; text-align: center; }
 
 /* ---- Wand ---- */
 .nw__wall { display: grid; grid-template-columns: repeat(auto-fill, minmax(212px, 1fr)); gap: var(--sp-2); margin: 0; padding: 0; list-style: none; }
@@ -440,6 +444,15 @@ const CSS = `
 .nw__edit-title::placeholder { color: var(--fg-subtle); }
 .nw__edit-title:focus { border-bottom-color: var(--accent); }
 .nw__edit-error { margin: 0; padding: 10px 12px; font-size: var(--fs-sm); color: var(--danger); background: var(--danger-soft); border-radius: var(--r-2); }
+.nw__edit-error .btn { margin-left: 4px; }
+.nw__edit-tags { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.nw__edit-tags[hidden] { display: none; }
+.nw__tag--feld { gap: 2px; padding-right: 4px; cursor: default; }
+.nw__tag--feld:hover { color: var(--fg-muted); background: var(--surface-2); border-color: var(--border); }
+.nw__tag-weg { display: inline-grid; place-items: center; width: 20px; height: 20px; padding: 0; color: var(--fg-subtle); background: none; border: 0; border-radius: 50%; cursor: pointer; }
+.nw__tag-weg:hover { color: var(--fg); background: var(--surface-4); }
+.nw__tag-weg:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+.nw__tag-weg svg { width: 12px; height: 12px; }
 .nw__form { display: flex; flex-direction: column; gap: 12px; }
 .nw__form .textarea { min-height: 160px; }
 .nw__form-hint { margin: 0; font-size: var(--fs-sm); color: var(--fg-subtle); line-height: var(--lh); }
@@ -455,6 +468,8 @@ const CSS = `
 .nw__konflikt-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (pointer: coarse) {
   .nw__tag { height: auto; min-height: var(--tap-min); padding: 0 14px; }
+  .nw__tag--feld { padding-right: 4px; }
+  .nw__tag-weg { width: 34px; height: 34px; }
   .nw__link { min-height: var(--tap-min); }
   .nw__card-item { min-height: var(--tap-min); }
   /* Die Regel gegen das Hineinzoomen von iOS (16 px fuer jedes Feld) machte
@@ -708,7 +723,195 @@ export function zielFuer(eintrag) {
   }
 }
 
-function errorText(err) {
+const FALT_ZEICHEN = { 'ä': 'ae', 'ö': 'oe', 'ü': 'ue', 'ß': 'ss', 'æ': 'ae', 'ø': 'oe', 'å': 'aa', 'œ': 'oe' };
+
+/**
+ * Der Schluessel eines Titels oder [[Link]]-Ziels -- dieselbe Regel wie auf
+ * dem Server (src/graph/derive.js indexKey): gefaltet wie die Suche,
+ * Leerraum zusammengefasst, [ ] und | als Leerzeichen. Frueher verglich die
+ * Wand anders als die Ableitung, und "Projekt  Alpha" (zwei Leerzeichen)
+ * war hier verbunden, im Netz nicht (Pruefer, Runde 2).
+ */
+export function titelSchluessel(s) {
+  return String(s || '').replace(/[[\]|]/g, ' ').replace(/\s+/g, ' ').trim()
+    .normalize('NFC')
+    .toLowerCase()
+    .replace(/[äöüßæøåœ]/g, (c) => FALT_ZEICHEN[c])
+    .normalize('NFD').replace(/\p{M}/gu, '');
+}
+
+/**
+ * Bei [[Name#Abschnitt]] (Obsidian) der Name ohne den Abschnitt, sonst null
+ * -- wie src/graph/derive.js. Ein Abschnitt beginnt mit einem Buchstaben,
+ * einer Ziffer oder Leerraum: "C#" und "C#-Kurs" sind Titel.
+ */
+export function abschnittName(ziel) {
+  const s = typeof ziel === 'string' ? ziel : '';
+  const at = s.indexOf('#');
+  if (at <= 0) return null;
+  const name = s.slice(0, at).trim();
+  const abschnitt = s.slice(at + 1);
+  if (!name || !abschnitt.trim() || !/^[\p{L}\p{N}\s]/u.test(abschnitt)) return null;
+  return name;
+}
+
+/** Die Schluessel eines [[Link]]-Ziels: erst der ganze Text, dann der Name ohne Abschnitt. */
+export function linkSchluessel(ziel) {
+  const keys = [];
+  const ganz = titelSchluessel(ziel);
+  if (ganz) keys.push(ganz);
+  const name = abschnittName(ziel);
+  const key = name ? titelSchluessel(name) : '';
+  if (key && !keys.includes(key)) keys.push(key);
+  return keys;
+}
+
+/**
+ * Was die Knoepfe der Vorschlagskarte tun. Ohne "Bearbeiten" gilt alles fuer
+ * alle. Im Modus "Bearbeiten" verbindet der eine Knopf die angehakten, der
+ * andere lehnt die abgewaehlten (durchgestrichenen) ab -- frueher lehnte
+ * "Ablehnen" dort ausgerechnet die angehakten ab, und das fuer immer
+ * (Pruefer, Runde 2).
+ * @returns {{verbinden:object[], ablehnen:object[], verbindenText:string, ablehnenText:string}}
+ */
+export function kartenWahl(vorschlaege, gewaehlt, bearbeiten) {
+  const alle = Array.isArray(vorschlaege) ? vorschlaege : [];
+  if (!bearbeiten) return { verbinden: alle, ablehnen: alle, verbindenText: 'Alle verbinden', ablehnenText: 'Alle ablehnen' };
+  const an = gewaehlt instanceof Set ? gewaehlt : new Set(gewaehlt || []);
+  const verbinden = alle.filter((v) => an.has(v.id));
+  const ablehnen = alle.filter((v) => !an.has(v.id));
+  return {
+    verbinden,
+    ablehnen,
+    verbindenText: `Ausgewählte verbinden (${verbinden.length})`,
+    ablehnenText: `Abgewählte ablehnen (${ablehnen.length})`,
+  };
+}
+
+/** Wie src/graph/derive.js isTextTag: ein Buchstabe vorn, dann Buchstaben, Ziffern, _ - /, hoechstens 64 Zeichen, am Ende kein _ - /. */
+const TEXT_SCHLAGWORT_RE = /^\p{L}(?:[\p{L}\p{N}_/-]{0,62}[\p{L}\p{N}])?$/u;
+
+/**
+ * Was beim Bearbeiten aus dem Feld `tags` wird. Ein Schlagwort, das sich als
+ * #wort schreiben laesst, kommt als Zeile an den Schluss des Textes -- dort
+ * sieht man es und kann es loeschen (Pruefer, Runde 1). Eines, das der Text
+ * nie als Schlagwort lesen wuerde ("2025", "3d-druck", "v1.2", "c++",
+ * "steuer erklärung"), bleibt im Feld: frueher kam es trotzdem an den Text,
+ * das Feld wurde geleert, und nach dem Speichern war es weg oder
+ * verstuemmelt ("v1.2" wurde "v1"; Pruefer, Runde 2).
+ * @returns {{text:string, feld:string[]}} `text` fuer den Editor; `feld` wird so gespeichert
+ */
+export function schlagworteZumBearbeiten(body, tags) {
+  const text = String(body || '');
+  const lies = (s) => {
+    try { return extractLinks(s).tags.map((t) => falten(t)); } catch { return []; }
+  };
+  const gesehen = new Set(lies(text));
+  let inDenText = [];
+  const feld = [];
+  for (const roh of Array.isArray(tags) ? tags : []) {
+    const t = String(roh || '').trim().replace(/^#/, '');
+    const key = falten(t);
+    if (!t || gesehen.has(key)) continue;
+    gesehen.add(key);
+    if (TEXT_SCHLAGWORT_RE.test(t)) inDenText.push(t);
+    else feld.push(t);
+  }
+  const anhaengen = (liste) => `${text.replace(/\s+$/, '')}${text.trim() ? '\n\n' : ''}${liste.map((t) => `#${t}`).join(' ')}`;
+  if (!inDenText.length) return { text, feld };
+  // Nur, was der Text danach wirklich als Schlagwort liest -- am Ende eines
+  // nicht geschlossenen Codeblocks waere "#steuer" Code und ginge verloren.
+  const erkannt = lies(anhaengen(inDenText));
+  const bleibt = inDenText.filter((t) => !erkannt.includes(falten(t)));
+  if (bleibt.length) {
+    feld.push(...bleibt);
+    inDenText = inDenText.filter((t) => !bleibt.includes(t));
+  }
+  return { text: inDenText.length ? anhaengen(inDenText) : text, feld };
+}
+
+/**
+ * Muss die Ansicht vergessen, welche [[Namen]] sie schon aufgeloest hat?
+ * Bei jedem neuen und jedem geloeschten Eintrag -- und bei einer Aenderung,
+ * wenn sie einen Titel, Namen oder Alias aendert oder den Eintrag
+ * wiederherstellt ("Rueckgaengig" nach dem Loeschen kommt als
+ * record.updated mit restored:true). Frueher blieb [[Zellkern]] nach dem
+ * Wiederherstellen gestrichelt (Pruefer, Runde 2).
+ */
+export function aufloesungVeraltet(name, payload) {
+  if (name !== 'record.updated') return true;
+  const p = payload || {};
+  if (p.restored) return true;
+  const patch = p.patch && typeof p.patch === 'object' ? p.patch : null;
+  if (!patch) return false;
+  return ['title', 'name', 'aliases'].some((f) => Object.prototype.hasOwnProperty.call(patch, f)
+    && JSON.stringify(patch[f]) !== JSON.stringify(p.before ? p.before[f] : undefined));
+}
+
+/**
+ * Die Zeilen von "Verknuepft mit" ohne die Laeufe der KI. Jede Notiz, die
+ * die KI im Chat anlegt, haengt an ihrem Lauf (produced) -- eine Buchung,
+ * kein Wissen; woher die Notiz stammt, sagt schon die Herkunftszeile.
+ * Frueher stand dort roh "run · Von diesem Lauf erzeugt" (Pruefer, Runde 2).
+ */
+export function ohneLaeufe(zeilen) {
+  return (Array.isArray(zeilen) ? zeilen : []).filter((z) => z && z.type !== 'run');
+}
+
+/** Wofuer eine Auswahl des Servers gilt: Filter und Schlagwort. */
+export function auswahlSchluessel(filter, tag) {
+  return `${filter || 'alle'}\u0000${tag ? String(tag).replace(/^#/, '').toLowerCase() : ''}`;
+}
+
+/**
+ * Woraus die Wand gerade besteht. Sie laedt die neuesten Notizen (GET
+ * /api/notizen, LADE_LIMIT); gibt es mehr, filtert sie Quelle und
+ * Schlagwort nicht selbst -- sonst kaemen aeltere nie vor, und "Keine Notiz
+ * mit #steuer" stuende da, obwohl fuenf aeltere es tragen (Pruefer, Runde
+ * 2) --, sondern nimmt die Auswahl des Servers (GET /api/notizen/auswahl).
+ * Die Suche laeuft danach ueber das, was da ist; was sie nicht sieht, sagt
+ * der Hinweis.
+ *
+ * @param {{items?:object[], total?:number, auswahl?:object|null, filter?:string, tag?:string|null, q?:string}} stand
+ * @returns {{quelle:object[]|null, vomServer:boolean, laedt:boolean, fehler:string|null, hinweis:string|null, schluss:string|null}}
+ *   `quelle` ist null, solange die Auswahl laedt oder fehlt. `vomServer`:
+ *   Quelle und Schlagwort sind schon angewandt. `schluss` steht unter der Wand.
+ */
+export function wandAuswahl({ items = [], total = 0, auswahl = null, filter = 'alle', tag = null, q = '' } = {}) {
+  const geladen = Array.isArray(items) ? items.length : 0;
+  const gekuerzt = Number(total) > geladen;
+  const gefiltert = filter !== 'alle' || !!tag;
+  const suche = String(q || '').trim();
+  const leer = { quelle: null, vomServer: true, laedt: false, fehler: null, hinweis: null, schluss: null };
+  if (!gekuerzt || !gefiltert) {
+    return {
+      ...leer,
+      quelle: Array.isArray(items) ? items : [],
+      vomServer: false,
+      hinweis: gekuerzt && suche ? `Durchsucht sind die ${geladen} neuesten Notizen. Alle ${total} findet Strg+K.` : null,
+      schluss: gekuerzt && !suche ? `Die Wand zeigt die ${geladen} neuesten von ${total} Notizen. Ältere findest du mit Strg+K oder über ein Schlagwort.` : null,
+    };
+  }
+  if (!auswahl || auswahl.schluessel !== auswahlSchluessel(filter, tag) || auswahl.laedt) return { ...leer, laedt: true };
+  if (auswahl.fehler) return { ...leer, fehler: auswahl.fehler };
+  const da = Array.isArray(auswahl.items) ? auswahl.items : [];
+  const mehr = Number(auswahl.total) > da.length;
+  let hinweis = null;
+  if (mehr) {
+    hinweis = suche
+      ? `Durchsucht sind die ${da.length} neuesten der ${auswahl.total} passenden Notizen. Alle findet Strg+K.`
+      : `Gezeigt sind die ${da.length} neuesten der ${auswahl.total} passenden Notizen.`;
+  }
+  return { ...leer, quelle: da, hinweis };
+}
+
+/**
+ * Eine Fehlermeldung fuer Menschen. Ein 404 des Servers ("Eintrag note_6emx…
+ * not found", src/kernel/errors.js) ist kein deutscher Satz und traegt eine
+ * rohe Kennung -- er heisst hier, was er bedeutet (Pruefer, Runde 2).
+ */
+export function errorText(err) {
+  if (err && (err.status === 404 || err.code === 'NOT_FOUND')) return 'Diesen Eintrag gibt es nicht mehr.';
   return (err && err.message) || 'Unbekannter Fehler.';
 }
 
@@ -764,6 +967,15 @@ export default {
       /** Ids, die wir gerade selbst geschrieben haben: ihr record.updated baut das Blatt nicht um. */
       eigene: new Map(),
       neuAufWand: new Set(),
+      /**
+       * Mehr Notizen, als die Wand laedt: Filter und Schlagwort rechnet der
+       * Server (wandAuswahl). {schluessel, items, total, schlagworte,
+       * schlagworteAnzahl, laedt, fehler}
+       */
+      auswahl: null,
+      auswahlToken: 0,
+      /** Zaehlt jedes neue Blatt: ein openNote, das waehrend seiner Wartezeit ueberholt wurde, gibt auf. */
+      blattZug: 0,
     };
     const cleanups = [];
 
@@ -819,11 +1031,56 @@ export default {
         // Vergessen, was es nicht mehr gibt.
         const ids = new Set(st.items.map((n) => n.id));
         for (const key of st.tagCache.keys()) if (!ids.has(key.split('\u0000')[0])) st.tagCache.delete(key);
+        // Gekuerzt geladen: die Auswahl (und die Zahlen der Schlagworte) neu vom Server.
+        if (st.total > st.items.length) ladeAuswahl();
+        else st.auswahl = null;
       } catch (err) {
         if (!st.alive || token !== st.token) return;
         st.error = errorText(err);
       }
       st.loaded = true;
+      render();
+    }
+
+    /**
+     * Filter und Schlagwort ueber ALLE Notizen (GET /api/notizen/auswahl),
+     * wenn die Wand nur die neuesten hat. Ohne Filter nur die Zahlen der
+     * Schlagworte fuer die Leiste (limit 0).
+     */
+    async function ladeAuswahl() {
+      const schluessel = auswahlSchluessel(st.filter, st.tag);
+      const gefiltert = st.filter !== 'alle' || !!st.tag;
+      const token = ++st.auswahlToken;
+      const vorher = st.auswahl;
+      // Dieselbe Auswahl wird nur aufgefrischt (nach jeder Aenderung): bis
+      // die Antwort da ist, bleibt die alte stehen -- die Wand flackert nicht.
+      if (!vorher || vorher.schluessel !== schluessel || vorher.laedt || vorher.fehler) {
+        st.auswahl = {
+          schluessel,
+          items: [],
+          total: 0,
+          schlagworte: vorher ? vorher.schlagworte : null,
+          schlagworteAnzahl: vorher ? vorher.schlagworteAnzahl : 0,
+          laedt: true,
+          fehler: null,
+        };
+      }
+      try {
+        const res = await api.get('/notizen/auswahl', { query: { filter: st.filter, tag: st.tag || undefined, limit: gefiltert ? LADE_LIMIT : 0 } });
+        if (!st.alive || token !== st.auswahlToken) return;
+        st.auswahl = {
+          schluessel,
+          items: Array.isArray(res && res.items) ? res.items : [],
+          total: Number.isFinite(res && res.total) ? res.total : 0,
+          schlagworte: Array.isArray(res && res.schlagworte) ? res.schlagworte : null,
+          schlagworteAnzahl: Number.isFinite(res && res.schlagworteAnzahl) ? res.schlagworteAnzahl : 0,
+          laedt: false,
+          fehler: null,
+        };
+      } catch (err) {
+        if (!st.alive || token !== st.auswahlToken) return;
+        st.auswahl = { ...st.auswahl, laedt: false, fehler: errorText(err) };
+      }
       render();
     }
 
@@ -857,7 +1114,17 @@ export default {
     }
 
     function findNote(id) {
-      return st.items.find((n) => n.id === id) || null;
+      return st.items.find((n) => n.id === id)
+        || (st.auswahl && Array.isArray(st.auswahl.items) ? st.auswahl.items.find((n) => n.id === id) : null)
+        || null;
+    }
+
+    /** Alle geladenen Fassungen einer Notiz (Blatt, Wand, Auswahl) -- ein eigener Schritt gilt fuer alle. */
+    function kopienVon(id, ...dazu) {
+      const out = new Set(dazu.filter(Boolean));
+      for (const n of st.items) if (n.id === id) out.add(n);
+      if (st.auswahl && Array.isArray(st.auswahl.items)) for (const n of st.auswahl.items) if (n.id === id) out.add(n);
+      return [...out];
     }
 
     /* ---------------- Wand und Liste ---------------- */
@@ -913,11 +1180,24 @@ export default {
         return;
       }
       if (!st.loaded) return;
-      const list = sichtbareNotizen(st.items, { filter: st.filter, tag: st.tag, q: st.q }, tagsOf);
-      if (st.q.trim() && st.total > st.items.length) {
-        wallHost.appendChild(h('p.nw__hint', null,
-          text(`Durchsucht sind die ${st.items.length} neuesten Notizen. Alle ${st.total} findet Strg+K.`)));
+      const stand = wandAuswahl({ items: st.items, total: st.total, auswahl: st.auswahl, filter: st.filter, tag: st.tag, q: st.q });
+      // Filter oder Schlagwort gewechselt, waehrend die Wand gekuerzt ist: die passende Auswahl holen.
+      if (stand.laedt && !(st.auswahl && st.auswahl.schluessel === auswahlSchluessel(st.filter, st.tag))) ladeAuswahl();
+      if (stand.laedt) {
+        wallHost.appendChild(h('p.nw__hint', { role: 'status' }, text('Die passenden Notizen werden geladen …')));
+        return;
       }
+      if (stand.fehler) {
+        wallHost.appendChild(h('div.nw__notice', { role: 'alert' },
+          text(`Die passenden Notizen konnten nicht geladen werden: ${stand.fehler}`),
+          h('button.btn.btn--small', { type: 'button', onClick: () => ladeAuswahl() }, text('Erneut versuchen'))));
+        return;
+      }
+      // Hat der Server schon nach Quelle und Schlagwort gewaehlt, sucht die Wand nur noch.
+      const list = stand.vomServer
+        ? sichtbareNotizen(stand.quelle, { q: st.q }, tagsOf)
+        : sichtbareNotizen(stand.quelle, { filter: st.filter, tag: st.tag, q: st.q }, tagsOf);
+      if (stand.hinweis) wallHost.appendChild(h('p.nw__hint', null, text(stand.hinweis)));
       if (!list.length) {
         wallHost.appendChild(renderEmpty());
         return;
@@ -931,17 +1211,24 @@ export default {
         for (const note of list) wall.appendChild(h('li', null, renderNote(note)));
         wallHost.appendChild(wall);
       }
+      if (stand.schluss) wallHost.appendChild(h('p.nw__hint.nw__hint--schluss', null, text(stand.schluss)));
       st.neuAufWand.clear();
     }
 
     function renderTags() {
       clear(tagsRow);
       if (!st.loaded || st.error) return;
-      const alle = zaehleTags(st.items, tagsOf);
+      // Gekuerzt geladen: gezaehlt wird ueber ALLE Notizen, auf dem Server --
+      // sonst stuende "#steuer 0" da, obwohl aeltere Notizen es tragen.
+      const vomServer = st.total > st.items.length && !!st.auswahl && Array.isArray(st.auswahl.schlagworte);
+      const alle = vomServer ? st.auswahl.schlagworte : zaehleTags(st.items, tagsOf);
+      const verschiedene = vomServer ? Math.max(st.auswahl.schlagworteAnzahl || 0, alle.length) : alle.length;
+      // Der Server zaehlt gefaltet (Umlaute egal), die Wand nach Gross/Klein.
+      const gleich = (a, b) => (vomServer ? falten(a) === falten(b) : a.toLowerCase() === b.toLowerCase());
       if (!alle.length && !st.tag) return;
       let chips = alle.slice(0, MAX_TAG_CHIPS);
-      if (st.tag && !chips.some((c) => c.tag.toLowerCase() === st.tag.toLowerCase())) {
-        const rest = alle.find((c) => c.tag.toLowerCase() === st.tag.toLowerCase());
+      if (st.tag && !chips.some((c) => gleich(c.tag, st.tag))) {
+        const rest = alle.find((c) => gleich(c.tag, st.tag));
         chips = [...chips, rest || { tag: st.tag, anzahl: 0 }];
       }
       tagsRow.appendChild(h('span.nw__tags-label', null, icon(I.tag), text('Schlagwort')));
@@ -952,7 +1239,7 @@ export default {
         onClick: () => { st.tag = null; render(); syncRoute(); },
       }, text('Alle')));
       for (const { tag, anzahl } of chips) {
-        const active = !!st.tag && st.tag.toLowerCase() === tag.toLowerCase();
+        const active = !!st.tag && gleich(st.tag, tag);
         tagsRow.appendChild(h('button.nw__tag', {
           type: 'button',
           class: active ? 'is-active' : '',
@@ -961,8 +1248,8 @@ export default {
           onClick: () => { st.tag = active ? null : tag; render(); syncRoute(); },
         }, text(`#${tag}`), h('span.nw__tag-count', null, text(String(anzahl)))));
       }
-      if (alle.length > MAX_TAG_CHIPS) {
-        tagsRow.appendChild(h('span.nw__tags-label', null, text(`+${alle.length - MAX_TAG_CHIPS} weitere in den Notizen`)));
+      if (verschiedene > MAX_TAG_CHIPS) {
+        tagsRow.appendChild(h('span.nw__tags-label', null, text(`+${verschiedene - MAX_TAG_CHIPS} weitere in den Notizen`)));
       }
     }
 
@@ -1140,6 +1427,7 @@ export default {
       container.style.overflowY = '';
       const was = st.open;
       st.open = null;
+      st.blattZug += 1;
       if (!keepRoute && typeof ctx.replaceRoute === 'function') ctx.replaceRoute(wandRoute());
       if (was && was.id) {
         const tile = root.querySelector(`.nw__note[data-id="${was.id}"], .nw__row[data-id="${was.id}"]`);
@@ -1148,16 +1436,16 @@ export default {
       return true;
     }
 
+    /**
+     * Eine Notiz frisch vom Server, in derselben Form wie auf der Wand -- mit
+     * Herkunft und Projekt (GET /api/notizen/auswahl?id=). Frueher rechnete
+     * das Blatt die Herkunft selbst und kannte nur "automatisch" und "hand":
+     * eine importierte Notiz hiess dann "Von dir" (Pruefer, Runde 2).
+     */
     async function fetchNote(id) {
-      const res = await api.get(`/records/${encodeURIComponent(id)}`);
-      if (!res || !res.record || res.record.type !== 'note') throw Object.assign(new Error('Das ist keine Notiz.'), { status: 404 });
-      const note = { ...res.record, herkunft: { art: res.record.data.source === 'auto' ? 'automatisch' : 'hand' } };
-      if (res.record.data.chatId) {
-        try {
-          const chat = await api.get(`/chats/${encodeURIComponent(res.record.data.chatId)}`);
-          if (chat && chat.record) note.herkunft = { art: 'chat', chatId: chat.record.id, chatTitel: chat.record.data.title, chatGeloescht: false };
-        } catch { /* Chat weg: dann bleibt "automatisch erkannt" */ }
-      }
+      const res = await api.get('/notizen/auswahl', { query: { id } });
+      const note = res && Array.isArray(res.items) ? res.items[0] : null;
+      if (!note || note.type !== 'note') throw Object.assign(new Error('Das ist keine Notiz.'), { status: 404 });
       return note;
     }
 
@@ -1182,9 +1470,12 @@ export default {
 
     function wikiTarget(name) {
       if (st.aufgeloest.has(name)) return st.aufgeloest.get(name);
-      const wanted = falten(name);
-      const hit = st.items.find((n) => falten(n.data.title) === wanted);
-      return hit ? { id: hit.id, type: 'note', title: hit.data.title } : null;
+      // Ohne Antwort des Servers: die Titel der Wand, nach derselben Regel.
+      for (const key of linkSchluessel(name)) {
+        const hit = st.items.find((n) => titelSchluessel(n.data.title) === key);
+        if (hit) return { id: hit.id, type: 'note', title: hit.data.title };
+      }
+      return null;
     }
 
     function wikiHref(name) {
@@ -1194,22 +1485,30 @@ export default {
     }
 
     async function openNote(id, { fromRoute = false, mode = 'read', frisch = false } = {}) {
-      if (st.open && st.open.dirty && st.open.id !== id) {
+      // Was gerade getippt wird, verschwindet nicht ohne Rueckfrage -- auch
+      // nicht, wenn dieselbe Notiz neu geoeffnet wird (Pruefer, Runde 2).
+      if (st.open && st.open.dirty) {
         if (!closeSheet({ keepRoute: true })) return;
       }
+      // Wer zuletzt ein Blatt verlangt, bekommt es. Wurde waehrend der
+      // Wartezeiten unten ein anderes geoeffnet (Neue Notiz, eine andere
+      // Notiz) oder geschlossen, gibt dieser Aufruf auf, statt es zu
+      // ersetzen -- frueher wich ein angefangener Text der zuerst
+      // angetippten Notiz.
+      const zug = ++st.blattZug;
       let note = frisch ? null : findNote(id);
       if (!note) {
         try {
           note = await fetchNote(id);
         } catch (err) {
-          if (!st.alive) return;
+          if (!st.alive || zug !== st.blattZug) return;
           toast(err && err.status === 404 ? 'Diese Notiz gibt es nicht mehr.' : `Die Notiz konnte nicht geöffnet werden: ${errorText(err)}`, 'error');
           if (fromRoute && typeof ctx.replaceRoute === 'function') ctx.replaceRoute('#/notes');
           return;
         }
       }
       if (mode === 'read') await resolveWiki(note.data && note.data.body);
-      if (!st.alive) return;
+      if (!st.alive || zug !== st.blattZug) return;
       st.open = { id: note.id, mode, note, dirty: false, verknuepft: null, karte: null };
       renderSheet();
       if (!fromRoute && typeof ctx.replaceRoute === 'function') ctx.replaceRoute(`#/notes?id=${note.id}`);
@@ -1218,6 +1517,7 @@ export default {
 
     function openNew({ title = '', body = '' } = {}) {
       if (st.open && st.open.dirty && !closeSheet({ keepRoute: true })) return;
+      st.blattZug += 1;
       st.open = { id: null, mode: 'neu', note: { id: null, data: { title, body, tags: [] }, herkunft: { art: 'hand' } }, dirty: false };
       renderSheet();
       if (typeof ctx.replaceRoute === 'function') ctx.replaceRoute('#/notes?neu=notiz');
@@ -1225,6 +1525,7 @@ export default {
 
     function openForm(art) {
       if (st.open && st.open.dirty && !closeSheet({ keepRoute: true })) return;
+      st.blattZug += 1;
       st.open = { id: null, mode: 'form', art, dirty: false };
       renderSheet();
       if (typeof ctx.replaceRoute === 'function') ctx.replaceRoute(`#/notes?neu=${art}`);
@@ -1357,8 +1658,10 @@ export default {
 
     /** "Notiz „Name“ anlegen?" -- danach existiert sie, und die Kante steht. */
     async function offerCreate(name, note) {
+      // [[Zellatmung#Ablauf]] meint die Notiz "Zellatmung", Abschnitt "Ablauf".
+      const titel = abschnittName(name) || name;
       const ok = await confirm({
-        title: `Notiz „${name}“ anlegen?`,
+        title: `Notiz „${titel}“ anlegen?`,
         message: 'Es gibt noch keinen Eintrag mit diesem Titel. Die neue Notiz wird sofort mit dieser hier verknüpft und erscheint im Gehirn.',
         confirmLabel: 'Anlegen',
         cancelLabel: 'Nicht jetzt',
@@ -1366,7 +1669,7 @@ export default {
       if (!ok || !st.alive) return;
       let res;
       try {
-        res = await api.post('/notizen/anlegen', { title: name, vonId: note.id });
+        res = await api.post('/notizen/anlegen', { title: titel, vonId: note.id });
       } catch (err) {
         toast(`Anlegen hat nicht geklappt: ${errorText(err)}`, 'error');
         return;
@@ -1377,8 +1680,8 @@ export default {
       const kanten = (res && res.kanten) || null;
       const neu = kanten && Array.isArray(kanten.neu) ? kanten.neu.length : 0;
       toast(res && res.bereits
-        ? `„${name}“ gab es schon – jetzt ist die Notiz damit verknüpft.`
-        : `„${name}“ angelegt${neu ? ' und verknüpft' : ''}.`, 'success', {
+        ? `„${titel}“ gab es schon – jetzt ist die Notiz damit verknüpft.`
+        : `„${titel}“ angelegt${neu ? ' und verknüpft' : ''}.`, 'success', {
         action: rec ? { label: 'Öffnen', run: () => openNote(rec.id) } : undefined,
         timeout: 7000,
       });
@@ -1427,7 +1730,7 @@ export default {
         const res = await api.get(`/records/${encodeURIComponent(id)}/verknuepft`, { timeoutMs: 12000 });
         if (!st.alive || st.open !== o || token !== o.linkToken) return;
         const vorher = o.verknuepft;
-        o.verknuepft = { eingehend: res.eingehend || [], ausgehend: res.ausgehend || [], fehler: null };
+        o.verknuepft = { eingehend: ohneLaeufe(res.eingehend), ausgehend: ohneLaeufe(res.ausgehend), fehler: null };
         // Welche Zeilen neu sind: die bekommen die leichte Bewegung.
         const alt = new Set();
         if (vorher) for (const z of [...vorher.eingehend, ...vorher.ausgehend]) alt.add(z.edgeId || `${z.id}:${z.kind}`);
@@ -1539,7 +1842,8 @@ export default {
           zeile.appendChild(h('input', {
             type: 'checkbox',
             checked: gewaehlt,
-            'aria-label': `„${v.title}“ verbinden`,
+            // Angehakt: wird verbunden. Abgewaehlt: laesst sich ablehnen.
+            'aria-label': `„${v.title}“ auswählen`,
             onChange: (event) => {
               if (event.target.checked) k.gewaehlt.add(v.id); else k.gewaehlt.delete(v.id);
               renderLinks();
@@ -1555,13 +1859,13 @@ export default {
         ul.appendChild(zeile);
       }
       box.appendChild(ul);
-      const gewaehlt = k.vorschlaege.filter((v) => k.gewaehlt.has(v.id));
+      const wahl = kartenWahl(k.vorschlaege, k.gewaehlt, k.bearbeiten);
       box.appendChild(h('div.nw__card-actions', null,
         h('button.btn.btn--primary.btn--small', {
           type: 'button',
-          disabled: k.busy || (k.bearbeiten && !gewaehlt.length),
-          onClick: () => verbindeVorschlaege(k.bearbeiten ? gewaehlt : k.vorschlaege),
-        }, icon(I.link), text(k.bearbeiten ? `Ausgewählte verbinden (${gewaehlt.length})` : 'Alle verbinden')),
+          disabled: k.busy || !wahl.verbinden.length,
+          onClick: () => verbindeVorschlaege(wahl.verbinden),
+        }, icon(I.link), text(wahl.verbindenText)),
         h('button.btn.btn--small', {
           type: 'button',
           disabled: k.busy,
@@ -1571,9 +1875,12 @@ export default {
         h('span.spacer'),
         h('button.btn.btn--ghost.btn--small', {
           type: 'button',
-          disabled: k.busy,
-          onClick: () => lehneAb(k.bearbeiten ? gewaehlt : k.vorschlaege),
-        }, text('Ablehnen'))));
+          disabled: k.busy || !wahl.ablehnen.length,
+          title: k.bearbeiten
+            ? 'Die durchgestrichenen Vorschläge ablehnen – sie kommen nicht wieder.'
+            : 'Alle Vorschläge ablehnen – sie kommen nicht wieder.',
+          onClick: () => lehneAb(wahl.ablehnen),
+        }, text(wahl.ablehnenText))));
       return box;
     }
 
@@ -1693,24 +2000,52 @@ export default {
       const konflikt = h('div.nw__konflikt', { role: 'alert', hidden: true });
       const saveBtn = h('button.btn.btn--primary', { type: 'button', onClick: () => save() }, text('Speichern'));
 
-      // EINE Quelle fuer Schlagworte: der Text. Stehen im Feld `tags`
-      // Schlagworte, die im Text fehlen (Import, Schnellerfassung), kommen sie
-      // beim Bearbeiten als Zeile an den Schluss -- dort sieht man sie und
-      // kann sie loeschen; gespeichert wird das Feld leer (Pruefer, Runde 1:
-      // ein aus dem Text geloeschtes #biologie blieb sonst fuer immer).
-      let startText = String(data.body || '');
-      if (!neu) {
-        let imText = [];
-        try { imText = extractLinks(startText).tags.map((t) => falten(t)); } catch { imText = []; }
-        const fehlen = (Array.isArray(data.tags) ? data.tags : []).map((t) => String(t || '').trim().replace(/^#/, ''))
-          .filter((t) => t && !imText.includes(falten(t)));
-        if (fehlen.length) startText = `${startText.replace(/\s+$/, '')}${startText.trim() ? '\n\n' : ''}${fehlen.map((t) => `#${t.replace(/\s+/g, '-')}`).join(' ')}`;
+      // EINE Quelle fuer Schlagworte ist der Text (Pruefer, Runde 1: ein aus
+      // dem Text geloeschtes #biologie blieb sonst fuer immer). Was im Feld
+      // `tags` steht und sich als #wort schreiben laesst (Import,
+      // Schnellerfassung), kommt als Zeile an den Schluss. Was nicht ("2025"
+      // von der KI, "v1.2" aus einem Import), bleibt im Feld und steht unter
+      // dem Text, wo man es entfernen kann (schlagworteZumBearbeiten).
+      const start = neu ? { text: String(data.body || ''), feld: [] } : schlagworteZumBearbeiten(data.body, data.tags);
+      let feld = start.feld.slice();
+      const feldZeile = h('div.nw__edit-tags');
+      function zeigeFeld() {
+        clear(feldZeile);
+        feldZeile.hidden = !feld.length;
+        if (!feld.length) return;
+        feldZeile.appendChild(h('span.nw__tags-label', { title: 'Diese Schlagworte lassen sich nicht als #wort in den Text schreiben. Sie bleiben an der Notiz.' },
+          icon(I.tag), text('Weitere Schlagworte')));
+        for (const t of feld) {
+          feldZeile.appendChild(h('span.nw__tag.nw__tag--feld', null, text(`#${t}`),
+            h('button.nw__tag-weg', {
+              type: 'button',
+              'aria-label': `Schlagwort „${t}“ entfernen`,
+              title: 'Entfernen',
+              onClick: () => { feld = feld.filter((x) => x !== t); o.dirty = true; zeigeFeld(); },
+            }, icon(I.close))));
+        }
       }
+      zeigeFeld();
       // Der Stand, auf dem dieses Bearbeiten beruht -- fuer den Abgleich beim Speichern.
       let basisRev = note.rev || null;
+      // Unter welcher Kennung gespeichert wird; null, solange es die Notiz nicht gibt.
+      let notizId = note.id || null;
+      // Bilder, die in diesem Bearbeiten abgelegt wurden. Was davon beim
+      // Schliessen in keinem gespeicherten Text steht (Abbrechen, Verwerfen,
+      // vor dem Speichern wieder herausgenommen), kommt wieder weg -- sonst
+      // stand es im Gehirn als loses „image.png“ unter „Unverbunden“.
+      const abgelegt = new Set();
+      let gespeicherterText = String(data.body || '');
+      sheetCleanups.push(() => {
+        for (const id of abgelegt) {
+          if (gespeicherterText.includes(`/api/notizen/dateien/${id}`)) continue;
+          api.del(`/records/${encodeURIComponent(id)}`).catch(() => { /* bleibt liegen */ });
+        }
+        abgelegt.clear();
+      });
 
       const editor = createNoteEditor(host, {
-        value: startText,
+        value: start.text,
         label: 'Text der Notiz',
         minRows: 12,
         onChange: () => { o.dirty = true; },
@@ -1723,6 +2058,7 @@ export default {
           try {
             const daten = await dateiAlsBase64(file);
             const res = await api.post('/notizen/dateien', { name: file.name || 'bild.png', mime: file.type, daten }, { timeoutMs: 60000 });
+            if (res && res.record && res.record.id) abgelegt.add(res.record.id);
             return res && res.markdown ? res.markdown : '';
           } catch (err) {
             toast(`Das Bild ließ sich nicht ablegen: ${errorText(err)}`, 'error');
@@ -1744,6 +2080,8 @@ export default {
         clear(konflikt);
         const d = (aktuell && aktuell.data) || {};
         const deren = String(d.body || '');
+        // Die andere Fassung so, wie dieser Editor sie oeffnen wuerde -- mit ihren Schlagworten.
+        const derenStart = schlagworteZumBearbeiten(deren, d.tags);
         konflikt.append(
           h('p', null, h('strong', null, text('Diese Notiz wurde inzwischen anderswo geändert.')), text(' Deine Fassung ist noch nicht gespeichert. So steht sie jetzt im Tresor:')),
           h('pre', null, text(deren || '(leer)')),
@@ -1752,7 +2090,9 @@ export default {
               type: 'button',
               title: 'Die andere Fassung behalten und deine neuen Zeilen darunter setzen -- danach noch einmal speichern',
               onClick: () => {
-                editor.setValue(zusammenfuehren(deren, meinText));
+                editor.setValue(zusammenfuehren(derenStart.text, meinText));
+                feld = [...feld, ...derenStart.feld.filter((t) => !feld.some((x) => falten(x) === falten(t)))];
+                zeigeFeld();
                 if (d.title && !meinTitel) titleInput.value = d.title;
                 basisRev = aktuell.rev;
                 o.dirty = true;
@@ -1768,7 +2108,9 @@ export default {
             h('button.btn.btn--ghost.btn--small', {
               type: 'button',
               onClick: () => {
-                editor.setValue(deren);
+                editor.setValue(derenStart.text);
+                feld = derenStart.feld.slice();
+                zeigeFeld();
                 titleInput.value = d.title || titleInput.value;
                 basisRev = aktuell.rev;
                 o.dirty = false;
@@ -1793,25 +2135,35 @@ export default {
         busy = true;
         saveBtn.disabled = true;
         error.hidden = true;
+        // tags: nur, was sich nicht als #wort schreiben laesst -- der Rest steht im Text (siehe oben).
+        const tags = feld.slice();
+        const anlegen = !notizId;
         try {
-          let id = note.id;
-          if (neu) {
-            const res = await api.post('/records', { type: 'note', data: { title, body, tags: [] } });
+          let id = notizId;
+          if (anlegen) {
+            const res = await api.post('/records', { type: 'note', data: { title, body, tags } });
             id = res && (res.id || (res.record && res.record.id));
             if (!id) throw new Error('Der Server hat keine Kennung zurückgegeben.');
+            // Ab jetzt gibt es sie: ein zweites Speichern aendert sie, statt eine weitere anzulegen.
+            notizId = id;
+            o.id = id;
+            basisRev = res.record ? res.record.rev : null;
             st.neuAufWand.add(id);
           } else {
             st.eigene.set(id, Date.now() + 2000);
-            // tags: [] -- die Schlagworte stehen jetzt im Text (siehe oben).
-            await api.patch(`/records/${encodeURIComponent(id)}`, { data: { title, body, tags: [] }, rev: basisRev || undefined });
+            const res = await api.patch(`/records/${encodeURIComponent(id)}`, { data: { title, body, tags }, rev: basisRev || undefined });
+            if (res && res.record) basisRev = res.record.rev;
           }
+          gespeicherterText = body;
           if (!st.alive) return;
-          o.dirty = false;
-          toast(neu ? 'Notiz angelegt.' : 'Notiz gespeichert.', 'success');
+          // Was waehrend des Speicherns dazugetippt wurde, ist noch nicht
+          // gespeichert: dann fragt das Neuoeffnen unten, statt es zu verwerfen.
+          o.dirty = editor.getValue() !== body || titleInput.value.trim() !== title;
+          toast(anlegen ? 'Notiz angelegt.' : 'Notiz gespeichert.', 'success');
           await load();
           if (!st.alive) return;
           await openNote(id, { fromRoute: true });
-          if (typeof ctx.replaceRoute === 'function') ctx.replaceRoute(`#/notes?id=${id}`);
+          if (st.open && st.open.id === id && st.open.mode === 'read' && typeof ctx.replaceRoute === 'function') ctx.replaceRoute(`#/notes?id=${id}`);
         } catch (err) {
           if (!st.alive) return;
           const details = err && (err.details || (err.body && err.body.error && err.body.error.details));
@@ -1820,7 +2172,16 @@ export default {
             return;
           }
           clear(error);
-          error.appendChild(text(`Speichern hat nicht geklappt: ${errorText(err)}`));
+          if (err && err.status === 404 && !anlegen) {
+            // Anderswo geloescht, waehrend hier geschrieben wurde. Der Text
+            // bleibt im Editor und laesst sich als neue Notiz retten -- frueher
+            // stand hier nur "Eintrag note_… not found" (Pruefer, Runde 2).
+            error.append(
+              text('Diese Notiz gibt es nicht mehr – dein Text steht noch hier. '),
+              h('button.btn.btn--small', { type: 'button', onClick: () => alsNeueNotiz() }, text('Als neue Notiz speichern')));
+          } else {
+            error.appendChild(text(`Speichern hat nicht geklappt: ${errorText(err)}`));
+          }
           error.hidden = false;
         } finally {
           busy = false;
@@ -1828,16 +2189,31 @@ export default {
         }
       }
 
+      /** Die Notiz gibt es nicht mehr: Titel und Text als neue Notiz speichern. */
+      function alsNeueNotiz() {
+        notizId = null;
+        o.id = null;
+        basisRev = null;
+        save();
+      }
+
+      /** "Abbrechen" verwirft ausdruecklich -- zurueck zum Lesen, ohne Rueckfrage. */
+      function abbrechen() {
+        if (!notizId) { closeSheet(); return; }
+        o.dirty = false;
+        openNote(notizId, { fromRoute: true });
+      }
+
       const foot = h('footer.nw__read-foot', null,
         saveBtn,
-        h('button.btn.btn--ghost', { type: 'button', onClick: () => (neu ? closeSheet() : openNote(note.id, { fromRoute: true })) }, text('Abbrechen')),
+        h('button.btn.btn--ghost', { type: 'button', onClick: () => abbrechen() }, text('Abbrechen')),
         h('span.spacer'),
         h('span.meta', null, text('Strg+Enter speichert')));
 
       const card = h('article.nw__read', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId },
         h('div.nw__read-top', null, h('span.nw__kicker', null, text(neu ? 'Neue Notiz' : 'Notiz bearbeiten')), close),
         h('div.nw__read-body', null,
-          h('div.nw__edit', null, titleInput, konflikt, host, error)),
+          h('div.nw__edit', null, titleInput, konflikt, host, feldZeile, error)),
         foot);
       mountSheet(card, { focus: neu || !data.title ? titleInput : null });
       if (!neu && data.title) setTimeout(() => editor.focus(), 0);
@@ -2032,18 +2408,30 @@ export default {
     /* ---------------- Anheften, Loeschen ---------------- */
 
     async function togglePin(note) {
+      const blatt = st.open;
       const pinned = !note.data.pinned;
+      let res;
       try {
         st.eigene.set(note.id, Date.now() + 2000);
-        await api.patch(`/records/${encodeURIComponent(note.id)}`, { data: { pinned } });
+        res = await api.patch(`/records/${encodeURIComponent(note.id)}`, { data: { pinned } });
       } catch (err) {
         toast(`Das hat nicht geklappt: ${errorText(err)}`, 'error');
         return;
       }
       if (!st.alive) return;
+      // Der neue Stand gilt sofort, nicht erst nach dem Neuladen der Wand: ein
+      // "Bearbeiten" gleich danach speicherte sonst mit dem alten Stand.
+      const rec = res && res.record;
+      for (const kopie of kopienVon(note.id, note)) {
+        kopie.data.pinned = pinned;
+        if (rec) { kopie.rev = rec.rev; kopie.updatedAt = rec.updatedAt; }
+      }
       toast(pinned ? 'Angeheftet – steht jetzt ganz oben.' : 'Gelöst.', 'success');
       await load();
-      if (st.open && st.open.id === note.id) openNote(note.id, { fromRoute: true });
+      // Neu gezeichnet wird nur das Blatt, auf dem "Anheften" stand. Wer
+      // inzwischen bearbeitet oder etwas anderes geoeffnet hat, behaelt es --
+      // frueher verschwand ein angefangener Text ohne Rueckfrage (Pruefer, Runde 2).
+      if (st.alive && blatt && st.open === blatt && blatt.mode === 'read') openNote(note.id, { fromRoute: true });
     }
 
     async function removeNote(note) {
@@ -2068,6 +2456,8 @@ export default {
           run: async () => {
             try {
               await api.post(`/records/${encodeURIComponent(note.id)}/restore`);
+              // Ihr Titel loest wieder Links auf -- nicht erst, wenn das Ereignis ankommt.
+              st.aufgeloest.clear();
               await load();
             } catch (err) {
               toast(`Wiederherstellen hat nicht geklappt: ${errorText(err)}`, 'error');
@@ -2084,7 +2474,8 @@ export default {
     for (const name of ['record.created', 'record.updated', 'record.deleted']) {
       cleanups.push(bus.on(name, (payload) => {
         const type = typeOf(payload);
-        if (name !== 'record.updated') st.aufgeloest.clear(); // ein neuer Titel kann einen Link aufloesen
+        // Ein neuer, geaenderter oder wiederhergestellter Titel kann einen Link aufloesen.
+        if (aufloesungVeraltet(name, payload)) st.aufgeloest.clear();
         // Ein umbenannter Chat aendert die Herkunftszeile seiner Notizen.
         if (type !== 'note' && type !== 'chat') return;
         if (name === 'record.created' && type === 'note') st.neuAufWand.add(payload.id);
@@ -2093,7 +2484,12 @@ export default {
           if (name === 'record.deleted') { closeSheet({ force: true }); return; }
           const bis = st.eigene.get(payload.id) || 0;
           if (bis > Date.now()) return; // unsere eigene Aenderung: das Blatt steht schon richtig
-          setTimeout(() => { if (st.open && st.open.mode === 'read' && st.open.id === payload.id) openNote(payload.id, { fromRoute: true }); }, 400);
+          // Frisch vom Server: die Wand ist um diese Zeit oft noch nicht neu
+          // geladen, und das Blatt zeigte sonst dauerhaft den alten Text,
+          // die Wand dahinter den neuen (Pruefer, Runde 2).
+          setTimeout(() => {
+            if (st.open && st.open.mode === 'read' && st.open.id === payload.id) openNote(payload.id, { fromRoute: true, frisch: true });
+          }, 400);
         }
       }));
     }

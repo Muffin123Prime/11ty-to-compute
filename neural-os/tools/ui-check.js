@@ -2239,6 +2239,47 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
   await page.keyboard.press('Escape');
   await warte(400);
 
+  // Ein Bild einfuegen, dann doch [Abbrechen]: es bleibt kein loses Bild im
+  // Tresor -- sonst stand es im Gehirn als „strand.png“ unter „Unverbunden“.
+  const bilderVorher = store.count('file');
+  await page.locator('[data-nw-plus]').click();
+  await page.locator('[data-neu="notiz"]').click();
+  await warte(400);
+  await page.locator('.nw__edit-title').fill('Am Strand');
+  const bildEinfuegen = async () => {
+    await page.locator('.nos-ne__area').click();
+    await page.evaluate(() => {
+      const feld = document.querySelector('.nos-ne__area');
+      const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0));
+      const dt = new DataTransfer();
+      dt.items.add(new File([png], 'strand.png', { type: 'image/png' }));
+      feld.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    });
+    await page.waitForFunction(() => /\/api\/notizen\/dateien\//.test(document.querySelector('.nos-ne__area').value), null, { timeout: 5000 }).catch(() => {});
+  };
+  await bildEinfuegen();
+  const bilderMit = store.count('file');
+  await page.locator('.nw__read-foot').getByRole('button', { name: /^Abbrechen$/ }).click();
+  const verwerfenKnopf = page.locator('.dialog').getByRole('button', { name: /^Verwerfen$/ });
+  if (await verwerfenKnopf.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) await verwerfenKnopf.click();
+  await warte(1200);
+  check(bilderMit === bilderVorher + 1 && store.count('file') === bilderVorher && !store.all('note').some((x) => x.data.title === 'Am Strand'),
+    'Ein Bild eingefügt, dann [Abbrechen]: im Tresor bleibt weder Notiz noch loses Bild', `${bilderVorher} → ${bilderMit} → ${store.count('file')} Bilder`);
+  // Gespeichert bleibt es, an seiner Notiz -- auch wenn das Blatt danach zugeht.
+  await page.locator('[data-nw-plus]').click();
+  await page.locator('[data-neu="notiz"]').click();
+  await warte(400);
+  await page.locator('.nw__edit-title').fill('Am Strand');
+  await bildEinfuegen();
+  await page.keyboard.press('Control+Enter');
+  await warte(2000);
+  await page.keyboard.press('Escape');
+  await warte(800);
+  const nzStrand = store.all('note').find((x) => x.data.title === 'Am Strand');
+  const nzStrandBild = nzStrand ? store.edges.for(nzStrand.id, { direction: 'out' }).find((e) => (store.get(e.data.to) || {}).type === 'file') : null;
+  check(!!nzStrandBild && store.count('file') === bilderVorher + 1,
+    'Mit [Speichern] bleibt das Bild – verbunden mit seiner Notiz', `${store.count('file')} Bilder, Kante ${nzStrandBild ? 'da' : 'fehlt'}`);
+
   /* --- Projekte: das zuletzt geaenderte oben, abhaken wirkt --- */
   const projekt = store.create('project', { name: 'Auto verkaufen', description: 'Inserat, Probefahrt, Übergabe.' });
   const aufgabe = store.create('task', { title: 'Fotos machen', projectId: projekt.id });

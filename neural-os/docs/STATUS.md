@@ -9,9 +9,10 @@ prüfen ist, steht weiter unten – ungeschönt.
 ## Messwerte
 
 ```
-npm test                             1563 Tests, 0 fehlgeschlagen
+npm test                             1596 Tests, 0 fehlgeschlagen
 npm run check                        170 Funktionen über HTTP, 0 defekt
-npm run ui                           246 Prüfpunkte im Browser, alles in Ordnung
+npm run ui                           249 Prüfpunkte im Browser, alles in Ordnung
+npm run proof                        22 Prüfungen, ohne Freigabe geht nichts ins Netz
 node tools/chat-beweis.js            226 Punkte, alle Baustein-Arten im Browser
 node tools/stick-trennung-check.js   15 Punkte, zwei Sticks im selben Browser
 node tools/screenshots.js            106 Bilder, kein Schritt fehlt
@@ -21,8 +22,8 @@ Die Werkzeuge prüfen absichtlich Verschiedenes: `test` den Code, `check` jede
 Funktion über die echte HTTP-Schnittstelle, `ui` ob ein Klick in der
 Oberfläche wirklich bis in den Tresor durchschlägt, `chat-beweis` den Chat mit
 allen Baustein-Arten im echten Browser (mit nachgestellter KI), und
-`stick-trennung-check` zwei Sticks nacheinander im selben Browser.
-`npm run proof` beweist zusätzlich, dass ohne Freigabe nichts ins Netz geht.
+`stick-trennung-check` zwei Sticks nacheinander im selben Browser; `proof`
+beweist, dass ohne Freigabe nichts ins Netz geht.
 
 ## Was es gibt
 
@@ -37,8 +38,9 @@ allen Baustein-Arten im echten Browser (mit nachgestellter KI), und
   Wissen“, Gedächtnis, Hintergrund-Agenten mit Vorschlägen.
 - **Kalender** mit Serien, Erinnerungen, `.ics`; die KI legt Termine an,
   ändert und löscht sie (Werkzeuge mit Rückgängig).
-- **Notizen** als Wand zum Wiederfinden, `[[Links]]`, „Verknüpft mit“ mit
-  Gründen, Anheften, Import.
+- **Notizen** als Wand zum Wiederfinden, `[[Links]]` (auch
+  `[[Name#Abschnitt]]`), „Verknüpft mit“ mit Gründen, Bilder im Text,
+  Anheften, Import.
 - **Gehirn** – zoombares Wissensuniversum: Themenbereiche, hineinzoomen,
   Detailkarte mit Verbindungen und gemerkter KI-Zusammenfassung; 10.000 Knoten
   in rund 150 ms (Server, `src/graph/universum.js`).

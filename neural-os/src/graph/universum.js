@@ -543,8 +543,12 @@ function bauen(store, opts = {}) {
   for (const l of [...gruppen.keys()].sort(idSort)) {
     const ids = gruppen.get(l);
     if (ids.length < 2) { unverbunden.push(...ids); continue; }
+    // Ein Bild benennt keine Gruppe, solange ein anderer Eintrag darin ist:
+    // eine Notiz mit ihrem einen Bild hiess sonst „image.png“ (bei
+    // Gleichstand gewinnt die kleinere id, und file_ steht vor note_).
+    const benennbar = ids.filter((id) => knoten.get(id).type !== 'file');
     let hub = null;
-    for (const id of ids) {
+    for (const id of benennbar.length ? benennbar : ids) {
       const k = knoten.get(id);
       if (!hub || k.grad > knoten.get(hub).grad || (k.grad === knoten.get(hub).grad && idSort(id, hub) < 0)) hub = id;
     }
@@ -1325,7 +1329,18 @@ function attach({ store, bus, logger, istAusgesetzt, verzoegerungMs } = {}) {
       dfWeg(tab, p.id || (rec && rec.id));
       if (evt.name !== 'record.deleted' && rec && !rec.deletedAt) dfNimm(tab, rec);
     }
-    if (evt.name === 'record.deleted' || !rec || rec.deletedAt) return;
+    if (evt.name === 'record.deleted' || !rec || rec.deletedAt) {
+      // Trug ein zweiter Satz denselben Titel, gehoert er jetzt ihm: seine
+      // [[Links]] nachziehen, wie bei einem neuen Titel (derive.titelNachfolger).
+      if (rec && typeof derive.titelNachfolger === 'function') {
+        try {
+          for (const nachfolger of derive.titelNachfolger(store, rec)) nachziehen(nachfolger, false);
+        } catch (err) {
+          log.warn(`Nachfolger fuer ${rec.id} nicht ermittelt: ${err && err.message}`);
+        }
+      }
+      return;
+    }
     // Links, die an diesem Titel haengen: neu angelegt, umbenannt, wiederhergestellt.
     const titelNeu = evt.name === 'record.created' || p.restored
       || (p.patch && ['title', 'name', 'aliases'].some((f) => Object.prototype.hasOwnProperty.call(p.patch, f)

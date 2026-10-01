@@ -272,10 +272,21 @@ function register(router) {
   });
 }
 
+/** So viele Verknuepfungen nennt "Verknuepft mit" hoechstens (die aeltesten zuerst). */
+const MAX_VERKNUEPFT = 500;
+
 /**
  * Eingehende und ausgehende Verknuepfungen eines Satzes, mit dem Titel der
  * Gegenseite (Vertrag B). Ein Nachbar, den es nicht mehr gibt (Tombstone),
  * wird ausgelassen statt als "Unbekannt" angezeigt.
+ *
+ * Nur Wissen (die Arten des Universums, universum.TYPEN): eine Nachricht
+ * gehoert zu ihrem Chat, ein Lauf zu seinem Agenten -- beides ist keine
+ * Verknuepfung. Frueher listete ein Chat jede einzelne Nachricht, ab 500
+ * verdraengten sie die echten Verknuepfungen, und dieselben Zeilen gingen
+ * als Nachbarn in die KI-Zusammenfassung; in der Notizansicht stand ein
+ * Lauf roh als "run" (Pruefer Gehirn, Runde 2). Deshalb gilt die Grenze
+ * erst nach dem Filtern.
  */
 function verknuepfungenVon(store, id) {
   const label = require('../../graph/view').label;
@@ -283,13 +294,14 @@ function verknuepfungenVon(store, id) {
   const ausgehend = [];
   let edges = [];
   try {
-    edges = store.edges.for(id, { direction: 'both', limit: 500 });
+    edges = store.edges.for(id, { direction: 'both' });
   } catch { /* ein Satz ohne Kanten */ }
   for (const edge of edges) {
+    if (eingehend.length + ausgehend.length >= MAX_VERKNUEPFT) break;
     const d = edge.data || {};
     const raus = d.from === id;
     const other = store.get(raus ? d.to : d.from);
-    if (!other) continue;
+    if (!other || !universum.TYPEN.includes(other.type)) continue;
     (raus ? ausgehend : eingehend).push({
       id: other.id,
       type: other.type,

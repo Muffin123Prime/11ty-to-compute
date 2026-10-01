@@ -303,6 +303,20 @@ test('link: die Auflösung stimmt mit der des Graphen überein', async () => {
   });
 });
 
+test('link: [[Name#Abschnitt]] und [[Projekt  Alpha]] verbinden wie im Graphen; fehlt das Ziel, wird der Name ohne Abschnitt angelegt', async () => {
+  await withVault(async ({ store, assist }) => {
+    store.create('note', { title: 'Zellatmung', body: 'Ablauf in drei Schritten.' });
+    store.create('note', { title: 'Projekt Alpha', body: 'Plan.' });
+    const quelle = store.create('note', { title: 'Lernplan', body: 'Siehe [[Zellatmung#Ablauf]], [[Projekt  Alpha]] und [[Mitose#Phasen]].' });
+    await assist.scan({ kinds: ['link'] });
+    const items = of(assist, 'link');
+    assert.equal(items.length, 1, JSON.stringify(items.map((i) => i.data.title)));
+    assert.equal(items[0].data.action.title, 'Mitose', 'angelegt wird die Notiz, nicht der Abschnitt');
+    assert.match(items[0].data.action.body, /\[\[Mitose#Phasen\]\]/, 'der Hinweis nennt den Link, wie er im Text steht');
+    assert.equal(items[0].data.action.linkFrom, quelle.id);
+  });
+});
+
 /* ------------------------------------------------------------------ scan */
 
 test('Ein zweiter Scan legt nichts Neues an, sondern frischt auf', async () => {

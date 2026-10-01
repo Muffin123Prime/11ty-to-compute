@@ -43,10 +43,11 @@
 import { h, text, clear, on, icon, formatNumber, timeAgo, debounce } from '../lib/dom.js';
 import { createGraphCanvas, layoutThemen, THEME_HUES, FARBE_NEUTRAL, themaFarbeCss } from '../lib/graph-canvas.js';
 import {
-  TYPE_PLURALS, WURZEL_NAME, KLEIN_AB, UNIVERSUM_TYPEN, artVon, fold, passt, oeffnenZiel,
-  normaliseEbene0, normaliseEbene1, normaliseVerknuepft, verknuepftAusGraph, brotkrumen,
+  TYPE_PLURALS, WURZEL_NAME, KLEIN_AB, UNIVERSUM_TYPEN, artVon, fold, oeffnenZiel,
+  normaliseEbene0, normaliseEbene1, normaliseVerknuepft, verknuepftAusGraph,
   sucheThemen, sucheKnoten, universumLokal, ebene1Lokal,
   WEITERE_ID, UNVERBUNDEN_ID, anzahlText, verbindungenImThema, themenZahl, bereicheVon,
+  eintraegeDrin, behaelterKreise, hochZiel, istWurzelNetz, krumenFuer, themaFuerEintrag, sprungZiel,
 } from '../lib/universum.js';
 import { createWissenskarte } from './wissenskarte.js';
 
@@ -86,9 +87,12 @@ const AB_WERK_AUS = new Set(['run']);
 const STYLE_ID = 'nos-gehirn-style';
 const CSS = `
 .main[data-view="graph"] { overflow: hidden; }
+/* Das Gehirn ist sein eigener Massstab (Container-Abfrage): neben zwei
+   offenen Seitenleisten ist es schmal, auch wenn das Fenster breit ist. */
 .gh {
   position: relative; height: 100%; min-height: 320px; overflow: hidden;
   background: var(--bg);
+  container: gehirn / inline-size;
 }
 .gh__layer {
   position: absolute; inset: 0;
@@ -197,8 +201,11 @@ const CSS = `
 }
 .gh__hint[hidden] { display: none; }
 
-/* Die Informationskarte rechts. */
+/* Die Informationskarte rechts (im schmalen Gehirn unten). Wo sie steht,
+   liest die Ansicht aus --gh-karte (istSchmal) -- dieselbe Regel, nicht
+   eine zweite Grenze im Code. */
 .gh__card {
+  --gh-karte: rechts;
   position: absolute; top: 12px; right: 14px; bottom: 12px; z-index: 3;
   width: min(340px, calc(100% - 28px));
   display: flex; flex-direction: column;
@@ -280,7 +287,7 @@ const CSS = `
 .gh[data-ansicht="karte"] .gh__top, .gh[data-ansicht="karte"] .gh__hint, .gh[data-ansicht="karte"] .gh__card { display: none; }
 
 /* Bei offener Karte ruecken Suche und Art-Chips links neben sie. */
-@media (min-width: 761px) {
+@container gehirn (width > 760px) {
   .gh[data-karte="offen"] .gh__tools { margin-right: calc(min(340px, 100% - 28px) + 12px); }
   /* Neben der Karte wird es eng: das Suchfeld gibt dem Pfad Platz. */
   .gh[data-karte="offen"] .gh__search { width: 190px; }
@@ -295,8 +302,20 @@ const CSS = `
   .gh__card-head .icon-button { width: 40px; height: 40px; }
   .gh__result { min-height: 40px; }
 }
+/* Schmales Gehirn (Telefon, oder 1280 px mit beiden Seitenleisten): die
+   Karte unten. Frueher galt hier die Fensterbreite, im Code die des Gehirns
+   -- die Karte stand rechts, die Ansicht schob die Auswahl darunter
+   (Pruefer, Runde 2). */
+@container gehirn (width <= 760px) {
+  .gh__card { --gh-karte: unten; top: auto; right: 10px; left: 10px; bottom: 10px; width: auto; max-height: 52%; }
+  .gh__card[data-kompakt="ja"] .gh__sec, .gh__card[data-kompakt="ja"] .gh__card-snip, .gh__card[data-kompakt="ja"] .gh__card-tags { display: none; }
+}
+/* Telefon: weniger Text, schmalere Suche; die Zahl steht im Kopf der Schale.
+   Die Karte unten auch hier -- fuer Browser ohne Container-Abfragen (iOS 15);
+   ein schmales Fenster heisst immer ein schmales Gehirn, beide Regeln sagen
+   dann dasselbe. */
 @media (max-width: 760px) {
-  .gh__card { top: auto; right: 10px; left: 10px; bottom: 10px; width: auto; max-height: 52%; }
+  .gh__card { --gh-karte: unten; top: auto; right: 10px; left: 10px; bottom: 10px; width: auto; max-height: 52%; }
   .gh__card[data-kompakt="ja"] .gh__sec, .gh__card[data-kompakt="ja"] .gh__card-snip, .gh__card[data-kompakt="ja"] .gh__card-tags { display: none; }
   .gh__hint { display: none; }
   .gh__search { width: 190px; }
@@ -381,9 +400,13 @@ export default {
       query: '',
       matches: [],
       fernTreffer: [],
+      fernFuer: null, // die Anfrage, zu der fernTreffer gehoeren
+      springenNach: null, // Eingabetaste kam vor den Treffern des Servers: springen, sobald sie da sind
       fernThemen: [],
-      wechsel: 0, // laufende Ueberblendung
-      ladeToken: 0,
+      wechsel: 0, // Nummer des letzten Ebenenwechsels (hinein, heraus, Umfeld)
+      unterwegs: 0, // der Wechsel, der gerade laedt (0 = keiner)
+      nachladenOffen: false, // der Bus meldete etwas, waehrend ein Wechsel lud
+      ladeToken: 0, // nur fuer das Nachladen vom Bus
       kartenToken: 0,
       wunsch: { focus: typeof params.focus === 'string' && params.focus ? params.focus : null, thema: typeof params.thema === 'string' && params.thema ? params.thema : null },
     };
@@ -463,15 +486,24 @@ function build(self) {
     onOrt: (id) => { self.karteThema = id || null; if (self.ansicht === 'karte') adresse(self); },
     onKnoten: (node, themaId) => {
       setAnsicht(self, 'universum');
-      if (themaId && !(self.ebene === 1 && self.thema && self.thema.id === themaId)) {
-        tauchen(self, themaId, { woher: 'karte', dann: node.id });
-      } else if (self.byId.has(node.id)) {
+      // "Weitere Themen" ist kein Netz: dann das eigene Thema des Eintrags darin.
+      const behaelter = self.universum ? self.universum.themen.find((t) => t.id === WEITERE_ID_) : null;
+      const ziel = themaFuerEintrag(node, themaId, behaelter);
+      if (ziel && !(self.ebene === 1 && self.thema && self.thema.id === ziel)) {
+        tauchen(self, ziel, { woher: 'karte', dann: node.id });
+      } else if (self.ebene === 1 && self.byId.has(node.id)) {
         select(self, node.id, { hinzoomen: true });
       } else {
         umfeld(self, node.id);
       }
     },
-    onOeffnen: (node) => openNode(self, node),
+    // Ein Begriff oder eine Datei oeffnet sich als Umfeld im Universum -- also
+    // erst dorthin; frueher baute es sich unsichtbar hinter der Karte auf
+    // (Pruefer, Runde 2).
+    onOeffnen: (node) => {
+      if (!oeffnenZiel(node)) setAnsicht(self, 'universum');
+      openNode(self, node);
+    },
   });
   // Erst jetzt gibt es die Karte: beim direkten Aufruf von #/graph?ansicht=karte
   // (und nach dem Neuladen) blieb sie sonst leer (Pruefer, Runde 1).
@@ -516,7 +548,8 @@ function build(self) {
       event.preventDefault();
       if (self.selectedId) select(self, null);
       else if (self.fokusModus) setFokusModus(self, false);
-      else if ((self.ebene === 1 && !self.klein) || (self.ebene === 0 && self.unter)) auftauchen(self, { woher: 'taste' });
+      // Auch im kleinen Tresor: aus einem Umfeld oder Thema zurueck zum ganzen Netz.
+      else if (hochZiel(zustandVon(self))) auftauchen(self, { woher: 'taste' });
       return;
     }
     if (tippt || self.ansicht === 'karte') return;
@@ -578,6 +611,23 @@ function build(self) {
     tauchen: (id) => tauchen(self, id, { woher: 'test' }),
     auftauchen: () => auftauchen(self, { woher: 'test' }),
     select: (id) => select(self, id),
+    /** Wie ein Ereignis vom Bus, nur sofort (ohne die 1,2 s Buendelung). */
+    nachladen: () => nachladen(self),
+    get unterwegs() { return self.unterwegs; },
+  };
+}
+
+/** Der Zustand, aus dem die reinen Funktionen (web/lib/universum.js) Pfad und Rueckweg ableiten. */
+function zustandVon(self) {
+  return {
+    ebene: self.ebene,
+    klein: self.klein,
+    einThemaId: self.einThema ? self.einThema.id : null,
+    thema: self.thema,
+    pfad: self.pfad,
+    fokusId: self.fokusId,
+    fokusName: self.fokusId ? (self.byId.get(self.fokusId) || {}).label : null,
+    unter: self.unter,
   };
 }
 
@@ -624,15 +674,20 @@ async function ladeThemaDaten(self, themaId) {
   return normaliseEbene1(data);
 }
 
-/** Das Umfeld eines Eintrags bis Tiefe 2 -- als eigene Ebene 1. */
+/**
+ * Das Umfeld eines Eintrags bis Tiefe 2 -- als eigene Ebene 1. Nur die Arten
+ * des Universums, wie Ebene 0 und das Thema: Agenten und Laeufe sind Betrieb,
+ * kein Wissen (Pruefer, Runde 2: der kleine Tresor zeigte die sechs
+ * eingebauten Agenten und ihre Laeufe, der Server zaehlte sie nicht).
+ */
 async function ladeUmfeld(self, id) {
-  const data = await self.ctx.api.get('/graph', { query: { focus: id, depth: 2, limit: 400, includeOrphans: true }, timeoutMs: 20000 });
+  const data = await self.ctx.api.get('/graph', { query: { focus: id, depth: 2, limit: 400, includeOrphans: true, types: UNIVERSUM_TYPEN }, timeoutMs: 20000 });
   return normaliseEbene1({ thema: null, knoten: data.nodes, kanten: data.edges });
 }
 
-/** Alles auf einmal -- fuer kleine Tresore ohne Themen-Ebene. */
+/** Alles auf einmal -- fuer kleine Tresore ohne Themen-Ebene (dieselben Arten wie oben). */
 async function ladeAlles(self) {
-  const data = await self.ctx.api.get('/graph', { query: { limit: LOAD_LIMIT, includeOrphans: true }, timeoutMs: 20000 });
+  const data = await self.ctx.api.get('/graph', { query: { limit: LOAD_LIMIT, includeOrphans: true, types: UNIVERSUM_TYPEN }, timeoutMs: 20000 });
   return normaliseEbene1({ thema: null, knoten: data.nodes, kanten: data.edges });
 }
 
@@ -696,13 +751,32 @@ function groesseBestimmen(self, u) {
   self.einThema = !self.leer && !self.klein && u.themen.length === 1 ? u.themen[0] : null;
 }
 
-/** Nach einem Ereignis vom Bus: die gezeigte Ebene neu laden, Positionen bleiben. */
+/**
+ * Nach einem Ereignis vom Bus: die gezeigte Ebene neu laden, Positionen bleiben.
+ *
+ * Waehrend ein Wechsel laedt (hinein, heraus, Umfeld), wartet das Nachladen
+ * und kommt danach: frueher verwarf es mit derselben Marke die Antwort des
+ * Wechsels, und die schon ausgeblendete Ebene kam nie zurueck -- leere
+ * Flaeche, Tippen wirkungslos (Pruefer, Runde 2). Umgekehrt gilt ein
+ * Ergebnis nicht mehr, wenn waehrenddessen ein Wechsel kam: dann noch einmal.
+ */
 async function nachladen(self) {
   if (!self.alive || self.loading) return;
+  if (self.unterwegs) {
+    self.nachladenOffen = true;
+    return;
+  }
   const token = ++self.ladeToken;
+  const wechsel = self.wechsel;
+  const veraltet = () => {
+    if (!self.alive || token !== self.ladeToken) return true;
+    if (wechsel === self.wechsel) return false;
+    nachladenSpaeter(self);
+    return true;
+  };
   try {
     const u = await ladeUniversum(self, { frisch: true });
-    if (!self.alive || token !== self.ladeToken) return;
+    if (veraltet()) return;
     const warLeer = self.leer;
     const warKlein = self.klein;
     const warEins = !!self.einThema;
@@ -731,17 +805,17 @@ async function nachladen(self) {
       renderState(self);
     } else if (self.fokusId) {
       const e1 = await ladeUmfeld(self, self.fokusId);
-      if (!self.alive || token !== self.ladeToken) return;
+      if (veraltet()) return;
       netzDaten(self, e1, { still: true });
     } else if (self.thema) {
       const e1 = await ladeThemaDaten(self, self.thema.id);
-      if (!self.alive || token !== self.ladeToken) return;
+      if (veraltet()) return;
       self.thema = { ...self.thema, ...e1.thema };
       self.pfad = e1.pfad;
       netzDaten(self, e1, { still: true });
     } else if (self.klein || self.einThema) {
       const e1 = await ladeAlles(self);
-      if (!self.alive || token !== self.ladeToken) return;
+      if (veraltet()) return;
       netzDaten(self, e1, { still: true });
     }
     if (self.karte) self.karte.aktualisieren();
@@ -749,16 +823,99 @@ async function nachladen(self) {
     renderCrumbs(self);
     renderSub(self);
   } catch (err) {
-    if (!(err && err.status === 404)) console.warn('[gehirn] Nachladen ist gescheitert:', err && err.message);
+    if (veraltet()) return;
+    // Das offene Thema oder der Eintrag des Umfelds ist weg (anderswo
+    // geloescht, das Schlagwort umbenannt): eine Ebene hoch. Frueher blieb
+    // das alte Bild samt geloeschter Eintraege stehen (Pruefer, Runde 2).
+    if (err && err.status === 404) wegGefallen(self);
+    else console.warn('[gehirn] Nachladen ist gescheitert:', err && err.message);
   }
+}
+
+/** Nachladen, sobald kein Wechsel mehr laedt. */
+function nachladenSpaeter(self) {
+  if (self.unterwegs) self.nachladenOffen = true;
+  else nachladen(self);
+}
+
+/**
+ * Was offen war, gibt es nicht mehr: mit einem kurzen Satz eine Ebene hoch --
+ * ins Elternthema, sonst zur Wurzel.
+ */
+function wegGefallen(self) {
+  if (self.ebene !== 1 || !(self.fokusId || self.thema)) return;
+  self.ctx.toast(self.fokusId ? 'Diesen Eintrag gibt es nicht mehr.' : 'Dieses Thema gibt es nicht mehr.', 'info');
+  const ziel = hochZiel(zustandVon(self));
+  if (ziel && ziel.art === 'eltern') tauchen(self, ziel.id, { woher: 'weg' });
+  else zeigeWurzel(self);
+}
+
+/* ---------------------------- Wechsel ------------------------------- */
+
+/**
+ * Ein Wechsel der Ebene (hinein, heraus, ein Umfeld) bekommt eine Nummer.
+ * Nur ein neuerer Wechsel macht die Antwort eines aelteren ungueltig, nicht
+ * das Nachladen vom Bus; solange er laedt, wartet das Nachladen
+ * (`unterwegs`). Am Ende holt wechselEndet nach, was der Bus inzwischen
+ * gemeldet hat.
+ */
+function wechselBeginnt(self) {
+  self.wechsel++;
+  self.unterwegs = self.wechsel;
+  // Wer selbst woandershin geht, will nicht mehr dorthin, wohin die Eingabetaste wollte.
+  self.springenNach = null;
+  return self.wechsel;
+}
+
+function wechselEndet(self, wechsel) {
+  if (self.unterwegs !== wechsel) return;
+  self.unterwegs = 0;
+  if (self.nachladenOffen && self.alive) {
+    self.nachladenOffen = false;
+    nachladen(self);
+  }
+}
+
+/** Die Wurzel: das Universum -- im kleinen Tresor und bei einem einzigen Thema das Netz. */
+function zeigeWurzel(self) {
+  if (self.klein || self.einThema) return zeigeNetz(self, { art: 'alles', sofort: true });
+  zeigeUniversum(self);
+  return null;
+}
+
+/**
+ * Ein Wechsel ist gescheitert: die Ebene, auf der man noch steht, wieder
+ * zeigen -- sie war fuer die Ueberblendung schon ausgeblendet ("tief",
+ * "klein"). War noch gar nichts gezeichnet (Start mit ?focus= auf einen
+ * geloeschten Eintrag), die Wurzel; die Adresse folgt ihr (Pruefer, Runde 2:
+ * sonst blieb die Flaeche leer, und weder "Mein Wissen" noch Escape halfen).
+ */
+function ebeneZurueck(self) {
+  const { dom } = self;
+  if (!gezeichnet(self)) {
+    zeigeWurzel(self);
+    return;
+  }
+  if (self.ebene === 1) dom.layerNetz.dataset.zustand = 'da';
+  else dom.layerUni.dataset.zustand = 'da';
+}
+
+/** Steht auf der aktuellen Ebene schon ein Bild? Beim Start, vor der ersten Ebene, nicht. */
+function gezeichnet(self) {
+  const canvas = self.ebene === 1 ? self.netz : self.uni;
+  return !!canvas && canvas.stats().nodes > 0;
 }
 
 /* ---------------------------- Ebene 0 ------------------------------- */
 
-/** Die Kreise, die Ebene 0 gerade zeigt: das Universum, oder die Kinder eines Behaelters. */
+/**
+ * Die Kreise, die Ebene 0 gerade zeigt: das Universum, oder die groessten
+ * Kinder eines Behaelters (hoechstens BEHAELTER_MAX; renderSub sagt, dass
+ * alle in der Karte stehen).
+ */
 function sichtbareThemen(self) {
   if (!self.universum) return [];
-  if (self.unter) return self.unter.kinder || [];
+  if (self.unter) return behaelterKreise(self.unter);
   return self.universum.themen;
 }
 
@@ -788,11 +945,14 @@ function themenZeichnen(self, { neu = false } = {}) {
   self.uni.setData({ nodes, edges });
   self.uni.setColors(new Map(nodes.map((n) => [n.id, n.farbe])), THEME_HUES);
   if (neu) self.uni.enter();
-  self.uni.fitToView({ animate: false });
+  // Beim Nachladen gleiten die Kreise an ihre neue Lage (Zeichner); die Kamera faehrt mit.
+  self.uni.fitToView({ animate: !neu });
 }
 
 function zeigeUniversum(self, { sofort = false, unter = null } = {}) {
   const { dom } = self;
+  // Auch das ist ein Wechsel: was noch unterwegs war, gilt nicht mehr.
+  const wechsel = wechselBeginnt(self);
   self.ebene = 0;
   self.thema = null;
   self.pfad = [];
@@ -816,6 +976,7 @@ function zeigeUniversum(self, { sofort = false, unter = null } = {}) {
   describe(self);
   if (self.query) suchen(self, self.query);
   adresse(self);
+  wechselEndet(self, wechsel);
 }
 
 /**
@@ -830,14 +991,11 @@ async function tauchen(self, themaId, { woher = 'tippen', sofort = false, dann =
   const { dom } = self;
   const behaelter = self.universum && self.universum.themen.find((t) => t.id === themaId && t.id === WEITERE_ID_);
   if (behaelter) {
-    ++self.ladeToken;
-    ++self.wechsel;
     zeigeUniversum(self, { unter: behaelter });
     announce(self, `${behaelter.name}: ${anzahlText(behaelter.kinder.length, 'Thema', 'Themen')}.`);
     return;
   }
-  const token = ++self.ladeToken;
-  const wechsel = ++self.wechsel;
+  const wechsel = wechselBeginnt(self);
   // Vom Kreis aus hineinfahren: die Mitte des Kreises ist der Ursprung.
   const pos = self.ebene === 0 ? self.uni.screenPosition(themaId) : null;
   if (pos && dom.layerUni.dataset.zustand === 'da') {
@@ -852,37 +1010,44 @@ async function tauchen(self, themaId, { woher = 'tippen', sofort = false, dann =
   try {
     e1 = await ladeThemaDaten(self, themaId);
   } catch (err) {
-    if (!self.alive || token !== self.ladeToken) return;
-    if (self.ebene === 0) dom.layerUni.dataset.zustand = 'da';
+    if (!self.alive || wechsel !== self.wechsel) return;
+    // Das Thema, in dem man stand, ist weg (Nachladen), und sein Elternthema
+    // laesst sich nicht oeffnen: dann ganz nach oben -- der Satz kam schon.
+    if (woher === 'weg') { zeigeWurzel(self); return; }
+    ebeneZurueck(self);
     self.ctx.toast(err && err.status === 404 ? 'Dieses Thema gibt es nicht mehr.' : `Das Thema konnte nicht geladen werden: ${err && err.message ? err.message : 'unbekannter Fehler'}`, 'error');
     return;
+  } finally {
+    wechselEndet(self, wechsel);
   }
-  if (!self.alive || token !== self.ladeToken || wechsel !== self.wechsel) return;
+  if (!self.alive || wechsel !== self.wechsel) return;
   self.thema = e1.thema.id ? e1.thema : { id: themaId, name: 'Thema', anzahl: e1.nodes.length, farbe: 0, kinder: [] };
   self.pfad = e1.pfad;
   self.fokusId = null;
   self.unter = null;
   await zeigeNetz(self, { art: 'thema', daten: e1, sofort, dann, tiefer: self.ebene === 1 });
-  void woher;
 }
 
 /** Das Umfeld eines Eintrags bis Tiefe 2 -- als eigene Ebene 1. */
 async function umfeld(self, id, { sofort = false } = {}) {
   if (!self.alive) return;
-  const token = ++self.ladeToken;
+  const wechsel = wechselBeginnt(self);
   const { dom } = self;
   if (dom.layerUni.dataset.zustand === 'da') dom.layerUni.dataset.zustand = 'tief';
   let e1;
   try {
     e1 = await ladeUmfeld(self, id);
   } catch (err) {
-    if (!self.alive || token !== self.ladeToken) return;
-    if (self.ebene === 0) dom.layerUni.dataset.zustand = 'da';
+    if (!self.alive || wechsel !== self.wechsel) return;
     self.ctx.toast(err && err.status === 404 ? 'Diesen Eintrag gibt es nicht mehr.' : `Das Umfeld konnte nicht geladen werden: ${err && err.message ? err.message : 'unbekannter Fehler'}`, err && err.status === 404 ? 'info' : 'error');
-    if (self.ebene === 0 && dom.layerUni.dataset.zustand !== 'da') zeigeUniversum(self);
+    // Zurueck auf die Ebene, die man sah -- beim Start mit ?focus= war noch
+    // keine gezeichnet: dann die Wurzel, und die Adresse wird #/graph.
+    ebeneZurueck(self);
     return;
+  } finally {
+    wechselEndet(self, wechsel);
   }
-  if (!self.alive || token !== self.ladeToken) return;
+  if (!self.alive || wechsel !== self.wechsel) return;
   const mitte = e1.nodes.find((n) => n.id === id);
   self.thema = null;
   self.pfad = [];
@@ -896,22 +1061,36 @@ async function zeigeNetz(self, { art, daten = null, sofort = false, dann = null,
   const { dom } = self;
   let e1 = daten;
   if (!e1) {
-    const token = ++self.ladeToken;
+    const wechsel = wechselBeginnt(self);
     try {
       // Ein einziges Thema: sein Netz (mit Kuerzung und Zahlen des Servers).
       e1 = art === 'alles' ? (self.einThema ? await ladeThemaDaten(self, self.einThema.id) : await ladeAlles(self)) : null;
     } catch (err) {
-      if (!self.alive) return;
-      self.error = err;
+      if (!self.alive || wechsel !== self.wechsel) return;
       self.loading = false;
-      renderState(self);
+      // Ist schon etwas zu sehen, bleibt es, und ein Satz sagt, was nicht ging;
+      // sonst steht der Fehler in der Mitte, mit "Nochmal versuchen".
+      if (gezeichnet(self)) {
+        ebeneZurueck(self);
+        self.ctx.toast(`Das Netz konnte nicht geladen werden: ${err && err.message ? err.message : 'unbekannter Fehler'}`, 'error');
+      } else {
+        self.error = err;
+        renderState(self);
+      }
       return;
+    } finally {
+      wechselEndet(self, wechsel);
     }
-    if (!self.alive || token !== self.ladeToken || !e1) return;
+    if (!self.alive || wechsel !== self.wechsel || !e1) return;
     self.thema = self.einThema && e1.thema && e1.thema.id ? e1.thema : null;
     self.pfad = [];
     self.fokusId = null;
     self.unter = null;
+  }
+  if (self.error) {
+    // Ein zweiter Versuch hat geklappt: der Fehler in der Mitte gilt nicht mehr.
+    self.error = null;
+    renderState(self);
   }
   self.ebene = 1;
   self.fokusModus = false;
@@ -987,31 +1166,32 @@ function faerben(self) {
   self.netz.setColors(map, THEME_HUES);
 }
 
-/** Zurueck in die Uebersicht: das Netz wird klein, die Kreise kommen wieder. */
+/**
+ * Zurueck in die Uebersicht: das Netz wird klein, die Kreise kommen wieder.
+ * Wohin, sagt hochZiel (web/lib/universum.js) -- an der Wurzel (das ganze
+ * Netz eines kleinen Tresors, das einzige Thema) geht es nicht hoeher.
+ */
 async function auftauchen(self, { woher = 'taste' } = {}) {
-  if (!self.alive || self.klein) return;
+  if (!self.alive) return;
   const { dom } = self;
+  const ziel = hochZiel(zustandVon(self));
+  if (!ziel) return;
   // Die Kinder eines Behaelters: eine Ebene hoch ist das Universum.
   if (self.ebene === 0) {
-    if (self.unter) {
-      zeigeUniversum(self);
-      announce(self, 'Zurück im Universum.');
-    }
+    zeigeUniversum(self);
+    announce(self, 'Zurück im Universum.');
     return;
   }
-  // Ein einziges Thema ist selbst die Wurzel: hoeher geht es nicht.
-  if (self.einThema && self.thema && self.thema.id === self.einThema.id) return;
-  ++self.ladeToken;
-  ++self.wechsel;
   // Ein Kind-Thema: eine Ebene hoch ist sein Elternthema, nicht die Wurzel.
-  if (self.thema && self.pfad.length && woher !== 'wurzel') {
-    const eltern = self.pfad[self.pfad.length - 1];
+  if (ziel.art === 'eltern' && woher !== 'wurzel') {
     dom.layerNetz.dataset.zustand = 'klein';
-    await tauchen(self, eltern.id, { woher: 'auf' });
+    await tauchen(self, ziel.id, { woher: 'auf' });
     return;
   }
-  if (self.einThema) {
+  // Kleiner Tresor oder ein einziges Thema: die Wurzel ist ihr Netz.
+  if (self.klein || self.einThema) {
     await zeigeNetz(self, { art: 'alles', sofort: true });
+    if (self.alive && istWurzelNetz(zustandVon(self))) announce(self, `Zurück bei ${WURZEL_NAME}.`);
     return;
   }
   dom.layerNetz.dataset.zustand = 'klein';
@@ -1066,6 +1246,7 @@ function applyFilter(self, { quiet = false } = {}) {
     if (self.query) suchen(self, self.query);
     describe(self);
     renderCount(self);
+    renderCrumbs(self);
   }
 }
 
@@ -1082,7 +1263,7 @@ function setFokusModus(self, an) {
 const suchenFern = debounce(async (self, q) => {
   if (!self.alive || self.query !== q || q.length < 2) return;
   try {
-    const data = await self.ctx.api.get('/graph', { query: { q, limit: 12, includeOrphans: true }, timeoutMs: 8000 });
+    const data = await self.ctx.api.get('/graph', { query: { q, limit: 12, includeOrphans: true, types: UNIVERSUM_TYPEN }, timeoutMs: 8000 });
     if (!self.alive || self.query !== q) return;
     const hits = (data.nodes || []).filter((n) => !AB_WERK_AUS.has(n.type));
     if (self.ebene === 1) {
@@ -1098,13 +1279,27 @@ const suchenFern = debounce(async (self, q) => {
       self.fernTreffer = hits;
     }
   } catch {
+    if (!self.alive || self.query !== q) return;
     self.fernTreffer = [];
   }
+  self.fernFuer = q;
   renderResults(self);
+  // Die Eingabetaste kam vor diesen Treffern: jetzt springen.
+  if (self.springenNach === q) {
+    self.springenNach = null;
+    springen(self);
+  }
 }, 220);
 
 function suchen(self, value, { jump = false } = {}) {
   const q = String(value || '').trim();
+  // Eine neue Anfrage: was der Server zur alten fand, gilt nicht mehr --
+  // weder in der Liste noch fuer die Eingabetaste (Pruefer, Runde 2).
+  if (q !== self.query) {
+    self.fernTreffer = [];
+    self.fernFuer = null;
+    self.springenNach = null;
+  }
   self.query = q;
   if (!q) {
     self.matches = [];
@@ -1129,24 +1324,20 @@ function suchen(self, value, { jump = false } = {}) {
   if (jump) springen(self);
 }
 
-/** Eingabetaste: zum ersten Treffer. */
+/**
+ * Eingabetaste: zum ersten Treffer DIESER Anfrage (sprungZiel). Steht die
+ * Antwort des Servers noch aus, springt suchenFern, sobald sie da ist.
+ */
 function springen(self) {
-  if (self.ebene === 1 && self.matches.length) {
-    const hit = self.matches[0];
-    select(self, hit.id, { hinzoomen: true });
-    return;
-  }
-  if (self.ebene === 0 && self.fernThemen.length) {
-    const r = self.fernThemen[0];
-    const ziel = passt(self.query, r.thema.name) || !r.kinder.length ? r.thema.id : r.kinder[0].id;
-    tauchen(self, ziel, { woher: 'suche' });
-    return;
-  }
-  if (self.fernTreffer.length) {
-    umfeld(self, self.fernTreffer[0].id);
-    return;
-  }
-  if (self.fernThemen.length) tauchen(self, self.fernThemen[0].thema.id, { woher: 'suche' });
+  const ziel = sprungZiel({
+    ebene: self.ebene, query: self.query, matches: self.matches,
+    fernThemen: self.fernThemen, fernTreffer: self.fernTreffer, fernFuer: self.fernFuer,
+  });
+  if (!ziel) return;
+  if (ziel.art === 'warten') self.springenNach = self.query;
+  else if (ziel.art === 'waehlen') select(self, ziel.id, { hinzoomen: true });
+  else if (ziel.art === 'umfeld') umfeld(self, ziel.id);
+  else tauchen(self, ziel.id, { woher: 'suche' });
 }
 
 function renderResults(self) {
@@ -1205,18 +1396,18 @@ function select(self, id, { fromCanvas = false, hinzoomen = false, still = false
     applyFilter(self, { quiet: true });
   }
   if (!fromCanvas) self.netz.setSelection(next);
-  // Neben der offenen Karte bleibt weniger Flaeche: Einpassen und Hinzoomen
-  // zielen auf die freie Mitte, nicht unter die Karte.
-  const breit = !istSchmal(self);
-  self.netz.setPadding({ right: next && breit ? 340 + 28 + 24 : 72, bottom: next && !breit ? Math.round(self.dom.root.clientHeight * 0.52) + 16 : 48 });
   self.dom.root.dataset.karte = next ? 'offen' : 'zu';
+  self.dom.card.dataset.kompakt = voll || !fromCanvas || !istSchmal(self) ? 'nein' : 'ja';
+  renderCard(self);
+  // Neben der offenen Karte bleibt weniger Flaeche: Einpassen und Hinzoomen
+  // zielen auf die freie Mitte, nicht unter die Karte -- dort, wo sie
+  // wirklich steht (kartenRand).
+  self.netz.setPadding(kartenRand(self, !!next));
   if (next && hinzoomen) self.netz.focus(next, { zoom: Math.max(1.6, self.netz.transform.k) });
   // Die Karte verdeckt nie, was man gerade gewaehlt hat: liegen der Knoten
   // oder seine direkten Nachbarn darunter, faehrt die Kamera weich zur Seite
   // (Pruefer, Runde 1: "Sch" halb unter der Karte, Nachbarn ganz darunter).
   else if (next) self.netz.zeigeFrei(next);
-  self.dom.card.dataset.kompakt = voll || !fromCanvas || !istSchmal(self) ? 'nein' : 'ja';
-  renderCard(self);
   if (!still) {
     const node = next ? self.byId.get(next) : null;
     if (node) announce(self, `Gewählt: ${artVon(node)} ${node.label}`);
@@ -1225,8 +1416,29 @@ function select(self, id, { fromCanvas = false, hinzoomen = false, still = false
   }
 }
 
+/**
+ * Steht die Karte unten (schmales Gehirn) statt rechts? Das entscheidet das
+ * CSS (Container-Abfrage auf .gh, --gh-karte); hier wird nur nachgelesen.
+ * Frueher mass der Code die Breite des Gehirns, das CSS die des Fensters:
+ * bei 1280 px mit beiden Seitenleisten stand die Karte rechts, die Ansicht
+ * schob die Auswahl aber darunter (Pruefer, Runde 2).
+ */
 function istSchmal(self) {
-  return self.dom.root.clientWidth < 760;
+  try {
+    const lage = getComputedStyle(self.dom.card).getPropertyValue('--gh-karte').trim();
+    if (lage) return lage === 'unten';
+  } catch { /* ohne berechnete Stile: nach der Breite, wie im CSS */ }
+  return self.dom.root.getBoundingClientRect().width <= 760;
+}
+
+/** Der Rand, den Einpassen und Hinzoomen frei lassen: so breit (rechts) oder hoch (unten) wie die offene Karte. */
+function kartenRand(self, offen) {
+  if (!offen) return { right: 72, bottom: 48 };
+  const root = self.dom.root.getBoundingClientRect();
+  // Unten waechst die Karte mit ihrem Inhalt bis 52 % der Hoehe (CSS): so viel bleibt frei.
+  if (istSchmal(self)) return { right: 72, bottom: Math.round(root.height * 0.52) + 16 };
+  const card = self.dom.card.getBoundingClientRect();
+  return { right: card.width ? Math.round(root.right - card.left) + 24 : 340 + 28 + 24, bottom: 48 };
 }
 
 function openNode(self, node) {
@@ -1551,19 +1763,11 @@ function renderCrumbs(self) {
   clear(dom.crumbs);
   if (self.leer) { dom.crumbs.hidden = true; return; }
   dom.crumbs.hidden = false;
-  const wurzelThema = self.einThema && self.thema && self.thema.id === self.einThema.id;
-  let krumen;
-  if (self.ebene === 1 && self.fokusId) {
-    krumen = [{ id: null, name: WURZEL_NAME }, { id: '__fokus', name: (self.byId.get(self.fokusId) || {}).label || 'Umfeld' }];
-  } else if (self.ebene === 0 && self.unter) {
-    krumen = [{ id: null, name: WURZEL_NAME }, { id: self.unter.id, name: self.unter.name }];
-  } else if ((self.klein || wurzelThema) && self.ebene === 1) {
-    krumen = [{ id: null, name: WURZEL_NAME }];
-  } else {
-    krumen = brotkrumen(self.pfad, self.ebene === 1 ? self.thema : null);
-    // Liegt das Thema im einzigen Thema, ist dieses die Wurzel -- nicht doppelt.
-    if (self.einThema && krumen[1] && krumen[1].id === self.einThema.id) krumen.splice(1, 1);
-  }
+  // Im kleinen Tresor ist "Mein Wissen" das ganze Netz; ein Thema oder Umfeld
+  // darin steht dahinter (krumenFuer), und "Mein Wissen" fuehrt zurueck.
+  const z = zustandVon(self);
+  const wurzelNetz = istWurzelNetz(z);
+  const krumen = krumenFuer(z);
   krumen.forEach((k, i) => {
     const letzte = i === krumen.length - 1;
     if (i > 0) dom.crumbs.appendChild(h('span.gh__crumb-sep', { 'aria-hidden': 'true' }, text('›')));
@@ -1581,7 +1785,8 @@ function renderCrumbs(self) {
     }, text(k.name));
     if (letzte) {
       let zahl = null;
-      if ((self.klein || wurzelThema) && self.ebene === 1) zahl = anzahlText(self.nodes.filter((n) => !n.ausserhalb).length, 'Eintrag', 'Einträge');
+      // Dieselbe Zaehlung wie im Kopf (renderCount): ohne ausgeblendete Arten.
+      if (wurzelNetz) zahl = anzahlText(eintraegeDrin(self.nodes, self.hiddenTypes), 'Eintrag', 'Einträge');
       else if (self.ebene === 1 && self.thema && !self.fokusId) zahl = formatNumber(self.thema.anzahl);
       else if (self.ebene === 0 && self.unter) zahl = anzahlText((self.unter.kinder || []).length, 'Thema', 'Themen');
       else if (self.ebene === 0 && self.universum) zahl = anzahlText(themenZahl(self.universum.themen), 'Thema', 'Themen');
@@ -1619,9 +1824,16 @@ function renderSub(self) {
   const drin = self.nodes.filter((n) => !n.ausserhalb).length;
   const gesamt = self.thema ? self.thema.anzahl : drin;
   const zeigen = self.ebene === 1 && self.gekuerzt && gesamt > drin;
-  dom.note.hidden = !zeigen;
+  // Ein Behaelter zeigt nur seine groessten Themen als Kreise: das steht hier,
+  // und wo der Rest ist (Pruefer, Runde 2).
+  const alleKinder = self.ebene === 0 && self.unter && !self.leer ? (self.unter.kinder || []).length : 0;
+  const kreise = alleKinder ? sichtbareThemen(self).length : 0;
+  const behaelter = alleKinder > kreise;
+  dom.note.hidden = !zeigen && !behaelter;
   if (zeigen) {
     dom.note.appendChild(text(`${formatNumber(drin)} von ${anzahlText(gesamt, 'Eintrag', 'Einträgen')} – die am stärksten verbundenen. Den Rest findet die Suche oben rechts${kinder.length ? ', die Unterthemen zeigen alles' : ''}.`));
+  } else if (behaelter) {
+    dom.note.appendChild(text(`Die ${formatNumber(kreise)} größten von ${anzahlText(alleKinder, 'Thema', 'Themen')}. Alle stehen in der Karte, die Suche oben rechts findet jedes.`));
   }
 }
 
@@ -1704,7 +1916,11 @@ function renderHint(self) {
   let fein = false;
   try { fein = window.matchMedia('(pointer: fine)').matches; } catch { /* Finger */ }
   if (self.ebene === 0) dom.hint.appendChild(text(fein ? 'Klick oder Rad öffnet ein Thema · Ziehen verschiebt' : 'Antippen oder Aufziehen öffnet ein Thema'));
-  else dom.hint.appendChild(text(fein ? `Klick wählt · Doppelklick öffnet · Rad zoomt${self.klein ? '' : ' · Esc oder Herauszoomen zurück'}` : `Antippen wählt · Zweimal tippen öffnet · Zwei Finger zoomen${self.klein ? '' : ' · Zusammenziehen zurück'}`));
+  else {
+    // "zurück" nur, wo es ein Zurueck gibt -- an der Wurzel nicht, im Umfeld eines kleinen Tresors schon.
+    const hoch = !!hochZiel(zustandVon(self));
+    dom.hint.appendChild(text(fein ? `Klick wählt · Doppelklick öffnet · Rad zoomt${hoch ? ' · Esc oder Herauszoomen zurück' : ''}` : `Antippen wählt · Zweimal tippen öffnet · Zwei Finger zoomen${hoch ? ' · Zusammenziehen zurück' : ''}`));
+  }
 }
 
 /* ---------------------------- Zustand ------------------------------- */
@@ -1715,7 +1931,7 @@ function renderState(self) {
   let box = null;
   if (self.loading && !self.universum) {
     box = h('div.gh__state-box', null, h('span.spinner', { 'aria-hidden': 'true' }), h('p.gh__state-text', null, text('Das Gehirn wird geladen …')));
-  } else if (self.error && !self.universum) {
+  } else if (self.error && (!self.universum || !gezeichnet(self))) {
     const msg = self.error && self.error.message ? self.error.message : 'Unbekannter Fehler.';
     box = h('div.gh__state-box', { role: 'alert' },
       h('p.gh__state-title', null, text('Das Gehirn konnte nicht geladen werden.')),
@@ -1753,7 +1969,7 @@ function renderCount(self) {
   // Dieselbe Zaehlung wie in der Karte und auf dem Server: Eintraege des
   // Themas (ohne Nachbarn ausserhalb), Verbindungen als Paare zwischen ihnen.
   const sichtbar = (n) => !self.hiddenTypes.has(n.type);
-  const drin = self.nodes.filter((n) => !n.ausserhalb && sichtbar(n)).length;
+  const drin = eintraegeDrin(self.nodes, self.hiddenTypes);
   const paare = verbindungenImThema(self.nodes, self.edges, sichtbar);
   const draussen = self.nodes.filter((n) => n.ausserhalb && sichtbar(n)).length;
   const teile = [anzahlText(drin, 'Eintrag', 'Einträge'), anzahlText(paare, 'Verbindung', 'Verbindungen')];

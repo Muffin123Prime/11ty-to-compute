@@ -720,14 +720,20 @@ function parseDestination(raw) {
   return { href: value, title };
 }
 
-/** `[[Name]]`, `[[Name|Beschriftung]]`, `[[Name#Abschnitt]]`. */
+/**
+ * `[[Name]]`, `[[Name|Beschriftung]]`, `[[Name#Abschnitt]]` -- nach der
+ * Regel der Ableitung (src/graph/derive.js WIKI_RE): ohne `[`/`]` darin,
+ * hoechstens 500 Zeichen, das Ziel im Leerraum zusammengefasst. Sonst
+ * stuende hier ein Link, der im Netz nie eine Kante wird. Ob das Ziel
+ * "Name#Abschnitt" oder "Name" meint, entscheidet beim Aufloesen der Server.
+ */
 function readWiki(src, start) {
   const end = src.indexOf(']]', start + 2);
   if (end === -1) return null;
   const inner = src.slice(start + 2, end);
-  if (!inner.trim() || inner.indexOf('\n') !== -1) return null;
+  if (!inner.trim() || inner.indexOf('\n') !== -1 || /[[\]]/.test(inner) || inner.length > 500) return null;
   const pipe = inner.indexOf('|');
-  const target = (pipe === -1 ? inner : inner.slice(0, pipe)).trim();
+  const target = (pipe === -1 ? inner : inner.slice(0, pipe)).trim().replace(/\s+/g, ' ');
   const label = (pipe === -1 ? inner : inner.slice(pipe + 1)).trim();
   if (!target) return null;
   return { node: { type: 'wiki', target, label: label || target }, next: end + 2 };

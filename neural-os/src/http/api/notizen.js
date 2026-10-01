@@ -11,9 +11,15 @@
  *        10.000 Notizen ist das ein Lauf ueber die Titel im Speicher -- kein
  *        Volltext, weil ein Titel-Anfang gemeint ist, nicht ein Wort im Text.
  *   POST /api/notizen/aufloesen {namen:[...]}
- *        Welche [[Namen]] es gibt: dieselbe Faltung wie die Ableitung
- *        (src/graph/derive.js), damit die Ansicht genau die Links gestrichelt
- *        zeigt, die beim Speichern KEINE Kante ergeben haben.
+ *        Welche [[Namen]] es gibt: dasselbe Titelverzeichnis wie die
+ *        Ableitung (src/graph/derive.js resolveLink), damit die Ansicht genau
+ *        die Links gestrichelt zeigt, die beim Speichern KEINE Kante ergeben
+ *        haben.
+ *   GET  /api/notizen/auswahl?filter=alle|auto|angeheftet&tag=&limit=
+ *   GET  /api/notizen/auswahl?id=
+ *        Notizen in der Form der Wand (Herkunft, Projekt -- wie GET
+ *        /api/notizen), aber ueber ALLE Notizen gefiltert: fuer die Wand,
+ *        wenn es mehr gibt, als sie laedt. Mit `id` genau eine Notiz.
  *   POST /api/notizen/anlegen {title, body?, tags?, vonId?}
  *        "Notiz „Name“ anlegen?" -> [Anlegen]. Gibt es den Titel schon,
  *        kommt der vorhandene Eintrag zurueck (bereits:true) statt eines
@@ -24,8 +30,10 @@
  *   GET  /api/notizen/dateien/:id
  *        Bilder in Notizen. Abgelegt im vorhandenen Ablagefach des Tresors
  *        (store.files, inhaltsadressiert, verschluesselt wie alles andere),
- *        dazu ein `file`-Satz, damit das Bild im Netz ein Knoten ist. Nur
- *        Bildarten, die ein Browser als Bild zeigt -- kein SVG (Skripte).
+ *        dazu ein `file`-Satz, damit das Bild im Netz ein Knoten ist -- mit
+ *        einer Kante von der Notiz, in deren Text es steht (die Ableitung
+ *        liest den Verweis, src/graph/derive.js fileRefs). Nur Bildarten,
+ *        die ein Browser als Bild zeigt -- kein SVG (Skripte).
  *   POST /api/notizen/import {dateien:[{name, text}]}
  *        "Importieren": Markdown-Dateien oder ein Ordner (Obsidian) werden
  *        Notizen; [[Links]] und #Schlagworte bleiben und verbinden danach.
@@ -42,6 +50,7 @@
 
 const { fold } = require('../../store/search');
 const { tagsOf } = require('../../graph/view');
+const { buildIndex, indexKey, linkKeys, isTextTag } = require('../../graph/derive');
 const { ValidationError, NotFoundError } = require('../../kernel/errors');
 const {
   need,
@@ -76,6 +85,10 @@ const MAX_BILD_BYTES = 8 * 1024 * 1024;
 
 const MAX_NAMEN = 200;
 const MAX_TITEL_BYTES = 512 * 1024;
+
+/** Was die Wand filtert (web/views/notes.js FILTERS) und wie viele Schlagworte ihre Leiste bekommt. */
+const WAND_FILTER = ['alle', 'auto', 'angeheftet'];
+const MAX_WAND_SCHLAGWORTE = 50;
 
 /* --------------------------------------------------------------- Helfer */
 
@@ -157,27 +170,94 @@ function tagKandidaten(store, q, limit) {
   for (const [k, eintrag] of zaehler) {
     const guete = trefferGuete(k, key);
     if (guete < 0) continue;
+    // Nur, was sich als #wort schreiben laesst: "2025" oder "v1.2" aus dem
+    // Feld `tags` eingesetzt, waere im Text kein Schlagwort (Pruefer, Runde 2).
+    if (!isTextTag(eintrag.tag)) continue;
     treffer.push({ ...eintrag, guete });
   }
   treffer.sort((a, b) => (a.guete - b.guete) || (b.anzahl - a.anzahl) || (a.tag < b.tag ? -1 : 1));
   return treffer.slice(0, limit).map(({ tag, anzahl }) => ({ tag, anzahl }));
 }
 
-/** Titel -> Satz, mit derselben Faltung wie die Ableitung. */
-function titelIndex(store, graph) {
-  if (graph && typeof graph.buildIndex === 'function') {
-    try { return graph.buildIndex(store).byTitle; } catch { /* dann von Hand */ }
+/**
+ * [[Name]] -> id, mit dem Titelverzeichnis der Ableitung (derive.resolveLink):
+ * dieselbe Regel und derselbe Stand, nach dem ein gespeicherter Link eine
+ * Kante wird. Frueher baute diese Datei ein eigenes Verzeichnis, und nach
+ * einem Umbenennen sagte es etwas anderes als die Ableitung -- der Link stand
+ * durchgezogen da, "Verknuepft mit" zeigte nichts (Pruefer, Runde 2).
+ */
+function titelSucher(store, graph) {
+  if (graph && typeof graph.resolveLink === 'function') {
+    return (name) => {
+      try { return graph.resolveLink(store, name); } catch { return null; }
+    };
   }
-  const byTitle = new Map();
-  for (const type of ['note', 'project', 'entity', 'task', 'event', 'file', 'chat', 'agent']) {
-    let items = [];
-    try { items = store.list(type, { sort: 'createdAt', order: 'asc' }).items; } catch { continue; }
-    for (const rec of items) {
-      const k = fold(titelVon(rec));
-      if (k && !byTitle.has(k)) byTitle.set(k, rec.id);
+  // Ohne die Ableitung im Kontext (sie liess sich nicht starten): ein
+  // eigenes Verzeichnis, mit denselben Schluesseln.
+  const { byTitle } = buildIndex(store);
+  return (name) => {
+    for (const key of linkKeys(name)) {
+      const id = byTitle.get(key);
+      if (id) return id;
     }
+    return null;
+  };
+}
+
+/**
+ * Woher eine Notiz stammt -- dieselbe Zuordnung wie GET /api/notizen
+ * (noteOrigin in src/http/api/events.js); test/notizen-pruefrunde.test.js
+ * haelt beide gleich. 'chat' = die KI hat sie aus einem Gespraech gemacht.
+ */
+function herkunftVon(store, note, chats) {
+  const d = note.data || {};
+  let chat = null;
+  if (d.chatId) {
+    if (!chats.has(d.chatId)) {
+      const rec = store.get(d.chatId, { includeDeleted: true });
+      chats.set(d.chatId, rec && rec.type === 'chat' ? { id: rec.id, title: rec.data.title || 'Chat', deleted: !!rec.deletedAt } : null);
+    }
+    chat = chats.get(d.chatId);
   }
-  return byTitle;
+  let art = 'hand';
+  if (d.source === 'auto') art = chat ? 'chat' : 'automatisch';
+  else if (d.source === 'agent') art = 'agent';
+  else if (d.source === 'import') art = 'import';
+  return {
+    art,
+    chatId: chat ? chat.id : null,
+    chatTitel: chat ? chat.title : null,
+    chatGeloescht: chat ? chat.deleted : false,
+  };
+}
+
+/** Das Projekt einer Notiz, kurz -- wie GET /api/notizen. */
+function projektVon(store, note, projekte) {
+  const id = note.data && note.data.projectId;
+  if (!id) return null;
+  if (!projekte.has(id)) {
+    const rec = store.get(id);
+    projekte.set(id, rec && rec.type === 'project' ? { id, name: rec.data.name || 'Projekt', status: rec.data.status || 'active' } : null);
+  }
+  return projekte.get(id);
+}
+
+/** Notizen in der Form der Wand: jede mit Herkunft und Projekt. */
+function wandForm(store, notes) {
+  const chats = new Map();
+  const projekte = new Map();
+  return notes.map((note) => ({
+    ...note,
+    herkunft: herkunftVon(store, note, chats),
+    projekt: projektVon(store, note, projekte),
+  }));
+}
+
+/** Die Reihenfolge der Wand: Angeheftetes oben, dann das zuletzt Beruehrte (wie GET /api/notizen). */
+function wandFolge(a, b) {
+  if (!!a.data.pinned !== !!b.data.pinned) return a.data.pinned ? -1 : 1;
+  if (a.updatedAt !== b.updatedAt) return a.updatedAt < b.updatedAt ? 1 : -1;
+  return a.id < b.id ? -1 : 1;
 }
 
 /** Den <title> einer HTML-Seite lesen -- ohne Parser, ohne Entitaeten zu erfinden. */
@@ -273,14 +353,66 @@ function register(router) {
     const store = need(rc.ctx.store, 'Der Speicher');
     const body = asObject(await rc.body());
     const namen = requireStringArray(body.namen, 'namen', { max: 300, maxItems: MAX_NAMEN });
-    const byTitle = titelIndex(store, rc.ctx.graph);
+    const finde = titelSucher(store, rc.ctx.graph);
     const aufgeloest = {};
     for (const name of namen) {
-      const id = byTitle.get(fold(name)) || null;
+      const id = finde(name);
       const rec = id ? store.get(id) : null;
       aufgeloest[name] = rec ? { id: rec.id, type: rec.type, title: titelVon(rec) } : null;
     }
     return { aufgeloest };
+  });
+
+  /**
+   * Die Wand, wenn es mehr Notizen gibt, als sie laedt (GET /api/notizen
+   * gibt ihr die 600 neuesten). Filter und Schlagwort rechnet dann der
+   * Server ueber ALLE Notizen: frueher filterte die Wand nur die geladenen,
+   * und bei 625 Notizen hiess es "Keine Notiz mit #steuer", obwohl fuenf
+   * aeltere das Schlagwort trugen (Pruefer, Runde 2). `schlagworte` zaehlt
+   * ueber alle Notizen, fuer die Leiste ueber der Wand; das gewaehlte steht
+   * immer dabei. Mit `id` genau eine Notiz in derselben Form -- fuer das
+   * Blatt, wenn sie nicht auf der Wand steht.
+   */
+  router.get('/api/notizen/auswahl', (rc) => {
+    rc.requireCapability('read');
+    const store = need(rc.ctx.store, 'Der Speicher');
+    const id = strParam(rc.query, 'id', 100);
+    if (id) return { items: wandForm(store, [mustGet(store, id, 'note')]), total: 1 };
+    const filter = strParam(rc.query, 'filter', 20) || 'alle';
+    if (!WAND_FILTER.includes(filter)) throw new ValidationError('"filter" muss alle, auto oder angeheftet sein.');
+    const tag = (strParam(rc.query, 'tag', 200) || '').replace(/^#/, '').trim();
+    const tagKey = tag ? fold(tag) : '';
+    const limit = intParam(rc.query, 'limit', 600, 0, 2000);
+
+    const zaehler = new Map(); // gefaltet -> {tag, anzahl}
+    const treffer = [];
+    for (const note of store.all('note')) {
+      const keys = new Set();
+      for (const t of tagsOf(note)) {
+        const k = fold(t);
+        if (!k || keys.has(k)) continue;
+        keys.add(k);
+        const eintrag = zaehler.get(k) || { tag: t, anzahl: 0 };
+        eintrag.anzahl += 1;
+        zaehler.set(k, eintrag);
+      }
+      if (filter === 'auto' && note.data.source !== 'auto') continue;
+      if (filter === 'angeheftet' && !note.data.pinned) continue;
+      if (tagKey && !keys.has(tagKey)) continue;
+      treffer.push(note);
+    }
+    treffer.sort(wandFolge);
+    const alleSchlagworte = [...zaehler.values()].sort((a, b) => (b.anzahl - a.anzahl) || a.tag.localeCompare(b.tag, 'de'));
+    const schlagworte = alleSchlagworte.slice(0, MAX_WAND_SCHLAGWORTE);
+    if (tagKey && zaehler.has(tagKey) && !schlagworte.includes(zaehler.get(tagKey))) schlagworte.push(zaehler.get(tagKey));
+    return {
+      items: wandForm(store, treffer.slice(0, limit)),
+      total: treffer.length,
+      filter,
+      tag: tag || null,
+      schlagworte,
+      schlagworteAnzahl: zaehler.size,
+    };
   });
 
   router.post('/api/notizen/anlegen', async (rc) => {
@@ -293,8 +425,7 @@ function register(router) {
     const vonId = optionalString(body.vonId, 'vonId', { max: 80 }) || null;
     const graph = rc.ctx.graph;
 
-    const byTitle = titelIndex(store, graph);
-    const vorhandenId = byTitle.get(fold(title)) || null;
+    const vorhandenId = titelSucher(store, graph)(title);
     const vorhanden = vorhandenId ? store.get(vorhandenId) : null;
     let record = vorhanden;
     const bereits = !!vorhanden;
@@ -381,9 +512,13 @@ function register(router) {
    * "Importieren" im leeren Gehirn und auf der Notizwand: Markdown-Dateien
    * oder ein ganzer Ordner (Obsidian, ein Notizordner) werden Notizen. Die
    * Oberflaeche liest die Dateien im Browser und schickt ihren Text in
-   * Portionen; hier entsteht je Datei eine Notiz (source 'import'). Ein
-   * Titel, den es schon gibt, wird nicht doppelt angelegt, sondern mit Grund
-   * uebersprungen. Alles laeuft als EIN Massenschreibvorgang (bulkWrite):
+   * Portionen; hier entsteht je Datei eine Notiz (source 'import'). Eine
+   * NOTIZ, die es mit diesem Titel schon gibt, wird nicht doppelt angelegt,
+   * sondern mit Grund uebersprungen. Ein Termin "Zahnarzt", ein Chat oder
+   * die Person "Anna" zaehlen nicht: frueher verhinderten sie die
+   * gleichnamige Notiz, und ihr Text kam nie an (Pruefer, Runde 2). Ein
+   * [[Zahnarzt]] meint danach die Notiz -- sie geht im Titelverzeichnis vor.
+   * Alles laeuft als EIN Massenschreibvorgang (bulkWrite):
    * die Ableitung ruht waehrenddessen und zieht danach alle [[Links]] und
    * #Schlagworte auf einmal -- auch die auf Notizen, die erst spaeter in
    * derselben Portion kamen.
@@ -402,7 +537,7 @@ function register(router) {
       const text = typeof obj.text === 'string' ? obj.text : '';
       return { name, text };
     });
-    const byTitle = titelIndex(store, rc.ctx.graph);
+    const notizTitel = new Set(store.all('note').map((n) => indexKey(titelVon(n))).filter(Boolean));
     const angelegt = [];
     const uebersprungen = [];
     const run = () => {
@@ -410,10 +545,10 @@ function register(router) {
         if (!IMPORT_ENDUNG_RE.test(name)) { uebersprungen.push({ name, grund: 'Keine Markdown- oder Textdatei.' }); continue; }
         if (text.length > MAX_IMPORT_ZEICHEN) { uebersprungen.push({ name, grund: 'Länger als 1 Million Zeichen.' }); continue; }
         const n = markdownZuNotiz(name, text);
-        const key = fold(n.title);
-        if (byTitle.has(key)) { uebersprungen.push({ name, grund: `„${n.title}“ gibt es schon.` }); continue; }
+        const key = indexKey(n.title);
+        if (notizTitel.has(key)) { uebersprungen.push({ name, grund: `Eine Notiz „${n.title}“ gibt es schon.` }); continue; }
         const rec = store.create('note', { title: n.title, body: n.body, tags: n.tags, source: 'import' });
-        byTitle.set(key, rec.id);
+        notizTitel.add(key);
         angelegt.push(rec.id);
       }
     };

@@ -145,6 +145,34 @@ test('Ebene 0: Themen aus Schlagworten, Begriffen, Projekten und dem Rest -- mit
   }
 });
 
+test('Eine Notiz mit ihrem einen Bild heisst wie die Notiz, nicht "image.png"', async () => {
+  const h = await offen('uni-bild');
+  try {
+    // file_… steht vor note_…: bei Gleichstand gewann frueher das Bild.
+    const bild = h.store.create('file', { name: 'image.png', hash: 'b'.repeat(64), mime: 'image/png', size: 10 }, { id: fest('file', 1) });
+    h.store.create('note', { title: 'Urlaub am Meer', body: `Der Strand:\n\n![image.png](/api/notizen/dateien/${bild.id})`, tags: [] }, { id: fest('note', 1) });
+    const { u } = uni.universum(h.store);
+    const gruppe = uni.ebene0(u).themen.find((t) => t.quelle === 'gruppe');
+    assert.ok(gruppe, 'Notiz und Bild bilden keine Gruppe -- haengt das Bild nicht an der Notiz?');
+    assert.equal(gruppe.name, 'Urlaub am Meer');
+    assert.equal(gruppe.hub, fest('note', 1));
+    assert.equal(gruppe.anzahl, 2);
+    // Nur Bilder: dann darf eines die Gruppe benennen.
+    const h2 = await offen('uni-bild2');
+    try {
+      const a = h2.store.create('file', { name: 'a.png', hash: 'c'.repeat(64), mime: 'image/png', size: 10 });
+      const b = h2.store.create('file', { name: 'b.png', hash: 'd'.repeat(64), mime: 'image/png', size: 10 });
+      h2.store.edges.add({ from: a.id, to: b.id, kind: 'related' });
+      const g2 = uni.ebene0(uni.universum(h2.store).u).themen.find((t) => t.quelle === 'gruppe');
+      assert.ok(g2 && ['a.png', 'b.png'].includes(g2.name), JSON.stringify(g2));
+    } finally {
+      await h2.close();
+    }
+  } finally {
+    await h.close();
+  }
+});
+
 test('Ebene 1: Knoten und Kanten eines Themas, Nachbarn ausserhalb markiert, Pfad nach oben', async () => {
   const h = await offen('uni-e1');
   try {

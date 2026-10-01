@@ -100,6 +100,19 @@ export function themaRadius(anzahl, maxAnzahl) {
 }
 
 /**
+ * Wonach sich die Groesse eines Themenkreises richtet: `groesse`, falls die
+ * Ansicht sie setzt (sie kappt die Behaelter "Weitere Themen" und
+ * "Unverbunden" auf das groesste echte Thema), sonst die Anzahl. Lage und
+ * Zeichnen fragen beide hier -- frueher rechnete die Lage gekappt, gezeichnet
+ * wurde mit der vollen Anzahl, und die Behaelter waren die groessten Kreise
+ * (Pruefer, Runde 2).
+ */
+export function themaGroesse(t) {
+  if (!t) return 0;
+  return Number(t.groesse != null ? t.groesse : t.anzahl) || 0;
+}
+
+/**
  * Die Lage der Themenkreise, deterministisch: gleiche Daten, gleiche Karte.
  * Das groesste Thema in die Mitte, die weiteren der Groesse nach auf eine
  * Spirale; dann 120 Runden Entspannung -- Kreise, die sich ueberlappen,
@@ -118,7 +131,7 @@ export function layoutThemen(themen, links = []) {
   // `groesse` (falls gesetzt) bestimmt den Radius, `anzahl` sonst; `rand`
   // setzt einen Kreis an den Rand ("Weitere Themen", "Unverbunden"): er ist
   // ein Behaelter, kein Wissensgebiet, und gehoert nicht in die Mitte.
-  const groesse = (t) => Number(t.groesse != null ? t.groesse : t.anzahl) || 0;
+  const groesse = themaGroesse;
   const maxA = list.reduce((mx, t) => Math.max(mx, groesse(t)), 1);
   const order = list.map((_, i) => i).sort((p, q) => ((list[p].rand ? 1 : 0) - (list[q].rand ? 1 : 0))
     || (groesse(list[q]) - groesse(list[p])) || (list[p].id < list[q].id ? -1 : 1));
@@ -702,6 +715,7 @@ export function createGraphCanvas(canvas, options = {}) {
   let brightKey = null;
 
   let animation = null; // {from, to, start, duration}
+  let gleiten = null; // Themen-Ebene: {vonX, vonY, nachX, nachY, start} -- Kreise ruecken an ihre neue Lage
   let autoFit = false; // die Kamera folgt der Wolke, bis jemand selbst eingreift
 
   let palette = null;
@@ -816,8 +830,9 @@ export function createGraphCanvas(canvas, options = {}) {
   /* ---------------------------- Daten setzen ----------------------- */
 
   function radiusOf(slot) {
-    // Themen-Ebene: die Groesse ist die Anzahl, nicht der Grad.
-    if (themen) return themaRadius(nodes[slot].anzahl, maxAnzahl);
+    // Themen-Ebene: die Groesse ist die Anzahl (bei Behaeltern gekappt, wie
+    // in der Lage), nicht der Grad.
+    if (themen) return themaRadius(themaGroesse(nodes[slot]), maxAnzahl);
     // Die sichtbaren Linien: ein Agent, dessen Laeufe ausgeblendet sind,
     // liegt als Waise im Ring und soll dort kein dicker Punkt sein.
     // Groesse nach Verbindungen, sichtbar: ein Hub mit neun Linien ist gut
@@ -873,7 +888,7 @@ export function createGraphCanvas(canvas, options = {}) {
     outside = new Uint8Array(n);
     for (let i = 0; i < n; i++) {
       if (nodes[i].ausserhalb) outside[i] = 1;
-      const a = Number(nodes[i].anzahl) || 0;
+      const a = themaGroesse(nodes[i]);
       if (a > maxAnzahl) maxAnzahl = a;
     }
 
@@ -963,12 +978,17 @@ export function createGraphCanvas(canvas, options = {}) {
     for (let o = 0; o < n; o++) labelRank[labelOrder[o]] = o;
 
     // Positionen: bekannte behalten, neue neben einen bekannten Nachbarn.
+    // Die Themen-Ebene nimmt die Lage, die der Aufrufer neu gerechnet hat
+    // (layoutThemen), auch fuer bekannte Kreise -- frueher blieben die an
+    // ihrer alten Stelle, waehrend ihre Radien wuchsen und neue Kreise auf
+    // sie fielen (Pruefer, Runde 2). Sie gleiten weich dorthin (unten).
     let fresh = 0;
     const freshMask = new Uint8Array(n);
     mobile = null;
     for (let i = 0; i < n; i++) {
       const was = old.index.get(nodes[i].id);
-      if (was !== undefined && was < old.posX.length) {
+      const vorgegeben = Number.isFinite(nodes[i].x) && Number.isFinite(nodes[i].y);
+      if (was !== undefined && was < old.posX.length && !(themen && vorgegeben)) {
         posX[i] = old.posX[was];
         posY[i] = old.posY[was];
         velX[i] = old.velX[was];
@@ -976,7 +996,7 @@ export function createGraphCanvas(canvas, options = {}) {
         fixed[i] = old.fixed[was];
         fixX[i] = old.fixX[was];
         fixY[i] = old.fixY[was];
-      } else if (Number.isFinite(nodes[i].x) && Number.isFinite(nodes[i].y)) {
+      } else if (vorgegeben) {
         // Eine Lage, die der Aufrufer vorgibt (die Kachel legt ihr Bild selbst).
         posX[i] = nodes[i].x;
         posY[i] = nodes[i].y;
@@ -990,6 +1010,25 @@ export function createGraphCanvas(canvas, options = {}) {
     }
     if (fresh === n) seedLayout();
     else if (fresh > 0) seedNear();
+    gleiten = null;
+    if (themen && !reduceMotion()) {
+      // Bekannte Kreise starten dort, wo man sie gerade sieht; neue stehen gleich an ihrem Platz.
+      const vonX = Float64Array.from(posX);
+      const vonY = Float64Array.from(posY);
+      let bewegt = false;
+      for (let i = 0; i < n; i++) {
+        const was = old.index.get(nodes[i].id);
+        if (was === undefined || was >= old.posX.length || !Number.isFinite(old.posX[was]) || !Number.isFinite(old.posY[was])) continue;
+        vonX[i] = old.posX[was];
+        vonY[i] = old.posY[was];
+        if (Math.abs(vonX[i] - posX[i]) > 0.5 || Math.abs(vonY[i] - posY[i]) > 0.5) bewegt = true;
+      }
+      if (bewegt) {
+        gleiten = { vonX, vonY, nachX: Float64Array.from(posX), nachY: Float64Array.from(posY), start: performance.now() };
+        posX.set(vonX);
+        posY.set(vonY);
+      }
+    }
 
     selected = selectedId !== null && index.has(selectedId) ? index.get(selectedId) : -1;
     hovered = hoveredId !== null && index.has(hoveredId) ? index.get(hoveredId) : -1;
@@ -1443,12 +1482,15 @@ export function createGraphCanvas(canvas, options = {}) {
     let minY = Infinity;
     let maxX = -Infinity;
     let maxY = -Infinity;
+    // Gleiten die Kreise noch, zaehlt ihr Ziel: die Kamera passt das neue Bild ein.
+    const px = gleiten ? gleiten.nachX : posX;
+    const py = gleiten ? gleiten.nachY : posY;
     const take = (i) => {
       const r = radius[i];
-      if (posX[i] - r < minX) minX = posX[i] - r;
-      if (posX[i] + r > maxX) maxX = posX[i] + r;
-      if (posY[i] - r < minY) minY = posY[i] - r;
-      if (posY[i] + r > maxY) maxY = posY[i] + r;
+      if (px[i] - r < minX) minX = px[i] - r;
+      if (px[i] + r > maxX) maxX = px[i] + r;
+      if (py[i] - r < minY) minY = py[i] - r;
+      if (py[i] + r > maxY) maxY = py[i] + r;
     };
     if (slots) for (const i of slots) take(i);
     else for (let i = 0; i < n; i++) if (visible[i]) take(i);
@@ -1539,6 +1581,20 @@ export function createGraphCanvas(canvas, options = {}) {
       transform = { ...to };
       animation = null;
     }
+    return true;
+  }
+
+  /** Themen-Ebene: die Kreise ruecken weich an die neue Lage (MOVE_MS, ease-out). */
+  function stepGleiten(now) {
+    if (!gleiten) return false;
+    const t = clamp((now - gleiten.start) / MOVE_MS, 0, 1);
+    const e = easeOut(t);
+    for (let i = 0; i < n; i++) {
+      posX[i] = gleiten.vonX[i] + (gleiten.nachX[i] - gleiten.vonX[i]) * e;
+      posY[i] = gleiten.vonY[i] + (gleiten.nachY[i] - gleiten.vonY[i]) * e;
+    }
+    sceneVersion++;
+    if (t >= 1) gleiten = null;
     return true;
   }
 
@@ -1711,6 +1767,7 @@ export function createGraphCanvas(canvas, options = {}) {
       }
     }
     if (stepAnimation(now)) busy = true;
+    if (stepGleiten(now)) busy = true;
 
     updateBright();
     if (fade !== fadeTarget) {
@@ -2607,12 +2664,19 @@ export function createGraphCanvas(canvas, options = {}) {
         return (sx[j] - cx) ** 2 + (sy[j] - cy) ** 2 < rj * rj;
       });
       if (!strong && (!frei(box) || ueberKreis)) {
-        // Kein Platz fuer den Namen: die Zahl im Kreis bleibt trotzdem.
+        // Kein Platz unter dem Kreis: dann steht der Name doch innen,
+        // getrennt oder gekuerzt, statt der Zahl -- ein Kreis, auf dem nur
+        // „1 Eintrag“ steht, sagt nicht, wovon.
         if (unten) {
           ctx.globalAlpha = a;
-          ctx.font = `${subPx}px ${fontFamily}`;
-          ctx.fillStyle = palette.themeSub;
-          ctx.fillText(count, sx[i], sy[i]);
+          ctx.font = font;
+          ctx.fillStyle = palette.themeText;
+          const innenZeilen = wrapName(voll, maxW, 2);
+          let y = sy[i] - ((innenZeilen.length - 1) * zeilenH) / 2;
+          for (const z of innenZeilen) {
+            ctx.fillText(z, sx[i], y);
+            y += zeilenH;
+          }
         }
         continue;
       }
@@ -3002,6 +3066,16 @@ export function createGraphCanvas(canvas, options = {}) {
       requestFrame();
       checkLevel(mid.x, mid.y);
       return;
+    }
+    if (gesture.kind === 'node' && themen && !gesture.longPressed) {
+      // Die Themen-Ebene liegt fest (layoutThemen): ein Zug, der auf einem
+      // Kreis beginnt, verschiebt die Ansicht. Frueher zog er den Kreis aus
+      // der Karte, die Kraefte liefen an und andere Kreise rutschten
+      // uebereinander (Pruefer, Runde 2). Antippen bleibt Antippen.
+      if (Math.hypot(p.x - gesture.start.x, p.y - gesture.start.y) <= CLICK_SLOP) return;
+      clearPress(gesture);
+      if (gesture.pointerType === 'touch') setHovered(-1);
+      gesture = { kind: 'pan', start: gesture.start, last: gesture.start, moved: false, pointerType: gesture.pointerType };
     }
     if (gesture.kind === 'node') {
       const moved = Math.hypot(p.x - gesture.start.x, p.y - gesture.start.y);
@@ -3446,6 +3520,12 @@ export function createGraphCanvas(canvas, options = {}) {
   /** Weicher Aufbau: Knoten wachsen in Wellen, Linien und Namen blenden nach. */
   function enter(delayMs = 0) {
     sceneVersion++;
+    // Ein neues Bild baut sich als Ganzes auf: nichts gleitet dabei noch herum.
+    if (gleiten) {
+      posX.set(gleiten.nachX);
+      posY.set(gleiten.nachY);
+      gleiten = null;
+    }
     if (reduceMotion()) {
       enterStart = 0;
       requestFrame();

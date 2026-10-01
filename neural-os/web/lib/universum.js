@@ -356,6 +356,145 @@ export function bereicheVon(thema, nodes) {
   return out;
 }
 
+/**
+ * Wie viele Eintraege das Bild gerade zeigt: Knoten des Themas (ohne die
+ * Nachbarn ausserhalb) und ohne ausgeblendete Arten. Kopf und Pfad zaehlen
+ * damit dasselbe -- im kleinen Tresor standen dort 11 und 31 Eintraege,
+ * waehrend der Server 5 meldete (Pruefer, Runde 2).
+ * @param {Array} nodes  mit `ausserhalb`, `type`
+ * @param {Set<string>} [verborgen]  ausgeblendete Arten
+ */
+export function eintraegeDrin(nodes, verborgen = null) {
+  let n = 0;
+  for (const node of nodes || []) {
+    if (!node || node.ausserhalb || (verborgen && verborgen.has(node.type))) continue;
+    n++;
+  }
+  return n;
+}
+
+/** So viele Kreise zeigt der Behaelter "Weitere Themen" hoechstens; alle stehen in der Karte. */
+export const BEHAELTER_MAX = 40;
+
+/**
+ * Die Kreise in einem Behaelter: seine groessten Themen, hoechstens
+ * BEHAELTER_MAX. Bei 400 Schlagworten waren es 400 Kreise, und ihre Lage
+ * rechnete fast eine Sekunde auf dem Hauptfaden -- bei jedem Nachladen neu
+ * (Pruefer, Runde 2). Der Rest steht in der Karte und in der Suche.
+ */
+export function behaelterKreise(behaelter, max = BEHAELTER_MAX) {
+  const kinder = behaelter && Array.isArray(behaelter.kinder) ? behaelter.kinder : [];
+  if (kinder.length <= max) return kinder;
+  return kinder.slice()
+    .sort((a, b) => (num(b.anzahl) - num(a.anzahl)) || String(a.name).localeCompare(String(b.name), 'de') || (a.id < b.id ? -1 : 1))
+    .slice(0, max);
+}
+
+/* ------------------------------------------------------------------ */
+/* Wege durch das Gehirn                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Ein Zustand des Gehirns, so wie die Ansicht ihn beschreibt:
+ *   {ebene: 0|1, klein, einThemaId, thema: {id,name}|null, pfad: [{id,name}],
+ *    fokusId, fokusName, unter: {id,name}|null}
+ * Die Funktionen hier entscheiden nur; zeichnen und laden tut die Ansicht.
+ */
+
+/**
+ * Zeigt Ebene 1 gerade die Wurzel als Netz? Das ist im kleinen Tresor (unter
+ * KLEIN_AB Eintraegen) das ganze Netz und bei einem einzigen Thema dessen Netz.
+ */
+export function istWurzelNetz(z) {
+  if (!z || z.ebene !== 1 || z.fokusId) return false;
+  if (z.einThemaId && z.thema && z.thema.id === z.einThemaId) return true;
+  return !!z.klein && !(z.thema && z.thema.id);
+}
+
+/**
+ * Wohin "eine Ebene hoch" fuehrt (Escape, Herauszoomen, Pfad):
+ * {art:'eltern', id} -- das Elternthema; {art:'wurzel'} -- die Wurzel
+ * (Universum, im kleinen Tresor das ganze Netz); null -- man ist schon dort.
+ * Frueher fuehrte im kleinen Tresor aus einem Umfeld oder Thema kein Weg
+ * zurueck zum ganzen Netz (Pruefer, Runde 2).
+ */
+export function hochZiel(z) {
+  if (!z) return null;
+  if (z.ebene !== 1) return z.unter ? { art: 'wurzel' } : null;
+  if (z.fokusId) return { art: 'wurzel' };
+  if (istWurzelNetz(z)) return null;
+  if (z.thema && z.thema.id) {
+    const pfad = Array.isArray(z.pfad) ? z.pfad.filter((p) => p && p.id) : [];
+    return pfad.length ? { art: 'eltern', id: pfad[pfad.length - 1].id } : { art: 'wurzel' };
+  }
+  return z.klein || z.einThemaId ? null : { art: 'wurzel' };
+}
+
+/**
+ * Der Pfad oben links: "Mein Wissen › Schule › Biologie". Im kleinen Tresor
+ * ist "Mein Wissen" das ganze Netz -- ein Thema darin steht dahinter, statt
+ * selbst "Mein Wissen" zu heissen (Pruefer, Runde 2).
+ * @returns {Array<{id:string|null, name:string}>}
+ */
+export function krumenFuer(z) {
+  const wurzel = { id: null, name: WURZEL_NAME };
+  if (!z) return [wurzel];
+  if (z.ebene === 1 && z.fokusId) return [wurzel, { id: '__fokus', name: String(z.fokusName || 'Umfeld') }];
+  if (z.ebene === 0 && z.unter) return [wurzel, { id: z.unter.id, name: String(z.unter.name || 'Thema') }];
+  if (istWurzelNetz(z)) return [wurzel];
+  const krumen = brotkrumen(z.pfad, z.ebene === 1 ? z.thema : null);
+  // Liegt das Thema im einzigen Thema, ist dieses die Wurzel -- nicht doppelt.
+  if (z.einThemaId && krumen[1] && krumen[1].id === z.einThemaId) krumen.splice(1, 1);
+  return krumen;
+}
+
+/**
+ * Welches Thema ein Eintrag aus der Karte oeffnet. Ein Behaelter ("Weitere
+ * Themen") ist kein Netz: dann das eigene Thema des Eintrags darin (zuerst
+ * eines der Kinder des Behaelters), sonst null -- die Ansicht zeigt dann sein
+ * Umfeld. Frueher landete man bei den Kreisen des Behaelters, und der
+ * Eintrag war weg (Pruefer, Runde 2).
+ * @param {{themen?:string[]}} node
+ * @param {string|null} themaId  das Thema, in dem die Karte gerade steht
+ * @param {{kinder?:Array<{id:string}>}|null} [behaelter]
+ */
+export function themaFuerEintrag(node, themaId, behaelter = null) {
+  if (themaId !== WEITERE_ID) return themaId || null;
+  const eigene = (node && Array.isArray(node.themen) ? node.themen : []).filter((id) => typeof id === 'string' && id && id !== WEITERE_ID);
+  const kinder = new Set((behaelter && Array.isArray(behaelter.kinder) ? behaelter.kinder : []).map((k) => k && k.id));
+  return eigene.find((id) => kinder.has(id)) || eigene[0] || null;
+}
+
+/**
+ * Wohin die Eingabetaste in der Suche fuehrt -- nur zu Treffern DIESER
+ * Anfrage. Frueher sprang sie, bevor der Server antwortete, zum Treffer der
+ * vorigen Suche ("Zahnarzt", dann "Photosynthese" + Enter: Umfeld
+ * "Zahnarzt-Termin", Pruefer, Runde 2). Steht die Antwort des Servers noch
+ * aus, heisst es {art:'warten'}: die Ansicht springt, sobald sie da ist.
+ * @param {{ebene:number, query:string, matches?:Array, fernThemen?:Array, fernTreffer?:Array, fernFuer?:string|null}} s
+ * @returns {{art:'waehlen'|'thema'|'umfeld', id:string}|{art:'warten'}|null}
+ */
+export function sprungZiel(s) {
+  const src = s || {};
+  const q = String(src.query || '').trim();
+  if (!q) return null;
+  const matches = Array.isArray(src.matches) ? src.matches : [];
+  const fernThemen = Array.isArray(src.fernThemen) ? src.fernThemen : [];
+  const fernTreffer = Array.isArray(src.fernTreffer) ? src.fernTreffer : [];
+  if (src.ebene === 1 && matches.length) return { art: 'waehlen', id: matches[0].id };
+  if (src.ebene === 0 && fernThemen.length) {
+    const r = fernThemen[0];
+    return { art: 'thema', id: passt(q, r.thema.name) || !r.kinder.length ? r.thema.id : r.kinder[0].id };
+  }
+  if (src.fernFuer === q) {
+    if (fernTreffer.length) return { art: 'umfeld', id: fernTreffer[0].id };
+  } else if (q.length >= 2) {
+    return { art: 'warten' };
+  }
+  if (fernThemen.length) return { art: 'thema', id: fernThemen[0].thema.id };
+  return null;
+}
+
 /* ------------------------------------------------------------------ */
 /* Suchen und Nachbarschaft                                            */
 /* ------------------------------------------------------------------ */

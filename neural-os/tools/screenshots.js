@@ -802,6 +802,9 @@ async function los(page, base, view, warten = 1000) {
       await shot(p, 'stick-rueckfrage-internet-dunkel');
     });
     await step('Stick: der Balken', async () => {
+      // Der Balken gleitet in 200 ms nach; das Bild entsteht sofort. Ohne
+      // Bewegung (wie mit „Bewegung reduzieren“) zeigt er, was der Satz sagt.
+      await p.emulateMedia({ reducedMotion: 'reduce' });
       await klick(p, /^Nur /, { warten: 10 });
       await p.locator('.stickv__bar').waitFor({ timeout: 10000 });
       for (let i = 0; i < 200; i++) {

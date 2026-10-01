@@ -307,7 +307,11 @@ function buildGraph(store, opts = {}) {
   if (focus) {
     const start = store.get(focus);
     if (!start) throw new NotFoundError(`Record ${focus}`);
-    const nb = store.edges.neighbours(focus, { depth, kinds: kinds || undefined, limit });
+    // Die Arten gehen in die Breitensuche selbst, nicht erst danach: sonst
+    // fuellt sie ihr Limit mit Saetzen, die gleich wieder herausfallen. Ein
+    // Chat mit 450 Nachrichten hatte so ein Umfeld aus nichts als sich
+    // selbst (Pruefer Gehirn, Runde 2).
+    const nb = store.edges.neighbours(focus, { depth, types, kinds: kinds || undefined, limit });
     records = nb.nodes.filter((r) => r.id === focus || types.includes(r.type));
     candidateTotal = nb.nodes.length;
     truncated = !!nb.truncated;
