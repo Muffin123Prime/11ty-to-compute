@@ -34,7 +34,7 @@ selben Browser; `proof` beweist, dass ohne Freigabe nichts ins Netz geht.
   Zustand reist mit dem Stick. Dunkel und hell, iPad quer mit dem Finger.
 - **KI** online: Gemini (kostenlos, Voreinstellung) oder Claude, rohes HTTP
   ohne SDK (`src/models/providers/`), Schlüssel versiegelt im Tresor. Ein
-  Schlüssel wird an seinem Anfang erkannt (`AIza` → Gemini, `sk-ant-` →
+  Schlüssel wird an seinem Anfang erkannt (`AQ.`/`AIza` → Gemini, `sk-ant-` →
   Claude), egal in welchem Feld er steht; wer einen einfügt, bekommt diesen
   Anbieter als den, der antwortet. Claude ohne Guthaben bietet „Kostenlos mit
   Gemini weiter“ an.

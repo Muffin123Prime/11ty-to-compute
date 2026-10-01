@@ -198,7 +198,7 @@ Erweiterungen. Mehr in `docs/ERWEITERN.md`.
   Stick: …“).
 - **KI** – Gemini (kostenlos) oder Claude verbinden, Schlüssel prüfen,
   wechseln. Wer einen Schlüssel einfügt, bekommt diese KI als die, die ab
-  jetzt antwortet. Ein Google-Schlüssel (beginnt mit `AIza`) verbindet immer
+  jetzt antwortet. Ein Google-Schlüssel (beginnt mit `AQ.`, ältere mit `AIza`) verbindet immer
   Gemini, ein Anthropic-Schlüssel (`sk-ant-`) immer Claude – auch im falschen
   Feld.
 - **Gedächtnis** – was sich die KI über dich gemerkt hat, mit Herkunft;

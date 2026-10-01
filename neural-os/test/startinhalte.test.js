@@ -18,7 +18,7 @@
 const assert = require('node:assert/strict');
 const { test, tempHome } = require('./harness');
 const {
-  createApp, seedIfEmpty, startInhalteAuffrischen, startBasen, fruehereStartTexte, START_IDS,
+  createApp, seedIfEmpty, startInhalteAuffrischen, startBasen, fruehereStartTexte, startTexteVom0110, START_IDS,
 } = require('../src/app');
 const merge = require('../src/sync/merge');
 
@@ -62,7 +62,8 @@ test('Eine frische KI liest zuerst: Gemini, kostenlos – Claude nur als Möglic
     const anleitung = app.store.get(S.claude).data;
     assert.equal(anleitung.title, 'KI verbinden');
     assert.match(anleitung.body, /aistudio\.google\.com\/apikey/);
-    assert.match(anleitung.body, /beginnt mit „AIza“/);
+    assert.match(anleitung.body, /beginnt mit „AQ\.“, ältere mit „AIza“/);
+    assert.match(anleitung.body, /Mistral, Groq oder OpenRouter/);
     assert.ok(anleitung.body.indexOf('Gemini') < anleitung.body.indexOf('Claude'), 'Gemini steht vor Claude');
     assert.equal(app.store.get(S.aufgabeClaude).data.title, 'KI verbinden');
     // Die feste Kante ist genau die, die die Ableitung selbst zoege.
@@ -220,5 +221,22 @@ test('Vor den festen IDs gilt dasselbe: Angefasstes bleibt, und im Zweifel wird 
     assert.deepEqual((await startInhalteAuffrischen(app)).sort(), [a.id, w.id].sort());
     assert.equal(app.store.get(t.id).data.title, 'Claude verbinden');
     assert.equal(app.store.get(t.id).data.status, 'done');
+  });
+});
+
+test('Die Anleitung vom 01.10.2026 („beginnt mit AIza“) wird allein aufgefrischt – die Einführung ist schon die heutige', async () => {
+  await mitApp(async (app) => {
+    assert.equal(await seedIfEmpty(app), true);
+    const S = START_IDS;
+    // So stand sie in der Fassung vom 01.10.2026 (dieselbe ID, derselbe Titel).
+    app.store.update(S.claude, startTexteVom0110()[S.claude]);
+    await app.store.flush();
+    const willkommenVorher = app.store.get(S.willkommen);
+    const neu = await startInhalteAuffrischen(app);
+    assert.deepEqual(neu, [S.claude]);
+    assert.match(app.store.get(S.claude).data.body, /beginnt mit „AQ\.“/);
+    assert.equal(app.store.get(S.willkommen).rev, willkommenVorher.rev, 'die Einführung bleibt unberührt');
+    for (const [id, h] of Object.entries(startBasen())) assert.equal(merge.fingerprint(app.store.get(id)), h, id);
+    assert.deepEqual(await startInhalteAuffrischen(app), []);
   });
 });

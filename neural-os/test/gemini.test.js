@@ -408,7 +408,7 @@ test('Gemini: 429 heißt Limit (deutsch, mit Hinweis auf morgen und Claude), 503
     const r1 = await strom(base, `/api/chats/${chatId}/messages`, { inhalt: 'a' });
     const f1 = r1.ereignisse.find((e) => e.name === 'fehler').data;
     assert.equal(f1.code, 'GEMINI_LIMIT');
-    assert.equal(f1.satz, 'Google-Limit erreicht — gleich nochmal (in etwa 30 s), spätestens morgen geht es kostenlos weiter. Oder Claude wählen.');
+    assert.equal(f1.satz, 'Google-Limit erreicht — gleich nochmal (in etwa 30 s), spätestens morgen geht es kostenlos weiter. Oder eine weitere KI verbinden (Einstellungen → KI).');
     assert.ok(!/quota|billing/i.test(f1.satz), 'kein englischer Rohtext');
     assert.equal(app.gemini.zustand().letzterFehler.code, 'GEMINI_LIMIT');
 
@@ -450,7 +450,8 @@ test('Gemini: falscher Schlüssel -> 400 "Der Google-Schlüssel stimmt nicht.", 
 
     const kaputt = await anfrage(base, 'POST', '/api/ki/gemini/schluessel', { schluessel: 'AIza mit leerzeichen 12345' });
     assert.equal(kaputt.status, 400);
-    assert.equal(statist.anfragen.filter((a) => !a.stream).length, 1, 'ein ungültiges Format wird gar nicht erst geprüft');
+    assert.equal(statist.anfragen.length, 1, 'ein ungültiges Format wird gar nicht erst geprüft');
+    assert.equal(statist.anfragen[0].liste, true, 'den falschen Schlüssel sagt schon die Modellliste -- ohne Probeaufruf');
     const unbekannt = await anfrage(base, 'POST', '/api/ki/openai/schluessel', { schluessel: statist.schluessel });
     assert.equal(unbekannt.status, 400);
 
@@ -459,7 +460,7 @@ test('Gemini: falscher Schlüssel -> 400 "Der Google-Schlüssel stimmt nicht.", 
     assert.equal(gut.status, 200, gut.text);
     assert.equal(gut.json.verbunden, true);
     assert.equal(gut.json.aktiv, 'gemini');
-    const probe = statist.anfragen.filter((a) => !a.stream).pop();
+    const probe = statist.ohneStromAnfragen().pop();
     assert.equal(probe.pfad, '/v1beta/models/gemini-3.8-flash:generateContent');
     assert.equal(probe.body.generationConfig.maxOutputTokens, 8, 'der Probeaufruf ist klein');
     assert.equal(probe.body.tools, undefined);
@@ -498,7 +499,12 @@ test('Gemini: ein 401/403 mit "API key" ist ebenfalls "Der Google-Schlüssel sti
   assert.equal(fehlerAusAntwort({ status: 404, statusName: 'NOT_FOUND', text: 'models/x is not found' }).code, 'GEMINI_MODELL_UNBEKANNT');
   assert.equal(fehlerAusAntwort({ status: 400, statusName: 'INVALID_ARGUMENT', text: 'The input token count (2000000) exceeds the maximum number of tokens allowed (1048576).' }).code, 'GEMINI_ZU_GROSS');
   assert.equal(fehlerAusAntwort({ status: 400, statusName: 'INVALID_ARGUMENT', text: 'Invalid JSON payload' }).code, 'GEMINI_ANFRAGE_ABGELEHNT');
-  assert.equal(fehlerAusAntwort({ status: 500, statusName: 'INTERNAL', text: 'x' }).code, 'GEMINI_FEHLER');
+  // Ein 500 bei Google ist meist vorübergehend: wie überlastet (dann darf der Dienst ausweichen).
+  assert.equal(fehlerAusAntwort({ status: 500, statusName: 'INTERNAL', text: 'x' }).code, 'GEMINI_UEBERLASTET');
+  assert.equal(fehlerAusAntwort({ status: 502, statusName: null, text: 'Bad Gateway' }).code, 'GEMINI_FEHLER');
+  // Was Google sagt, steht bei Unbekanntem im Satz -- ohne den Schlüssel.
+  const unbekannt = fehlerAusAntwort({ status: 400, statusName: 'INVALID_ARGUMENT', text: 'Invalid value at contents[0] for key AIzaSyAbcdefghijklmnopqrstuvwx' });
+  assert.match(unbekannt.message, /Google: „Invalid value at contents\[0\] for key AIza…“/);
 });
 
 test('Gemini offline: ohne Freigabe verlässt nichts den Rechner – nicht einmal der Name generativelanguage.googleapis.com', async () => {
@@ -538,7 +544,8 @@ test('Gemini offline: ohne Freigabe verlässt nichts den Rechner – nicht einma
     const dienst = createGemini({
       paths: app.paths, config: app.config, gate: app.gate, bus: app.bus, vaultCrypto: app.vaultCrypto,
       konfigSpeichern: (patch) => app.saveConfig(patch),
-      anbieter: { ...gemini, probe: async (o) => { geprueft.push(o); return { ok: true }; } },
+      // Ein Stellvertreter ohne Netz: weder Probe noch Modellliste gehen hinaus.
+      anbieter: { ...gemini, probe: async (o) => { geprueft.push(o); return { ok: true }; }, modelleAbfragen: undefined },
     });
     const z = await dienst.schluesselSpeichern('AIzaSyStellvertreter00000000000000000000');
     assert.equal(z.verbunden, true);

@@ -55,11 +55,15 @@ const LEERLAUF_MS = 180000;
 const STANDARD_MODELL = 'gemini-3.8-flash';
 
 /**
- * Die wählbaren Modelle -- alle auf der kostenlosen Stufe. `denken` sagt,
- * wie das Modell seinen Denkaufwand nimmt: Gemini 3.x über `thinkingLevel`,
- * Gemini 2.5 über `thinkingBudget`. Preise gibt es nicht: auf der
- * kostenlosen Stufe kostet der Aufruf nichts, Google begrenzt stattdessen die
- * Zahl der Anfragen (je Minute und je Tag).
+ * Die bekannten Modelle -- alle auf der kostenlosen Stufe (ai.google.dev,
+ * Modelle und Preise, nachgesehen am 01.10.2026: 3.8 Flash seit 02.09.2026
+ * stabil, 3.5 Flash-Lite seit 21.07.2026; die 2.5-Modelle gibt es für neue
+ * Projekte nicht mehr, 2.0 ist abgeschaltet). Das ist nur der Anfang:
+ * Welche ein Schlüssel wirklich kann, fragt Neural OS beim Verbinden ab
+ * (`modelleAbfragen`), und die Liste von Google gilt. `denken` sagt, wie
+ * das Modell seinen Denkaufwand nimmt (`familie`). Preise gibt es nicht:
+ * auf der kostenlosen Stufe kostet der Aufruf nichts, Google begrenzt
+ * stattdessen die Zahl der Anfragen (je Minute und je Tag, je Projekt).
  */
 const MODELLE = Object.freeze({
   'gemini-3.8-flash': Object.freeze({
@@ -68,17 +72,17 @@ const MODELLE = Object.freeze({
     hinweis: 'Kostenlos. Voreinstellung.',
     denken: 'level',
   }),
+  'gemini-3.7-flash': Object.freeze({
+    id: 'gemini-3.7-flash',
+    name: 'Gemini 3.7 Flash',
+    hinweis: 'Kostenlos. Eigenes Tageslimit – springt ein, wenn 3.8 voll ist.',
+    denken: 'level',
+  }),
   'gemini-3.5-flash-lite': Object.freeze({
     id: 'gemini-3.5-flash-lite',
     name: 'Gemini 3.5 Flash-Lite',
     hinweis: 'Schneller, einfacher. Kostenlos.',
     denken: 'level',
-  }),
-  'gemini-2.5-flash': Object.freeze({
-    id: 'gemini-2.5-flash',
-    name: 'Gemini 2.5 Flash',
-    hinweis: 'Das ältere Modell. Kostenlos.',
-    denken: 'budget',
   }),
 });
 
@@ -86,18 +90,126 @@ const EFFORTS = new Set(['low', 'medium', 'high']);
 /** thinkingBudget je Aufwand (Gemini 2.5): -1 lässt das Modell selbst entscheiden. */
 const BUDGET = Object.freeze({ low: 1024, medium: -1, high: 24576 });
 
+/**
+ * Die Denk-Einstellung für GENAU dieses Modell. Gebaut wird eine Anfrage
+ * einmal; weicht der Dienst auf ein anderes Modell aus (das erste gibt es
+ * nicht, sein Tageslimit ist voll), passt `senden` sie hier an -- ein
+ * thinkingLevel an ein 2.5-Modell lehnte Google mit 400 ab.
+ * @param {string} modell
+ * @param {{an?:boolean, aufwand?:string, sichtbar?:boolean}} wunsch
+ * @returns {object|null} thinkingConfig oder null (dann keins senden)
+ */
+function denkenFuer(modell, { an = true, aufwand = 'medium', sichtbar = true } = {}) {
+  const art = modellInfo(modell).denken;
+  const stufe = EFFORTS.has(aufwand) ? aufwand : 'medium';
+  const zeigen = sichtbar ? { includeThoughts: true } : {};
+  if (art === 'aus') return null;
+  if (art === 'budget') return an ? { ...zeigen, thinkingBudget: BUDGET[stufe] } : { thinkingBudget: 0 };
+  // Gemini 3 kann das Denken nicht abschalten, nur klein halten.
+  if (art === 'level') return an ? { ...zeigen, thinkingLevel: stufe } : { thinkingLevel: 'low' };
+  return an && sichtbar ? { includeThoughts: true } : null;
+}
+
 /** Wie eine abgelehnte Antwort im Chat heißt (chat.js liest das je Anbieter). */
 const ABLEHNUNG = Object.freeze({
   code: 'GEMINI_ABGELEHNT',
   satz: 'Google hat die Antwort abgelehnt. Formuliere sie anders oder frag etwas anderes.',
 });
 
+/**
+ * Was als Gemini-Modell gelten kann. Welche es wirklich gibt, sagt nur
+ * Google: Neural OS fragt sie mit dem Schlüssel ab (`modelleAbfragen`) und
+ * nimmt das beste, statt sich auf eine feste Liste zu verlassen (Nutzer am
+ * 01.10.2026: mit echtem Schlüssel ging "gar nichts" -- gebaut und geprüft
+ * war nur gegen den Statisten).
+ */
+const MODELL_RE = /^gemini-[a-z0-9][a-z0-9.-]{0,60}$/;
+
+/**
+ * Wie ein Modell sein Denken nimmt, an seinem Namen:
+ *   'budget' – Gemini 2.5 (`thinkingBudget`)
+ *   'level'  – Gemini 3 und neuer (`thinkingLevel`)
+ *   'aus'    – Gemini 2.0 und älter (kein Denken)
+ *   'offen'  – ein Alias wie gemini-flash-latest: welches Modell dahinter
+ *              steht, weiß erst Google; dann nur `includeThoughts`.
+ */
+function familie(id) {
+  const s = String(id || '');
+  const v = /^gemini-(\d+)(?:\.(\d+))?-/.exec(s);
+  if (!v) return 'offen';
+  const haupt = Number(v[1]);
+  const neben = v[2] === undefined ? 0 : Number(v[2]);
+  if (haupt >= 3) return 'level';
+  if (haupt === 2 && neben >= 5) return 'budget';
+  return 'aus';
+}
+
+/** "gemini-2.5-flash-lite" -> "Gemini 2.5 Flash-Lite", "-preview" -> "(Vorschau)". */
+function anzeigeName(id) {
+  const s = String(id || '').replace(/^gemini-/, '');
+  const vorschau = /(^|-)(preview|exp)(-|$)/.test(s);
+  const neuestes = /-latest$/.test(s);
+  const teile = s.replace(/-(preview|exp)(-[0-9a-z]+)*$/, '').replace(/-latest$/, '').split('-').filter(Boolean);
+  const wort = (t) => (/^\d/.test(t) ? t : t.charAt(0).toUpperCase() + t.slice(1));
+  let name = `Gemini ${teile.map(wort).join(' ')}`.replace(/ Flash Lite\b/, ' Flash-Lite').trim();
+  if (vorschau) name += ' (Vorschau)';
+  if (neuestes) name += ' (neueste)';
+  return name;
+}
+
 function modellInfo(id) {
-  return MODELLE[id] || MODELLE[STANDARD_MODELL];
+  if (typeof id === 'string' && Object.prototype.hasOwnProperty.call(MODELLE, id)) return MODELLE[id];
+  if (istModell(id)) return { id, name: anzeigeName(id), hinweis: '', denken: familie(id) };
+  return MODELLE[STANDARD_MODELL];
 }
 
 function istModell(id) {
-  return typeof id === 'string' && Object.prototype.hasOwnProperty.call(MODELLE, id);
+  return typeof id === 'string' && (Object.prototype.hasOwnProperty.call(MODELLE, id) || MODELL_RE.test(id));
+}
+
+/**
+ * Taugt ein Modell aus der Liste von Google für den Chat? Es muss
+ * generateContent können und darf kein Spezialmodell sein (Bilder, Ton,
+ * Einbettung, Live, Computer-Steuerung).
+ */
+function chatModell(m) {
+  if (!m || !MODELL_RE.test(m.id)) return false;
+  if (Array.isArray(m.methoden) && m.methoden.length && !m.methoden.includes('generateContent')) return false;
+  return !/(embedding|tts|image|imagen|live|native-audio|audio|computer-use|robotics|aqa|veo|lyria|learnlm|thinking-exp)/.test(m.id);
+}
+
+/**
+ * Reihenfolge der Wahl: Flash vor Flash-Lite vor Pro (Pro ist auf der
+ * kostenlosen Stufe oft gar nicht frei), stabil vor Vorschau vor Alias,
+ * die neuere Version vor der älteren.
+ */
+function rang(m) {
+  const id = m.id;
+  const art = /flash-lite/.test(id) ? 1 : (/flash/.test(id) ? 2 : (/pro/.test(id) ? 0 : -1));
+  const stufe = /-latest$/.test(id) ? 0 : (/(preview|exp)/.test(id) ? 1 : 2);
+  const v = /^gemini-(\d+)(?:\.(\d+))?-/.exec(id);
+  const version = v ? Number(v[1]) * 100 + (v[2] === undefined ? 0 : Number(v[2])) : 0;
+  return [art, stufe, version];
+}
+
+function nachRang(a, b) {
+  const ra = rang(a);
+  const rb = rang(b);
+  for (let i = 0; i < ra.length; i++) if (ra[i] !== rb[i]) return rb[i] - ra[i];
+  return a.id < b.id ? -1 : 1;
+}
+
+/** Ein Eintrag aus GET /v1beta/models in der Form, die Neural OS speichert. */
+function modellAusListe(m) {
+  const id = String((m && (m.name || '')) || '').replace(/^models\//, '');
+  return {
+    id,
+    name: typeof m.displayName === 'string' && m.displayName.trim() ? m.displayName.trim() : anzeigeName(id),
+    methoden: Array.isArray(m.supportedGenerationMethods) ? m.supportedGenerationMethods.slice() : [],
+    eingabe: Number.isFinite(m.inputTokenLimit) ? m.inputTokenLimit : null,
+    ausgabe: Number.isFinite(m.outputTokenLimit) ? m.outputTokenLimit : null,
+    denken: m.thinking === false ? 'aus' : familie(id),
+  };
 }
 
 /* --------------------------------------------------------------- Fehler */
@@ -111,45 +223,96 @@ class GeminiFehler extends NeuralError {
   }
 }
 
+/** Googles Text kurz, für den Satz in der Oberfläche (ohne Schlüssel, ohne Zeilenumbrüche). */
+function kurz(roh, max = 180) {
+  const t = String(roh || '').replace(/AIza[0-9A-Za-z_-]{10,}/g, 'AIza…').replace(/AQ\.[0-9A-Za-z._-]{10,}/g, 'AQ.…').replace(/\s+/g, ' ').trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
 /**
  * HTTP-Status und `error.status` der API -> Satz für den Nutzer.
  *
  * Ein ungültiger Schlüssel kommt bei Google mal als 400 ("API key not
- * valid"), mal als 401 UNAUTHENTICATED, mal als 403 PERMISSION_DENIED. Alle
- * drei heißen hier dasselbe -- und nach außen 400, nicht 401: ein falscher
- * Google-Schlüssel ist für diesen Server eine ungültige Eingabe, keine
- * abgelaufene Sitzung.
+ * valid", Grund API_KEY_INVALID), mal als 401 UNAUTHENTICATED, mal als 403
+ * PERMISSION_DENIED. Alle drei heißen hier dasselbe -- und nach außen 400,
+ * nicht 401: ein falscher Google-Schlüssel ist für diesen Server eine
+ * ungültige Eingabe, keine abgelaufene Sitzung.
+ *
+ * Was Google sagt, steht bei allem Unbekannten im Satz mit dabei: Ohne das
+ * hieß es beim Nutzer nur "Google hat die Anfrage nicht angenommen", und
+ * niemand konnte sehen, warum.
+ *
+ * @param {object} f
+ * @param {string} [f.grund]   ErrorInfo.reason (API_KEY_INVALID, SERVICE_DISABLED, …)
+ * @param {Array}  [f.quoten]  QuotaFailure.violations: [{id, metrik, wert}]
  */
-function fehlerAusAntwort({ status, statusName, text, wiederholenNachS, teilInhalt }) {
+function fehlerAusAntwort({ status, statusName, text, wiederholenNachS, teilInhalt, grund = null, quoten = [] }) {
   const details = { status: status || null, typ: statusName || null };
   const roh = String(text || '');
-  if (roh) details.api = roh.slice(0, 300);
+  if (roh) details.api = kurz(roh, 300);
+  if (grund) details.grund = grund;
   const opts = (s) => ({ status: s, details, wiederholenNachS, teilInhalt });
   const schluesselSatz = /api key|api_key|apikey/i.test(roh);
-  if (status === 401 || statusName === 'UNAUTHENTICATED' || ((status === 400 || status === 403) && schluesselSatz)) {
+  // Ein "AQ."-Schlüssel, den Google so nicht annimmt (abgeschnitten, nicht
+  // vollständig kopiert, noch nicht verknüpft): laut Google ist das Format
+  // selbst in Ordnung -- also sagen, was hilft.
+  if (grund === 'ACCESS_TOKEN_TYPE_UNSUPPORTED') {
+    return new GeminiFehler('GEMINI_SCHLUESSEL_FALSCH', 'Google nimmt diesen Schlüssel nicht an. Bitte in AI Studio mit dem Kopier-Knopf vollständig kopieren – oder dort einen neuen Schlüssel erstellen.', opts(400));
+  }
+  if (/unrestricted (standard )?(api )?keys?|dormant/i.test(roh)) {
+    return new GeminiFehler('GEMINI_SCHLUESSEL_GESPERRT', 'Google nimmt diesen älteren Schlüssel nicht mehr an. Auf aistudio.google.com/apikey einen neuen erstellen (er beginnt mit „AQ.“) und den einfügen.', opts(403));
+  }
+  if (grund === 'API_KEY_INVALID' || grund === 'API_KEY_EXPIRED' || status === 401 || statusName === 'UNAUTHENTICATED'
+    || ((status === 400 || status === 403) && schluesselSatz && !/blocked|disabled|not been used/i.test(roh))) {
     return new GeminiFehler('GEMINI_SCHLUESSEL_FALSCH', 'Der Google-Schlüssel stimmt nicht.', opts(400));
   }
+  if (grund === 'SERVICE_DISABLED' || /has not been used in project|it is disabled|API is disabled/i.test(roh)) {
+    return new GeminiFehler('GEMINI_API_AUS', 'Für diesen Google-Schlüssel ist die Gemini-API nicht eingeschaltet. Auf aistudio.google.com/apikey einen neuen Schlüssel erstellen und den einfügen.', opts(403));
+  }
+  if (grund === 'API_KEY_SERVICE_BLOCKED' || /are blocked|requests to this api .* blocked/i.test(roh)) {
+    return new GeminiFehler('GEMINI_SCHLUESSEL_GESPERRT', 'Dieser Google-Schlüssel darf die Gemini-API nicht benutzen. Auf aistudio.google.com/apikey einen neuen Schlüssel erstellen und den einfügen.', opts(403));
+  }
+  if (/location is not supported|not supported in your (country|region)|not available in your (country|region)/i.test(roh)) {
+    return new GeminiFehler('GEMINI_ORT', 'Google bietet die Gemini-API an deinem Ort nicht an. Mit einer anderen KI geht es weiter (Einstellungen → KI).', opts(403));
+  }
   if (status === 403 || statusName === 'PERMISSION_DENIED') {
-    return new GeminiFehler('GEMINI_KEINE_BERECHTIGUNG', 'Dieses Google-Konto darf das Modell nicht benutzen.', opts(403));
+    return new GeminiFehler('GEMINI_KEINE_BERECHTIGUNG', `Dieses Google-Konto darf das Modell nicht benutzen${roh ? ` (Google: „${kurz(roh)}“)` : ''}.`, opts(403));
   }
   if (status === 429 || statusName === 'RESOURCE_EXHAUSTED') {
+    // "limit: 0": dieses Modell hat auf der kostenlosen Stufe gar kein Kontingent.
+    const keinKontingent = quoten.some((q) => String(q.wert) === '0') || /\blimit: 0\b/.test(roh);
+    const jeTag = quoten.some((q) => /PerDay/i.test(q.id) || /per_day|perday/i.test(q.metrik)) || /per day|PerDay/i.test(roh);
+    if (keinKontingent) {
+      return new GeminiFehler('GEMINI_NICHT_KOSTENLOS', 'Dieses Gemini-Modell ist bei Google nicht kostenlos.', opts(429));
+    }
+    if (jeTag) {
+      return new GeminiFehler('GEMINI_LIMIT_TAG', 'Google-Tageslimit für dieses Modell erreicht – morgen geht es kostenlos weiter.', opts(429));
+    }
     const warte = Number.isFinite(wiederholenNachS) && wiederholenNachS > 0 ? ` (in etwa ${Math.ceil(wiederholenNachS)} s)` : '';
-    return new GeminiFehler('GEMINI_LIMIT', `Google-Limit erreicht — gleich nochmal${warte}, spätestens morgen geht es kostenlos weiter. Oder Claude wählen.`, opts(429));
+    return new GeminiFehler('GEMINI_LIMIT', `Google-Limit erreicht — gleich nochmal${warte}, spätestens morgen geht es kostenlos weiter. Oder eine weitere KI verbinden (Einstellungen → KI).`, opts(429));
   }
   if (status === 503 || statusName === 'UNAVAILABLE') {
     return new GeminiFehler('GEMINI_UEBERLASTET', 'Gemini ist gerade überlastet.', opts(503));
   }
   if (status === 404 || statusName === 'NOT_FOUND') {
-    return new GeminiFehler('GEMINI_MODELL_UNBEKANNT', 'Dieses Modell gibt es bei Google nicht (mehr). Wähle in den Einstellungen ein anderes.', opts(502));
+    return new GeminiFehler('GEMINI_MODELL_UNBEKANNT', 'Dieses Modell gibt es bei Google nicht (mehr).', opts(502));
   }
   if (status === 413 || /token count|too large|exceeds the maximum|input token/i.test(roh)) {
     return new GeminiFehler('GEMINI_ZU_GROSS', 'Das Gespräch ist zu lang für eine einzelne Anfrage. Fang einen neuen Chat an.', opts(413));
   }
   if (status === 400 || statusName === 'INVALID_ARGUMENT' || statusName === 'FAILED_PRECONDITION') {
-    return new GeminiFehler('GEMINI_ANFRAGE_ABGELEHNT', 'Google hat die Anfrage nicht angenommen.', opts(502));
+    return new GeminiFehler('GEMINI_ANFRAGE_ABGELEHNT', `Google hat die Anfrage nicht angenommen${roh ? ` (Google: „${kurz(roh)}“)` : ''}.`, opts(502));
   }
-  return new GeminiFehler('GEMINI_FEHLER', 'Bei Gemini ist ein Fehler aufgetreten. Versuch es gleich noch einmal.', opts(502));
+  if (status === 500 || statusName === 'INTERNAL') {
+    return new GeminiFehler('GEMINI_UEBERLASTET', 'Bei Google ist gerade ein Fehler aufgetreten. Gleich noch einmal versuchen.', opts(503));
+  }
+  return new GeminiFehler('GEMINI_FEHLER', `Bei Gemini ist ein Fehler aufgetreten${roh ? ` (Google: „${kurz(roh)}“)` : ''}. Versuch es gleich noch einmal.`, opts(502));
 }
+
+/** Bei diesen Fehlern lohnt ein anderes Modell desselben Schlüssels (der Dienst weicht dann aus). */
+const MODELL_WECHSELN_BEI = Object.freeze(new Set([
+  'GEMINI_MODELL_UNBEKANNT', 'GEMINI_NICHT_KOSTENLOS', 'GEMINI_LIMIT_TAG', 'GEMINI_LIMIT', 'GEMINI_UEBERLASTET',
+]));
 
 /** Satz für Transportfehler (Schleuse, Netz, Zeit). */
 function transportFehler(err, waechter, teilInhalt) {
@@ -184,14 +347,38 @@ const stromOpts = {
 const { Waechter, auszug, kopfWert } = strom;
 const koerper = (res) => strom.koerper(res, stromOpts);
 
+/** "17s" / "1.5s" -> Sekunden. */
+function sekundenAus(d) {
+  const m = /^(\d+(?:\.\d+)?)s$/.exec(String(d || '').trim());
+  return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * Googles Fehlerkörper lesen: Status, Satz und -- in `details` -- der Grund
+ * (ErrorInfo), die Wartezeit (RetryInfo) und welche Quote voll ist
+ * (QuotaFailure).
+ */
 function fehlerAus(text) {
   try {
     const j = JSON.parse(text);
     if (j && j.error && typeof j.error === 'object') {
-      return { statusName: j.error.status || null, nachricht: j.error.message || '' };
+      const liste = Array.isArray(j.error.details) ? j.error.details : [];
+      const art = (d, name) => d && typeof d['@type'] === 'string' && d['@type'].endsWith(name);
+      const info = liste.find((d) => art(d, 'ErrorInfo')) || null;
+      const retry = liste.find((d) => art(d, 'RetryInfo')) || null;
+      const quota = liste.find((d) => art(d, 'QuotaFailure')) || null;
+      return {
+        statusName: j.error.status || null,
+        nachricht: j.error.message || '',
+        grund: info && typeof info.reason === 'string' ? info.reason : null,
+        retryS: retry ? sekundenAus(retry.retryDelay) : undefined,
+        quoten: quota && Array.isArray(quota.violations)
+          ? quota.violations.map((v) => ({ id: String((v && v.quotaId) || ''), metrik: String((v && v.quotaMetric) || ''), wert: v && v.quotaValue }))
+          : [],
+      };
     }
   } catch { /* kein JSON */ }
-  return { statusName: null, nachricht: text };
+  return { statusName: null, nachricht: text, grund: null, retryS: undefined, quoten: [] };
 }
 
 /* ----------------------------------------------------- Werkzeuge übersetzen */
@@ -415,16 +602,38 @@ function anfrageBauen(p) {
   const generationConfig = {
     maxOutputTokens: Number.isFinite(p.maxTokens) && p.maxTokens > 0 ? Math.floor(p.maxTokens) : MAX_TOKENS,
   };
-  if (p.denken === false) {
-    // Gemini 3 kann das Denken nicht abschalten, nur klein halten; 2.5 kann es (Budget 0).
-    generationConfig.thinkingConfig = info.denken === 'budget' ? { thinkingBudget: 0 } : { thinkingLevel: 'low' };
-  } else {
-    generationConfig.thinkingConfig = info.denken === 'budget'
-      ? { includeThoughts: true, thinkingBudget: BUDGET[effort] }
-      : { includeThoughts: true, thinkingLevel: effort };
-  }
+  // Gemini 3 kann das Denken nicht abschalten, nur klein halten; 2.5 kann es (Budget 0).
+  const denken = { an: p.denken !== false, aufwand: effort, sichtbar: true };
+  const tc = denkenFuer(info.id, denken);
+  if (tc) generationConfig.thinkingConfig = tc;
   body.generationConfig = generationConfig;
-  return { body, modell: info.id, stream: p.stream !== false, betas: [] };
+  return { body, modell: info.id, stream: p.stream !== false, betas: [], denken };
+}
+
+/**
+ * Die Anfrage für ein (anderes) Modell herrichten: Denken passend, Länge in
+ * seiner Grenze -- und ohne Google-Suche, wenn dieser Schlüssel sie für das
+ * Modell nicht bekommt (`ohneSuche`, der Dienst merkt sich das).
+ */
+function fuerModell(body, modell, { denken, ausgabeMax, ohneSuche } = {}) {
+  if (!body || typeof body !== 'object') return body;
+  if (ohneSuche === true && Array.isArray(body.tools) && body.tools.some((t) => t && t.googleSearch)) {
+    const rest = body.tools.filter((t) => !(t && t.googleSearch));
+    body = { ...body };
+    if (rest.length) body.tools = rest;
+    else delete body.tools;
+  }
+  if (!body.generationConfig) return body;
+  const gc = { ...body.generationConfig };
+  if (denken) {
+    const tc = denkenFuer(modell, denken);
+    if (tc) gc.thinkingConfig = tc;
+    else delete gc.thinkingConfig;
+  }
+  if (Number.isFinite(ausgabeMax) && ausgabeMax > 0 && Number.isFinite(gc.maxOutputTokens) && gc.maxOutputTokens > ausgabeMax) {
+    gc.maxOutputTokens = ausgabeMax;
+  }
+  return { ...body, generationConfig: gc };
 }
 
 function koepfe(apiKey) {
@@ -469,7 +678,7 @@ function neueId() {
  */
 async function senden({
   basis, apiKey, modell, body, stream = true, gate, scope, purpose, signal, beiEreignis,
-  verbindenMs = VERBINDEN_MS, leerlaufMs = LEERLAUF_MS,
+  verbindenMs = VERBINDEN_MS, leerlaufMs = LEERLAUF_MS, denken, ausgabeMax, ohneSuche, geheilt = [],
 } = {}) {
   if (!gate || typeof gate.fetch !== 'function') {
     throw new ValidationError('Interner Fehler: ohne Netzschleuse darf Neural OS Gemini nicht erreichen.');
@@ -479,6 +688,8 @@ async function senden({
   }
   if (!body || typeof body !== 'object') throw new ValidationError('Interner Fehler: keine Anfrage an Gemini.');
   if (signal && signal.aborted) throw new AbortedError('Die Antwort wurde abgebrochen.');
+  // Für genau dieses Modell: Denken in seiner Form, Länge in seiner Grenze.
+  body = fuerModell(body, modell, { denken, ausgabeMax, ohneSuche });
   const url = adresse(basis, modell, stream);
   const kopf = koepfe(apiKey);
   const begonnen = Date.now();
@@ -516,15 +727,32 @@ async function senden({
     waechter.stellen(10000, 'leerlauf');
     const text = await auszug(res);
     waechter.aufraeumen();
-    const { statusName, nachricht } = fehlerAus(text);
+    const { statusName, nachricht, grund, retryS, quoten } = fehlerAus(text);
     const ra = Number(kopfWert(res.headers, 'retry-after'));
-    const fehler = fehlerAusAntwort({ status: res.status, statusName, text: nachricht, wiederholenNachS: Number.isFinite(ra) ? ra : undefined });
-    // Manche Modelle nehmen Google-Suche und eigene Werkzeuge nicht zusammen.
-    // Dann ohne Suche noch einmal -- und ehrlich sagen, dass diesmal keine da ist.
-    if (res.status === 400 && sucheUndWerkzeuge(body) && /tool/i.test(nachricht)) {
-      melden({ art: 'hinweis', satz: 'Ohne Internetsuche: dieses Gemini-Modell nimmt Suche und Werkzeuge nicht zusammen.' });
-      const ohne = { ...body, tools: body.tools.filter((t) => !t.googleSearch) };
-      return senden({ basis, apiKey, modell, body: ohne, stream, gate, scope, purpose, signal, beiEreignis, verbindenMs, leerlaufMs });
+    const fehler = fehlerAusAntwort({
+      status: res.status, statusName, text: nachricht, grund, quoten,
+      wiederholenNachS: Number.isFinite(ra) && ra > 0 ? ra : retryS,
+    });
+    // Eine Anfrage, die dieses Modell so nicht nimmt (Suche mit Werkzeugen,
+    // Denken in der falschen Form, zu lange Antwort): angepasst noch einmal --
+    // und ehrlich sagen, wenn dabei etwas wegfällt.
+    const heil = heilen(body, nachricht, geheilt, { fehler, quoten });
+    if (heil) {
+      let r;
+      try {
+        r = await senden({
+          basis, apiKey, modell, body: heil.body, stream, gate, scope, purpose, signal, beiEreignis, verbindenMs, leerlaufMs,
+          ausgabeMax, geheilt: [...geheilt, heil.art],
+        });
+      } catch (err) {
+        // Auch ohne Suche nicht: dann lag es nicht an ihr, und der erste Satz sagt, was los ist.
+        if (heil.art === 'suche' && !(Array.isArray(err && err.teilInhalt) && err.teilInhalt.length) && !(err && err.code === 'ABORTED')) throw fehler;
+        throw err;
+      }
+      // Erst wenn es ohne geklappt hat, steht fest, dass es an der Suche lag.
+      if (heil.hinweis) melden({ art: 'hinweis', satz: heil.hinweis });
+      // Der Dienst merkt sich: dieser Schlüssel bekommt die Suche für dieses Modell nicht.
+      return heil.art === 'suche' ? { ...r, ohneSuche: true } : r;
     }
     throw fehler;
   }
@@ -727,6 +955,78 @@ async function senden({
   };
 }
 
+/**
+ * Eine abgelehnte Anfrage so ändern, dass das Modell sie nimmt -- je Art
+ * höchstens einmal, und nur, was Google in seinem Satz nennt.
+ * @returns {{art:string, body:object, hinweis?:string}|null}
+ */
+function heilen(body, nachricht, geheilt = [], { fehler = null, quoten = [] } = {}) {
+  const msg = String(nachricht || '');
+  const code = fehler && fehler.code;
+  const tools = Array.isArray(body && body.tools) ? body.tools : [];
+  const mitSuche = tools.some((t) => t && t.googleSearch);
+  // Die Google-Suche ist auf der kostenlosen Stufe für die neuen Modelle
+  // nicht zu haben (ai.google.dev, Preise: "Grounding with Google Search …
+  // Not available", Stand 01.10.2026) -- wie Google das ablehnt, steht
+  // nirgends. Deshalb: Jede Ablehnung einer Anfrage MIT Suche, die nicht am
+  // Schlüssel oder am Netz liegt, wird einmal ohne Suche wiederholt.
+  const nenntSuche = /search|grounding/i.test(msg) || quoten.some((q) => /search|grounding/i.test(`${q.id} ${q.metrik}`));
+  // Auch ein Limit: ob es die Suche ist oder das Modell, sagt erst der
+  // Versuch ohne Suche (ein Aufruf mehr, wenn es wirklich das Modell ist).
+  const sucheVerdaechtig = ['GEMINI_ANFRAGE_ABGELEHNT', 'GEMINI_NICHT_KOSTENLOS', 'GEMINI_LIMIT', 'GEMINI_LIMIT_TAG', 'GEMINI_KEINE_BERECHTIGUNG'].includes(code);
+  if (!geheilt.includes('suche') && mitSuche && sucheVerdaechtig) {
+    const rest = tools.filter((t) => !(t && t.googleSearch));
+    const neu = { ...body };
+    if (rest.length) neu.tools = rest;
+    else delete neu.tools;
+    const satz = sucheUndWerkzeuge(body) && /tool/i.test(msg) && !nenntSuche
+      ? 'Ohne Internetsuche: dieses Gemini-Modell nimmt Suche und Werkzeuge nicht zusammen.'
+      : 'Ohne Internetsuche: Google gibt die Suche für dieses Modell nicht frei (auf der kostenlosen Stufe gibt es sie nicht).';
+    return { art: 'suche', body: neu, hinweis: satz };
+  }
+  if (code && code !== 'GEMINI_ANFRAGE_ABGELEHNT') return null;
+  const gc = (body && body.generationConfig) || {};
+  if (gc.thinkingConfig && /thinking/i.test(msg)) {
+    const tc = { ...gc.thinkingConfig };
+    if (!geheilt.includes('denken') && ('thinkingLevel' in tc || 'thinkingBudget' in tc)) {
+      delete tc.thinkingLevel;
+      delete tc.thinkingBudget;
+      const ngc = { ...gc };
+      if (Object.keys(tc).length) ngc.thinkingConfig = tc;
+      else delete ngc.thinkingConfig;
+      return { art: 'denken', body: { ...body, generationConfig: ngc } };
+    }
+    if (!geheilt.includes('denken-ganz')) {
+      const ngc = { ...gc };
+      delete ngc.thinkingConfig;
+      return { art: 'denken-ganz', body: { ...body, generationConfig: ngc } };
+    }
+  }
+  if (!geheilt.includes('laenge') && Number(gc.maxOutputTokens) > 8192 && /max_?output_?tokens|maxOutputTokens|output token/i.test(msg)) {
+    return { art: 'laenge', body: { ...body, generationConfig: { ...gc, maxOutputTokens: 8192 } } };
+  }
+  // "Requests ending with a model turn are not supported" (Gemini 3.8): ein
+  // angefangener Zug der KI am Ende geht nicht mehr -- dann ohne ihn.
+  const contents = Array.isArray(body && body.contents) ? body.contents : [];
+  if (!geheilt.includes('ende') && /ending with a model turn|model turn/i.test(msg) && contents.length && contents[contents.length - 1].role === 'model') {
+    const neu = contents.slice();
+    while (neu.length && neu[neu.length - 1].role === 'model') neu.pop();
+    if (neu.length) return { art: 'ende', body: { ...body, contents: neu } };
+  }
+  // Nimmt Google die Beschreibung der eigenen Werkzeuge nicht an, antwortet
+  // die KI wenigstens ohne sie -- und der Satz sagt es (mit Googles Grund).
+  if (!geheilt.includes('werkzeuge') && tools.some((t) => t && t.functionDeclarations)
+    && /function_?declarations|functionDeclarations|parameters|schema|tool/i.test(msg)) {
+    const neu = { ...body };
+    const rest = tools.filter((t) => !(t && t.functionDeclarations));
+    if (rest.length) neu.tools = rest;
+    else delete neu.tools;
+    delete neu.toolConfig;
+    return { art: 'werkzeuge', body: neu, hinweis: `Ohne Werkzeuge: Google hat ihre Beschreibung nicht angenommen („${kurz(msg, 120)}“). Termine und Notizen legt die KI diesmal nicht selbst an.` };
+  }
+  return null;
+}
+
 function sucheUndWerkzeuge(body) {
   const tools = Array.isArray(body && body.tools) ? body.tools : [];
   return tools.some((t) => t && t.googleSearch) && tools.some((t) => t && t.functionDeclarations);
@@ -773,21 +1073,90 @@ function kostenSchaetzen() {
   return 0;
 }
 
-/** Der kleine Probeaufruf beim Speichern eines Schlüssels: ohne Strom, ohne Werkzeuge, wenige Token. */
+/**
+ * Der kleine Probeaufruf beim Speichern eines Schlüssels: ohne Strom, ohne
+ * Werkzeuge, ohne Denk-Einstellung (die eine Familie so, die andere so
+ * will), wenige Token. Bestanden ist, was Google mit 200 beantwortet.
+ */
 async function probe({ basis, apiKey, modell, gate, signal, timeoutMs = 30000 } = {}) {
-  const { body, modell: id } = anfrageBauen({
-    modell,
-    nachrichten: [{ role: 'user', content: [{ type: 'text', text: 'Antworte nur mit: OK' }] }],
-    maxTokens: 8,
-    stream: false,
-    websuche: false,
-    denken: false,
-  });
+  const id = modellInfo(modell).id;
+  const body = {
+    contents: [{ role: 'user', parts: [{ text: 'Antworte nur mit: OK' }] }],
+    generationConfig: { maxOutputTokens: 8 },
+  };
   const r = await senden({
     basis, apiKey, modell: id, body, stream: false, gate,
     scope: 'global', purpose: 'Google-Schlüssel prüfen', signal, verbindenMs: timeoutMs,
   });
   return { ok: true, modell: r.modell || id, usage: r.usage, ms: r.ms };
+}
+
+/**
+ * Welche Modelle dieser Schlüssel wirklich nutzen kann: GET /v1beta/models
+ * (seitenweise), nur Chat-Modelle, die besten zuerst (`nachRang`). Prüft
+ * nebenbei den Schlüssel -- ein falscher kommt hier schon als
+ * GEMINI_SCHLUESSEL_FALSCH zurück, ohne ein Stück des Tageslimits.
+ * @returns {Promise<Array<{id,name,methoden,eingabe,ausgabe,denken}>>}
+ */
+async function modelleAbfragen({ basis, apiKey, gate, signal, timeoutMs = 20000 } = {}) {
+  if (!gate || typeof gate.fetch !== 'function') {
+    throw new ValidationError('Interner Fehler: ohne Netzschleuse darf Neural OS Gemini nicht erreichen.');
+  }
+  const b = String(basis || API_BASIS).trim().replace(/\/+$/, '');
+  const kopf = koepfe(apiKey);
+  delete kopf['content-type'];
+  const roh = [];
+  let token = '';
+  for (let seite = 0; seite < 10; seite++) {
+    let url;
+    try {
+      url = new URL(`${b}/v1beta/models`);
+    } catch {
+      throw new ValidationError(`Ungültige Gemini-Adresse: ${basis}`);
+    }
+    url.searchParams.set('pageSize', '1000');
+    if (token) url.searchParams.set('pageToken', token);
+    const waechter = new Waechter(signal);
+    let res;
+    let text = '';
+    try {
+      waechter.stellen(timeoutMs, 'verbinden');
+      res = await gate.fetch(url.toString(), {
+        method: 'GET',
+        headers: { ...kopf, accept: 'application/json' },
+        scope: 'global',
+        purpose: 'Gemini-Modelle abfragen',
+        allowedHosts: [url.hostname],
+        timeoutMs,
+        signal: waechter.signal,
+      });
+      text = await auszug(res, 8 * 1024 * 1024);
+    } catch (err) {
+      throw transportFehler(err, waechter);
+    } finally {
+      waechter.aufraeumen();
+    }
+    if (!res || typeof res.status !== 'number') throw new GeminiFehler('GEMINI_FEHLER', 'Die Netzschleuse hat keine verwertbare Antwort geliefert.');
+    if (res.status < 200 || res.status >= 300) {
+      const f = fehlerAus(text);
+      throw fehlerAusAntwort({ status: res.status, statusName: f.statusName, text: f.nachricht, grund: f.grund, quoten: f.quoten, wiederholenNachS: f.retryS });
+    }
+    let j;
+    try {
+      j = JSON.parse(text);
+    } catch {
+      throw new GeminiFehler('GEMINI_FEHLER', 'Google hat eine unlesbare Modellliste geschickt.');
+    }
+    for (const m of (j && Array.isArray(j.models) ? j.models : [])) if (m && typeof m === 'object') roh.push(m);
+    token = j && typeof j.nextPageToken === 'string' ? j.nextPageToken : '';
+    if (!token) break;
+  }
+  const gesehen = new Set();
+  return roh.map(modellAusListe).filter((m) => {
+    if (!chatModell(m) || gesehen.has(m.id)) return false;
+    gesehen.add(m.id);
+    return true;
+  }).sort(nachRang);
 }
 
 /* --------------------------------------- allgemeiner chat()-Adapter */
@@ -863,9 +1232,9 @@ async function chat({
     maxTokens: Number.isFinite(options.maxTokens) && options.maxTokens > 0 ? options.maxTokens : undefined,
   });
   // Der allgemeine Weg braucht keinen lesbaren Gedankengang.
-  if (gebaut.body.generationConfig.thinkingConfig) delete gebaut.body.generationConfig.thinkingConfig.includeThoughts;
+  const denken = { ...gebaut.denken, sichtbar: false };
   const r = await senden({
-    basis, apiKey, modell: gebaut.modell, body: gebaut.body, stream: true, gate, scope, purpose, signal,
+    basis, apiKey, modell: gebaut.modell, body: gebaut.body, stream: true, gate, scope, purpose, signal, denken,
     verbindenMs: Number.isFinite(timeoutMs) ? timeoutMs : VERBINDEN_MS,
     beiEreignis: (e) => {
       if (e.art === 'text' && typeof onDelta === 'function') onDelta(e.delta);
@@ -909,13 +1278,22 @@ module.exports = {
   GeminiFehler,
   modellInfo,
   istModell,
+  familie,
+  anzeigeName,
+  denkenFuer,
+  fuerModell,
+  MODELL_WECHSELN_BEI,
   anfrageBauen,
   senden,
   probe,
+  modelleAbfragen,
   chat,
   bloeckeZurueck,
   werkzeugAufrufe,
   kostenSchaetzen,
   fehlerAusAntwort,
-  __internals: { schemaUebersetzen, werkzeugeUebersetzen, nachrichtenUebersetzen, uebersetzen, transportFehler, stopReasonAus },
+  __internals: {
+    schemaUebersetzen, werkzeugeUebersetzen, nachrichtenUebersetzen, uebersetzen, transportFehler, stopReasonAus,
+    heilen, fehlerAus, chatModell, nachRang, modellAusListe,
+  },
 };

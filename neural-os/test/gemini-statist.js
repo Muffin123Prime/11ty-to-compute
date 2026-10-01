@@ -147,6 +147,9 @@ function httpFehler(code, status, message, koepfe = {}) {
  * @param {string} [opts.schluessel]  der einzige Schlüssel, der gilt
  * @param {number} [opts.schluesselFehlerStatus]  wie ein falscher Schlüssel abgelehnt wird (400, 401 oder 403)
  *
+ * @param {string[]} [opts.modelle]  was GET /v1beta/models nennt (Voreinstellung: alle bekannten)
+ * @param {object} [opts.modellListeFehler]  {status, json}: so antwortet GET /v1beta/models
+ *
  * `weiter(a, b, …)` stellt die nächsten Antworten in die Schlange. Eine
  * Antwort ist `{sse:[…]}`, `{status, json}` oder `{sse, abbrechenNach:n}`;
  * mit `pauseMs` liegen zwischen zwei Ereignissen so viele Millisekunden
@@ -156,7 +159,9 @@ function httpFehler(code, status, message, koepfe = {}) {
  * Ist die Schlange leer, kommt ein 500 -- ein Test, der mehr Anfragen
  * auslöst als er erwartet, fällt auf.
  */
-function starten({ schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schluesselFehlerStatus = 400 } = {}) {
+function starten({
+  schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schluesselFehlerStatus = 400, modelle = null, modellListeFehler = null,
+} = {}) {
   const anfragen = [];
   const schlange = [];
   // Antworten für Aufrufe OHNE Strom (generateContent), z. B. das Umschreiben
@@ -182,6 +187,31 @@ function starten({ schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schlu
         res.end(JSON.stringify(obj));
       };
 
+      // Die Modellliste (GET /v1beta/models): wie bei Google erst der Schlüssel, dann die Liste.
+      if (req.method === 'GET' && /^\/v1beta\/models(\?|$)/.test(req.url || '')) {
+        eintrag.liste = true;
+        if (req.headers['x-goog-api-key'] !== schluessel) {
+          json(400, { error: { code: 400, message: 'API key not valid. Please pass a valid API key.', status: 'INVALID_ARGUMENT', details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'API_KEY_INVALID', domain: 'googleapis.com' }] } });
+          return;
+        }
+        if (modellListeFehler) {
+          json(modellListeFehler.status, modellListeFehler.json || {});
+          return;
+        }
+        const ids = Array.isArray(modelle) ? modelle : Object.keys(MODELLE_BEKANNT);
+        json(200, {
+          models: [
+            ...ids.map((id) => ({
+              name: `models/${id}`, displayName: null, inputTokenLimit: 1048576, outputTokenLimit: 65536,
+              supportedGenerationMethods: ['generateContent', 'countTokens'],
+            })),
+            // Was kein Chat-Modell ist, muss Neural OS selbst aussortieren.
+            { name: 'models/gemini-embedding-001', supportedGenerationMethods: ['embedContent'] },
+            { name: 'models/gemini-2.5-flash-preview-tts', supportedGenerationMethods: ['generateContent'] },
+          ],
+        });
+        return;
+      }
       if (req.method !== 'POST' || !m || (m[2] === 'streamGenerateContent' && !m[3])) {
         json(404, { error: { code: 404, message: `Not found: ${req.url}`, status: 'NOT_FOUND' } });
         return;
@@ -193,7 +223,7 @@ function starten({ schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schlu
         else json(400, { error: { code: 400, message: 'API key not valid. Please pass a valid API key.', status: 'INVALID_ARGUMENT' } });
         return;
       }
-      if (!Object.prototype.hasOwnProperty.call(MODELLE_BEKANNT, eintrag.modell)) {
+      if (!Object.prototype.hasOwnProperty.call(MODELLE_BEKANNT, eintrag.modell) && !(Array.isArray(modelle) && modelle.includes(eintrag.modell))) {
         json(404, { error: { code: 404, message: `models/${eintrag.modell} is not found for API version v1beta`, status: 'NOT_FOUND' } });
         return;
       }
@@ -278,6 +308,8 @@ function starten({ schluessel = 'AIzaSyStatist0123456789abcdefghijklmnop', schlu
         anfragen,
         /** Nur die Anfragen mit Strom (also ohne den Probeaufruf). */
         stromAnfragen: () => anfragen.filter((a) => a.stream),
+        /** Nur die Probeaufrufe und Anfragen ohne Strom (ohne die Modellliste). */
+        ohneStromAnfragen: () => anfragen.filter((a) => !a.stream && !a.liste),
         weiter: (...antworten) => schlange.push(...antworten),
         /** Nächste Antworten ohne Strom: {text, finishReason?} oder {status, json}. */
         weiterOhneStrom: (...antworten) => ohneStrom.push(...antworten),

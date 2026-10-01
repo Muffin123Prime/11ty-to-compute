@@ -5,7 +5,7 @@
  *
  *   GET    /api/claude             -> Zustand (fragt NIE das Netz)
  *   POST   /api/claude/schluessel  { schluessel } -> prüft mit Probeaufruf, speichert im Tresor
- *                                   (ein Google-Schlüssel AIza… verbindet Gemini)
+ *                                   (ein Google-Schlüssel AQ.… oder AIza… verbindet Gemini)
  *   DELETE /api/claude/schluessel  -> vergisst den Schlüssel
  *   PATCH  /api/claude             { modell } -> claude-opus-5 | claude-sonnet-5 | claude-haiku-4-5
  *
@@ -47,7 +47,7 @@ function register(router) {
     const controller = new AbortController();
     // Wer den Tab schliesst, bricht die Pruefung ab; ein fertiger Aufruf nicht mehr.
     rc.res.on('close', () => { if (!rc.res.writableEnded) controller.abort(); });
-    // Ein Google-Schlüssel (AIza…) im Claude-Feld -- etwa aus einem Tab, der
+    // Ein Google-Schlüssel (AQ.… oder AIza…) im Claude-Feld -- etwa aus einem Tab, der
     // noch die Oberfläche von vor Gemini zeigt: Er verbindet Gemini, und
     // Gemini antwortet ab dann, wie bei POST /api/ki/claude/schluessel. Die
     // Antwort ist der Zustand der KI, die jetzt antwortet.

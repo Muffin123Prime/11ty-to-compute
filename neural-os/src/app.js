@@ -994,18 +994,22 @@ function startInhalte() {
       '',
       '1. Auf **aistudio.google.com/apikey** mit einem Google-Konto anmelden und auf',
       '   „Create API key“ klicken.',
-      '2. Den Schlüssel kopieren (er beginnt mit „AIza“) und im Chat unter „Kostenlos',
-      '   mit Google“ einfügen – oder unter **Einstellungen → KI**. Er wird sofort mit',
-      '   einer kleinen Anfrage geprüft.',
+      '2. Den Schlüssel kopieren (er beginnt mit „AQ.“, ältere mit „AIza“) und im',
+      '   Chat unter „Kostenlos mit Google“ einfügen – oder unter **Einstellungen → KI**.',
+      '   Er wird sofort mit einer kleinen Anfrage geprüft.',
       '3. Der Schlüssel liegt danach im Tresor auf dem Stick, nicht in einer offenen',
       '   Datei. Ist eine PIN eingerichtet, ist er damit geschützt.',
       '',
       'Kostenlos heißt: Google begrenzt die Anfragen je Tag und darf die Inhalte zur',
       'Verbesserung nutzen.',
       '',
+      '**Mehr KIs, falls ein Limit voll ist:** Unter Einstellungen → KI lassen sich',
+      'weitere Schlüssel hinzufügen – kostenlos etwa von Mistral, Groq oder OpenRouter.',
+      'Ist eine KI am Limit, antwortet von selbst die nächste.',
+      '',
       'Lieber **Claude** von Anthropic? Den Schlüssel gibt es auf console.anthropic.com',
-      'unter „API Keys“; eingefügt wird er unter „Oder Claude“. Claude kostet je',
-      'Antwort ein wenig Geld; unter Einstellungen → KI steht eine Schätzung.',
+      'unter „API Keys“. Claude kostet je Antwort ein wenig Geld; unter',
+      'Einstellungen → KI steht eine Schätzung.',
       '',
       '#anleitung',
     ].join('\n'),
@@ -1094,6 +1098,41 @@ function fruehereStartTexte() {
   };
 }
 
+/**
+ * Die Anleitung vom 01.10.2026 (Gemini zuerst, aber noch "beginnt mit
+ * „AIza“" -- AI Studio erstellt seit 28.05.2026 nur noch "AQ."-Schlüssel).
+ * Nur zum Wiedererkennen (startInhalteAuffrischen); die Einführung und die
+ * Aufgabe von damals sind die heutigen.
+ */
+function startTexteVom0110() {
+  return {
+    [START.claude]: {
+      title: 'KI verbinden',
+      body: [
+        'Neural OS antwortet mit **Gemini** von Google – kostenlos. Dafür braucht es einmal einen Schlüssel.',
+        '',
+        '1. Auf **aistudio.google.com/apikey** mit einem Google-Konto anmelden und auf',
+        '   „Create API key“ klicken.',
+        '2. Den Schlüssel kopieren (er beginnt mit „AIza“) und im Chat unter „Kostenlos',
+        '   mit Google“ einfügen – oder unter **Einstellungen → KI**. Er wird sofort mit',
+        '   einer kleinen Anfrage geprüft.',
+        '3. Der Schlüssel liegt danach im Tresor auf dem Stick, nicht in einer offenen',
+        '   Datei. Ist eine PIN eingerichtet, ist er damit geschützt.',
+        '',
+        'Kostenlos heißt: Google begrenzt die Anfragen je Tag und darf die Inhalte zur',
+        'Verbesserung nutzen.',
+        '',
+        'Lieber **Claude** von Anthropic? Den Schlüssel gibt es auf console.anthropic.com',
+        'unter „API Keys“; eingefügt wird er unter „Oder Claude“. Claude kostet je',
+        'Antwort ein wenig Geld; unter Einstellungen → KI steht eine Schätzung.',
+        '',
+        '#anleitung',
+      ].join('\n'),
+      tags: ['anleitung'],
+    },
+  };
+}
+
 let startBasenCache = null;
 
 /**
@@ -1175,32 +1214,46 @@ async function startInhalteAuffrischen(app) {
   if (!store || typeof store.get !== 'function') return [];
   const schema = require('./store/schema');
   const merge = require('./sync/merge');
-  const frueher = fruehereStartTexte();
+  const varianten = (id) => [fruehereStartTexte()[id], startTexteVom0110()[id]].filter(Boolean);
   const heute = new Map();
   const { vorAgenten, nachAgenten } = startInhalte();
   for (const r of [...vorAgenten, ...nachAgenten]) heute.set(r.id, r);
+  /** Ein Satz mit einem Text von früher, den der Nutzer nie angefasst hat -- oder null. */
   const alsFrueher = (id) => {
-    const alt = frueher[id];
     const rec = store.get(id);
     const neu = heute.get(id);
-    if (!alt || !rec || rec.deletedAt || !neu || rec.type !== neu.type) return null;
-    let gleich = false;
-    try {
-      gleich = merge.fingerprint({ type: rec.type, data: rec.data }) === merge.fingerprint({ type: rec.type, data: schema.validate(rec.type, alt) });
-    } catch { gleich = false; }
-    const unberuehrt = rec.rev === 1 && rec.data.title === alt.title;
-    return gleich || unberuehrt ? neu : null;
+    if (!rec || rec.deletedAt || !neu || rec.type !== neu.type) return null;
+    const abdruck = (data) => {
+      try { return merge.fingerprint({ type: rec.type, data: schema.validate(rec.type, data) }); } catch { return null; }
+    };
+    const jetzt = merge.fingerprint({ type: rec.type, data: rec.data });
+    if (jetzt === abdruck(neu.data)) return null; // steht schon so da
+    for (const alt of varianten(id)) {
+      const gleich = jetzt === abdruck(alt);
+      const unberuehrt = rec.rev === 1 && rec.data.title === alt.title;
+      if (gleich || unberuehrt) return { neu, alt };
+    }
+    return null;
   };
   // Rang: erst das Ziel des Links (neuer Titel), dann die Einfuehrung (neuer Link), dann die Aufgabe.
   const faellig = [];
-  // Einfuehrung und "Claude verbinden" nur zusammen: die eine verlinkt die
-  // andere ueber ihren Titel. Hat der Nutzer die Einfuehrung angefasst,
-  // bliebe sonst ein [[Claude verbinden]] ohne Ziel zurueck.
+  // Die Einfuehrung verlinkt die Anleitung ueber ihren Titel. Aendert der
+  // sich ("Claude verbinden" -> "KI verbinden"), nur beide zusammen -- hat
+  // der Nutzer die Einfuehrung angefasst, bliebe sonst ein [[Claude
+  // verbinden]] ohne Ziel zurueck. Bleibt der Titel (Anleitung vom
+  // 01.10.2026), darf die Anleitung allein neu werden.
   const willkommen = alsFrueher(START.willkommen);
   const anleitung = alsFrueher(START.claude);
-  if (willkommen && anleitung) faellig.push({ id: anleitung.id, data: anleitung.data, rang: 0 }, { id: willkommen.id, data: willkommen.data, rang: 1 });
+  const neuerTitel = heute.get(START.claude).data.title;
+  const titelWechsel = !!anleitung && anleitung.alt.title !== neuerTitel;
+  if (anleitung && (!titelWechsel || willkommen)) faellig.push({ id: START.claude, data: anleitung.neu.data, rang: 0 });
+  const recAnleitung = store.get(START.claude);
+  const titelDanach = anleitung && (!titelWechsel || willkommen)
+    ? neuerTitel
+    : (recAnleitung && !recAnleitung.deletedAt ? recAnleitung.data.title : null);
+  if (willkommen && titelDanach === neuerTitel) faellig.push({ id: START.willkommen, data: willkommen.neu.data, rang: 1 });
   const aufgabe = alsFrueher(START.aufgabeClaude);
-  if (aufgabe) faellig.push({ id: aufgabe.id, data: aufgabe.data, rang: 2 });
+  if (aufgabe) faellig.push({ id: START.aufgabeClaude, data: aufgabe.neu.data, rang: 2 });
   // Ein Tresor von vor den festen IDs (vor dem 24.09.2026) hat seine
   // Startinhalte unter zufaelligen IDs.
   if (!faellig.length && !store.get(START.willkommen, { includeDeleted: true })) faellig.push(...fruehOhneFesteId(store, heute));
@@ -1262,5 +1315,5 @@ async function acquireLock(paths, felder = {}) {
 }
 
 module.exports = {
-  createApp, seedIfEmpty, startInhalteAuffrischen, startBasen, fruehereStartTexte, START_IDS: START, acquireLock, sanitiseConfig, VERSION,
+  createApp, seedIfEmpty, startInhalteAuffrischen, startBasen, fruehereStartTexte, startTexteVom0110, START_IDS: START, acquireLock, sanitiseConfig, VERSION,
 };

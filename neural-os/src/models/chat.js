@@ -647,8 +647,11 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
 
     const d0 = assistant.data || {};
     const c0 = d0.claude || {};
-    const anbieter = modulVon();
-    const modell = c0.modell && anbieter.istModell(c0.modell) ? c0.modell : modellFuer(chat);
+    // Beide können sich im Zug ändern: Ist der Anbieter am Limit, antwortet
+    // ein anderer verbundener (ki.sendenAusweichend) -- dann übersetzt ab da
+    // dessen Modul die Blöcke.
+    let anbieter = modulVon();
+    let modell = c0.modell && anbieter.istModell(c0.modell) ? c0.modell : modellFuer(chat);
     const t = {
       verlauf: Array.isArray(c0.verlauf) ? klon(c0.verlauf) : [],
       text: String(d0.content || ''),
@@ -931,35 +934,46 @@ function createChatService({ store, claude, gate, bus, graph, config, logger, we
           hinweis = 'Diese Antwort brauchte zu viele Schritte; ich habe hier angehalten. Schreib „weiter“, dann mache ich weiter.';
           break;
         }
-        const { nachrichten, weg } = kuerzen(verlaufHerrichten([...basis, ...t.verlauf], anbieter));
-        if (weg && t.runden === 1) {
-          emit(onEvent, { type: 'hinweis', satz: `${weg} ältere Nachricht(en) passen nicht mehr in den Kontext und wurden diesmal weggelassen (nicht zusammengefasst).` });
-        }
-        const mitAnhaengen = anhaengeMod.aufloesen(nachrichten, {
-          anbieter: anbieter.anbieterId || 'claude',
-          lesen: anhangLesen,
-          cache: anhangCache,
-          // Der Rest der Anfrage (Verlauf, Systemtext, Werkzeuge) zählt zur Größengrenze.
-          reserve: JSON.stringify(nachrichten).length + JSON.stringify(system).length + 60000,
-        });
-        const gebaut = anbieter.anfrageBauen({
-          modell,
-          system,
-          werkzeuge: DEFINITIONEN,
-          nachrichten: mitCachePunkt(mitAnhaengen.nachrichten),
-          effort,
-          // „Mein Wissen“: nur eigene Quellen, also keine Websuche.
-          websuche: !wissenModus(chat),
-        });
+        // Die Anfrage für EINEN Anbieter: jeder übersetzt Verlauf und Anhänge anders.
+        let wegGesagt = false;
+        const bauen = (modul, m) => {
+          const { nachrichten, weg } = kuerzen(verlaufHerrichten([...basis, ...t.verlauf], modul));
+          if (weg && t.runden === 1 && !wegGesagt) {
+            wegGesagt = true;
+            emit(onEvent, { type: 'hinweis', satz: `${weg} ältere Nachricht(en) passen nicht mehr in den Kontext und wurden diesmal weggelassen (nicht zusammengefasst).` });
+          }
+          const mitAnhaengen = anhaengeMod.aufloesen(nachrichten, {
+            anbieter: modul.anbieterId || 'claude',
+            lesen: anhangLesen,
+            cache: anhangCache,
+            // Der Rest der Anfrage (Verlauf, Systemtext, Werkzeuge) zählt zur Größengrenze.
+            reserve: JSON.stringify(nachrichten).length + JSON.stringify(system).length + 60000,
+          });
+          return modul.anfrageBauen({
+            modell: m,
+            system,
+            werkzeuge: DEFINITIONEN,
+            nachrichten: mitCachePunkt(mitAnhaengen.nachrichten),
+            effort,
+            // „Mein Wissen“: nur eigene Quellen, also keine Websuche.
+            websuche: !wissenModus(chat),
+          });
+        };
         const rundeAb = t.text.length;
-        const r = await claude.senden({
-          ...gebaut,
+        const wie = {
           gate,
           scope,
           purpose: `Antwort im Chat „${(chat.data && chat.data.title) || chat.id}“`,
           signal: controller.signal,
           beiEreignis,
-        });
+        };
+        const r = typeof claude.sendenAusweichend === 'function'
+          ? await claude.sendenAusweichend(bauen, { ...wie, modell, modul: anbieter })
+          : await claude.senden({ ...bauen(anbieter, modell), ...wie });
+        if (r.modul && r.modul !== anbieter) {
+          anbieter = r.modul;
+          modell = r.modellGenutzt || modell;
+        }
         if (Array.isArray(r.belege) && r.belege.length) belegeEinsetzen(r.belege, rundeAb);
         statsAddieren(t.stats, r.usage);
         t.modellAntwort = r.modell || t.modellAntwort;

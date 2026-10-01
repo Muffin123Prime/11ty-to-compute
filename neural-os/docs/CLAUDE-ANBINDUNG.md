@@ -209,25 +209,85 @@ stillschweigend um, sondern sagt, warum.
 ## 9. Gemini (kostenlos)
 
 Der Nutzer will kein Geld ausgeben. Deshalb ist **Google Gemini** die erste
-Wahl und Claude die zweite (Einstellungen → KI). Stand der Recherche:
-24. September 2026. Umgesetzt in `src/models/providers/gemini.js`; der
-Verbund beider Anbieter steht in `src/models/ki.js`.
+Wahl und Claude die zweite (Einstellungen → KI). Erste Recherche:
+24. September 2026; **nachgesehen am 1. Oktober 2026** in Googles
+Unterlagen (ai.google.dev: Modelle, Preise, Limits, Regionen, Bedingungen,
+Änderungsprotokoll), nachdem der Nutzer mit seinem echten Schlüssel „gar
+nichts“ zum Laufen bekam. Umgesetzt in `src/models/providers/gemini.js`;
+der Verbund der Anbieter steht in `src/models/ki.js`, Schlüssel und
+Ausweichen in `src/models/anbieter-dienst.js`.
 
-**Kostenlose Stufe, ohne Karte.** Modelle u. a. `gemini-3.8-flash`
-(Voreinstellung), `gemini-3.7-flash`, `gemini-3.5-flash-lite`,
-`gemini-2.5-flash`. Eingabe, Ausgabe und Denken kosten nichts. Grounding mit
-Google-Suche: 5 000 Suchanfragen im Monat frei, danach 14 $ je 1 000. Auf
-der kostenlosen Stufe **darf Google Inhalte zur Verbesserung nutzen** — das
-steht in der Oberfläche in einem Satz. Limits etwa 10–15 Anfragen je Minute
-und niedrige Tausender je Tag; darüber antwortet die API mit 429
-`RESOURCE_EXHAUSTED` ("Google-Limit erreicht — morgen geht es kostenlos
-weiter, oder Claude wählen").
+**Modelle (Stand 01.10.2026).** Stabil und kostenlos: `gemini-3.8-flash`
+(seit 02.09.2026, Voreinstellung), `gemini-3.7-flash`, `gemini-3.6-flash`,
+`gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`; alle
+1 048 576 Token Eingabe, 65 536 Ausgabe. Vorschau: `gemini-3-flash-preview`
+(kostenlos), `gemini-3.1-pro-preview` (**nicht** kostenlos). Die
+2.5-Modelle gibt es seit 18.09.2026 nur noch für Projekte, die sie schon
+benutzt haben; 2.0 ist abgeschaltet. **Deshalb verlässt sich Neural OS nicht
+auf eine feste Liste:** Beim Verbinden fragt es mit dem Schlüssel
+`GET /v1beta/models` (`pageSize` bis 1000, `nextPageToken`), nimmt die
+Chat-Modelle (generateContent, keine Einbettung/Sprachausgabe/Bilder/Live),
+ordnet sie (Flash vor Flash-Lite vor Pro, stabil vor Vorschau vor Alias,
+neuere Version zuerst) und probt das beste; geht es nicht (gibt es nicht,
+nicht kostenlos, Tageslimit), das nächste. Gespeichert werden das Modell,
+das antwortete, und die Liste.
+
+**Die Google-Suche gibt es auf der kostenlosen Stufe nicht** (Preise:
+„Grounding with Google Search … Not available“ für 3.8 und 3.7 Flash, die
+übrigen 3.x nur in AI Studio; 2.5 hatte 500 je Tag). Das war der
+wahrscheinliche Grund für „gar nichts“: Jede Chat-Anfrage trug
+`googleSearch`, der Probeaufruf nicht. Wie Google die Suche ablehnt, steht
+nirgends. Deshalb: Lehnt Google eine Anfrage **mit** Suche ab (400, 403,
+429 — auch ein Limit, denn ob Suche oder Modell, zeigt erst der Versuch),
+geht dieselbe Anfrage einmal **ohne**; klappt das, sagt der Chat „Ohne
+Internetsuche: …“, und der Dienst merkt sich je Schlüssel und Modell, dass
+es die Suche dort nicht gibt (`ohneSuche` im Tresor). Klappt es auch ohne
+nicht, gilt der erste Fehler.
+
+**Denken.** `generationConfig.thinkingConfig = {includeThoughts,
+thinkingLevel}` für Gemini 3 und neuer (3.8/3.7 Flash: low, medium, high —
+`minimal` ist dort ein Fehler; 3.6/3.5 Flash und 3.5 Flash-Lite auch
+`minimal`); `thinkingBudget` nur für 2.5; **beides zusammen ist 400**, und
+`thinkingLevel` an ein älteres Modell auch. Die Denk-Token zählen zu
+`maxOutputTokens`. Neural OS baut die Denk-Einstellung je Modell
+(`denkenFuer`); weicht der Dienst auf ein anderes Modell aus, passt `senden`
+sie an (`fuerModell`). Der Probeaufruf schickt keine.
+
+**Selbstheilung** einer abgelehnten Anfrage (je Art höchstens einmal, nur
+was Googles Satz nennt): ohne Suche; Denken ohne Stufe, dann ganz ohne;
+Antwortlänge 8 192; ohne angefangenen Zug der KI am Ende („Requests ending
+with a model turn are not supported“, 3.8); ohne eigene Werkzeuge, wenn
+Google ihre Beschreibung nicht nimmt (mit Satz). Was Google sagt, steht bei
+allem Unbekannten im Fehlersatz („Google: …“), der Schlüssel nie.
+
+**Ausweichen** (Nutzer: „falls bei einem das Limit leer geht, wechselt er
+zum nächsten“): Tageslimit (QuotaFailure `…PerDay…`, Rücksetzen um
+Mitternacht kalifornischer Zeit), Minutenlimit (RetryInfo `retryDelay`),
+überlastet, Modell fehlt oder nicht kostenlos → das nächste Modell
+desselben Schlüssels, dann der nächste Schlüssel, dann der nächste
+verbundene Anbieter (`ki.sendenAusweichend`) — immer mit einem Satz im
+Chat, wer jetzt antwortet, und nur, solange noch nichts angekommen ist.
+
+**Bedingungen (ehrlich).** Google-API-Bedingungen §2(d): Limits darf man
+nicht umgehen („will not attempt to circumvent“); Limits gelten **je
+Projekt, nicht je Schlüssel** — mehrere Schlüssel eines Projekts teilen
+sie, mehrere Projekte oder Konten nur fürs Limit wären Umgehen. Neural OS
+kann mehrere Schlüssel (etwa ein bezahlter als Ersatz), sagt das aber so.
+Die Gemini-API-Bedingungen sehen die Nutzung ab 18 Jahren vor und, für
+Programme, die man **anderen** im EWR anbietet, nur die bezahlte Stufe.
+
+**Kostenlose Stufe, ohne Karte.** Schlüssel in AI Studio (legt Projekt und
+Schlüssel selbst an); Limits je Modell stehen nur in AI Studio. Auf der
+kostenlosen Stufe **darf Google Inhalte zur Verbesserung nutzen** — das
+steht in der Oberfläche in einem Satz. Über dem Limit antwortet die API mit
+429 `RESOURCE_EXHAUSTED`. Bilder erzeugen gibt es kostenlos nicht mehr
+(alle Bildmodelle: „Not available“ auf der kostenlosen Stufe).
 
 **Schlüssel:** aistudio.google.com/apikey → "Create API key" (Google-Konto,
-keine Karte). Er liegt versiegelt in `vault/gemini-schluessel.json`, verlässt
+keine Karte). Er liegt versiegelt in `vault/gemini-schluessel.json` (eine
+Liste von Zugängen; oben steht für ältere Fassungen der erste), verlässt
 Neural OS nur als Kopf `x-goog-api-key` an
-`generativelanguage.googleapis.com` und wird beim Verbinden mit einem
-Probeaufruf (`maxOutputTokens: 8`, ohne Strom, ohne Werkzeuge) geprüft.
+`generativelanguage.googleapis.com`.
 
 **REST — bewusst `generateContent`, nicht die neue "Interactions API"
 (`/v1beta/interactions`), die Google inzwischen bewirbt:** `generateContent`
@@ -282,7 +342,11 @@ sagt ehrlich "Ohne Internetsuche".
 | 400/401/403 mit "API key", `UNAUTHENTICATED` | `GEMINI_SCHLUESSEL_FALSCH` | "Der Google-Schlüssel stimmt nicht." |
 | 429 `RESOURCE_EXHAUSTED` | `GEMINI_LIMIT` | "Google-Limit erreicht — … morgen geht es kostenlos weiter. Oder Claude wählen." |
 | 503 `UNAVAILABLE` | `GEMINI_UEBERLASTET` | "Gemini ist gerade überlastet." |
-| 404 `NOT_FOUND` | `GEMINI_MODELL_UNBEKANNT` | "Dieses Modell gibt es bei Google nicht (mehr)." |
+| 404 `NOT_FOUND` | `GEMINI_MODELL_UNBEKANNT` | "Dieses Modell gibt es bei Google nicht (mehr)." → nächstes Modell |
+| 429 mit `limit: 0` | `GEMINI_NICHT_KOSTENLOS` | "Dieses Gemini-Modell ist bei Google nicht kostenlos." → nächstes Modell |
+| 429 QuotaFailure `…PerDay…` | `GEMINI_LIMIT_TAG` | "Google-Tageslimit für dieses Modell erreicht …" → nächstes Modell |
+| 403 `SERVICE_DISABLED` | `GEMINI_API_AUS` | "Für diesen Google-Schlüssel ist die Gemini-API nicht eingeschaltet …" |
+| "User location is not supported" | `GEMINI_ORT` | "Google bietet die Gemini-API an deinem Ort nicht an …" |
 | 413 / Token-Grenze | `GEMINI_ZU_GROSS` | "Das Gespräch ist zu lang für eine einzelne Anfrage." |
 | `finishReason: SAFETY`, `promptFeedback.blockReason` | `GEMINI_ABGELEHNT` | "Google hat die Antwort abgelehnt." |
 | anderes 400 `INVALID_ARGUMENT` | `GEMINI_ANFRAGE_ABGELEHNT` | "Google hat die Anfrage nicht angenommen." |
@@ -295,4 +359,4 @@ Einstellung, sind beide verbunden, gilt die Einstellung. Routen: `GET /api/ki`,
 `POST/DELETE /api/ki/:anbieter/schluessel`, `PATCH /api/ki {anbieter, modell}`;
 `/api/claude` bleibt als Alias. Geprüft gegen den Statisten
 `test/gemini-statist.js` (`test/gemini.test.js`, `npm run check` Abschnitt 6b)
-— **nicht** gegen die echte Google-API: einen echten Schlüssel gab es beim Bau nicht.
+— **nicht** gegen die echte Google-API: einen echten Schlüssel gab es beim Bau nicht. Gegen das echte Google geprüft ist nur, was ohne Schlüssel geht: Ein falscher Schlüssel kommt als 400 `INVALID_ARGUMENT` mit ErrorInfo `API_KEY_INVALID` (und das schon bei der Modellliste, vor jeder Prüfung des Modells). Der Statist kann jetzt auch die Modellliste, Fehler mit Einzelheiten (QuotaFailure, RetryInfo) und die Ablehnung der Suche (`test/ausweichen.test.js`).

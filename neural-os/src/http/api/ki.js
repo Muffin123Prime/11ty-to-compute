@@ -94,6 +94,7 @@ function register(router) {
     const r = await g.senden({
       body: gebaut.body,
       modell: gebaut.modell,
+      denken: gebaut.denken,
       stream: false,
       scope,
       purpose: 'Sprache in Text umschreiben',
@@ -113,14 +114,26 @@ function register(router) {
     const controller = new AbortController();
     // Wer den Tab schliesst, bricht die Pruefung ab; ein fertiger Aufruf nicht mehr.
     rc.res.on('close', () => { if (!rc.res.writableEnded) controller.abort(); });
-    const zustand = await ki.schluesselSpeichern(rc.params.anbieter, body.schluessel, { signal: controller.signal, aktivieren: body.aktivieren === true });
+    const zustand = await ki.schluesselSpeichern(rc.params.anbieter, body.schluessel, {
+      signal: controller.signal,
+      aktivieren: body.aktivieren === true,
+      zusaetzlich: body.zusaetzlich === true,
+      ersetzt: typeof body.ersetzt === 'string' ? body.ersetzt : undefined,
+    });
     return { ok: true, ...zustand };
   });
 
+  // ?zugang=<id>: nur diesen Schlüssel; ohne: alle des Anbieters.
   router.delete('/api/ki/:anbieter/schluessel', (rc) => {
     rc.requireOwner('Der KI-Schlüssel');
-    const r = kiVon(rc).schluesselLoeschen(rc.params.anbieter);
+    const zugang = rc.query && typeof rc.query.get === 'function' ? rc.query.get('zugang') : null;
+    const r = kiVon(rc).schluesselLoeschen(rc.params.anbieter, zugang || undefined);
     return { ok: true, geloescht: r.geloescht, ...r.zustand };
+  });
+
+  router.post('/api/ki/:anbieter/zugaenge/:zugang/vor', (rc) => {
+    rc.requireOwner('Die Reihenfolge der Schlüssel');
+    return kiVon(rc).zugangVor(rc.params.anbieter, rc.params.zugang);
   });
 
   router.patch('/api/ki', async (rc) => {

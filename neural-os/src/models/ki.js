@@ -60,7 +60,7 @@ function geminiSchluesselPruefen(roh) {
   const s = roh.trim();
   if (!s) throw new ValidationError('Bitte den Google-Schlüssel einfügen.');
   if (/\s/.test(s)) throw new ValidationError('Im Schlüssel steht ein Leerzeichen oder Zeilenumbruch. Bitte genau so einfügen, wie er in AI Studio steht.');
-  if (s.length < 20 || s.length > 400) throw new ValidationError('Das sieht nicht nach einem Google-Schlüssel aus (die beginnen mit „AIza“).');
+  if (s.length < 20 || s.length > 600) throw new ValidationError('Das sieht nicht nach einem Google-Schlüssel aus (neue beginnen mit „AQ.“, ältere mit „AIza“).');
   if (!/^[\x21-\x7e]+$/.test(s)) throw new ValidationError('Im Schlüssel stehen Zeichen, die dort nicht hingehören.');
   return s;
 }
@@ -78,6 +78,8 @@ const PROFIL_GEMINI = Object.freeze({
   verbrauchHinweis: 'Kostenlos auf Googles kostenloser Stufe; Google begrenzt die Zahl der Anfragen je Minute und je Tag.',
   schluesselPruefen: geminiSchluesselPruefen,
   sperrMuster: 'googleapis.com',
+  // Jedes Gemini-Modell hat sein eigenes Tageslimit: Ist eines voll, antwortet das nächste.
+  modellWechsel: true,
 });
 
 function createGemini(deps = {}) {
@@ -94,12 +96,13 @@ const KEINE = Object.freeze({
 const ANLEITUNG = `${GEMINI_ANLEITUNG}\n\nOder Claude (kostet pro Nutzung): console.anthropic.com → API Keys, dann unter Einstellungen → KI bei Claude einfügen.`;
 
 /**
- * Wem ein Schluessel gehoert, an seinem Anfang: "AIza" (Google) oder
+ * Wem ein Schluessel gehoert, an seinem Anfang: "AQ." oder "AIza" (Google;
+ * AI Studio erstellt seit 28.05.2026 nur noch "AQ."-Schluessel) oder
  * "sk-ant-" (Anthropic). Sonst null -- dann gilt das Feld, in dem er steht.
  */
 function anbieterVonSchluessel(roh) {
   const s = typeof roh === 'string' ? roh.trim() : '';
-  if (/^AIza/.test(s)) return 'gemini';
+  if (/^(AIza|AQ\.)/.test(s)) return 'gemini';
   if (/^sk-ant-/.test(s)) return 'claude';
   return null;
 }
@@ -223,7 +226,7 @@ function createKi(deps = {}) {
   async function schluesselSpeichern(anbieter, roh, opts = {}) {
     dienst(anbieter);
     // Ein Schluessel verraet, wem er gehoert: Google-Schluessel beginnen mit
-    // "AIza", die von Anthropic mit "sk-ant-". Steht er im falschen Feld
+    // "AQ." (neu) oder "AIza", die von Anthropic mit "sk-ant-". Steht er im falschen Feld
     // (Nutzer am 01.10.2026: den Google-Schluessel ins Claude-Feld), wird er
     // trotzdem richtig verbunden -- statt "Der Claude-Schlüssel stimmt nicht".
     const erkannt = anbieterVonSchluessel(roh);
@@ -238,9 +241,103 @@ function createKi(deps = {}) {
     return ziel !== anbieter ? { ...z, umgeleitet: ziel } : z;
   }
 
-  function schluesselLoeschen(anbieter) {
-    const r = dienst(anbieter).schluesselLoeschen();
+  /* ------------------------------------------- Ausweichen über Anbieter */
+
+  /**
+   * Wer nach dem Aktiven gefragt wird, wenn er nicht kann: die Reihenfolge
+   * aus `config.ki.reihenfolge`, sonst die feste (kostenlose zuerst, Claude
+   * zuletzt, denn Claude kostet).
+   */
+  function reihenfolge() {
+    const eigene = Array.isArray(config.ki && config.ki.reihenfolge)
+      ? config.ki.reihenfolge.filter((id) => ANBIETER.includes(id))
+      : [];
+    const alle = [...eigene, ...ANBIETER.filter((id) => !eigene.includes(id))];
+    const a = aktiv();
+    return [a, ...alle.filter((id) => id !== a)];
+  }
+
+  /** Lohnt bei diesem Fehler ein anderer Anbieter? Nicht bei offline, Schleuse, Netz weg, Abbruch. */
+  function ausweichbar(err) {
+    const code = String((err && err.code) || '');
+    if (!code || code === 'ABORTED') return false;
+    if (/_(OFFLINE|GESPERRT|KEIN_NETZ|STILLE|ABGEBROCHEN|ABGELEHNT)$/.test(code)) return false;
+    return /_(LIMIT|LIMIT_TAG|ZU_VIELE_ANFRAGEN|UEBERLASTET|NICHT_KOSTENLOS|MODELL_UNBEKANNT|SCHLUESSEL_FALSCH|API_AUS|SCHLUESSEL_GESPERRT|GUTHABEN|ORT|KEINE_BERECHTIGUNG|ANFRAGE_ABGELEHNT|FEHLER|ZEIT|NICHT_VERBUNDEN|ZU_GROSS)$/.test(code);
+  }
+
+  function grundWort(err) {
+    const code = String((err && err.code) || '');
+    if (/_(LIMIT|LIMIT_TAG|ZU_VIELE_ANFRAGEN)$/.test(code)) return 'ist gerade am Limit';
+    if (/_UEBERLASTET$/.test(code)) return 'ist gerade überlastet';
+    if (/_GUTHABEN$/.test(code)) return 'hat kein Guthaben';
+    if (/_(SCHLUESSEL_FALSCH|API_AUS|SCHLUESSEL_GESPERRT)$/.test(code)) return 'nimmt den Schlüssel nicht an';
+    return 'antwortet gerade nicht';
+  }
+
+  /**
+   * Senden mit Ausweichen über Anbieter (Nutzer am 01.10.2026: "falls bei
+   * einem das Limit leer geht, wechselt er zum nächsten"). Jeder Dienst
+   * weicht zuerst selbst aus (andere Schlüssel, andere Modelle); hilft das
+   * nicht und ist noch nichts angekommen, fragt der Verbund den nächsten
+   * verbundenen Anbieter. `bauen(modul, modell)` baut die Anfrage für ihn --
+   * jeder Anbieter übersetzt Verlauf und Werkzeuge anders.
+   * @returns {Promise<object>} die Antwort plus `anbieter` und `modul`
+   */
+  async function sendenAusweichend(bauen, opts = {}) {
+    let erster = null;
+    let vorher = null;
+    const a = aktiv();
+    for (const id of reihenfolge()) {
+      const d = dienste[id];
+      if (!d.zustand().verbunden) continue;
+      if (vorher && typeof opts.beiEreignis === 'function') {
+        try { opts.beiEreignis({ art: 'hinweis', satz: `${dienste[vorher.id].name} ${grundWort(vorher.err)} – es antwortet ${d.name}.` }); } catch { /* egal */ }
+      }
+      const wunsch = id === a && d.modul.istModell(opts.modell) ? opts.modell : d.modell();
+      const gebaut = bauen(d.modul, wunsch);
+      try {
+        const r = await d.senden({ ...opts, ...gebaut });
+        return { ...r, anbieter: id, modul: d.modul };
+      } catch (err) {
+        const angekommen = Array.isArray(err && err.teilInhalt) && err.teilInhalt.length > 0;
+        if (angekommen || !ausweichbar(err)) throw err;
+        if (!erster) erster = err;
+        vorher = { id, err };
+      }
+    }
+    if (erster) throw erster;
+    zugang(); // wirft den Satz, warum keiner kann
+    throw new NeuralError(KEINE.code, KEINE.satz, { status: 409 });
+  }
+
+  /** Der Registry-Weg (Agenten, Zusammenfassen) mit demselben Ausweichen. */
+  async function chatAusweichend(opts) {
+    let erster = null;
+    for (const id of reihenfolge()) {
+      const d = dienste[id];
+      if (!d.zustand().verbunden) continue;
+      try {
+        const r = await d.chat({ ...opts, model: id === aktiv() ? opts.model : undefined });
+        return { ...r, anbieter: id };
+      } catch (err) {
+        if (!ausweichbar(err)) throw err;
+        if (!erster) erster = err;
+      }
+    }
+    if (erster) throw erster;
+    return aktiver().chat(opts);
+  }
+
+  /** Ohne `zugang`: alle Schlüssel des Anbieters; mit: nur diesen. */
+  function schluesselLoeschen(anbieter, zugang) {
+    const r = dienst(anbieter).schluesselLoeschen(zugang);
     return { geloescht: r.geloescht, zustand: zustand() };
+  }
+
+  /** Diesen Schlüssel zuerst fragen. */
+  function zugangVor(anbieter, zugang) {
+    dienst(anbieter).zugangVor(zugang);
+    return zustand();
   }
 
   return {
@@ -255,11 +352,14 @@ function createKi(deps = {}) {
     zustand,
     zugang,
     senden: (opts) => aktiver().senden(opts),
-    chat: (opts) => aktiver().chat(opts),
+    sendenAusweichend,
+    reihenfolge,
+    chat: (opts) => chatAusweichend(opts),
     modell: () => aktiver().modell(),
     setzen,
     schluesselSpeichern,
     schluesselLoeschen,
+    zugangVor,
     vergessen: () => { dienste.claude.vergessen(); dienste.gemini.vergessen(); },
     anleitung: () => ANLEITUNG,
     get basis() { return aktiver().basis; },

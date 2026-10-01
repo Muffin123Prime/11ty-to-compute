@@ -81,12 +81,15 @@ Kalender, Projekte und das Gehirn funktionieren trotzdem vollständig.
 
 1. <https://aistudio.google.com/apikey> öffnen, mit dem Google-Konto anmelden
    und **Create API key** antippen – keine Karte nötig. Der Schlüssel beginnt
-   mit `AIza`.
+   mit `AQ.` (ältere mit `AIza`). Am sichersten mit dem Kopier-Knopf neben dem
+   Schlüssel kopieren, damit nichts fehlt.
 2. In Neural OS im Chat unter **„Kostenlos mit Google“** den Schlüssel einfügen
    und **Online gehen und verbinden** antippen. Neural OS prüft ihn sofort.
 
 Auf der kostenlosen Stufe darf Google Inhalte zur Verbesserung nutzen, und die
-Zahl der Anfragen je Tag ist begrenzt.
+Zahl der Anfragen je Tag ist begrenzt. Die Google-Suche gibt es dort nicht:
+Neural OS fragt dann ohne Suche und sagt das im Chat („Ohne Internetsuche“).
+Ist ein Modell am Tageslimit, antwortet von selbst das nächste.
 
 **Oder Claude (kostet je Nutzung):** Auf <https://console.anthropic.com> unter
 **API Keys** einen Schlüssel erzeugen (beginnt mit `sk-ant-`) und in Neural OS
@@ -101,7 +104,7 @@ keine schwarze Pille (die Insel), zeigt der Browser noch eine alte Fassung: die
 neue ZIP laden (1.2) und dort `Neural OS starten.bat` doppelklicken – läuft die
 alte noch, beendet der Starter sie selbst und öffnet die neue. Ein Tab, der
 danach noch die alte zeigt, kann zu. In der neuen Fassung ist es egal, in
-welches Feld der Schlüssel kommt: einer mit `AIza` verbindet immer Gemini, und
+welches Feld der Schlüssel kommt: einer mit `AQ.` oder `AIza` verbindet immer Gemini, und
 Gemini antwortet ab dann.
 
 ---

@@ -1053,7 +1053,7 @@ function baueAnsicht(container, ctx) {
    */
   const ANBIETER = {
     gemini: {
-      name: 'Gemini', titel: 'Kostenlos mit Google', platzhalter: 'AIza…', label: 'Google-Schlüssel',
+      name: 'Gemini', titel: 'Kostenlos mit Google', platzhalter: 'AQ.… oder AIza…', label: 'Google-Schlüssel',
       link: 'https://aistudio.google.com/apikey', linkText: 'aistudio.google.com/apikey',
       satz: ' → Create API key. Kostenlos; Google darf Inhalte zur Verbesserung nutzen.',
     },

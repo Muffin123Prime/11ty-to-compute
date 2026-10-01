@@ -517,7 +517,7 @@ async function vergessen(self, ids) {
 /** Was je Anbieter fest ist: Name, Preis in einem Wort, wo es den Schlüssel gibt. */
 const ANBIETER = {
   gemini: {
-    name: 'Gemini', wahl: 'Gemini (kostenlos)', platzhalter: 'AIza…', label: 'Google-Schlüssel', host: 'generativelanguage.googleapis.com',
+    name: 'Gemini', wahl: 'Gemini (kostenlos)', platzhalter: 'AQ.… oder AIza…', label: 'Google-Schlüssel', host: 'generativelanguage.googleapis.com',
     hinweis: 'Schlüssel: aistudio.google.com/apikey → Create API key. Kostenlos; Google darf Inhalte zur Verbesserung nutzen.',
   },
   claude: {
