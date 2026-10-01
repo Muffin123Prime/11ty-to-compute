@@ -9,68 +9,129 @@ Gehirn, Werkstatt, Einstellungen**, darunter die letzten Chats, ganz unten
 **[Beenden]** und der Status („Offline“, „Online verbunden · Gemini“ …).
 Rechts stehen Kacheln mit dem, was gerade zählt (aktive Agenten, Termine von
 heute, die letzte Notiz, ein Ausschnitt aus dem Gehirn). Beide Seiten lassen
-sich ein- und ausklappen; eingeklappt bleibt nur der Chat. Oben in der Mitte
-sitzt die **Insel**.
+sich ein- und ausklappen; eingeklappt bleibt nur der Chat. Am rechten Rand
+wohnt die **Insel**, ein kleines Wesen.
 
 ---
 
 ## Die Insel
 
-Die schwarze Pille oben in der Mitte – wie die „Dynamic Island“ am iPhone.
+Das kleine Wesen am rechten Rand – schwarz, weiß und grau, mit einem blauen
+Ring. Es ist deine KI für zwischendurch und auf jeder Seite von Neural OS da.
+Es sitzt etwas unter der Mitte (am Telefon unten rechts) und rückt ein Stück
+nach oben oder unten, wenn dort gerade ein Knopf liegt. Ist die rechte Spalte
+zugeklappt, lässt der Inhalt ihm am Rand einen schmalen Streifen frei.
 
-**Sie zeigt, was gerade läuft:** die KI denkt oder schreibt (eine kleine
-Welle), ein Timer läuft ab, ein Termin beginnt gleich („In 12 Min ·
-Zahnarzt“), ein Agent arbeitet, eine Freigabe wartet, der Bildschirm wird
-geteilt, das Mikrofon hört zu. Das Wichtigste steht groß, ein Zweites als
-kleine Blase daneben. Kommt eine Antwort, während die Insel zu ist, leuchtet
-sie grün. Erinnerungen an Termine hängen sich als Kapsel daneben (× schließt
-sie).
+**Am Gesicht siehst du, was es tut:** Es ruht (atmet, blinzelt, schaut dem
+Zeiger nach), hört zu (Ohren hoch, der Ring atmet mit deiner Stimme), denkt
+(drei Punkte), schreibt oder spricht (der Mund bewegt sich), frisst eine
+Datei (es kaut), freut sich, wenn etwas fertig ist, schaut fragend und
+schüttelt den Kopf, wenn etwas nicht geht, und schläft, wenn Neural OS aus
+oder noch keine KI verbunden ist. Hast du am Computer „Bewegung reduzieren“
+eingestellt, bleibt es ruhig und zeigt alles ohne Hüpfen.
 
-**Antippen** (oder **Strg/⌘ + Umschalt + Leertaste**) klappt sie auf: Dort
-fragst du deine KI – tippen oder mit dem Mikrofon sprechen (Mikrofon antippen,
-sprechen, noch einmal antippen; die Antwort wird dann vorgelesen). Es ist
-dieselbe KI wie im Chat, mit allem, was sie dort kann: Termine eintragen,
-Notizen anlegen, sich etwas merken, in deinem Wissen suchen. Rückfragen
-beantwortest du mit einem Tipp; was sie angelegt hat, steht unter der Antwort
-zum Antippen. Jedes Gespräch ist ein echter Chat „Insel · …“ unter „Zuletzt“
-(öffnen, weiterschreiben, löschen); **[+]** beginnt ein neues, nach zwei
-Stunden Ruhe beginnt sie selbst eins. Unter jeder Antwort: **Vorlesen,
-Kopieren, Als Notiz, Im Chat öffnen**.
+**Neben dem Wesen** stehen kleine Schilder mit dem, was gerade läuft: ein
+Timer („4:12 Nudeln“), „Denkt …“, „Hört zu“, „Liest vor“, „Sieht deinen
+Bildschirm“, ein Termin („In 12 Min · Zahnarzt“), ein Agent, eine wartende
+Freigabe – höchstens zwei, der Rest steht drinnen. Kommt eine Antwort,
+während die Insel zu ist, bekommt das Wesen einen blauen Punkt, und daneben
+steht der Anfang der Antwort. Erinnerungen an Termine erscheinen als Kapsel
+neben dem Wesen (× schließt sie). Findet sie keinen freien Platz (etwa im
+Kalender auf einem kleinen Bildschirm), liegt die Kapsel kurz über dem
+Inhalt wie eine Mitteilung.
 
-**Bildschirm zeigen** (das Bildschirm-Zeichen): Der Browser fragt, was du
-teilen willst – den ganzen Bildschirm, ein Fenster oder einen Tab. Solange
-geteilt wird, steht dort ein kleines Bild davon und „Ich sehe …“, und mit
-jeder Frage geht ein frisches Bild mit. So kann die KI sehen, was du gerade
-in einem **anderen Programm** vor dir hast („Was siehst du?“, „Erklär mir
-das“, „Hilf mir antworten“). Das Bild geht an deine KI (Gemini oder Claude)
-und liegt danach als Anhang im Insel-Chat. „Bildschirm geht mit“ antippen
-schickt die nächste Frage ohne Bild; **[Stopp]** beendet das Teilen. Am Mac
-muss der Browser einmal erlaubt werden (Systemeinstellungen → Datenschutz &
-Sicherheit → Bildschirm- & Systemaudioaufnahme).
+**Antippen** (oder **Strg/⌘ + Umschalt + Leertaste**): Das Wesen wächst zu
+einem Feld am rechten Rand, am Telefon zu einem Blatt, das von unten kommt.
+Oben sitzt das Wesen groß und sagt in einem Satz, was es tut; darunter steht
+das Gespräch, unten die Zeile zum Fragen. **Esc**, das Kreuz oben oder ein
+Tipp auf das Wesen machen es wieder klein.
 
-**Über allen Fenstern** (das Zeichen mit dem kleinen Fenster): Die Insel zieht
-in ein eigenes kleines Fenster, das über jedem Programm schwebt – auch wenn du
-in Word, im Browser oder in einem Spiel bist. Dort geht alles genauso; **[˄]**
-macht es klein (nur die Zeile mit dem, was läuft), die Pille antippen macht es
-wieder groß, **[↩]** holt die Insel zurück. Das geht in Chrome, Edge, Opera
-und Firefox am Computer, nicht in Safari und nicht auf dem iPad. Das Fenster
-gehört zum Tab von Neural OS: Schließt du den, geht es mit zu.
+**Fragen:** Tippen und senden – oder das **Mikrofon** antippen, sprechen,
+noch einmal antippen; dann wird die Antwort auch vorgelesen (ein Tipp auf das
+große Wesen hält das Vorlesen an). Es ist dieselbe KI wie im Chat, mit allem,
+was sie dort kann: Termine eintragen, Notizen anlegen, sich etwas merken, in
+deinem Wissen und im Internet suchen.
+Rückfragen beantwortest du mit einem Tipp; was sie angelegt hat, steht unter
+der Antwort zum Antippen. Unter jeder Antwort: **Vorlesen, Kopieren, Als
+Notiz, Im Chat öffnen**; solange sie noch schreibt, hält **[Stopp]** sie an.
+Jedes Gespräch ist ein echter Chat „Insel · …“ unter „Zuletzt“ (öffnen,
+weiterschreiben, löschen); nach zwei Stunden Ruhe beginnt sie selbst ein
+neues, „Neues Gespräch“ im Menü **„…“** sofort.
+
+**Nachschlagen, Quellen, Hinweise:** Sucht die KI im Internet oder schlägt
+sie nach (etwa in Wikipedia), steht über der Antwort eine ruhige Zeile dazu –
+erst, was sie gerade tut, dann, was dabei herauskam („Wikipedia: „Brandenburger
+Tor“ · 2 Artikel gefunden“). Die Quellen stehen klein unter der Antwort; die
+Zahlen [1], [2] im Text führen zur passenden Quelle. Musste sie ausweichen
+(„Gemini ist gerade am Limit – es antwortet Mistral.“) oder ging die Suche
+nicht, steht das als leiser grauer Satz darunter. Bilder in einer Antwort
+zeigt die Insel wie der Chat (antippen vergrößert sie); ein Bild aus dem
+Internet lädt Neural OS nicht – dort steht sein Name mit „öffnen ↗“.
+
+**Live – einfach reden:** **[Live]** antippen und sprechen wie mit einem
+Menschen. Machst du eine kurze Pause (gut eine Sekunde), hat das Wesen
+verstanden: Es antwortet, liest die Antwort vor und hört danach wieder zu.
+Willst du dazwischenreden, tippst du das Wesen an – es hört sofort auf zu
+sprechen und hört dir zu. Ein Tipp, während es zuhört, heißt „fertig“: Es
+antwortet gleich. Am Stück darfst du bis zu einer Minute reden. **Esc** oder
+**[Live]** oben beenden das Gespräch; hört das Wesen eine Minute lang nichts,
+geht Live von selbst aus und sagt das. Versteht der Browser
+Sprache selbst (Chrome, Edge), nimmt die Insel das; kann er es nur dem Namen
+nach (etwa Opera), nimmt sie deine Worte auf und lässt sie von Gemini
+aufschreiben – dafür braucht es den Google-Schlüssel (Einstellungen → KI).
+Das Mikrofon gibt der Browser nur frei, wenn Neural OS auf diesem Gerät läuft
+(127.0.0.1), nicht über das WLAN.
+
+**Dateien füttern:** Zieh eine Datei auf das Wesen – es macht schon das Maul
+auf – oder in das offene Feld, oder nimm die **Büroklammer**. Es frisst sie,
+kaut kurz und liest sie dann wirklich: Bilder (PNG, JPG, WEBP, GIF) und PDF
+wie im Chat, Textdateien (.txt, .md, .csv, .json) bis 200 KB als Text. Hast
+du nichts dazugeschrieben, fragt es von selbst „Werte diese Datei aus.“ Was
+es nicht lesen kann (etwa ZIP oder Word) oder was zu groß ist, nimmt es nicht:
+Es schüttelt den Kopf und sagt in einem Satz, warum. Bilder kannst du auch
+mit Strg+V einfügen.
+
+**Das Menü „…“** neben der Büroklammer: **Bildschirm zeigen, Über allen
+Fenstern, Aus der Zwischenablage, Timer, Neues Gespräch.** Was dein Browser
+nicht kann, fehlt dort.
+
+**Bildschirm zeigen:** Der Browser fragt, was du teilen willst – den ganzen
+Bildschirm, ein Fenster oder einen Tab. Solange geteilt wird, steht dort ein
+kleines Bild davon und „Ich sehe …“, und mit jeder Frage geht ein frisches
+Bild mit. So kann die KI sehen, was du gerade in einem **anderen Programm**
+vor dir hast („Was siehst du?“, „Erklär mir das“, „Hilf mir antworten“). Das
+Bild geht an deine KI (Gemini oder Claude) und liegt danach als Anhang im
+Insel-Chat. „Bildschirm geht mit“ antippen schickt die nächste Frage ohne
+Bild; **[Stopp]** beendet das Teilen. Am Mac muss der Browser einmal erlaubt
+werden (Systemeinstellungen → Datenschutz & Sicherheit → Bildschirm- &
+Systemaudioaufnahme).
+
+**Über allen Fenstern:** Die Insel zieht in ein eigenes kleines Fenster, das
+über jedem Programm schwebt – auch wenn du in Word, im Browser oder in einem
+Spiel bist. Dort geht alles genauso; **Kleiner** lässt nur das Wesen und
+seinen Satz stehen, ein Tipp auf das Wesen macht es wieder groß, **Zurück in
+Neural OS** holt die Insel zurück (solange steht in Neural OS am Rand „Insel
+schwebt · zurückholen“). Das geht in Chrome, Edge und Opera am Computer,
+nicht in Safari und nicht auf dem iPad. Das Fenster gehört zum Tab von Neural
+OS: Schließt du den, geht es mit zu.
 
 **Ohne die KI, sofort:** „Timer 5 min“ (auch „Timer 8 min Nudeln“, „Timer
-1:30“, „Timer“ allein zeigt die Auswahl) – am Ende klingelt es, die Insel
-pulsiert, und auf Wunsch kommt eine Mitteilung. „Notiz: Milch kaufen“ legt
-eine Notiz an.
+1:30“, „Timer“ allein zeigt die Auswahl) – am Ende klingelt es, das Wesen
+hüpft aufgeregt, bis du den Timer ausmachst, und auf Wunsch kommt eine
+Mitteilung. „Notiz: Milch kaufen“ legt eine Notiz an.
 
 **Worauf sich „das“ bezieht:** Hast du etwas **kopiert** (Strg+C, in jedem
 Programm), nehmen „Erklär mir das“, „Fass zusammen“, „Übersetz ins Deutsche“
-und „Hilf mir antworten“ den kopierten Text. **[Einfügen]** holt Text oder Bild
-aus der Zwischenablage; Bilder kannst du auch mit Strg+V einfügen oder auf die
-Insel ziehen. Hast du in Neural OS Text **markiert**, kommt er beim Öffnen
-mit (als Kärtchen, × nimmt ihn weg).
+und „Hilf mir antworten“ den kopierten Text. **Aus der Zwischenablage** (im
+Menü „…“) holt Text oder Bild ausdrücklich. Hast du in Neural OS Text
+**markiert**, kommt er beim Öffnen mit (als Kärtchen, × nimmt ihn weg).
 
 **Was sie nicht kann:** In anderen Programmen klicken oder tippen. Von selbst
-zuhören. Ein Tastenkürzel für den ganzen Computer – Strg/⌘ + Umschalt +
-Leertaste gilt in Neural OS und im schwebenden Fenster.
+zuhören – das Mikrofon ist nur an, solange du sprichst oder Live läuft (dann
+steht „Hört zu“ daneben). Ein Tastenkürzel für den ganzen Computer –
+Strg/⌘ + Umschalt + Leertaste gilt in Neural OS und im schwebenden Fenster.
+Dateien, die sie nicht lesen kann, nimmt sie nicht an – sie tut nie so, als
+hätte sie sie gelesen.
 
 ---
 

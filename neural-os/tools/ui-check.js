@@ -941,6 +941,9 @@ async function pruefeSchale(page, base, store, app) {
       spalteSichtbar: getComputedStyle(aside).visibility !== 'hidden' && aside.getBoundingClientRect().width > 100,
       chatBreite: Math.round(stage.getBoundingClientRect().width),
       fensterBreite: window.innerWidth,
+      // Ist die rechte Spalte zu, haelt die Insel am Rand eine schmale Spur fuer ihr Wesen frei (web/lib/insel.js).
+      spur: shell.dataset.insel === 'spur' && shell.dataset.rechts === 'zu'
+        ? Math.round(parseFloat(getComputedStyle(shell).gridTemplateColumns.split(' ').pop()) || 0) : 0,
       fokus: aktiv ? (aktiv.getAttribute('aria-label') || aktiv.textContent || '').trim() : '',
     };
   });
@@ -1022,8 +1025,10 @@ async function pruefeSchale(page, base, store, app) {
   await page.getByRole('button', { name: 'Übersicht einklappen' }).click();
   await warte(500);
   const nurChat = await zustand();
-  check(nurChat.rechts === 'zu' && !nurChat.spalteSichtbar && nurChat.chatBreite >= nurChat.fensterBreite - 48,
-    'Beide Seiten eingeklappt: nur der Chat bleibt', `Chat ${nurChat.chatBreite} von ${nurChat.fensterBreite} px`);
+  check(nurChat.rechts === 'zu' && !nurChat.spalteSichtbar && nurChat.spur <= 80
+    && nurChat.chatBreite >= nurChat.fensterBreite - 48 - nurChat.spur,
+  'Beide Seiten eingeklappt: nur der Chat bleibt (am rechten Rand die schmale Spur der Insel)',
+  `Chat ${nurChat.chatBreite} von ${nurChat.fensterBreite} px, Spur ${nurChat.spur} px`);
   await warte(2500);
   const spaeter = await zustand();
   check(spaeter.links === 'zu' && spaeter.rechts === 'zu',
@@ -2303,7 +2308,7 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
     await store.flush();
   }
 
-  /* --- Erinnerung im Kopf, solange Neural OS offen ist --- */
+  /* --- Erinnerung neben der Insel, solange Neural OS offen ist --- */
   const bald = new Date(Date.now() + 10 * 60000);
   const wandzeit = (t) => `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T${pad(t.getHours())}:${pad(t.getMinutes())}`;
   store.create('event', { title: 'Erinnerungs-Probe', start: wandzeit(bald), end: wandzeit(new Date(bald.getTime() + 30 * 60000)), location: 'Flur', reminder: 15 });
@@ -2311,9 +2316,9 @@ async function pruefeKalenderNotizenProjekte(page, base, store) {
   await warte(1800);
   const karte = page.locator('.erin__card', { hasText: 'Erinnerungs-Probe' });
   const karteText = (await karte.innerText().catch(() => '')).replace(/\s+/g, ' ');
-  check(await karte.count() === 1 && /In \d+ Min/.test(karteText), 'Eine Erinnerung erscheint im Kopf, ohne Neuladen', karteText.slice(0, 80));
+  check(await karte.count() === 1 && /In \d+ Min/.test(karteText), 'Eine Erinnerung erscheint neben dem Wesen der Insel, ohne Neuladen', karteText.slice(0, 80));
   if (await karte.count()) {
-    // Sie liegt in der freien Mitte des Kopfes -- nicht auf "Suchen", "Übersicht" oder einer Kachel.
+    // Sie liegt neben dem Wesen am rechten Rand -- nicht auf "Suchen", "Übersicht" oder einer Kachel.
     const verdeckt = await page.evaluate(() => {
       const k = document.querySelector('.erin__card');
       return [...document.querySelectorAll('button, a, input, [role="button"]')]
