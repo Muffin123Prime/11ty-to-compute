@@ -12,8 +12,9 @@ Was am Ende dasteht:
 * Dein iPad zeigt Neural OS über dein WLAN.
 
 **Kosten:** Neural OS selbst kostet nichts – keine Domain, kein Server, kein
-Abo. Die KI ist entweder **Gemini von Google (kostenlos)** oder **Claude von
-Anthropic (kostet je Nutzung)**.
+Abo. Die KI ist **Gemini von Google (kostenlos)**; einspringen können weitere
+kostenlose KIs (Mistral, Groq, OpenRouter, OVHcloud). **Claude von Anthropic**
+und OpenAI kosten je Nutzung.
 
 ---
 
@@ -90,6 +91,24 @@ Auf der kostenlosen Stufe darf Google Inhalte zur Verbesserung nutzen, und die
 Zahl der Anfragen je Tag ist begrenzt. Die Google-Suche gibt es dort nicht:
 Neural OS fragt dann ohne Suche und sagt das im Chat („Ohne Internetsuche“).
 Ist ein Modell am Tageslimit, antwortet von selbst das nächste.
+
+**Weitere KIs – falls ein Limit voll ist:** Unter **Einstellungen → KI →
+Weitere KIs** lassen sich kostenlos **Mistral** (<https://console.mistral.ai>),
+**Groq** (<https://console.groq.com/keys>) und **OpenRouter**
+(<https://openrouter.ai/settings/keys>) verbinden – je ein Schlüssel vom
+Anbieter, keine Karte nötig. **OVHcloud** geht ganz ohne Schlüssel und Konto
+(**Einschalten**), ist aber langsam. Ist Gemini am Limit, springt von selbst
+die nächste ein, und der Chat sagt es in einem Satz. Im Chat gibt es dafür
+unter „Oder eine andere kostenlose KI“ ein Feld für jeden dieser Schlüssel.
+Ehrlich: Mehrere kostenlose Konten beim selben Anbieter, nur um mehr Limit zu
+bekommen, verbieten Google, Mistral, Groq und OpenRouter in ihren Bedingungen;
+verschiedene Anbieter zu verbinden ist erlaubt – und wirkt genauso.
+
+**Nachschlagen:** Die kostenlosen KIs haben keine eigene Internetsuche.
+Neural OS lässt sie deshalb in Wikipedia nachschlagen; die Artikel stehen als
+Quellen unter der Antwort, und auf „Zeig mir …“ kommt das Bild aus Wikipedia.
+Nachrichten von heute, Preise oder Wetter findet das nicht, und Bilder erzeugen
+kann die kostenlose KI nicht – das sagt sie dann ehrlich.
 
 **Oder Claude (kostet je Nutzung):** Auf <https://console.anthropic.com> unter
 **API Keys** einen Schlüssel erzeugen (beginnt mit `sk-ant-`) und in Neural OS

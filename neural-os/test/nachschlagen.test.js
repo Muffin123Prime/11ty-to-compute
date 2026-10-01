@@ -48,6 +48,18 @@ function anfrage(base, method, urlPath, body) {
   });
 }
 
+/** GET mit den rohen Bytes (für Bilder). */
+function roh(base, urlPath) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlPath, base);
+    http.get({ hostname: url.hostname, port: url.port, path: url.pathname + url.search }, (res) => {
+      const teile = [];
+      res.on('data', (c) => teile.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, buf: Buffer.concat(teile) }));
+    }).on('error', reject);
+  });
+}
+
 async function strom(base, urlPath, body) {
   const r = await anfrage(base, 'POST', urlPath, body);
   const ereignisse = [];
@@ -105,7 +117,7 @@ test('Eine KI ohne eigene Suche schlägt in Wikipedia nach: Werkzeug, Aktivität
   await mitApp(async ({ app, base, mistral, de, chatId }) => {
     // Beim Verbinden ging das Nachschlagen von selbst an: sichtbar auf der Freigabeliste.
     assert.equal(app.config.ki.nachschlagen, true);
-    assert.ok(nachschlagen.HOSTS.every((h) => app.config.network.allowHosts.includes(h)), JSON.stringify(app.config.network.allowHosts));
+    assert.ok(nachschlagen.FREIGABE.every((h) => app.config.network.allowHosts.includes(h)), JSON.stringify(app.config.network.allowHosts));
     const ki = (await anfrage(base, 'GET', '/api/ki')).json;
     assert.deepEqual({ an: ki.nachschlagen.an, erreichbar: ki.nachschlagen.erreichbar }, { an: true, erreichbar: true });
 
@@ -217,7 +229,7 @@ test('Der Schalter: aus nimmt Wikipedia von der Freigabeliste und das Werkzeug w
     assert.equal(aus.status, 200, aus.text);
     assert.equal(aus.json.nachschlagen.an, false);
     assert.equal(app.config.ki.nachschlagen, false);
-    assert.ok(nachschlagen.HOSTS.every((h) => !app.config.network.allowHosts.includes(h)));
+    assert.ok(nachschlagen.FREIGABE.every((h) => !app.config.network.allowHosts.includes(h)));
     assert.equal((await anfrage(base, 'PATCH', '/api/ki', { nachschlagen: 'ja' })).status, 400);
 
     mistral.weiter(OA.antwort(OA.B.text('Ohne Nachschlagen.'), OA.B.ende()));
@@ -276,6 +288,40 @@ test('Beim Start: wer schon eine KI ohne eigene Suche verbunden hatte, bekommt d
   });
 });
 
+test('Bilder aus Wikipedia: die KI bekommt eine eigene Adresse, Neural OS holt das Bild durch die Schleuse – ohne Tracking-Anhang, nur echte Bilder, nur von Wikipedia', async () => {
+  await mitApp(async ({ base, mistral, de, chatId }) => {
+    mistral.weiter(
+      OA.antwort(OA.B.aufruf('wikipedia_suchen', { suche: 'Brandenburger Tor' }), OA.B.ende('tool_calls')),
+      OA.antwort(OA.B.text('So sieht es aus.'), OA.B.ende()),
+    );
+    await strom(base, `/api/chats/${chatId}/messages`, { inhalt: 'Zeig mir das Brandenburger Tor' });
+    const tool = JSON.parse(mistral.stromAnfragen()[1].body.messages.find((m) => m.role === 'tool').content);
+    const bild = tool.treffer[0].bild;
+    assert.match(bild, /^\/api\/ki\/bild\?u=/, 'eine Adresse in Neural OS, keine fremde');
+    assert.equal(new URL(bild, base).searchParams.get('u'), `${de.url}/wikipedia/commons/thumb/1/11/Tor.png/500px-Tor.png`, 'ohne ?utm_source=…');
+    assert.equal(tool.treffer[1].bild, undefined, 'ohne Bild kein Feld');
+
+    const vorher = de.anfragen.length;
+    const b1 = await roh(base, bild);
+    assert.equal(b1.status, 200);
+    assert.equal(b1.headers['content-type'], 'image/png');
+    assert.equal(b1.headers['content-security-policy'], "default-src 'none'");
+    assert.equal(b1.headers['x-content-type-options'], 'nosniff');
+    assert.deepEqual(b1.buf, de.PNG);
+    assert.equal(de.anfragen.at(-1).koepfe['user-agent'], nachschlagen.UA);
+    const b2 = await roh(base, bild);
+    assert.deepEqual(b2.buf, de.PNG);
+    assert.equal(de.anfragen.length, vorher + 1, 'das zweite Mal aus dem Speicher');
+
+    const fremd = await anfrage(base, 'GET', `/api/ki/bild?u=${encodeURIComponent('https://example.com/wikipedia/x.png')}`);
+    assert.equal(fremd.status, 400);
+    assert.match(fremd.json.error.message, /nur Bilder von Wikipedia/);
+    const keinBild = await anfrage(base, 'GET', `/api/ki/bild?u=${encodeURIComponent(`${de.url}/wikipedia/kein-bild.png`)}`);
+    assert.equal(keinBild.status, 415);
+    assert.equal((await anfrage(base, 'GET', '/api/ki/bild')).status, 400);
+  });
+});
+
 test('Bausteine: die Eingabe wird geprüft, nicht repariert; die Beschreibung sagt ehrlich, was es nicht kann', () => {
   const { eingabePruefen, DEFINITION } = nachschlagen;
   assert.deepEqual(eingabePruefen({ suche: '  Mond ' }), { ok: true, wert: { suche: 'Mond', sprache: 'de' } });
@@ -286,5 +332,7 @@ test('Bausteine: die Eingabe wird geprüft, nicht repariert; die Beschreibung sa
   assert.equal(eingabePruefen(null).ok, false);
   assert.equal(eingabePruefen({ suche: 'x' }, { fehler: 'kaputt' }).ok, false);
   assert.match(DEFINITION.description, /nur Wikipedia – keine Nachrichten von heute, keine Preise, kein Wetter/);
+  assert.match(DEFINITION.description, /Bilder erzeugen kannst du nicht/);
+  assert.deepEqual(nachschlagen.FREIGABE, ['de.wikipedia.org', 'en.wikipedia.org', 'upload.wikimedia.org', 'thumb.wikimedia.org']);
   assert.deepEqual(DEFINITION.input_schema.required, ['suche']);
 });

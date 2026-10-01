@@ -293,6 +293,42 @@ async function main() {
       record('model', 'Claude geladen', 'fail', 'Teilsystem fehlt');
     }
 
+    // Dasselbe für die weiteren KIs (Mistral, Groq, OpenRouter, OVHcloud --
+    // auch die ganz ohne Schlüssel) und für das Nachschlagen in Wikipedia:
+    // offline geht nichts hinaus, und es wird nichts gespeichert.
+    if (app.kiDienst && typeof app.kiDienst.schluesselSpeichern === 'function') {
+      const vorher = auditZeilen(home).length;
+      const abgelehnt = [];
+      for (const [anbieter, schluessel] of [['mistral', 'beweisMistral0123456789abcdef'], ['groq', 'gsk_beweis0123456789abcdef'], ['ovh', undefined], ['auto', 'sk-or-v1-beweis0123456789abcdef']]) {
+        try {
+          await app.kiDienst.schluesselSpeichern(anbieter, schluessel);
+        } catch (err) {
+          if (/_OFFLINE$/.test(String(err && err.code))) abgelehnt.push(anbieter);
+        }
+      }
+      const neu = auditZeilen(home).slice(vorher).filter((l) => String(l.kind).startsWith('network.'));
+      const erlaubt = neu.filter((l) => /allow/.test(l.kind));
+      const z = app.kiDienst.zustand();
+      const gespeichert = ['mistral', 'groq', 'openrouter', 'ovh'].filter((id) => z.anbieter[id] && z.anbieter[id].schluesselVorhanden);
+      record('model', 'Mistral, Groq, OpenRouter und OVHcloud (ohne Schlüssel) werden offline weder gefragt noch gespeichert',
+        abgelehnt.length === 4 && erlaubt.length === 0 && gespeichert.length === 0 ? 'pass' : 'fail',
+        `abgelehnt: ${abgelehnt.join(', ') || '–'}; erlaubt: ${erlaubt.length}; gespeichert: ${gespeichert.join(', ') || '–'}`);
+      const n = app.kiDienst.nachschlagen;
+      let nachschlagenFehler = null;
+      if (n) {
+        try {
+          await n.suchen({ suche: 'Beweis', sprache: 'de' });
+        } catch (err) {
+          nachschlagenFehler = err;
+        }
+      }
+      record('model', 'Nachschlagen in Wikipedia geht offline nicht hinaus (und wird der KI gar nicht angeboten)',
+        n && nachschlagenFehler && nachschlagenFehler.code === 'NACHSCHLAGEN_GESPERRT' && n.verfuegbar() === false ? 'pass' : 'fail',
+        nachschlagenFehler ? nachschlagenFehler.message : 'die Anfrage ging durch!');
+    } else {
+      record('model', 'Der KI-Verbund ist geladen', 'fail', 'Teilsystem fehlt');
+    }
+
     // ---------------------------------------------------- 5. Audit-Nachweis
     console.log(`\n${B}5. Nachweisbarkeit${X}`);
     const auditPath = path.join(home, 'audit.jsonl');

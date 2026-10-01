@@ -32,12 +32,20 @@ selben Browser; `proof` beweist, dass ohne Freigabe nichts ins Netz geht.
 - **Schale** nach der Vorlage des Nutzers (`docs/vorlage/app.png`): Leiste,
   Chat, rechte Spalte mit Kacheln; beide Seiten ein- und ausklappbar, der
   Zustand reist mit dem Stick. Dunkel und hell, iPad quer mit dem Finger.
-- **KI** online: Gemini (kostenlos, Voreinstellung) oder Claude, rohes HTTP
-  ohne SDK (`src/models/providers/`), Schlüssel versiegelt im Tresor. Ein
-  Schlüssel wird an seinem Anfang erkannt (`AQ.`/`AIza` → Gemini, `sk-ant-` →
-  Claude), egal in welchem Feld er steht; wer einen einfügt, bekommt diesen
-  Anbieter als den, der antwortet. Claude ohne Guthaben bietet „Kostenlos mit
-  Gemini weiter“ an.
+- **KI** online: Gemini (kostenlos, Voreinstellung); einspringen können
+  Mistral, Groq, OpenRouter (kostenlos, je ein Schlüssel), OVHcloud (ganz ohne
+  Schlüssel) und, bezahlt, OpenAI und Claude — rohes HTTP ohne SDK
+  (`src/models/providers/`: gemini, anthropic, openai für alle
+  OpenAI-kompatiblen), Schlüssel versiegelt im Tresor, **mehrere Schlüssel je
+  Anbieter**. Ist ein Modell, ein Schlüssel oder ein Anbieter am Limit,
+  antwortet von selbst der nächste, mit einem Satz im Chat
+  (`docs/CLAUDE-ANBINDUNG.md` 9 und 10). Ein Schlüssel wird an seinem Anfang
+  erkannt (`AQ.`/`AIza` Gemini, `gsk_` Groq, `sk-or-v1-` OpenRouter, `sk-ant-`
+  Claude, `sk-` OpenAI, ohne Vorsilbe Mistral), egal in welchem Feld er steht.
+  Lehnt Google die Suche ab (kostenlose Stufe), geht dieselbe Frage ohne.
+  **Nachschlagen in Wikipedia** für die KIs ohne eigene Suche, mit den Bildern
+  der Artikel (`src/models/nachschlagen.js`, Abschnitt 11). Claude ohne Guthaben bietet
+  „Kostenlos mit Gemini weiter“ an.
 - **Chat** – 22 Bausteine (`docs/ANTWORT-BAUSTEINE.md`), Fassungen je Antwort,
   Umwandeln, Markier-Menü, Code-Aktionen mit Sandkasten, Bilder und PDF,
   Sprechen, Vorlese-Spieler, Live-Fortschritt, Quellen im Text, Modus „Mein
@@ -112,7 +120,12 @@ diskutil (`test/mac-paket.test.js`). Der freiwillige Probelauf
 2. **Die KI braucht Internet.** Ohne Netz bleibt alles lesbar und bearbeitbar,
    aber es gibt keine neuen Antworten.
 3. **Gemini kostenlos** begrenzt die Anfragen je Tag; Google darf Inhalte zur
-   Verbesserung nutzen. Beides steht in der Oberfläche.
+   Verbesserung nutzen; die Google-Suche gibt es dort nicht. Das steht in der
+   Oberfläche. **Mit einem echten Schlüssel geprüft ist keiner der Anbieter**
+   (beim Bau gab es keinen): gegen das Echte nur, was ohne Schlüssel geht —
+   falsche Schlüssel bei Google, Mistral, Groq, OpenRouter und OpenAI, die
+   öffentlichen Modelllisten, OVHcloud ohne Schlüssel und das Nachschlagen in
+   Wikipedia; der Rest gegen Statisten (`test/*-statist.js`).
 4. **Verschlüsselung schützt ein ruhendes Laufwerk**, kein laufendes,
    kompromittiertes System.
 5. **Der ganze Bestand liegt im Arbeitsspeicher.** Bis etwa 100.000 Einträge
@@ -128,5 +141,9 @@ diskutil (`test/mac-paket.test.js`). Der freiwillige Probelauf
    schwebenden Fenster – ein Kürzel für den ganzen Computer kann eine Webseite
    nicht anlegen. Wie groß das schwebende Fenster am echten Bildschirm ist,
    ließ sich hier nicht messen (ohne Bildschirm nimmt Chromium die Tabgröße).
+8. **Nachschlagen ist Wikipedia, nicht das ganze Internet.** Nachrichten von
+   heute, Preise und Wetter findet es nicht; ohne Kontaktangabe erlaubt
+   Wikipedia 10 Anfragen je Minute (eine Suche braucht zwei). Eine echte
+   Websuche haben nur Claude und Gemini auf der bezahlten Stufe.
 
 Wie es weitergeht, steht in `docs/UEBERGABE.md`, Abschnitt 4.

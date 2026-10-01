@@ -145,7 +145,9 @@ function zeichneZustand(self) {
   const c = self.claude;
   if (mode === 'online' && c && c.grundCode === 'schleuse') {
     const name = c.name || 'Die KI';
-    const host = c.aktiv === 'claude' ? 'api.anthropic.com' : 'generativelanguage.googleapis.com';
+    // Der Host des Anbieters, der antworten soll (Mistral, Groq, … nennen ihren selbst).
+    const eigener = c.anbieter && c.anbieter[c.aktiv] && c.anbieter[c.aktiv].host;
+    const host = eigener || (c.aktiv === 'claude' ? 'api.anthropic.com' : 'generativelanguage.googleapis.com');
     box.appendChild(h('div.nwv__hinweis', null,
       icon((self.ctx.icons || {}).alert),
       h('span', null, text(`Die Schleuse lässt ${host} nicht durch – ${name} kann so nicht antworten.`)),

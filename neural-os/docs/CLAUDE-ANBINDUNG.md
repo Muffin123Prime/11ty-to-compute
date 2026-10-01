@@ -340,7 +340,7 @@ sagt ehrlich "Ohne Internetsuche".
 | HTTP / status | Code | Satz |
 |---|---|---|
 | 400/401/403 mit "API key", `UNAUTHENTICATED` | `GEMINI_SCHLUESSEL_FALSCH` | "Der Google-Schlüssel stimmt nicht." |
-| 429 `RESOURCE_EXHAUSTED` | `GEMINI_LIMIT` | "Google-Limit erreicht — … morgen geht es kostenlos weiter. Oder Claude wählen." |
+| 429 `RESOURCE_EXHAUSTED` | `GEMINI_LIMIT` | "Google-Limit erreicht — … spätestens morgen geht es kostenlos weiter. Oder eine weitere KI verbinden (Einstellungen → KI)." |
 | 503 `UNAVAILABLE` | `GEMINI_UEBERLASTET` | "Gemini ist gerade überlastet." |
 | 404 `NOT_FOUND` | `GEMINI_MODELL_UNBEKANNT` | "Dieses Modell gibt es bei Google nicht (mehr)." → nächstes Modell |
 | 429 mit `limit: 0` | `GEMINI_NICHT_KOSTENLOS` | "Dieses Gemini-Modell ist bei Google nicht kostenlos." → nächstes Modell |
@@ -353,10 +353,147 @@ sagt ehrlich "Ohne Internetsuche".
 
 **Verbrauch:** Tokens werden gezählt (`vault/gemini-verbrauch.json`), Kosten
 sind auf der kostenlosen Stufe 0 — die Oberfläche sagt "kostenlos" und nennt
-das Google-Limit. **Anbieterwahl:** `config.ki.anbieter` (`gemini` | `claude`);
-nach dem ersten erfolgreichen Verbinden ist der verbundene Anbieter die
-Einstellung, sind beide verbunden, gilt die Einstellung. Routen: `GET /api/ki`,
-`POST/DELETE /api/ki/:anbieter/schluessel`, `PATCH /api/ki {anbieter, modell}`;
-`/api/claude` bleibt als Alias. Geprüft gegen den Statisten
+das Google-Limit. **Anbieterwahl:** `config.ki.anbieter` (einer aus
+`src/models/ki.js` `ANBIETER`, Abschnitt 10); nach dem ersten erfolgreichen
+Verbinden ist der verbundene Anbieter die Einstellung, danach gilt sie
+(„Zuerst fragen“ ändert sie). Routen: `GET /api/ki`,
+`POST /api/ki/:anbieter/schluessel {schluessel, aktivieren?, zusaetzlich?, ersetzt?}`
+(`:anbieter` = `auto`: der Anbieter ergibt sich aus dem Schlüssel),
+`DELETE /api/ki/:anbieter/schluessel[?zugang=]`,
+`POST /api/ki/:anbieter/zugaenge/:zugang/vor`,
+`PATCH /api/ki {anbieter, modell, nachschlagen}`; `/api/claude` bleibt als Alias. Geprüft gegen den Statisten
 `test/gemini-statist.js` (`test/gemini.test.js`, `npm run check` Abschnitt 6b)
 — **nicht** gegen die echte Google-API: einen echten Schlüssel gab es beim Bau nicht. Gegen das echte Google geprüft ist nur, was ohne Schlüssel geht: Ein falscher Schlüssel kommt als 400 `INVALID_ARGUMENT` mit ErrorInfo `API_KEY_INVALID` (und das schon bei der Modellliste, vor jeder Prüfung des Modells). Der Statist kann jetzt auch die Modellliste, Fehler mit Einzelheiten (QuotaFailure, RetryInfo) und die Ablehnung der Suche (`test/ausweichen.test.js`).
+
+## 10. Weitere Anbieter (OpenAI-kompatibel)
+
+Der Nutzer am 01.10.2026: „mehrere Keys … wenn es noch andere Optionen gibt,
+wo ich einen API-Key kopieren kann für eine KI, dann nehme ich auch jede
+andere … falls bei einem das Limit leer geht, wechselt er zum nächsten“.
+**Nachgesehen am 01.10.2026** in den Unterlagen der Anbieter; die Fehlerformen
+mit einem absichtlich falschen Schlüssel **echt beobachtet** (obs.). Umgesetzt
+in `src/models/providers/openai.js` (ein Modul je Vorlage, derselbe Vertrag wie
+gemini.js und anthropic.js), eingehängt in `src/models/ki.js` (`profilFuer`).
+
+| Anbieter | Schlüssel | Adresse | kostenlos (Stand 01.10.2026) | falscher Schlüssel (obs.) |
+|---|---|---|---|---|
+| Mistral (Frankreich) | console.mistral.ai → API Keys, keine Vorsilbe | `https://api.mistral.ai/v1` | „Free mode“ ohne Karte; Limits je Modell nur in Admin → Limits | `401 {"detail":"Invalid API Key"}` (nicht die OpenAI-Form) |
+| Groq | console.groq.com/keys, `gsk_` | `https://api.groq.com/openai/v1` | je Modell und Organisation 30 RPM, **1 000 Anfragen/Tag**, 8K TPM, 200K Token/Tag (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.8-27b`; nur Qwen sieht Bilder) | `401 {"error":{"message":"Invalid API Key","code":"invalid_api_key"}}` |
+| OpenRouter | openrouter.ai/settings/keys, `sk-or-v1-` | `https://openrouter.ai/api/v1` | nur Modelle mit `:free`; 20 RPM, **50 Anfragen/Tag** (1 000, wer je 10 Credits gekauft hat) | `GET /key`: `401 {"error":{"message":"User not found.","code":401}}` — `GET /models` ist **öffentlich** (200 auch mit falschem Schlüssel), deshalb prüft Neural OS vorher `/key` |
+| OVHcloud AI Endpoints (Frankreich) | **keiner**, kein Konto | `https://oai.endpoints.kepler.ai.cloud.ovh.net/v1` | „Anonymous: 2 requests per minute, per IP and per model“ | — (429 obs.: `{"message":"API rate limit exceeded"}`, Kopf `ratelimit-reset`) |
+| OpenAI | platform.openai.com, `sk-` | `https://api.openai.com/v1` | nein (kostet je Nutzung) | `401 {"error":{…,"code":"invalid_api_key"}}`, der Schlüssel in der Meldung maskiert |
+
+Echt geprüft (01.10.2026) ist außerdem: OVHcloud antwortet ohne Schlüssel im
+Strom (`chat.completion.chunk`, `data: [DONE]`); die öffentliche Modellliste von
+OpenRouter (464 Modelle) ergibt mit Neural OS' Filter (`:free`, Werkzeuge) 15,
+die von OVHcloud (24) 10 Chat-Modelle. Mit einem echten Schlüssel von Mistral,
+Groq oder OpenRouter geprüft ist nichts – den gab es beim Bau nicht; der Weg
+dorthin läuft gegen den Statisten `test/openai-statist.js`
+(`test/openai-anbieter.test.js`, `tools/chat-beweis.js` Abschnitt 11).
+
+**Wie es funktioniert.** `POST {basis}/chat/completions` mit
+`Authorization: Bearer …` (OVHcloud ohne), Strom bis `data: [DONE]`;
+Kommentarzeilen (`: OPENROUTER PROCESSING`) werden übersprungen. Nach innen
+bleibt Claudes Blockform: system → `role:"system"`, tool_use → `tool_calls`
+(Argumente kommen in Stücken und werden nicht repariert), tool_result → je eine
+`role:"tool"`-Nachricht direkt nach dem Zug; **Werkzeug-IDs werden kurz und
+gleich gemacht** (9 Zeichen a-z0-9, Mistral verlangt das; ein Verlauf von
+Gemini oder Claude trägt deren IDs). Bilder als `image_url` mit `data:`-Adresse
+(ein Modell ohne Augen bekommt einen ehrlichen Satz statt des Bildes), PDF als
+Satz. Denken (`reasoning`/`reasoning_content`) wird angezeigt, geht aber nicht
+zurück (keine Signatur). Beim Verbinden fragt Neural OS `GET /models` (Mistral:
+`capabilities.completion_chat`, OpenRouter: `supported_parameters` mit `tools`,
+OVHcloud: `max_completion_tokens` > 0) und probt das beste Modell; Heilung bei
+400 (Bilder, Länge, Werkzeuge — mit Satz).
+
+**Fehler** je Anbieter mit eigener Vorsilbe (`MISTRAL_…`, `GROQ_…`, …):
+401/403 → `_SCHLUESSEL_FALSCH`, 402 / `insufficient_quota` → `_GUTHABEN`,
+404/410 → `_MODELL_UNBEKANNT`, 413 / Kontext → `_ZU_GROSS`, 429 → `_LIMIT`
+(mit `retry-after` / `ratelimit-reset`) oder `_LIMIT_TAG` (Text nennt den Tag,
+etwa OpenRouters `free-models-per-day`, oder bei Groq
+`x-ratelimit-remaining-requests: 0` — dort zählt dieser Kopf den **Tag**),
+5xx → `_UEBERLASTET`, sonst 400/422 → `_ANFRAGE_ABGELEHNT` mit dem Satz des
+Anbieters; ein Fehler mitten im Strom kommt als `finish_reason:"error"`.
+
+**Ausweichen.** Reihenfolge (`ANBIETER`): Gemini, Mistral, Groq, OpenRouter,
+OVHcloud, OpenAI, Claude — kostenlos zuerst, bezahlt zuletzt; der
+Eingestellte zuerst. Jeder Dienst weicht erst selbst aus (Modelle, Schlüssel),
+dann der Verbund (`ki.sendenAusweichend`): Ein Anbieter, dessen Schlüssel alle
+gerade pausieren (Limit, Überlastung), wird übersprungen und nur gefragt, wenn
+sonst keiner kann. Der Nutzer liest **einen** Satz je Zug, erst wenn der Ersatz
+wirklich antwortet, und er nennt den ersten, der nicht konnte („Gemini ist
+gerade am Limit – es antwortet Mistral.“); wer in einem Zug eingesprungen ist,
+antwortet auch dessen weitere Werkzeugrunden. Ausgewichen wird nur, solange
+noch nichts angekommen ist, nie bei offline/Schleuse/Abbruch und nie bei einer
+abgelehnten **Antwort** (Inhalt); eine abgelehnte **Anfrage** darf zum
+nächsten.
+
+**Bedingungen (ehrlich).** Mehrere Konten nur für mehr Limit verbieten alle:
+Mistral („The creation or use of multiple Mistral AI accounts by a single
+individual is strictly prohibited, including to bypass rate limits“), Groq
+(Nutzung „beyond published … rate limits … including by registering multiple
+accounts“), OpenRouter („create multiple accounts as a single user, for
+purposes of bypassing or circumventing use limits“; weitere Schlüssel
+„will not affect your rate limits“), Google (Abschnitt 9). Verschiedene
+Anbieter zu verbinden ist erlaubt. Die Oberfläche sagt das beim „Weiteren
+Schlüssel“ in einem Satz. Mistral: Training lässt sich in Admin → Privacy
+abschalten. OpenRouter: Verarbeitung nur in der EU gibt es erst ab dem
+Business-Tarif.
+
+Quellen: docs.mistral.ai (activate-and-generate-api-key, usage-limits,
+error-glossary), legal.mistral.ai/terms/eu-consumers-terms-of-service;
+console.groq.com/docs/rate-limits, /models, /legal/ai-policy;
+openrouter.ai/docs/api_reference/limits, /errors-and-debugging, /streaming,
+openrouter.ai/terms; OVHcloud AI Endpoints (Anonymous-Limit); platform.openai.com.
+
+## 11. Nachschlagen in Wikipedia
+
+Für die KIs ohne eigene Suche (Gemini auf der kostenlosen Stufe, Abschnitt 9;
+alle aus Abschnitt 10) — der Nutzer: „der kann dann für mich Sachen suchen im
+Internet“. Umgesetzt in `src/models/nachschlagen.js`, eingehängt in
+`src/models/chat.js` (das Werkzeug `wikipedia_suchen` hinten an die festen
+Werkzeuge, nicht für Claude, nicht im Modus „Mein Wissen“).
+
+- **Zwei Anfragen je Suche** an `https://{de|en}.wikipedia.org/w/api.php`
+  (`formatversion=2`): `list=search&srsearch=…&srlimit=5`, dann für die besten
+  drei `prop=extracts|info|pageimages&exintro=1&explaintext=1&exchars=1200
+  &inprop=url&redirects=1`. Gibt es auf Deutsch nichts, einmal auf Englisch.
+  An die KI gehen Titel, Kurztext und Adresse (als Inhalt markiert, nicht als
+  Anweisung), unter die Antwort die Artikel als Quellen. **Live geprüft am
+  01.10.2026** (Brandenburger Tor, Photosynthese, Ada Lovelace,
+  Quantenverschränkung, ein Wort ohne Treffer).
+- **Wikimedias Regeln** (nachgesehen am 01.10.2026): Die User-Agent-Policy
+  verlangt einen eigenen Namen („Scripts should use an informative User-Agent
+  string with contact information, or they may be blocked without notice“).
+  Neural OS sendet `NeuralOS/1.0 (private assistant on a USB stick; looks up
+  articles for one person) node/…` — **ohne Kontaktangabe**, denn die würde den
+  Nutzer verraten. Damit gilt das Limit für nicht Identifizierte: **10 Anfragen
+  je Minute** (mit Kontakt 200; Seite „Wikimedia APIs/Rate limits“, „new in
+  2026“); darüber 429 mit `Retry-After` — die KI bekommt dann den Satz
+  „Wikipedia bittet um eine kurze Pause …“. Eine Suche braucht zwei Anfragen.
+  (In der Bauumgebung teilen sich viele eine Adresse; dort kam das 429 echt.)
+- **Bilder** (der Nutzer: „mir Bilder geben“; erzeugen gibt es kostenlos nicht,
+  Abschnitt 9): Ein Treffer mit Bild (pageimages, `thumb.wikimedia.org`, ältere
+  `upload.wikimedia.org`) bekommt für die KI die Adresse
+  `/api/ki/bild?u=<Bildadresse ohne ?utm_…>`; die KI zeigt es mit
+  `![Titel](…)`. Die Route holt das Bild durch die Schleuse (nur https, nur
+  diese zwei Hosts, nur `/wikipedia/…`, nur JPEG/PNG/WEBP/GIF — kein SVG —,
+  höchstens 4 MB, die letzten 40 im Speicher) und gibt es mit
+  `Content-Security-Policy: default-src 'none'` und `nosniff` weiter. Die CSP
+  der App (`img-src 'self'`) bleibt, und der Browser verrät Wikimedia nichts.
+- **Schleuse:** nur `de.wikipedia.org`, `en.wikipedia.org` und für Bilder
+  `upload.wikimedia.org`, `thumb.wikimedia.org` (`allowedHosts`), und nur,
+  solange sie auf der Freigabeliste stehen. Das
+  tun sie, wenn „Nachschlagen“ an ist (`config.ki.nachschlagen`): Es geht von
+  selbst an, sobald eine KI ohne eigene Suche verbunden wird (oder beim Start,
+  wenn schon eine verbunden war), es sei denn, der Nutzer hat es je
+  ausgeschaltet — Einstellungen → KI → „Nachschlagen in Wikipedia“. Aus nimmt
+  alle vier von der Liste. Offline gibt es kein Werkzeug.
+- **Ehrlich:** Die Beschreibung des Werkzeugs sagt, dass es nur Wikipedia
+  durchsucht (keine Nachrichten von heute, keine Preise, kein Wetter), und ein
+  Satz im Systemtext sagt der KI, dass sie keine Websuche hat — sonst behauptet
+  ein Modell gern, es habe nachgesehen.
+
+Quellen: foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy,
+www.mediawiki.org/wiki/Wikimedia_APIs/Rate_limits,
+www.mediawiki.org/wiki/Wikimedia_APIs/Access_policy.

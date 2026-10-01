@@ -9,6 +9,7 @@
  *   DELETE /api/ki/:anbieter/schluessel    -> vergisst den Schlüssel
  *   PATCH  /api/ki                         { anbieter?, modell?, nachschlagen? (Wikipedia an/aus) }
  *   POST   /api/ki/transkribieren          { audio (WAV, Base64, höchstens 60 s), chatId? } -> { text, sekunden, modell }
+ *   GET    /api/ki/bild?u=…                -> ein Bild aus Wikipedia (Nachschlagen), durch die Schleuse geholt
  *
  * `/api/ki/name` (Name dieser KI) liegt in src/http/api/system.js und ist
  * etwas anderes: die Identität dieses Sticks, nicht der Anbieter.
@@ -105,6 +106,34 @@ function register(router) {
     }
     const text = (r.inhalt || []).filter((b) => b && b.type === 'text').map((b) => b.text).join('').trim();
     return { text, sekunden: Math.round(wav.sekunden * 10) / 10, modell: r.modell || gebaut.modell };
+  });
+
+  /**
+   * Ein Bild aus Wikipedia, durch die Schleuse geholt (src/models/nachschlagen.js):
+   * Die CSP der App lädt keine fremden Bilder, und so erfährt Wikimedia nichts
+   * über den Browser. ?u=<Bildadresse von upload/thumb.wikimedia.org>.
+   */
+  router.get('/api/ki/bild', async (rc) => {
+    rc.requireCapability('read');
+    const n = kiVon(rc).nachschlagen;
+    if (!n || typeof n.bild !== 'function') {
+      throw new NeuralError('SUBSYSTEM_UNAVAILABLE', 'Nachschlagen gibt es in dieser Instanz nicht.', { status: 503 });
+    }
+    const u = rc.query && typeof rc.query.get === 'function' ? rc.query.get('u') : null;
+    const controller = new AbortController();
+    rc.res.on('close', () => { if (!rc.res.writableEnded) controller.abort(); });
+    const { buf, typ } = await n.bild(u, { signal: controller.signal });
+    rc.res.writeHead(200, {
+      'Content-Type': typ,
+      'Content-Length': buf.length,
+      'Cache-Control': 'private, max-age=86400',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'",
+    });
+    if (rc.method === 'HEAD') rc.res.end();
+    else rc.res.end(buf);
+    rc.handled = true;
+    return undefined;
   });
 
   router.post('/api/ki/:anbieter/schluessel', async (rc) => {

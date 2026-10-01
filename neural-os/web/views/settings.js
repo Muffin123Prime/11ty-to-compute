@@ -660,8 +660,8 @@ function nachschlagenBlock(self, n) {
   };
   block.appendChild(h('div.setv__zeile', null,
     satz(n.an
-      ? 'Die KIs ohne eigene Suche (alle außer Claude) schlagen in Wikipedia nach, wenn du etwas gesucht haben willst. Wikipedia erfährt nur die Suchwörter. Nachrichten von heute, Preise und Wetter findet es nicht.'
-      : 'Aus: Ohne eigene Suche kann die KI nichts nachschlagen. An heißt: Sie schlägt in Wikipedia nach (de.wikipedia.org, en.wikipedia.org stehen dann auf der Freigabeliste).', '.meta'),
+      ? 'Die KIs ohne eigene Suche (alle außer Claude) schlagen in Wikipedia nach, wenn du etwas gesucht haben willst, und zeigen Bilder aus Wikipedia. Wikipedia erfährt nur die Suchwörter. Nachrichten von heute, Preise und Wetter findet es nicht.'
+      : 'Aus: Ohne eigene Suche kann die KI nichts nachschlagen. An heißt: Sie schlägt in Wikipedia nach und zeigt Bilder von dort (Wikipedia und wikimedia.org stehen dann auf der Freigabeliste).', '.meta'),
     knopf(self, n.an ? 'Ausschalten' : 'Einschalten', () => schalten(!n.an), { art: '.btn--ghost.btn--small', schluessel: 'nachschlagen' })));
   return block;
 }

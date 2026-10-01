@@ -196,11 +196,22 @@ Erweiterungen. Mehr in `docs/ERWEITERN.md`.
 
 - **Name dieser KI** – steht oben in der App und auf anderen Sticks („Anderer
   Stick: …“).
-- **KI** – Gemini (kostenlos) oder Claude verbinden, Schlüssel prüfen,
-  wechseln. Wer einen Schlüssel einfügt, bekommt diese KI als die, die ab
-  jetzt antwortet. Ein Google-Schlüssel (beginnt mit `AQ.`, ältere mit `AIza`) verbindet immer
-  Gemini, ein Anthropic-Schlüssel (`sk-ant-`) immer Claude – auch im falschen
-  Feld.
+- **KI** – oben steht in einem Satz, wer zuerst antwortet und wer einspringt.
+  Darunter **Gemini** (kostenlos) und **Weitere KIs**: Mistral, Groq und
+  OpenRouter (kostenlos, je ein Schlüssel vom Anbieter), OVHcloud (ganz ohne
+  Schlüssel, dafür langsam: **[Einschalten]**), OpenAI und Claude (kosten je
+  Nutzung). Jede KI zeigt ihre Schlüssel mit Zustand („bereit“, „am Limit bis
+  09:00“, „wird nicht angenommen“), dazu **[Zuerst fragen]**, **[Entfernen]**
+  und **[Weiterer Schlüssel]**. Ist eine KI am Limit, antwortet von selbst die
+  nächste – der Chat sagt es in einem Satz. Ein Schlüssel verrät, wem er gehört
+  (`AQ.`/`AIza` Google, `gsk_` Groq, `sk-or-v1-` OpenRouter, `sk-ant-` Claude,
+  `sk-` OpenAI, ohne Vorsilbe Mistral) – auch im falschen Feld. Ehrlich:
+  Mehrere kostenlose Konten beim selben Anbieter, nur für mehr Limit, verbieten
+  die Anbieter; verschiedene Anbieter zu verbinden ist erlaubt. Ganz unten
+  **Nachschlagen in Wikipedia** (an/aus): die KIs ohne eigene Suche schlagen
+  dort nach, die Artikel stehen als Quellen unter der Antwort, und auf „Zeig
+  mir …“ zeigen sie das Bild aus Wikipedia (Bilder erzeugen kann die
+  kostenlose KI nicht).
 - **Gedächtnis** – was sich die KI über dich gemerkt hat, mit Herkunft;
   einzeln **[Vergessen]** (mit Rückgängig) oder „Alles vergessen …“.
 - **Schutz** – PIN einrichten (4 bis 6 Ziffern). Mit PIN ist der Tresor
@@ -227,7 +238,7 @@ auch die erlaubten.
 |---|---|
 | **Offline** | Nichts verlässt diesen Rechner. Ab Werk eingestellt. Notizen, Kalender, Gehirn gehen weiter; die KI antwortet nicht. |
 | **Nur lokales Netz** | Zusätzlich dein WLAN – aber kein Internet, die KI ist so nicht erreichbar. |
-| **Online** | Die KI und die Websuche dürfen ins Internet. „Online gehen und verbinden“ beim Einrichten der KI stellt es ein. |
+| **Online** | Die KI, ihre Websuche und das Nachschlagen in Wikipedia dürfen ins Internet – nur zu den Adressen auf der Freigabeliste (die trägt Neural OS beim Verbinden ein). „Online gehen und verbinden“ beim Einrichten der KI stellt es ein. |
 
 Feiner geht es mit **Freigaben**: Geltungsbereich, Ablaufzeit und maximale
 Anzahl („dieser Agent, für diesen Lauf, für `de.wikipedia.org`, dreimal“).
@@ -297,7 +308,9 @@ erst mit [Übernehmen] wahr.
 | Der Chat sagt, es sei keine KI verbunden | **Einstellungen → KI**: Schlüssel einfügen, „Online gehen und verbinden“. |
 | „Das Guthaben bei Anthropic reicht nicht.“ | Daneben **[Kostenlos mit Gemini weiter]** antippen und einen Google-Schlüssel einfügen; ab dann antwortet Gemini. |
 | Im Chat gibt es nur ein Feld für Claude, oben fehlt die schwarze Pille | Im Browser läuft noch eine alte Fassung: die neue ZIP laden und dort den Starter doppelklicken (`docs/ERSTE-SCHRITTE.md`, 1.2) – er beendet die alte selbst. |
-| „Google-Limit erreicht“ | Die kostenlose Stufe ist für heute aufgebraucht. Morgen geht es weiter – oder Claude wählen. |
+| „Google-Limit erreicht“ | Die kostenlose Stufe ist für heute aufgebraucht. Morgen geht es weiter – oder unter **Einstellungen → KI → Weitere KIs** eine zweite KI verbinden (etwa Mistral, kostenlos, oder OVHcloud ganz ohne Schlüssel); sie springt dann von selbst ein. |
+| „… ist gerade am Limit – es antwortet …“ | Kein Fehler: Eine andere verbundene KI hat übernommen. |
+| Die KI sagt, sie könne etwas nicht nachsehen | Ohne eigene Suche schlägt sie nur in Wikipedia nach (**Einstellungen → KI → Nachschlagen in Wikipedia**, nur online). Nachrichten von heute, Preise und Wetter findet das nicht. |
 | Unten links „Offline“, die KI antwortet nicht | Netzstufe auf Online stellen (**Einstellungen → Netzwerk**). |
 | „Neural OS ist aus.“ | Neural OS läuft nicht (Stick gezogen, beendet). Den Starter noch einmal doppelklicken. |
 | „PIN nötig“ | Dieser Browser hat die KI noch nicht entsperrt; die PIN eingeben. |

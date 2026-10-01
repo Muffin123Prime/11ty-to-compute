@@ -92,7 +92,10 @@ const GROQ_SCHLUESSEL = 'gsk_statistGroq0123456789abcdefABCDEF';
 /**
  * Eine App mit Statisten. `anbieter`: {mistral: optionen, groq: …}; `gemini`: mit Gemini-Statist.
  */
-async function mitApp(fn, { anbieter = { mistral: { modelle: MISTRAL_MODELLE } }, gemini = false } = {}) {
+/** So lehnt Mistral einen falschen Schlüssel ab (echt beobachtet am 01.10.2026). */
+const MISTRAL_FALSCH = { status: 401, json: { detail: 'Invalid API Key' } };
+
+async function mitApp(fn, { anbieter = { mistral: { modelle: MISTRAL_MODELLE, falsch: MISTRAL_FALSCH } }, gemini = false } = {}) {
   const { home, cleanup } = tempHome('nos-openai');
   const statisten = {};
   for (const [id, o] of Object.entries(anbieter)) statisten[id] = await OA.starten(o);
@@ -244,7 +247,7 @@ test('Der Schlüssel verrät seinen Anbieter: „gsk_“ im Google-Feld wird Gro
     assert.equal(falschesFeld.json.error.message, 'Ein Groq-Schlüssel beginnt mit „gsk_“.');
   }, {
     anbieter: {
-      mistral: { modelle: MISTRAL_MODELLE },
+      mistral: { modelle: MISTRAL_MODELLE, falsch: MISTRAL_FALSCH },
       groq: { schluessel: GROQ_SCHLUESSEL, modelle: ['openai/gpt-oss-120b', 'whisper-large-v3', 'meta-llama/llama-guard-4-12b', 'qwen/qwen3.8-27b'] },
     },
   });
@@ -336,6 +339,44 @@ test('Lehnt Mistral die Beschreibung der Werkzeuge ab (400), geht die Frage einm
     assert.equal(ohne.body.tools, undefined);
     assert.equal(ohne.body.tool_choice, undefined);
   });
+});
+
+test('Denken in <think>-Klammern (Qwen bei Groq, offene Modelle) ist Denken, nicht die Antwort – auch über Stückgrenzen', async () => {
+  await mitApp(async ({ base, s, chatId }) => {
+    const m = s.mistral;
+    assert.equal((await anfrage(base, 'POST', '/api/ki/mistral/schluessel', { schluessel: m.schluessel })).status, 200);
+    const st = (content) => OA.chunk({ role: 'assistant', content });
+    m.weiter(OA.antwort([st('<thi'), st('nk>Ich über'), st('lege kurz.</th'), st('ink>Die Antwort ist 42'), st(' – und a <'), st(' b.')], OA.B.ende()));
+    const r = await strom(base, `/api/chats/${chatId}/messages`, { inhalt: 'Frage' });
+    assert.equal(textVon(r.ereignisse), 'Die Antwort ist 42 – und a < b.');
+    assert.equal(r.ereignisse.filter((e) => e.name === 'denken').map((e) => e.data.delta).join(''), 'Ich überlege kurz.');
+    m.weiter(OA.antwort(OA.B.text('Ok.'), OA.B.ende()));
+    await strom(base, `/api/chats/${chatId}/messages`, { inhalt: 'Und?' });
+    const verlauf = JSON.stringify(m.stromAnfragen()[1].body.messages);
+    assert.ok(!verlauf.includes('überlege') && !verlauf.includes('<think>'), 'das Denken geht nicht zurück');
+    assert.ok(verlauf.includes('Die Antwort ist 42 – und a < b.'));
+  });
+});
+
+test('OpenAI bekommt die Länge als max_completion_tokens; sagt ein Anbieter, er kenne den Namen nicht, geht es mit dem anderen', () => {
+  const oai = openai.erstellen('openai');
+  const b1 = oai.anfrageBauen({ modell: 'gpt-6-luna', nachrichten: [{ role: 'user', content: 'Hi' }] }).body;
+  assert.equal(b1.max_completion_tokens, 8192);
+  assert.equal(b1.max_tokens, undefined);
+  const mistral = openai.erstellen('mistral');
+  const b2 = mistral.anfrageBauen({ modell: 'mistral-small-latest', nachrichten: [{ role: 'user', content: 'Hi' }] }).body;
+  assert.equal(b2.max_tokens, 8192);
+  const { heilen } = mistral.__internals;
+  const h1 = heilen(b2, "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", []);
+  assert.equal(h1.art, 'laengenname');
+  assert.equal(h1.body.max_completion_tokens, 8192);
+  assert.equal('max_tokens' in h1.body, false);
+  const h2 = heilen(b1, 'Unrecognized request argument supplied: max_completion_tokens', []);
+  assert.equal(h2.art, 'laengenname');
+  assert.equal(h2.body.max_tokens, 8192);
+  const h3 = heilen(b2, 'max_tokens is too large: 8192. This model supports at most 4096 completion tokens.', []);
+  assert.equal(h3.art, 'laenge');
+  assert.equal(h3.body.max_tokens, 2048);
 });
 
 test('Bausteine: Erkennung am Schlüssel, kurze IDs, Verlauf von Gemini und Claude, Denken, Fehler als deutsche Sätze', async () => {

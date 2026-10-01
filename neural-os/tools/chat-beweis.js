@@ -1940,7 +1940,8 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       for (let i = 0; i < 8; i++) gemini.weiter(tag());
       mistral.weiter(
         oaStatist.antwort(oaStatist.B.aufruf('wikipedia_suchen', { suche: 'Brandenburger Tor' }), oaStatist.B.ende('tool_calls')),
-        oaStatist.antwort(oaStatist.B.text('Das Brandenburger Tor wurde von 1789 bis 1793 nach Entwürfen von Carl Gotthard Langhans gebaut.'), oaStatist.B.ende()),
+        // So zeigt die KI das Bild, das das Nachschlagen nennt (eine Adresse in Neural OS, Abschnitt 11 der Anbindung).
+        oaStatist.antwort(oaStatist.B.text(`Das Brandenburger Tor wurde von 1789 bis 1793 nach Entwürfen von Carl Gotthard Langhans gebaut.\n\n![Brandenburger Tor](/api/ki/bild?u=${encodeURIComponent(`${wiki.url}/wikipedia/commons/thumb/1/11/Tor.png/500px-Tor.png`)})`), oaStatist.B.ende()),
       );
       await p14.goto(`${base}/#/chat`, { waitUntil: 'domcontentloaded' });
       await p14.locator('.cv-composer__feld').waitFor({ timeout: 8000 });
@@ -1959,6 +1960,10 @@ async function warteBis(fn, { timeout = 8000, alle = 60 } = {}) {
       const quelle14 = p14.locator('.cv-msg').last().locator('.cv-quelle', { hasText: 'Brandenburger Tor – Wikipedia' });
       check(await quelle14.count() >= 1 && /de\.wikipedia\.org/.test(await quelle14.first().innerText().catch(() => '')),
         'Unter der Antwort: der Wikipedia-Artikel als Quelle (de.wikipedia.org)');
+      const bild14 = p14.locator('.cv-msg').last().locator('img.md-image');
+      const geladen14 = await warteBis(async () => (await bild14.count()) && bild14.first().evaluate((img) => img.complete && img.naturalWidth > 0), { timeout: 5000 });
+      check(!!geladen14 && /^\/api\/ki\/bild\?u=/.test(await bild14.first().getAttribute('src')),
+        'Das Bild aus Wikipedia steht in der Antwort – geholt von Neural OS (/api/ki/bild), nicht vom Browser bei Wikipedia');
       const anMistral = mistral.stromAnfragen()[0] && mistral.stromAnfragen()[0].body;
       check(!!anMistral && (anMistral.tools || []).some((t) => t.function && t.function.name === 'wikipedia_suchen') && wiki.anfragen.length === 2,
         'Mistral bekam das Werkzeug „wikipedia_suchen“, und Neural OS hat zweimal bei Wikipedia nachgefragt (suchen, Kurztexte)', `Wikipedia-Anfragen: ${wiki.anfragen.length}`);

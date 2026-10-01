@@ -407,7 +407,7 @@ function createAnbieterDienst(profil, deps = {}) {
     const liste = erster && Array.isArray(erster.modelle) && erster.modelle.length
       ? erster.modelle.slice(0, 6).map((x) => ({ id: x.id, name: x.name || modul.modellInfo(x.id).name, hinweis: x.hinweis || '' }))
       : Object.values(modul.MODELLE).map((x) => ({ id: x.id, name: x.name, hinweis: x.hinweis }));
-    if (!liste.some((x) => x.id === m)) liste.unshift({ id: m, name: namen(m), hinweis: '' });
+    if (m && !liste.some((x) => x.id === m)) liste.unshift({ id: m, name: namen(m), hinweis: '' });
     return {
       anbieter: profil.id,
       name: profil.name,

@@ -124,6 +124,8 @@ const VORLAGEN = Object.freeze({
     seite: 'platform.openai.com → API keys (kostet je Nutzung)',
     platzhalter: 'sk-…',
     hinweis: 'Kostet je Nutzung; die Rechnung stellt OpenAI.',
+    // OpenAI: `max_tokens` ist veraltet, die Denkmodelle lehnen es ab.
+    laengenFeld: 'max_completion_tokens',
     modelle: [],
     modellMuster: /^(gpt|o\d|chatgpt)[a-z0-9.-]*$/,
     ausschluss: /(realtime|audio|tts|transcribe|image|embedding|search|moderation|instruct|codex|dall)/,
@@ -175,6 +177,10 @@ function erstellen(vorlageId) {
     id: m.id, name: m.name, hinweis: V.kostenlos ? 'Kostenlos.' : '', bilder: m.bilder !== false,
   })])));
   const STANDARD_MODELL = V.modelle.length ? V.modelle[0].id : null;
+  /** Wie die Antwortlänge heißt: bei den meisten `max_tokens`, bei OpenAI `max_completion_tokens`. */
+  const LAENGE = V.laengenFeld || 'max_tokens';
+  const laengenName = (body) => (body && Object.prototype.hasOwnProperty.call(body, 'max_completion_tokens') ? 'max_completion_tokens'
+    : (body && Object.prototype.hasOwnProperty.call(body, 'max_tokens') ? 'max_tokens' : null));
   const ABLEHNUNG = Object.freeze({
     code: `${P}_ABGELEHNT`,
     satz: `${V.name} hat die Antwort abgelehnt. Formuliere sie anders oder frag etwas anderes.`,
@@ -390,7 +396,7 @@ function erstellen(vorlageId) {
       body.tools = tools;
       body.tool_choice = 'auto';
     }
-    body.max_tokens = Number.isFinite(p.maxTokens) && p.maxTokens > 0 ? Math.floor(p.maxTokens) : MAX_TOKENS;
+    body[LAENGE] = Number.isFinite(p.maxTokens) && p.maxTokens > 0 ? Math.floor(p.maxTokens) : MAX_TOKENS;
     return { body, modell: info.id, stream: body.stream, betas: [], denken: null };
   }
 
@@ -429,8 +435,19 @@ function erstellen(vorlageId) {
         : m));
       return { art: 'bilder', body: { ...body, messages }, hinweis: `Ohne Bild: ${V.name} kann mit diesem Modell keine Bilder sehen.` };
     }
-    if (!geheilt.includes('laenge') && body.max_tokens > 2048 && /max_tokens|max_completion_tokens|maximum.*tokens|tokens.*maximum/i.test(msg)) {
-      return { art: 'laenge', body: { ...body, max_tokens: 2048 } };
+    // "Unsupported parameter: 'max_tokens' … Use 'max_completion_tokens' instead." (und umgekehrt)
+    if (!geheilt.includes('laengenname') && /unsupported|not supported|unrecognized|unknown|extra/i.test(msg)) {
+      const alt = laengenName(body);
+      const neu = alt === 'max_tokens' ? 'max_completion_tokens' : 'max_tokens';
+      if (alt && msg.includes(alt)) {
+        const b = { ...body, [neu]: body[alt] };
+        delete b[alt];
+        return { art: 'laengenname', body: b };
+      }
+    }
+    const feld = laengenName(body);
+    if (!geheilt.includes('laenge') && feld && body[feld] > 2048 && /max_tokens|max_completion_tokens|maximum.*tokens|tokens.*maximum/i.test(msg)) {
+      return { art: 'laenge', body: { ...body, [feld]: 2048 } };
     }
     if (!geheilt.includes('werkzeuge') && Array.isArray(body.tools) && /tool|function|schema/i.test(msg)) {
       const neu = { ...body };
@@ -459,7 +476,8 @@ function erstellen(vorlageId) {
     if (signal && signal.aborted) throw new AbortedError('Die Antwort wurde abgebrochen.');
     // Das Modell, das der Dienst gewählt hat (er weicht womöglich aus).
     body = { ...body, model: modellInfo(modell).id, stream };
-    if (Number.isFinite(ausgabeMax) && ausgabeMax > 0 && body.max_tokens > ausgabeMax) body.max_tokens = ausgabeMax;
+    const feld = laengenName(body);
+    if (feld && Number.isFinite(ausgabeMax) && ausgabeMax > 0 && body[feld] > ausgabeMax) body[feld] = ausgabeMax;
     const url = adresse(basis, '/chat/completions');
     const kopf = koepfe(apiKey);
     const begonnen = Date.now();
@@ -536,6 +554,33 @@ function erstellen(vorlageId) {
       b[feld] += delta;
       melden({ art, index: z.bloecke.length - 1, delta });
     };
+    // Manche Modelle (Qwen 3 bei Groq, offene Modelle bei OVHcloud) schreiben
+    // ihr Denken als <think>…</think> in den Text. Das ist Denken, nicht die
+    // Antwort -- auch wenn eine Klammer über zwei Stücke geht.
+    const klammer = { drin: false, rest: '' };
+    const inhaltDazu = (stueck) => {
+      let t = klammer.rest + stueck;
+      klammer.rest = '';
+      while (t) {
+        const marke = klammer.drin ? '</think>' : '<think>';
+        const i = t.indexOf(marke);
+        if (i >= 0) {
+          if (i > 0) textDazu(t.slice(0, i), klammer.drin ? 'denken' : 'text');
+          klammer.drin = !klammer.drin;
+          t = t.slice(i + marke.length);
+          continue;
+        }
+        // Ein angefangenes Zeichen der Marke am Ende: auf das nächste Stück warten.
+        let halb = 0;
+        for (let n = Math.min(marke.length - 1, t.length); n > 0; n--) {
+          if (marke.startsWith(t.slice(-n))) { halb = n; break; }
+        }
+        const fertig = t.slice(0, t.length - halb);
+        if (fertig) textDazu(fertig, klammer.drin ? 'denken' : 'text');
+        klammer.rest = t.slice(t.length - halb);
+        t = '';
+      }
+    };
     const aufrufDazu = (tc) => {
       const i = Number.isInteger(tc.index) ? tc.index : z.aufrufe.size;
       let a = z.aufrufe.get(i);
@@ -563,8 +608,8 @@ function erstellen(vorlageId) {
       const delta = c.delta || c.message || {};
       const denken = typeof delta.reasoning_content === 'string' ? delta.reasoning_content : (typeof delta.reasoning === 'string' ? delta.reasoning : '');
       if (denken) textDazu(denken, 'denken');
-      if (typeof delta.content === 'string') textDazu(delta.content, 'text');
-      else if (Array.isArray(delta.content)) for (const t of delta.content) if (t && typeof t.text === 'string') textDazu(t.text, 'text');
+      if (typeof delta.content === 'string') inhaltDazu(delta.content);
+      else if (Array.isArray(delta.content)) for (const t of delta.content) if (t && typeof t.text === 'string') inhaltDazu(t.text);
       if (Array.isArray(delta.tool_calls)) for (const tc of delta.tool_calls) if (tc) aufrufDazu(tc);
       if (c.finish_reason) {
         z.finish = String(c.finish_reason);
@@ -613,6 +658,10 @@ function erstellen(vorlageId) {
       }
     }
 
+    if (klammer.rest) {
+      textDazu(klammer.rest, klammer.drin ? 'denken' : 'text');
+      klammer.rest = '';
+    }
     const b = letzter();
     if (b) abschliessen(b, z.bloecke.length - 1);
     // Werkzeugaufrufe: erst am Ende vollständig (die Argumente kommen in Stücken).
@@ -701,7 +750,7 @@ function erstellen(vorlageId) {
   /** Der kleine Probeaufruf beim Verbinden: ohne Strom, ohne Werkzeuge, wenige Token. */
   async function probe({ basis, apiKey, modell, gate, signal, timeoutMs = 30000 } = {}) {
     const id = modellInfo(modell).id;
-    const body = { model: id, messages: [{ role: 'user', content: 'Antworte nur mit: OK' }], max_tokens: 16, stream: false };
+    const body = { model: id, messages: [{ role: 'user', content: 'Antworte nur mit: OK' }], [LAENGE]: 16, stream: false };
     const r = await senden({ basis, apiKey, modell: id, body, stream: false, gate, scope: 'global', purpose: `${V.name}-Schlüssel prüfen`, signal, verbindenMs: timeoutMs });
     return { ok: true, modell: r.modell || id, usage: r.usage, ms: r.ms };
   }
@@ -735,10 +784,23 @@ function erstellen(vorlageId) {
     }
   }
 
-  /** Reihenfolge: die bekannten guten zuerst (in ihrer Reihenfolge), dann der Rest nach Namen. */
+  /** Reihenfolge: die bekannten guten zuerst (in ihrer Reihenfolge), dann der Rest. */
   function rangVon(id) {
     const i = V.modelle.findIndex((m) => m.id === id);
     return i >= 0 ? i : 1000;
+  }
+
+  /**
+   * Unter den unbekannten: neuere Version zuerst ("gpt-6.1-…" vor "gpt-4o"),
+   * teure Pro- und Vorschau-Fassungen zuletzt, sonst nach Namen.
+   */
+  function vergleichUnbekannt(a, b) {
+    const teuer = (id) => (/(^|[-_.])(pro|preview|vorschau)([-_.]|$)/i.test(id) ? 1 : 0);
+    const version = (id) => {
+      const m = /(\d+(?:\.\d+)?)/.exec(id.replace(/^[^/]*\//, ''));
+      return m ? Number(m[1]) : 0;
+    };
+    return (teuer(a) - teuer(b)) || (version(b) - version(a)) || (a < b ? -1 : (a > b ? 1 : 0));
   }
 
   /**
@@ -773,7 +835,7 @@ function erstellen(vorlageId) {
         bilder,
       });
     }
-    liste.sort((a, b) => (rangVon(a.id) - rangVon(b.id)) || (a.id < b.id ? -1 : 1));
+    liste.sort((a, b) => (rangVon(a.id) - rangVon(b.id)) || vergleichUnbekannt(a.id, b.id));
     return liste;
   }
 
