@@ -1,0 +1,7 @@
+{
+  "name": "cache-anzeige",
+  "version": "1.0.0",
+  "description": "Zeigt in der Statuszeile, ob Claudes Cache warm ist, wie lange noch, wie voll der Kontext ist und was Neu-Einlesen und die Sitzung zum API-Preis kosten. Warnt kurz bevor der Cache kalt wird.",
+  "author": { "name": "Titus Harmann" },
+  "types": "./types/index.d.ts"
+}

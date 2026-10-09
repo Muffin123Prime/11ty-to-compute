@@ -1,0 +1,7 @@
+{
+  "name": "chat-anzeige",
+  "version": "1.0.0",
+  "description": "Zeigt über dem Eingabefeld alle offenen Claude-Code-Chats: Ziel, Fortschritt der Aufgabenliste als Balken und wann jeder fertig wird. /chats öffnet dieselbe Liste als Fenster.",
+  "author": { "name": "Titus Harmann" },
+  "types": "./types/index.d.ts"
+}
