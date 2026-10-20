@@ -34,5 +34,5 @@ Ziel: täglich automatisch kurze, hochkante Erklärvideos (TikTok und Instagram 
 - Werkzeug: `upload/tiktok_upload.py`. Standard ist ein Testlauf ohne Netzwerk, `--send` sendet wirklich. Modus `draft` legt einen Entwurf ab (video.upload), `direct` postet (video.publish). Videos werden als KI-erzeugt gekennzeichnet.
 - Ungeprüfte Apps posten nur privat. Das Konto muss dafür privat sein. Öffentlich geht es erst nach der TikTok-Prüfung.
 - Umgebungsvariablen: `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_REDIRECT_URI`. Zugangstoken liegen in `.secrets/` (git-ignoriert) und gehen mit der Sitzung verloren.
-- Webseiten für TikTok in `legal/`: Datenschutz, Nutzungsbedingungen, Rückleitung (zeigt den Code zum Kopieren). Platzhalter `[NAME DES BETREIBERS]` und `[KONTAKT-E-MAIL]` vor dem Veröffentlichen ersetzen.
+- Webseiten für TikTok in `legal/`: Datenschutz, Nutzungsbedingungen, Rückleitung (zeigt den Code zum Kopieren). Betreiber: Nachgehakt, Kontakt: nachgehakt0@gmail.com (bewusst keine Wohnanschrift).
 - Offen: Wo die Seiten gehostet werden (Repository ist privat, GitHub Pages braucht dann einen bezahlten Tarif). Wo die Token dauerhaft liegen, damit tägliche Läufe ohne Anmeldung funktionieren.
