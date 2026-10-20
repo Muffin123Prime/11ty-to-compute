@@ -157,17 +157,17 @@ SC.eliza=(tl,t)=>{
   ctx.fillStyle='rgba(44,255,154,.14)';ctx.beginPath();ctx.roundRect(70,250,940,76,[26,26,0,0]);ctx.fill();
   [COL.pink,COL.amber,COL.green].forEach((c,i)=>{ctx.fillStyle=c;ctx.beginPath();ctx.arc(116+i*40,288,12,0,7);ctx.fill()});
   glowText('ELIZA  —  MIT  —  1966',560,290,30,COL.green,{font:MONO,weight:700,blur:8,spacing:2});
-  let y=350;const font=`700 36px ${MONO}`;
+  let y=345;const font=`700 32px ${MONO}`;
   for(const [st,who,txt] of ELIZA){
     const n=Math.floor(clamp((tl-st)/(txt.length*.045))*txt.length);if(tl<st)continue;
-    const lines=wrap(txt,640,font),h=lines.length*46+30,bw=Math.min(700,Math.max(...lines.map(l=>(ctx.measureText(l).width)))+50);
+    const lines=wrap(txt,660,font),h=lines.length*40+26,bw=Math.min(700,Math.max(...lines.map(l=>(ctx.measureText(l).width)))+50);
     const x=who==='u'?1010-30-bw:70+30;
     ctx.fillStyle=who==='u'?hexA(COL.cyan,.18):hexA(COL.green,.16);ctx.strokeStyle=who==='u'?COL.cyan:COL.green;ctx.lineWidth=3;
     ctx.beginPath();ctx.roundRect(x,y,bw,h,18);ctx.fill();ctx.stroke();
     ctx.font=font;ctx.fillStyle=who==='u'?'#bff4ff':'#c9ffe5';ctx.textAlign='left';ctx.textBaseline='middle';
-    let shown=txt.slice(0,n),L2=wrap(shown,640,font);
-    L2.forEach((ln,i)=>ctx.fillText(ln+(i===L2.length-1&&n<txt.length&&Math.floor(tl*8)%2?'▌':''),x+25,y+38+i*46));
-    y+=h+22;
+    let shown=txt.slice(0,n),L2=wrap(shown,660,font);
+    L2.forEach((ln,i)=>ctx.fillText(ln+(i===L2.length-1&&n<txt.length&&Math.floor(tl*8)%2?'▌':''),x+25,y+33+i*40));
+    y+=h+16;
   }
   ctx.restore();
 };
