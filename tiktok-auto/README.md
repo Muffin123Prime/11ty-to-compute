@@ -36,3 +36,12 @@ Ziel: täglich automatisch kurze, hochkante Erklärvideos (TikTok und Instagram 
 - Umgebungsvariablen: `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_REDIRECT_URI`. Zugangstoken liegen in `.secrets/` (git-ignoriert) und gehen mit der Sitzung verloren.
 - Webseiten für TikTok in `legal/`: Datenschutz, Nutzungsbedingungen, Rückleitung (zeigt den Code zum Kopieren). Betreiber: Nachgehakt, Kontakt: nachgehakt0@gmail.com (bewusst keine Wohnanschrift).
 - Offen: Wo die Seiten gehostet werden (Repository ist privat, GitHub Pages braucht dann einen bezahlten Tarif). Wo die Token dauerhaft liegen, damit tägliche Läufe ohne Anmeldung funktionieren.
+
+## Stand TikTok-Einrichtung (21.10.)
+- Konto Nachgehakt, Profilbild in `brand/`. Entwickler-App "Nachgehakt" angelegt, Entwurf in Production gespeichert.
+- Seiten liegen auf https://nachgehakt.netlify.app (Datenschutz, Nutzungsbedingungen, callback.html, Bestätigungsdatei). Adresse bei TikTok als bestätigt eingetragen. Änderungen: ZIP bei Netlify unter Deploys hochladen.
+- In Production liegt ein **Platzhaltervideo** (ki_01.mp4) nur zum Speichern. Vor dem Einreichen ersetzen durch ein echtes Demovideo, das den Ablauf in der Sandbox zeigt. Nicht einreichen, bevor das ersetzt ist.
+- Sandbox "nachgehakt-test" angelegt. Sie hat **eigene Zugangsdaten** (Client key beginnt mit `sb`). Noch zu tun: Products, Scopes, Target users prüfen, Apply changes.
+- Danach in der Cloud-Umgebung "Ki" die Variablen `TIKTOK_CLIENT_KEY` und `TIKTOK_CLIENT_SECRET` auf die **Sandbox-Werte** setzen und `TIKTOK_REDIRECT_URI=https://nachgehakt.netlify.app/callback.html` ergänzen. Dann neue Sitzung starten (Zweig tiktok-auto-pipeline).
+- Dann: `python3 upload/tiktok_upload.py auth-url`, Anmeldung im Browser, Code von callback.html kopieren, `exchange <code>`, danach Testupload mit `--send` als Entwurf.
+- Ungeprüfte Apps posten nur privat, das Konto muss privat sein.
