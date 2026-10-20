@@ -15,6 +15,7 @@ const browser=await chromium.launch({args:['--disable-gpu','--font-render-hintin
 const page=await browser.newPage({viewport:{width:1080,height:1920}});
 await page.goto('file://'+path.resolve('render/anim.html'));
 await page.evaluate(tl=>window.setTimeline(tl),TL);
+if(args.includes('--guides'))await page.evaluate(()=>{window.GUIDES=true});
 await page.evaluate(()=>document.fonts.ready);
 const grab=async t=>{
   const d=await page.evaluate(t=>{window.drawFrame(t);return document.getElementById('c').toDataURL('image/jpeg',0.93)},t);
