@@ -138,10 +138,10 @@ function bigText(txt,x,y,size,o={}){ctx.save();ctx.font=`900 ${size}px ${FONT}`;
   ctx.shadowColor='rgba(20,5,50,.65)';ctx.shadowBlur=22;ctx.shadowOffsetY=8;ctx.lineJoin='round';ctx.lineWidth=size*.12;ctx.strokeStyle='rgba(30,8,70,.85)';ctx.strokeText(txt,x,y);
   ctx.shadowColor='transparent';ctx.fillStyle=o.color||'#fff';ctx.fillText(txt,x,y);ctx.restore()}
 function eraLabel(t,title,sub){
-  ctx.save();ctx.textAlign='right';ctx.textBaseline='alphabetic';ctx.shadowColor='rgba(20,5,50,.7)';ctx.shadowBlur=10;
-  ctx.fillStyle='#fff';ctx.font=`800 42px ${FONT}`;ctx.fillText(title,960,150);
-  ctx.font=`700 30px ${FONT}`;ctx.fillStyle='rgba(255,255,255,.9)';ctx.fillText(sub,960,190);
-  ctx.shadowBlur=0;ctx.fillStyle='rgba(255,255,255,.28)';ctx.fillRect(660,210,300,6);ctx.fillStyle=PL.red;ctx.fillRect(660,210,300*clamp(t/TL.duration),6);ctx.restore()}
+  ctx.save();ctx.textAlign='right';ctx.textBaseline='alphabetic';ctx.shadowColor='rgba(20,5,50,.7)';ctx.shadowBlur=8;
+  ctx.fillStyle='#fff';ctx.font=`800 30px ${FONT}`;ctx.fillText(title,960,140);
+  ctx.font=`700 22px ${FONT}`;ctx.fillStyle='rgba(255,255,255,.88)';ctx.fillText(sub,960,167);
+  ctx.shadowBlur=0;ctx.fillStyle='rgba(255,255,255,.28)';ctx.fillRect(760,179,200,4);ctx.fillStyle=PL.red;ctx.fillRect(760,179,200*clamp(t/TL.duration),4);ctx.restore()}
 
 function earth(cx,cy,r,rot){
   ctx.save();

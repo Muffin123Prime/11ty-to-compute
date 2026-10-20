@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Erzeugt Sprecherstimme (edge-tts) satzweise, misst Wortzeiten und schreibt timeline.json + voice.wav."""
-import asyncio, json, os, subprocess, sys, wave, re
+import asyncio, base64, json, os, re, subprocess, sys, urllib.request, wave
 import numpy as np
-import edge_tts
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from align import align_words
 
 SR = 44100
 PROXY = os.environ.get("HTTPS_PROXY")
@@ -15,7 +16,40 @@ def load_wav(path):
         a = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768
     return a
 
+def gemini_tts(i, text):
+    """Google Gemini Sprachausgabe: steuerbar per Stil-Satz (z.B. rau, spannend). Braucht GEMINI_API_KEY."""
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("GEMINI_API_KEY fehlt: in den Einstellungen der Umgebung hinterlegen")
+    style = ep.get("style", "")
+    prompt = f"{style}: {text}" if style else text
+    body = {"contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseModalities": ["AUDIO"],
+                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": ep.get("gemini_voice", "Algenib")}}}}}
+    last = None
+    for model in ep.get("gemini_models", ["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"]):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", "x-goog-api-key": key})
+        for attempt in range(3):
+            try:
+                resp = json.load(urllib.request.urlopen(req, timeout=180))
+                part = resp["candidates"][0]["content"]["parts"][0]["inlineData"]
+                m = re.search(r"rate=(\d+)", part.get("mimeType", "")); rate = int(m.group(1)) if m else 24000
+                path = f"{out}/s{i:02d}.wav"
+                with wave.open(path, "wb") as w:
+                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+                    w.writeframes(base64.b64decode(part["data"]))
+                return path
+            except Exception as e:
+                last = e
+                import time; time.sleep(3)
+    raise RuntimeError(f"Gemini-Sprachausgabe fehlgeschlagen: {last}")
+
 async def synth(i, text):
+    if ep.get("provider") == "gemini":
+        return await asyncio.to_thread(gemini_tts, i, text), []
+    import edge_tts
     mp3 = f"{out}/s{i:02d}.mp3"
     last = None
     for attempt in range(4):
@@ -48,7 +82,7 @@ t = ep.get("start_offset", 0.5)
 chunks = [np.zeros(int(t * SR), dtype=np.float32)]
 sentences = []
 for i, (s, (mp3, bwords)) in enumerate(zip(ep["sentences"], results)):
-    wav = f"{out}/s{i:02d}.wav"
+    wav = f"{out}/s{i:02d}_raw.wav"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", mp3, "-ac", "1", "-ar", str(SR), wav], check=True)
     a = load_wav(wav)
     thr = 0.012
@@ -61,7 +95,14 @@ for i, (s, (mp3, bwords)) in enumerate(zip(ep["sentences"], results)):
     toks = s["text"].split()
     # Wortzeiten: aus Boundary-Daten, wenn Anzahl passt, sonst proportional zur Zeichenlaenge
     words = []
-    if len(bwords) == len(toks):
+    if ep.get("align", "whisper") == "whisper":
+        trim = f"{out}/s{i:02d}.wav"
+        with wave.open(trim, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
+            w.writeframes((np.clip(a, -1, 1) * 32767).astype(np.int16).tobytes())
+        for tok, x in zip(toks, align_words(trim, toks)):
+            words.append({"w": tok, "s": float(x["s"]), "e": float(x["e"])})
+    elif len(bwords) == len(toks):
         for tok, b in zip(toks, bwords):
             ws = max(0.0, b["s"] - lead_s)
             words.append({"w": tok, "s": ws, "e": ws + b["d"]})
@@ -77,7 +118,7 @@ for i, (s, (mp3, bwords)) in enumerate(zip(ep["sentences"], results)):
         w["s"] += t; w["e"] += t
     sentences.append({"text": s["text"], "scene": s["scene"], "accent": s.get("accent", []),
                       "event": s.get("event"), "start": t, "end": t + dur, "words": words,
-                      "boundary_ok": len(bwords) == len(toks)})
+                      "boundary_ok": ep.get("align", "whisper") == "whisper" or len(bwords) == len(toks)})
     chunks.append(a)
     gap = s.get("gap_after", 0.22)
     chunks.append(np.zeros(int(gap * SR), dtype=np.float32))
