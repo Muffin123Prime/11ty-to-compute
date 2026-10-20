@@ -1,0 +1,26 @@
+<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#140a2e}svg{display:block}</style></head><body>
+<svg id="s" width="1080" height="1080" viewBox="0 0 1080 1080" xmlns="http://www.w3.org/2000/svg">
+<defs>
+ <radialGradient id="bg" cx="50%" cy="42%" r="75%"><stop offset="0" stop-color="#7a2480"/><stop offset=".55" stop-color="#3a1666"/><stop offset="1" stop-color="#140a2e"/></radialGradient>
+ <radialGradient id="orb" cx="38%" cy="35%" r="70%"><stop offset="0" stop-color="#fff6c8"/><stop offset=".45" stop-color="#ffd23c"/><stop offset="1" stop-color="#ff7a3c"/></radialGradient>
+ <radialGradient id="halo"><stop offset="0" stop-color="#ffd23c" stop-opacity=".55"/><stop offset="1" stop-color="#ffd23c" stop-opacity="0"/></radialGradient>
+ <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fffaf0"/><stop offset="1" stop-color="#e8c9a8"/></linearGradient>
+ <filter id="sh" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#0a0020" flood-opacity=".55"/></filter>
+</defs>
+<rect width="1080" height="1080" fill="url(#bg)"/>
+<g fill="#fff2d9" opacity=".5"><circle cx="170" cy="210" r="4"/><circle cx="900" cy="170" r="3"/><circle cx="960" cy="560" r="4"/><circle cx="130" cy="700" r="3"/><circle cx="820" cy="900" r="4"/><circle cx="260" cy="920" r="3"/><circle cx="700" cy="120" r="3"/></g>
+<g transform="translate(452,548) rotate(-25) translate(45,137)">
+ <circle cx="-45" cy="150" r="250" fill="url(#halo)"/>
+ <path d="M60 -374 C70 -430 90 -470 78 -520" fill="none" stroke="#fff2d9" stroke-opacity=".85" stroke-width="7" stroke-linecap="round"/>
+ <g filter="url(#sh)">
+  <path d="M60 -300 V110 C60 290 -150 290 -150 110 L-150 0" fill="none" stroke="url(#metal)" stroke-width="72" stroke-linecap="butt" stroke-linejoin="round"/>
+  <polygon points="-186,0 -114,0 -150,-92" fill="#fffaf0"/>
+  <polygon points="-129,-38 -78,-2 -114,-2" fill="#f1dcc3"/>
+  <circle cx="60" cy="-300" r="36" fill="url(#metal)"/><circle cx="60" cy="-340" r="34" fill="none" stroke="url(#metal)" stroke-width="24"/>
+ </g>
+ <path d="M84 -290 V110 C84 200 40 262 -20 270" fill="none" stroke="#b9855f" stroke-opacity=".3" stroke-width="14" stroke-linecap="round"/>
+ <circle cx="-45" cy="150" r="58" fill="url(#orb)"/>
+ <ellipse cx="-64" cy="130" rx="16" ry="10" fill="#fff" opacity=".75" transform="rotate(-30 -64 130)"/>
+</g>
+<g fill="#ffd23c"><path transform="translate(-60,0)" d="M770 300 l9 24 24 9 -24 9 -9 24 -9 -24 -24 -9 24 -9z" opacity=".95"/><path d="M290 780 l6 16 16 6 -16 6 -6 16 -6 -16 -16 -6 16 -6z" opacity=".8"/></g>
+</svg></body></html>
