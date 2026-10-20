@@ -27,7 +27,7 @@ def gemini_tts(i, text):
             "generationConfig": {"responseModalities": ["AUDIO"],
                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": ep.get("gemini_voice", "Algenib")}}}}}
     last = None
-    for model in ep.get("gemini_models", ["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"]):
+    for model in ep.get("gemini_models", ["gemini-3.8-flash-tts", "gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"]):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json", "x-goog-api-key": key})
@@ -36,10 +36,14 @@ def gemini_tts(i, text):
                 resp = json.load(urllib.request.urlopen(req, timeout=180))
                 part = resp["candidates"][0]["content"]["parts"][0]["inlineData"]
                 m = re.search(r"rate=(\d+)", part.get("mimeType", "")); rate = int(m.group(1)) if m else 24000
+                data = base64.b64decode(part["data"])
                 path = f"{out}/s{i:02d}.wav"
-                with wave.open(path, "wb") as w:
-                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
-                    w.writeframes(base64.b64decode(part["data"]))
+                if data[:4] == b"RIFF":  # neuere Modelle (z.B. gemini-3.8-flash-tts) liefern fertige WAV-Dateien
+                    open(path, "wb").write(data)
+                else:                     # aeltere liefern rohes PCM (audio/L16)
+                    with wave.open(path, "wb") as w:
+                        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+                        w.writeframes(data)
                 return path
             except Exception as e:
                 last = e
