@@ -13,7 +13,7 @@ const FPS=+(opt('fps')||30);
 const stills=opt('stills'); // z.B. --stills 0.1,1,2.5  -> JPGs neben outPath
 const browser=await chromium.launch({args:['--disable-gpu','--font-render-hinting=none']});
 const page=await browser.newPage({viewport:{width:1080,height:1920}});
-await page.goto('file://'+path.resolve('render/anim.html'));
+await page.goto('file://'+path.resolve(opt('html')||'render/anim.html'));
 await page.evaluate(tl=>window.setTimeline(tl),TL);
 if(args.includes('--guides'))await page.evaluate(()=>{window.GUIDES=true});
 await page.evaluate(()=>document.fonts.ready);
@@ -26,7 +26,7 @@ if(stills){
   for(const t of stills.split(',').map(Number)){fs.writeFileSync(path.join(outPath,`still_${t.toFixed(2)}.jpg`),await grab(t))}
   await browser.close();process.exit(0);
 }
-const total=Math.round(TL.duration*FPS);
+const total=Math.round((+(opt('end')||TL.duration))*FPS);
 const ff=spawn('ffmpeg',['-v','error','-y','-f','image2pipe','-framerate',String(FPS),'-c:v','mjpeg','-i','-',
   '-c:v','libx264','-preset','medium','-crf','18','-pix_fmt','yuv420p',outPath],{stdio:['pipe','inherit','inherit']});
 const t0=Date.now();
