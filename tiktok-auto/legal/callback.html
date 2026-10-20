@@ -1,0 +1,11 @@
+<!doctype html><html lang="de"><head><title>Anmeldung Nachgehakt</title><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font:17px/1.6 system-ui,sans-serif;max-width:720px;margin:0 auto;padding:24px;color:#1b1030;background:#fbf7ff}h1{font-size:28px}h2{font-size:20px;margin-top:28px}code{background:#efe6fa;padding:2px 6px;border-radius:6px;word-break:break-all}.box{background:#fff;border:1px solid #e3d6f5;border-radius:14px;padding:16px;margin:16px 0}button{font:inherit;padding:12px 18px;border-radius:12px;border:0;background:#c23a8a;color:#fff}</style></head><body>
+<h1>Anmeldung bei TikTok</h1>
+<div id="ok" class="box" hidden><p>Fertig. Kopiere diesen Code und gib ihn Claude. Er gilt nur kurz.</p><p><code id="code"></code></p><button onclick="navigator.clipboard.writeText(document.getElementById('code').textContent).then(()=>this.textContent='Kopiert')">Code kopieren</button></div>
+<div id="err" class="box" hidden><p>Die Anmeldung hat nicht geklappt:</p><p><code id="msg"></code></p></div>
+<div id="none" class="box" hidden><p>Hier kommst du nach der Anmeldung bei TikTok an. Es wurde noch kein Code übergeben.</p></div>
+<script>
+var p=new URLSearchParams(location.search),c=p.get('code'),e=p.get('error_description')||p.get('error');
+if(c){document.getElementById('code').textContent=c;document.getElementById('ok').hidden=false}
+else if(e){document.getElementById('msg').textContent=e;document.getElementById('err').hidden=false}
+else{document.getElementById('none').hidden=false}
+</script></body></html>

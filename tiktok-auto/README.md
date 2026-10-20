@@ -29,3 +29,10 @@ Ziel: täglich automatisch kurze, hochkante Erklärvideos (TikTok und Instagram 
 - Kurz halten: Ziel deutlich unter 45 Sekunden, kurze Sätze, pro Szene wenig Text.
 - Beispielvideo ki_01 war mit 58,8 s zu lang.
 - API-Kontingent: gemini-3.8-flash-tts erlaubt im kostenlosen Tarif nur 10 Anfragen pro Tag. Stimme deshalb pro Szene erzeugen (`group_by_scene`).
+
+## TikTok-Upload (Stand)
+- Werkzeug: `upload/tiktok_upload.py`. Standard ist ein Testlauf ohne Netzwerk, `--send` sendet wirklich. Modus `draft` legt einen Entwurf ab (video.upload), `direct` postet (video.publish). Videos werden als KI-erzeugt gekennzeichnet.
+- Ungeprüfte Apps posten nur privat. Das Konto muss dafür privat sein. Öffentlich geht es erst nach der TikTok-Prüfung.
+- Umgebungsvariablen: `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_REDIRECT_URI`. Zugangstoken liegen in `.secrets/` (git-ignoriert) und gehen mit der Sitzung verloren.
+- Webseiten für TikTok in `legal/`: Datenschutz, Nutzungsbedingungen, Rückleitung (zeigt den Code zum Kopieren). Platzhalter `[NAME DES BETREIBERS]` und `[KONTAKT-E-MAIL]` vor dem Veröffentlichen ersetzen.
+- Offen: Wo die Seiten gehostet werden (Repository ist privat, GitHub Pages braucht dann einen bezahlten Tarif). Wo die Token dauerhaft liegen, damit tägliche Läufe ohne Anmeldung funktionieren.
