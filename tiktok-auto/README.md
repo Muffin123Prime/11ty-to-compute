@@ -20,3 +20,12 @@ Ziel: täglich automatisch kurze, hochkante Erklärvideos (TikTok und Instagram 
 - Python-Umgebung mit edge-tts, numpy, scipy, faster-whisper: `python3 -m venv` und dann pip. Der Renderer nutzt Playwright mit Chromium (`PW_PATH` auf das Playwright-Paket setzen).
 - Hinter dem Proxy muss `SSL_CERT_FILE=/root/.ccr/ca-bundle.crt` gesetzt sein.
 - Quellen nur als Stil-Vorbild nutzen. Keine Bilder, Figuren oder Videos anderer Kanäle übernehmen.
+
+## Gelernte Regeln für Folgen (Rückmeldung des Auftraggebers)
+- Stimme: Gemini "Fenrir", Stil "mitreißend, motivierend, überzeugend, nicht rau". Tempo `tempo` 1.04 bis 1.05, nicht schneller.
+- Ton: sehr leiser Klangteppich, weiche Töne nur an Einblendungen, keine Schläge, nichts Lautes.
+- Aufbau: Hook mit der Frage in den ersten Sekunden, Versprechen, Entwicklung, eigenes Ergebnis, dann offene Frage zum nächsten Teil. Leitlinien: kein künstlicher Cliffhanger, keine falschen Versprechen, kein Flackern.
+- Keine Aufzählungen im Text ("Moment eins, Moment zwei, Moment drei"). Das fühlt sich länger an und die Konzentration sinkt. Stattdessen eine durchlaufende Geschichte erzählen, ohne Zählwörter.
+- Kurz halten: Ziel deutlich unter 45 Sekunden, kurze Sätze, pro Szene wenig Text.
+- Beispielvideo ki_01 war mit 58,8 s zu lang.
+- API-Kontingent: gemini-3.8-flash-tts erlaubt im kostenlosen Tarif nur 10 Anfragen pro Tag. Stimme deshalb pro Szene erzeugen (`group_by_scene`).
