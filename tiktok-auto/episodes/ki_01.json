@@ -1,113 +1,112 @@
 {
-  "id": "ki_01",
-  "series": "KI-WOCHE",
-  "part": 1,
-  "title": "Wie die KI angefangen hat",
-  "provider": "gemini",
-  "gemini_voice": "Fenrir",
-  "gemini_models": [
-    "gemini-3.8-flash-tts"
-  ],
-  "style": "Sprich auf Deutsch als mitreißender, selbstbewusster Erzähler eines Wissenskanals: motivierend, überzeugend, energiegeladen, klare deutliche Betonung, zügiges Tempo, bei Fragen und Wendungen steigende Spannung, am Ende jedes Satzes Zug nach vorn, kein Flüstern, nicht rau",
-  "voice": "it-IT-GiuseppeMultilingualNeural",
-  "rate": "+4%",
-  "pitch": "-2Hz",
-  "start_offset": 0.55,
-  "sentences": [
-    {
-      "text": "1950. Ein Mathematiker stellt eine Frage, die die Welt verändern wird.",
-      "scene": "hook",
-      "accent": [
-        "1950",
-        "Frage"
-      ]
-    },
-    {
-      "text": "Können Maschinen denken?",
-      "scene": "question",
-      "accent": [
-        "denken"
-      ]
-    },
-    {
-      "text": "Sein Name: Alan Turing.",
-      "scene": "turing",
-      "accent": [
-        "Alan",
-        "Turing"
-      ]
-    },
-    {
-      "text": "Er schlägt einen Test vor. Ein Mensch schreibt mit zwei Unbekannten. Einer ist ein Mensch, der andere eine Maschine.",
-      "scene": "test",
-      "accent": [
-        "Mensch",
-        "Maschine"
-      ]
-    },
-    {
-      "text": "Erkennt der Mensch den Unterschied nicht, hat die Maschine bestanden.",
-      "scene": "test",
-      "accent": [
-        "bestanden"
-      ],
-      "event": "stamp"
-    },
-    {
-      "text": "1966 baut ein Forscher am MIT ein Programm namens Eliza.",
-      "scene": "eliza",
-      "accent": [
-        "1966",
-        "Eliza"
-      ]
-    },
-    {
-      "text": "Es stellt fast nur Gegenfragen. Trotzdem vertrauen ihm die Leute ihre Geheimnisse an.",
-      "scene": "eliza",
-      "accent": [
-        "Geheimnisse"
-      ]
-    },
-    {
-      "text": "Sogar sein Erfinder war schockiert.",
-      "scene": "eliza",
-      "accent": [
-        "schockiert"
-      ]
-    },
-    {
-      "text": "1997 schlägt der IBM-Computer Deep Blue den Schachweltmeister Kasparow.",
-      "scene": "chess",
-      "accent": [
-        "1997",
-        "Deep",
-        "Blue",
-        "Kasparow"
-      ]
-    },
-    {
-      "text": "Die Welt hielt den Atem an.",
-      "scene": "chess",
-      "accent": [
-        "Atem"
-      ]
-    },
-    {
-      "text": "Doch das war erst der Anfang. Denn 2016 passiert etwas, womit niemand gerechnet hat.",
-      "scene": "go",
-      "accent": [
-        "Anfang",
-        "2016"
-      ]
-    },
-    {
-      "text": "Was genau? Das erfährst du im nächsten Teil.",
-      "scene": "go",
-      "accent": [
-        "nächsten",
-        "Teil"
-      ],
-      "event": "cta"
-    }
-  ]
+ "id": "ki_01",
+ "series": "KI-WOCHE",
+ "part": 1,
+ "title": "Wie die KI angefangen hat",
+ "provider": "gemini",
+ "gemini_voice": "Fenrir",
+ "gemini_models": [
+  "gemini-3.1-flash-tts-preview"
+ ],
+ "style": "Sprich auf Deutsch als mitreißender, selbstbewusster Erzähler eines Wissenskanals: motivierend, überzeugend, energiegeladen, klare deutliche Betonung, zügiges Tempo, bei Fragen und Wendungen steigende Spannung, am Ende jedes Satzes Zug nach vorn, kein Flüstern, nicht rau",
+ "voice": "it-IT-GiuseppeMultilingualNeural",
+ "rate": "+4%",
+ "pitch": "-2Hz",
+ "start_offset": 0.55,
+ "sentences": [
+  {
+   "text": "1950 stellt ein Mathematiker eine Frage, die bis heute nachwirkt.",
+   "scene": "hook",
+   "accent": [
+    "1950",
+    "Frage"
+   ],
+   "gap_after": 0.12
+  },
+  {
+   "text": "Können Maschinen denken?",
+   "scene": "question",
+   "accent": [
+    "denken?"
+   ],
+   "gap_after": 0.3
+  },
+  {
+   "text": "Sein Name: Alan Turing. Ich zeige dir drei Momente, in denen Maschinen Menschen überrascht haben.",
+   "scene": "turing",
+   "accent": [
+    "Alan",
+    "Turing.",
+    "drei",
+    "überrascht"
+   ]
+  },
+  {
+   "text": "Moment eins: der Turing-Test. Du schreibst mit zwei Unbekannten. Einer ist ein Mensch, einer eine Maschine.",
+   "scene": "test",
+   "accent": [
+    "eins:",
+    "Mensch,",
+    "Maschine."
+   ]
+  },
+  {
+   "text": "Erkennst du den Unterschied nicht, hat die Maschine bestanden.",
+   "scene": "test",
+   "accent": [
+    "bestanden."
+   ],
+   "event": "stamp"
+  },
+  {
+   "text": "Moment zwei, 1966: Das Programm Eliza stellt fast nur Gegenfragen. Trotzdem erzählen ihm Leute ihre Geheimnisse.",
+   "scene": "eliza",
+   "accent": [
+    "zwei,",
+    "1966:",
+    "Eliza",
+    "Geheimnisse."
+   ]
+  },
+  {
+   "text": "Sogar sein Erfinder war schockiert.",
+   "scene": "eliza",
+   "accent": [
+    "schockiert."
+   ],
+   "gap_after": 0.45
+  },
+  {
+   "text": "Moment drei, 1997: Der Computer Deep Blue schlägt den Schachweltmeister Kasparow.",
+   "scene": "chess",
+   "accent": [
+    "drei,",
+    "1997:",
+    "Deep",
+    "Blue",
+    "Kasparow."
+   ]
+  },
+  {
+   "text": "Maschinen konnten jetzt rechnen und Regeln befolgen. Aber denken?",
+   "scene": "chess",
+   "accent": [
+    "denken?"
+   ],
+   "gap_after": 0.35
+  },
+  {
+   "text": "Dann kam 2016, und alles kippte. Was genau passiert ist, erfährst du im nächsten Teil.",
+   "scene": "go",
+   "accent": [
+    "2016,",
+    "kippte.",
+    "nächsten",
+    "Teil."
+   ],
+   "event": "cta"
+  }
+ ],
+ "tempo": 1.05,
+ "group_by_scene": true
 }

@@ -284,6 +284,89 @@ SCN.test=(tl,t,sc)=>{
     ctx.font=`900 118px ${FONT}`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillStyle='#0d8f80';ctx.fillText('BESTANDEN',0,6);ctx.restore();
     if(u<.12){ctx.fillStyle=`rgba(255,255,255,${.5*(1-u/.12)})`;ctx.fillRect(0,0,W,H)}}
 };
+function wrap(txt,maxW,font){ctx.font=font;const ws=txt.split(' ');const L=[];let cur='';
+  for(const w of ws){const tst=cur?cur+' '+w:w;if(ctx.measureText(tst).width>maxW&&cur){L.push(cur);cur=w}else cur=tst}if(cur)L.push(cur);return L}
+/* --- Neue Szenen: Eliza, Schach, 2016 --- */
+const ELZ=[['u','Ich bin traurig.',0.5],['e','Warum bist du traurig?',1.6],['u','Meine Mutter versteht mich nicht.',3.0],['e','Erzähl mir mehr über deine Mutter.',4.3]];
+SCN.eliza=(tl,t)=>{
+  ctx.fillStyle=vgrad(0,H,[[0,'#1b0d45'],[.55,'#5a1d73'],[1,'#c23a8a']]);ctx.fillRect(0,0,W,H);
+  starfield(t,.4);
+  const a=eBack(tl/.5);ctx.save();ctx.translate(CX,640);ctx.scale(a,a);ctx.translate(-CX,-640);
+  // Fenster
+  ctx.shadowColor='rgba(10,0,40,.55)';ctx.shadowBlur=50;ctx.shadowOffsetY=20;ctx.fillStyle=PL.cream;rrect(110,250,800,780,44);ctx.fill();ctx.shadowColor='transparent';
+  ctx.fillStyle=PL.plum;ctx.beginPath();ctx.roundRect(110,250,800,96,[44,44,0,0]);ctx.fill();
+  [PL.red,PL.yellow,PL.teal].forEach((c,i)=>{ctx.fillStyle=c;ctx.beginPath();ctx.arc(160+i*44,298,13,0,7);ctx.fill()});
+  ctx.fillStyle='#fff';ctx.font=`800 34px ${FONT}`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('ELIZA  ·  1966',CX+60,300);
+  // Nachrichten
+  let y=395;
+  for(const [who,txt,at] of ELZ){
+    const p=eBack((tl-at)/.35);const lines=wrap(txt,470,`700 36px ${FONT}`);const h=lines.length*46+36;
+    if(tl>=at){
+      ctx.save();const right=who==='u',bx=right?880-520:140;
+      ctx.translate(bx+(right?520:0),y+h/2);ctx.scale(p,p);ctx.translate(-(bx+(right?520:0)),-(y+h/2));
+      ctx.fillStyle=right?PL.magenta:PL.teal;ctx.beginPath();ctx.roundRect(bx,y,520,h,[34,34,right?6:34,right?34:6]);ctx.fill();
+      ctx.fillStyle='#fff';ctx.font=`700 36px ${FONT}`;ctx.textAlign='left';ctx.textBaseline='middle';
+      lines.forEach((l,i)=>ctx.fillText(l,bx+28,y+18+23+i*46));
+      ctx.restore();
+    }
+    y+=h+30;
+  }
+  // Tipp-Punkte
+  const nxt=ELZ.find(m=>tl<m[2]);
+  if(nxt&&tl>nxt[2]-.7){const right=nxt[0]==='u',d=(Math.floor(tl*5)%3)+1;ctx.fillStyle='rgba(60,20,90,.35)';ctx.beginPath();ctx.roundRect(right?740:140,y,140,64,32);ctx.fill();
+    ctx.fillStyle='#fff';ctx.font=`900 46px ${FONT}`;ctx.textAlign='center';ctx.fillText('.'.repeat(d),right?810:210,y+30)}
+  ctx.restore();
+  if(tl>1.0){const b=eBack((tl-1.0)/.4);ctx.save();ctx.translate(CX,1090);ctx.scale(b,b);pill('Erstes Chat-Programm der Welt',0,0,PL.orange,32);ctx.restore()}
+};
+function chessPiece(x,y,s,kind,col,rot=0){
+  ctx.save();ctx.translate(x,y);ctx.rotate(rot);ctx.scale(s,s);
+  const dark=col==='b';ctx.fillStyle=dark?'#241046':'#fff2d9';ctx.strokeStyle=dark?'#a58be0':'#8a4a2a';ctx.lineWidth=5;
+  ctx.beginPath();ctx.roundRect(-30,14,60,16,6);ctx.fill();ctx.stroke();
+  ctx.beginPath();ctx.moveTo(-22,14);ctx.quadraticCurveTo(-12,-30,-10,-40);ctx.lineTo(10,-40);ctx.quadraticCurveTo(12,-30,22,14);ctx.closePath();ctx.fill();ctx.stroke();
+  ctx.beginPath();ctx.arc(0,-54,17,0,7);ctx.fill();ctx.stroke();
+  if(kind==='k'){ctx.lineWidth=7;ctx.beginPath();ctx.moveTo(0,-98);ctx.lineTo(0,-74);ctx.moveTo(-11,-87);ctx.lineTo(11,-87);ctx.stroke()}
+  ctx.restore();
+}
+SCN.chess=(tl,t)=>{
+  ctx.fillStyle=vgrad(0,H,[[0,'#07102e'],[.6,'#143a78'],[1,'#1fa6c8']]);ctx.fillRect(0,0,W,H);
+  starfield(t,.35);
+  const a=eBack(tl/.5),X0=164,Y0=330,C=88;
+  ctx.save();ctx.translate(CX,Y0+C*4);ctx.scale(a,a);ctx.translate(-CX,-(Y0+C*4));
+  ctx.shadowColor='rgba(0,0,30,.6)';ctx.shadowBlur=40;ctx.shadowOffsetY=18;ctx.fillStyle='#3a1860';rrect(X0-22,Y0-22,C*8+44,C*8+44,30);ctx.fill();ctx.shadowColor='transparent';
+  for(let r=0;r<8;r++)for(let c=0;c<8;c++){ctx.fillStyle=(r+c)%2?'#6a4aa8':'#f2dcc0';ctx.fillRect(X0+c*C,Y0+r*C,C,C)}
+  // Zugfolge: weisse Dame faehrt zum Schlussfeld, der schwarze König kippt um
+  const mv=eOut((tl-1.2)/.9),qx=lerp(X0+1.5*C,X0+4.5*C,mv),qy=lerp(Y0+7.5*C,Y0+3.5*C,mv);
+  const hit=tl>2.3?eOut((tl-2.3)/.7):0;
+  if(tl>2.1){ctx.fillStyle=`rgba(255,210,60,${.35+.25*Math.sin(tl*8)})`;ctx.fillRect(X0+4*C,Y0+3*C,C,C)}
+  chessPiece(X0+6.5*C,Y0+6.5*C,0.95,'p','w');chessPiece(X0+2.5*C,Y0+6.5*C,0.95,'p','w');chessPiece(X0+0.5*C,Y0+5.5*C,0.95,'p','w');
+  chessPiece(X0+1.5*C,Y0+1.5*C,0.95,'p','b');chessPiece(X0+6.5*C,Y0+1.5*C,0.95,'p','b');chessPiece(X0+3.5*C,Y0+0.5*C,0.95,'p','b');
+  chessPiece(X0+4.5*C+hit*50,Y0+3.5*C+hit*50,1.2,'k','b',hit*1.45);
+  chessPiece(qx,qy,1.2,'k','w');
+  ctx.restore();
+  if(tl>.4){const b=eBack((tl-.4)/.4);ctx.save();ctx.translate(CX-200,1090);ctx.scale(b,b);pill('DEEP BLUE',0,0,PL.blue,34);ctx.restore()}
+  if(tl>.8){const b=eBack((tl-.8)/.4);ctx.save();ctx.translate(CX+200,1090);ctx.scale(b,b);pill('KASPAROW',0,0,PL.red,34);ctx.restore()}
+  if(tl>.4){const b=eBack((tl-.4)/.4);ctx.save();ctx.translate(CX,230);ctx.scale(b,b);bigText('1997',0,0,130);ctx.restore()}
+};
+SCN.go=(tl,t)=>{
+  ctx.fillStyle=vgrad(0,H,[[0,'#060316'],[.5,'#1c0d47'],[1,'#5a1d73']]);ctx.fillRect(0,0,W,H);
+  starfield(t,.9);
+  const a=eBack(tl/.5),X0=200,Y0=440,D=76;
+  ctx.save();ctx.translate(CX,Y0+D*4);ctx.scale(a,a);ctx.translate(-CX,-(Y0+D*4));
+  ctx.shadowColor='rgba(0,0,30,.6)';ctx.shadowBlur=40;ctx.fillStyle='#d9a45a';rrect(X0-60,Y0-60,D*8+120,D*8+120,28);ctx.fill();ctx.shadowColor='transparent';
+  ctx.strokeStyle='#3a2410';ctx.lineWidth=3;for(let i=0;i<9;i++){ctx.beginPath();ctx.moveTo(X0+i*D,Y0);ctx.lineTo(X0+i*D,Y0+8*D);ctx.moveTo(X0,Y0+i*D);ctx.lineTo(X0+8*D,Y0+i*D);ctx.stroke()}
+  const st=[[2,2,'b'],[6,2,'w'],[3,4,'w'],[5,5,'b'],[2,6,'w'],[6,6,'b'],[4,3,'b'],[3,2,'w'],[5,3,'w'],[4,5,'b']];
+  st.forEach(([c,r,col],i)=>{const p=eBack((tl-.5-i*.32)/.3);if(p<=0)return;
+    ctx.save();ctx.translate(X0+c*D,Y0+r*D);ctx.scale(p,p);
+    const g=ctx.createRadialGradient(-8,-8,4,0,0,34);g.addColorStop(0,col==='b'?'#5a5a6e':'#ffffff');g.addColorStop(1,col==='b'?'#0c0c18':'#cfc6b4');
+    ctx.fillStyle=g;ctx.shadowColor='rgba(0,0,0,.4)';ctx.shadowBlur=8;ctx.shadowOffsetY=4;ctx.beginPath();ctx.arc(0,0,31,0,7);ctx.fill();ctx.restore()});
+  // der geheimnisvolle Zug
+  if(tl>3.8){const u=eBack((tl-3.8)/.4);ctx.save();ctx.translate(X0+4*D,Y0+4*D);ctx.scale(u,u);
+    ctx.fillStyle=PL.teal;ctx.shadowColor=PL.teal;ctx.shadowBlur=36+10*Math.sin(tl*6);ctx.beginPath();ctx.arc(0,0,31,0,7);ctx.fill();ctx.shadowBlur=0;
+    ctx.fillStyle='#fff';ctx.font=`900 44px ${FONT}`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('?',0,3);ctx.restore()}
+  ctx.restore();
+  const b=eBack((tl-.1)/.5);ctx.save();ctx.translate(CX,290);ctx.scale(b,b);bigText('2016',0,0,190,{color:'#ffd23c'});ctx.restore();
+  if(tl>1.0){const c=eBack((tl-1.0)/.4);ctx.save();ctx.translate(CX,1100);ctx.scale(c,c);pill('Teil 2: Das Spiel Go',0,0,PL.magenta,36);ctx.restore()}
+};
 window.drawFrame=t=>{
   const sc=TL.scenes.find(s=>t>=s.start&&t<s.end)||TL.scenes[TL.scenes.length-1],tl=t-sc.start;
   ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,W,H);

@@ -22,6 +22,11 @@ def gemini_tts(i, text):
     if not key:
         raise RuntimeError("GEMINI_API_KEY fehlt: in den Einstellungen der Umgebung hinterlegen")
     style = ep.get("style", "")
+    import hashlib
+    h = hashlib.sha1(f"{ep.get('gemini_voice')}|{style}|{ep.get('gemini_models')}|{text}".encode()).hexdigest()[:10]
+    cache = f"{out}/s{i:02d}_gem_{h}.wav"   # Zwischenspeicher: gleiche Eingabe wird nicht neu angefragt
+    if os.path.exists(cache):
+        return cache
     prompt = f"{style}: {text}" if style else text
     body = {"contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"responseModalities": ["AUDIO"],
@@ -31,13 +36,13 @@ def gemini_tts(i, text):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json", "x-goog-api-key": key})
-        for attempt in range(3):
+        for attempt in range(8):
             try:
                 resp = json.load(urllib.request.urlopen(req, timeout=180))
                 part = resp["candidates"][0]["content"]["parts"][0]["inlineData"]
                 m = re.search(r"rate=(\d+)", part.get("mimeType", "")); rate = int(m.group(1)) if m else 24000
                 data = base64.b64decode(part["data"])
-                path = f"{out}/s{i:02d}.wav"
+                path = cache
                 if data[:4] == b"RIFF":  # neuere Modelle (z.B. gemini-3.8-flash-tts) liefern fertige WAV-Dateien
                     open(path, "wb").write(data)
                 else:                     # aeltere liefern rohes PCM (audio/L16)
@@ -47,7 +52,7 @@ def gemini_tts(i, text):
                 return path
             except Exception as e:
                 last = e
-                import time; time.sleep(3)
+                import time; time.sleep(25 if '429' in str(e) else 3)
     raise RuntimeError(f"Gemini-Sprachausgabe fehlgeschlagen: {last}")
 
 async def synth(i, text):
@@ -74,10 +79,44 @@ async def synth(i, text):
             await asyncio.sleep(2)
     raise RuntimeError(f"TTS fehlgeschlagen: {last}")
 
+def gemini_group(idxs):
+    """Eine Anfrage fuer mehrere Saetze (spart Kontingent, gleichmaessigere Betonung); danach per Wortzeiten in Saetze schneiden."""
+    sents = [ep["sentences"][i]["text"] for i in idxs]
+    path = gemini_tts(idxs[0], " ".join(sents))
+    if len(idxs) == 1:
+        return [path]
+    toks = [t for x in sents for t in x.split()]
+    al = align_words(path, toks)
+    bounds, k = [], 0
+    for x in sents:
+        n = len(x.split()); bounds.append((al[k]["s"], al[k + n - 1]["e"])); k += n
+    cuts = []
+    for j, (a, b) in enumerate(bounds):
+        lo = 0.0 if j == 0 else (bounds[j - 1][1] + a) / 2
+        hi = None if j == len(bounds) - 1 else (b + bounds[j + 1][0]) / 2
+        cuts.append((lo, hi))
+    outs = []
+    for j, (i, (lo, hi)) in enumerate(zip(idxs, cuts)):
+        cp = f"{out}/s{i:02d}_cut.wav"
+        cmd = ["ffmpeg", "-v", "error", "-y", "-i", path, "-ss", f"{lo:.3f}"] + (["-to", f"{hi:.3f}"] if hi else []) + [cp]
+        subprocess.run(cmd, check=True); outs.append(cp)
+    return outs
+
 async def main():
-    results = []
+    n = len(ep["sentences"])
+    results = [None] * n
+    if ep.get("provider") == "gemini" and ep.get("group_by_scene"):
+        groups, cur = [], [0]
+        for i in range(1, n):
+            if ep["sentences"][i]["scene"] == ep["sentences"][i - 1]["scene"]: cur.append(i)
+            else: groups.append(cur); cur = [i]
+        groups.append(cur)
+        for g in groups:
+            for i, pth in zip(g, await asyncio.to_thread(gemini_group, g)):
+                results[i] = (pth, [])
+        return results
     for i, s in enumerate(ep["sentences"]):
-        results.append(await synth(i, s["text"]))
+        results[i] = await synth(i, s["text"])
     return results
 
 results = asyncio.run(main())
@@ -87,7 +126,9 @@ chunks = [np.zeros(int(t * SR), dtype=np.float32)]
 sentences = []
 for i, (s, (mp3, bwords)) in enumerate(zip(ep["sentences"], results)):
     wav = f"{out}/s{i:02d}_raw.wav"
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", mp3, "-ac", "1", "-ar", str(SR), wav], check=True)
+    tempo = float(ep.get("tempo", 1.0))  # Sprechtempo per ffmpeg (Tonhoehe bleibt gleich)
+    af = ["-af", f"atempo={tempo}"] if tempo != 1.0 else []
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", mp3, *af, "-ac", "1", "-ar", str(SR), wav], check=True)
     a = load_wav(wav)
     thr = 0.012
     idx = np.where(np.abs(a) > thr)[0]
