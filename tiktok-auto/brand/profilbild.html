@@ -1,26 +1,52 @@
 <!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#140a2e}svg{display:block}</style></head><body>
 <svg id="s" width="1080" height="1080" viewBox="0 0 1080 1080" xmlns="http://www.w3.org/2000/svg">
 <defs>
- <radialGradient id="bg" cx="50%" cy="42%" r="75%"><stop offset="0" stop-color="#7a2480"/><stop offset=".55" stop-color="#3a1666"/><stop offset="1" stop-color="#140a2e"/></radialGradient>
- <radialGradient id="orb" cx="38%" cy="35%" r="70%"><stop offset="0" stop-color="#fff6c8"/><stop offset=".45" stop-color="#ffd23c"/><stop offset="1" stop-color="#ff7a3c"/></radialGradient>
- <radialGradient id="halo"><stop offset="0" stop-color="#ffd23c" stop-opacity=".55"/><stop offset="1" stop-color="#ffd23c" stop-opacity="0"/></radialGradient>
- <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fffaf0"/><stop offset="1" stop-color="#e8c9a8"/></linearGradient>
- <filter id="sh" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#0a0020" flood-opacity=".55"/></filter>
+ <radialGradient id="bg" cx="50%" cy="58%" r="78%"><stop offset="0" stop-color="#6b2378"/><stop offset=".5" stop-color="#34165f"/><stop offset="1" stop-color="#0f0724"/></radialGradient>
+ <radialGradient id="halo"><stop offset="0" stop-color="#ffcf4a" stop-opacity=".65"/><stop offset=".4" stop-color="#ff9a3c" stop-opacity=".22"/><stop offset="1" stop-color="#ff7a3c" stop-opacity="0"/></radialGradient>
+ <radialGradient id="orb" cx="46%" cy="44%" r="62%"><stop offset="0" stop-color="#fffbe6"/><stop offset=".3" stop-color="#ffe27a"/><stop offset=".7" stop-color="#ffb236"/><stop offset="1" stop-color="#ff8a2a"/></radialGradient>
+ <linearGradient id="pt" gradientUnits="userSpaceOnUse" x1="-168" y1="0" x2="-128" y2="0"><stop offset="0" stop-color="#2a3140"/><stop offset=".3" stop-color="#9aa7bb"/><stop offset=".5" stop-color="#e9eff7"/><stop offset=".75" stop-color="#6f7c91"/><stop offset="1" stop-color="#2a3140"/></linearGradient>
+ <radialGradient id="glowmask" gradientUnits="userSpaceOnUse" cx="-45" cy="158" r="170"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient>
+ <mask id="m" maskUnits="userSpaceOnUse" x="-300" y="-600" width="600" height="900"><rect x="-300" y="-600" width="600" height="900" fill="url(#glowmask)"/></mask>
+ <filter id="blur6"><feGaussianBlur stdDeviation="6"/></filter><filter id="blur14"><feGaussianBlur stdDeviation="14"/></filter>
+ <filter id="blur2"><feGaussianBlur stdDeviation="1.6"/></filter>
+ <radialGradient id="vig" cx="50%" cy="50%" r="70%"><stop offset=".6" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".45"/></radialGradient>
 </defs>
 <rect width="1080" height="1080" fill="url(#bg)"/>
-<g fill="#fff2d9" opacity=".5"><circle cx="170" cy="210" r="4"/><circle cx="900" cy="170" r="3"/><circle cx="960" cy="560" r="4"/><circle cx="130" cy="700" r="3"/><circle cx="820" cy="900" r="4"/><circle cx="260" cy="920" r="3"/><circle cx="700" cy="120" r="3"/></g>
-<g transform="translate(452,548) rotate(-25) translate(45,137)">
- <circle cx="-45" cy="150" r="250" fill="url(#halo)"/>
- <path d="M60 -374 C70 -430 90 -470 78 -520" fill="none" stroke="#fff2d9" stroke-opacity=".85" stroke-width="7" stroke-linecap="round"/>
- <g filter="url(#sh)">
-  <path d="M60 -300 V110 C60 290 -150 290 -150 110 L-150 0" fill="none" stroke="url(#metal)" stroke-width="72" stroke-linecap="butt" stroke-linejoin="round"/>
-  <polygon points="-186,0 -114,0 -150,-92" fill="#fffaf0"/>
-  <polygon points="-129,-38 -78,-2 -114,-2" fill="#f1dcc3"/>
-  <circle cx="60" cy="-300" r="36" fill="url(#metal)"/><circle cx="60" cy="-340" r="34" fill="none" stroke="url(#metal)" stroke-width="24"/>
+<g fill="#ffd9a0" filter="url(#blur14)"><circle cx="200" cy="260" r="46" opacity=".05"/><circle cx="860" cy="220" r="70" opacity=".05"/><circle cx="880" cy="760" r="54" opacity=".05"/><circle cx="170" cy="800" r="64" opacity=".05"/></g>
+<g transform="translate(445,502) rotate(-25) scale(1.22) translate(45,140)">
+ <circle cx="-45" cy="158" r="260" fill="url(#halo)"/>
+ <!-- Schnur -->
+ <path d="M60 -350 C64 -400 90 -430 84 -480" fill="none" stroke="#e8f2ff" stroke-opacity=".55" stroke-width="3.5" stroke-linecap="round"/>
+ <!-- Schatten des Drahtes -->
+ <g filter="url(#blur6)" opacity=".5" transform="translate(10,16)"><path d="M60 -290 V100 C60 275 -150 275 -150 100 L-148 0" fill="none" stroke="#000" stroke-width="30" stroke-linecap="round"/></g>
+ <!-- Draht: Zylinder-Schattierung aus vier Lagen -->
+ <g id="wire" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M60 -290 V100 C60 275 -150 275 -150 100 L-148 0" stroke="#232a38" stroke-width="32"/>
+  <path d="M60 -290 V100 C60 275 -150 275 -150 100 L-148 0" stroke="#5f6c82" stroke-width="25" transform="translate(-1.5,-1)"/>
+  <path d="M60 -290 V100 C60 275 -150 275 -150 100 L-148 0" stroke="#aebbd0" stroke-width="13" transform="translate(-4.5,-3)"/>
+  <path d="M60 -290 V100 C60 275 -150 275 -150 100 L-148 0" stroke="#ffffff" stroke-width="3.5" stroke-opacity=".9" transform="translate(-7,-4.5)"/>
  </g>
- <path d="M84 -290 V110 C84 200 40 262 -20 270" fill="none" stroke="#b9855f" stroke-opacity=".3" stroke-width="14" stroke-linecap="round"/>
- <circle cx="-45" cy="150" r="58" fill="url(#orb)"/>
- <ellipse cx="-64" cy="130" rx="16" ry="10" fill="#fff" opacity=".75" transform="rotate(-30 -64 130)"/>
-</g>
-<g fill="#ffd23c"><path transform="translate(-60,0)" d="M770 300 l9 24 24 9 -24 9 -9 24 -9 -24 -24 -9 24 -9z" opacity=".95"/><path d="M290 780 l6 16 16 6 -16 6 -6 16 -6 -16 -16 -6 16 -6z" opacity=".8"/></g>
+ <!-- warmer Widerschein vom Funken -->
+ <path d="M60 -20 V100 C60 275 -150 275 -150 100 L-148 -10" fill="none" stroke="#ff9a3c" stroke-width="30" stroke-linecap="round" opacity=".6" mask="url(#m)" style="mix-blend-mode:screen"/>
+ <!-- Spitze mit Widerhaken -->
+ <polygon points="-163,0 -133,0 -134,-6 -135,-125 -141,-40" fill="url(#pt)"/>
+ <polygon points="-163,0 -133,0 -136,-125" fill="url(#pt)"/>
+ <polygon points="-137,-100 -106,-52 -134,-54" fill="url(#pt)"/>
+ <path d="M-137 -100 L-106 -52" stroke="#e9eff7" stroke-width="2" opacity=".7"/>
+ <!-- Oese -->
+ <g fill="none">
+  <circle cx="60" cy="-322" r="25" stroke="#232a38" stroke-width="12"/>
+  <circle cx="60" cy="-322" r="25" stroke="#6f7c91" stroke-width="8" transform="translate(-1,-1)"/>
+  <circle cx="60" cy="-322" r="25" stroke="#cfd9e8" stroke-width="4" transform="translate(-2,-2)"/>
+  <circle cx="60" cy="-322" r="25" stroke="#fff" stroke-width="1.6" stroke-opacity=".9" transform="translate(-3,-3)" stroke-dasharray="40 200" stroke-dashoffset="-80"/>
+ </g>
+ <!-- Knoten -->
+ <ellipse cx="60" cy="-349" rx="6" ry="5" fill="#e8f2ff" opacity=".75"/>
+ <!-- Funke -->
+ <circle cx="-45" cy="158" r="92" fill="#ffb236" opacity=".45" filter="url(#blur14)"/>
+ <circle cx="-45" cy="158" r="50" fill="url(#orb)"/>
+ <circle cx="-45" cy="158" r="50" fill="none" stroke="#fff6c8" stroke-opacity=".5" stroke-width="2" filter="url(#blur2)"/>
+ </g>
+<g fill="#ffe9a8" filter="url(#blur2)"><circle cx="600" cy="640" r="3.4" opacity=".9"/><circle cx="640" cy="590" r="2.4" opacity=".7"/><circle cx="560" cy="560" r="2.8" opacity=".6"/><circle cx="665" cy="690" r="2.2" opacity=".6"/></g>
+<rect width="1080" height="1080" fill="url(#vig)"/>
 </svg></body></html>
