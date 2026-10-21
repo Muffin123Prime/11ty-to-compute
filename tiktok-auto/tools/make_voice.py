@@ -120,12 +120,15 @@ def gemini_group(idxs):
 async def main():
     n = len(ep["sentences"])
     results = [None] * n
-    if ep.get("provider") == "gemini" and ep.get("group_by_scene"):
-        groups, cur = [], [0]
-        for i in range(1, n):
-            if ep["sentences"][i]["scene"] == ep["sentences"][i - 1]["scene"]: cur.append(i)
-            else: groups.append(cur); cur = [i]
-        groups.append(cur)
+    if ep.get("provider") == "gemini" and (ep.get("group_by_scene") or ep.get("group_size")):
+        if ep.get("group_size"):      # feste Anzahl Saetze pro Anfrage (spart Kontingent, eine Stimme aus einem Guss)
+            k = int(ep["group_size"]); groups = [list(range(i, min(n, i + k))) for i in range(0, n, k)]
+        else:                         # nach Szene gruppieren
+            groups, cur = [], [0]
+            for i in range(1, n):
+                if ep["sentences"][i]["scene"] == ep["sentences"][i - 1]["scene"]: cur.append(i)
+                else: groups.append(cur); cur = [i]
+            groups.append(cur)
         for g in groups:
             for i, pth in zip(g, await asyncio.to_thread(gemini_group, g)):
                 results[i] = (pth, [])

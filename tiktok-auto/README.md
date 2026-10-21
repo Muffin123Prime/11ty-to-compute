@@ -9,9 +9,10 @@
 
 ## Episodenformat (für neue Folgen)
 Datei `episodes/<id>.json`, Vorlage ist `episodes/ki_01.json`.
-- Kopf: `id`, `series`, `part`, `title` (wird Bildunterschrift), `label` (Kanalzeile oben rechts, z.B. aus dem Genre), `provider` "gemini", `gemini_voice` "Charon", `gemini_models` wie in ki_01, `style` wie in ki_01, `tempo` 1.12, `group_by_scene` true, `start_offset` 0.35.
+- Kopf: `id`, `series`, `part`, `title` (wird Bildunterschrift), `hashtags` (z.B. "#nachgehakt #wissen #weltraum", passend zum Genre), `label` (Kanalzeile oben rechts, z.B. aus dem Genre), `provider` "gemini", `gemini_voice` "Charon", `gemini_models` wie in ki_01, `style` wie in ki_01, `tempo` 1.12, `group_by_scene` true, `start_offset` 0.35.
 - `sentences`: Liste mit `text`, `scene` (Szenen-Kennung), `accent` (betonte Wörter, genau wie im Text geschrieben), optional `event` (`stamp`, `cta`, `shock`), `gap_after`.
-- `scenes`: Objekt Kennung -> Bildbeschreibung. Handgemalte Szenen (hook, question, turing, test, eliza, chess, go) brauchen keinen Eintrag. Alle anderen nutzen generische Szenen:
+- `group_size` 2 statt `group_by_scene`: zwei Sätze pro Stimm-Anfrage, spart Kontingent und klingt aus einem Guss.
+- `scenes`: Objekt Kennung -> Bildbeschreibung. Handgemalte Szenen (hook, question, turing, test, eliza, chess, go sowie für leben_01: helix, urerde, zellen, meteorit, einschlag, hypothese, offen) brauchen keinen Eintrag. Für ein hochwertiges Video lohnt sich eine eigene Szene pro Bildidee in `render/illu_scenes.js` (Vorbild: Block leben_01), generische Szenen sind die Rückfallebene. Alle anderen nutzen generische Szenen:
   - `{"visual":"year","text":"1969","pill":"vor 57 Jahren","bg":"nacht"}` große Zahl über der Erde (`"earth":false` ohne Erde)
   - `{"visual":"headline","lines":["WARUM VERGISST DU","NAMEN?"],"pill":"Teil 3"}` Karte mit 1 bis 3 Zeilen, letzte Zeile gelb
   - `{"visual":"chat","title":"ELIZA · 1966","messages":[["u","Text",0.5],["e","Antwort",1.6]],"pill":"..."}` Chatfenster, Zeiten in Sekunden ab Szenenstart, u rechts, e links

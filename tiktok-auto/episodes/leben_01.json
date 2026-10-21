@@ -1,0 +1,99 @@
+{
+ "id": "leben_01",
+ "series": "URSPRUNG DES LEBENS",
+ "label": "URSPRUNG DES LEBENS",
+ "part": 1,
+ "title": "Die Bausteine deines Körpers sind vielleicht nicht von dieser Welt",
+ "provider": "gemini",
+ "gemini_voice": "Charon",
+ "gemini_models": [
+  "gemini-3.8-flash-tts",
+  "gemini-2.5-flash-preview-tts",
+  "gemini-3.1-flash-tts-preview"
+ ],
+ "style": "Du bist der Erzähler eines spannenden deutschen Wissens-Kurzvideos, wie ein Trailer-Sprecher: tiefe, klare, junge Männerstimme, zügig, dramatisch, mit Spannungsbogen, kurze Pause vor jeder Pointe, Fragen mit steigender Spannung, nicht rau, nicht übertrieben. Sprich ausschließlich den folgenden Text auf Deutsch",
+ "voice": "de-DE-ConradNeural",
+ "rate": "+8%",
+ "pitch": "-2Hz",
+ "start_offset": 0.35,
+ "tempo": 1.12,
+ "group_size": 2,
+ "sentences": [
+  {
+   "text": "Die Bausteine deines Körpers sind vielleicht nicht von dieser Welt.",
+   "scene": "helix",
+   "accent": [
+    "Bausteine",
+    "nicht",
+    "Welt."
+   ],
+   "gap_after": 0.3
+  },
+  {
+   "text": "Vor 4,5 Milliarden Jahren entsteht die Erde. Glühend, ohne Leben.",
+   "scene": "urerde",
+   "accent": [
+    "4,5",
+    "Milliarden",
+    "Glühend,",
+    "Leben."
+   ],
+   "gap_after": 0.25
+  },
+  {
+   "text": "Eine Milliarde Jahre später lebt hier schon etwas. Aber woher?",
+   "scene": "zellen",
+   "accent": [
+    "Milliarde",
+    "lebt",
+    "woher?"
+   ],
+   "gap_after": 0.35
+  },
+  {
+   "text": "In Meteoriten finden Forscher organische Moleküle. Kohlenstoff, kein Leben.",
+   "scene": "meteorit",
+   "accent": [
+    "Meteoriten",
+    "organische",
+    "Moleküle.",
+    "kein",
+    "Leben."
+   ],
+   "gap_after": 0.25
+  },
+  {
+   "text": "Kometen könnten sie auf die junge Erde gebracht haben.",
+   "scene": "einschlag",
+   "accent": [
+    "Kometen",
+    "Erde"
+   ],
+   "gap_after": 0.3
+  },
+  {
+   "text": "Panspermie-Hypothese. Eine Idee, kein Beweis.",
+   "scene": "hypothese",
+   "accent": [
+    "Panspermie-Hypothese.",
+    "Idee,",
+    "kein",
+    "Beweis."
+   ],
+   "event": "stamp",
+   "gap_after": 0.45
+  },
+  {
+   "text": "Und selbst wenn sie stimmt: Wie aus Chemie Leben wurde, weiß bis heute niemand.",
+   "scene": "offen",
+   "accent": [
+    "Chemie",
+    "Leben",
+    "niemand."
+   ],
+   "event": "cta",
+   "gap_after": 0.2
+  }
+ ],
+ "hashtags": "#nachgehakt #wissen #weltraum #leben"
+}

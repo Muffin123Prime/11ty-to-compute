@@ -78,7 +78,7 @@ def caption_from(a):
         return a.caption
     if a.episode:
         ep = json.load(open(a.episode, encoding="utf-8"))
-        return f"{ep['title']} #nachgehakt #ki #wissen"
+        return f"{ep['title']} {ep.get('hashtags', '#nachgehakt #wissen')}"
     return "#nachgehakt"
 
 def cmd_upload(a):

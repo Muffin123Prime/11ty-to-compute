@@ -1,17 +1,71 @@
 {
  "_hinweis": "Themenspeicher. Genres unten, Themen in der Liste. Status: offen (nur Idee) -> bereit (episodes/<id>.json geschrieben und geprüft) -> hochgeladen (als Entwurf bei TikTok). Der Tageslauf nimmt immer das erste Thema mit Status bereit.",
  "genres": {
-  "ki": {"name": "KI & Technik", "label": "KI-GESCHICHTE", "ton": "Staunen über Maschinen, die Menschen überraschen. Jahreszahlen als Anker."},
-  "geschichte": {"name": "Geschichte", "label": "GESCHICHTE", "ton": "Eine Person, ein Moment, eine Entscheidung mit Folgen bis heute."},
-  "psychologie": {"name": "Psychologie & Gehirn", "label": "DEIN GEHIRN", "ton": "Direkt ansprechen: Das passiert gerade in deinem Kopf. Ein Experiment als Beweis."},
-  "wissenschaft": {"name": "Wissenschaft & Natur", "label": "WISSENSCHAFT", "ton": "Ein Alltagsding, dahinter ein Mechanismus, den fast niemand kennt."},
-  "weltraum": {"name": "Weltraum", "label": "WELTRAUM", "ton": "Größenordnungen greifbar machen, eine Zahl, die man nicht glaubt."},
-  "geld": {"name": "Geld & Wirtschaft", "label": "GELD", "ton": "Eine Regel, die Reiche kennen und Schulen nicht beibringen. Keine Anlageberatung."},
-  "koerper": {"name": "Körper & Gesundheit", "label": "DEIN KÖRPER", "ton": "Was dein Körper gerade heimlich tut. Keine medizinischen Ratschläge, nur Erklärung."},
-  "raetsel": {"name": "Mysterien & Rätsel", "label": "UNGELÖST", "ton": "Belegte Fakten, offene Frage am Ende. Keine Verschwörungserzählungen."}
+  "ki": {
+   "name": "KI & Technik",
+   "label": "KI-GESCHICHTE",
+   "ton": "Staunen über Maschinen, die Menschen überraschen. Jahreszahlen als Anker."
+  },
+  "geschichte": {
+   "name": "Geschichte",
+   "label": "GESCHICHTE",
+   "ton": "Eine Person, ein Moment, eine Entscheidung mit Folgen bis heute."
+  },
+  "psychologie": {
+   "name": "Psychologie & Gehirn",
+   "label": "DEIN GEHIRN",
+   "ton": "Direkt ansprechen: Das passiert gerade in deinem Kopf. Ein Experiment als Beweis."
+  },
+  "wissenschaft": {
+   "name": "Wissenschaft & Natur",
+   "label": "WISSENSCHAFT",
+   "ton": "Ein Alltagsding, dahinter ein Mechanismus, den fast niemand kennt."
+  },
+  "weltraum": {
+   "name": "Weltraum",
+   "label": "WELTRAUM",
+   "ton": "Größenordnungen greifbar machen, eine Zahl, die man nicht glaubt."
+  },
+  "geld": {
+   "name": "Geld & Wirtschaft",
+   "label": "GELD",
+   "ton": "Eine Regel, die Reiche kennen und Schulen nicht beibringen. Keine Anlageberatung."
+  },
+  "koerper": {
+   "name": "Körper & Gesundheit",
+   "label": "DEIN KÖRPER",
+   "ton": "Was dein Körper gerade heimlich tut. Keine medizinischen Ratschläge, nur Erklärung."
+  },
+  "raetsel": {
+   "name": "Mysterien & Rätsel",
+   "label": "UNGELÖST",
+   "ton": "Belegte Fakten, offene Frage am Ende. Keine Verschwörungserzählungen."
+  }
  },
  "themen": [
-  {"id": "ki_01", "genre": "ki", "thema": "Eliza 1966, Turing-Test, Deep Blue, Ausblick 2016", "status": "hochgeladen", "episode": "episodes/ki_01.json", "publish_id": "v_inbox_file~v2.7699107934835918870", "datum": "2026-10-21"},
-  {"id": "ki_02", "genre": "ki", "thema": "2016: AlphaGo schlägt Lee Sedol, Zug 37, den niemand verstand. Teil 2 der KI-Woche.", "status": "offen"}
+  {
+   "id": "leben_01",
+   "genre": "wissenschaft",
+   "thema": "Entstehung des Lebens und die Panspermie-Hypothese: Was gesichert ist (Erde 4,5 Mrd. Jahre, Leben seit mind. 3,5 Mrd., organische Moleküle in Meteoriten) und was Hypothese bleibt.",
+   "status": "hochgeladen",
+   "episode": "episodes/leben_01.json",
+   "publish_id": "v_inbox_file~v2.7699157274102908931",
+   "datum": "2026-10-21"
+  },
+  {
+   "id": "ki_01",
+   "genre": "ki",
+   "thema": "Eliza 1966, Turing-Test, Deep Blue, Ausblick 2016",
+   "status": "hochgeladen",
+   "episode": "episodes/ki_01.json",
+   "publish_id": "v_inbox_file~v2.7699107934835918870",
+   "datum": "2026-10-21"
+  },
+  {
+   "id": "ki_02",
+   "genre": "ki",
+   "thema": "2016: AlphaGo schlägt Lee Sedol, Zug 37, den niemand verstand. Teil 2 der KI-Woche.",
+   "status": "offen"
+  }
  ]
 }
