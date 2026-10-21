@@ -16,7 +16,7 @@ import argparse, json, math, os, sys, time, urllib.error, urllib.parse, urllib.r
 API = "https://open.tiktokapis.com"
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN_FILE = os.path.normpath(os.path.join(HERE, "..", ".secrets", "tiktok_token.json"))
-SCOPES = "user.info.basic,video.upload,video.publish"
+SCOPES = os.environ.get("TIKTOK_SCOPES", "user.info.basic,video.upload")  # video.publish erst, wenn Direct Post in der App aktiv ist
 
 def env(name):
     v = os.environ.get(name)
