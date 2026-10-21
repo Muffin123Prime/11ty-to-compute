@@ -131,7 +131,10 @@ SCN.turing=(tl,t)=>{
   ctx.save();ctx.globalAlpha=a;ctx.translate(0,(1-a)*-60);
   bigText('ALAN',CX,300,150);bigText('TURING',CX,440,150);
   ctx.restore();
-  if(tl>.7){const b=eBack((tl-.7)/.4);ctx.save();ctx.translate(CX,600);ctx.scale(b,b);pill('Mathematiker  ·  1912 – 1954',0,0,PL.magenta,34);ctx.restore()}
+  if(tl>.7){const b=eBack((tl-.7)/.4);ctx.save();ctx.translate(CX,600);ctx.scale(b,b);pill('Mathematiker  ·  1950',0,0,PL.magenta,34);ctx.restore()}
+  if(tl>1.9){const b=eBack((tl-1.9)/.45);ctx.save();ctx.translate(CX,860);ctx.scale(b,b);
+    ctx.fillStyle='rgba(20,6,50,.82)';ctx.beginPath();ctx.roundRect(-400,-130,800,260,36);ctx.fill();ctx.lineWidth=8;ctx.strokeStyle=PL.yellow;ctx.stroke();
+    bigText('KÖNNEN MASCHINEN',0,-48,74,{color:'#fff'});bigText('DENKEN?',0,52,110,{color:'#ffd23c'});ctx.restore()}
 };
 SCN.test=(tl,t,sc)=>{
   ctx.fillStyle=vgrad(0,H,[[0,'#2b1260'],[.55,'#7a2480'],[1,'#e0553c']]);ctx.fillRect(0,0,W,H);
@@ -164,17 +167,18 @@ SCN.test=(tl,t,sc)=>{
   if(ev&&t>=ev.t){const u=t-ev.t,s=lerp(3,1,eOut(u/.18)),sh=u<.3?(Math.random()-.5)*14*(1-u/.3):0;
     ctx.save();ctx.translate(CX+sh,640+sh);ctx.rotate(-.18);ctx.scale(s,s);
     ctx.fillStyle=PL.cream;ctx.beginPath();ctx.roundRect(-330,-90,660,180,24);ctx.fill();ctx.lineWidth=14;ctx.strokeStyle=PL.teal;ctx.stroke();
-    ctx.font=`900 118px ${FONT}`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillStyle='#0d8f80';ctx.fillText('BESTANDEN',0,6);ctx.restore();
+    ctx.font=`900 118px ${FONT}`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillStyle='#0d8f80';ctx.fillText('GEWONNEN',0,6);ctx.restore();
     if(u<.12){ctx.fillStyle=`rgba(255,255,255,${.5*(1-u/.12)})`;ctx.fillRect(0,0,W,H)}}
 };
 function wrap(txt,maxW,font){ctx.font=font;const ws=txt.split(' ');const L=[];let cur='';
   for(const w of ws){const tst=cur?cur+' '+w:w;if(ctx.measureText(tst).width>maxW&&cur){L.push(cur);cur=w}else cur=tst}if(cur)L.push(cur);return L}
 /* --- Neue Szenen: Eliza, Schach, 2016 --- */
-const ELZ=[['u','Ich bin traurig.',0.5],['e','Warum bist du traurig?',1.6],['u','Meine Mutter versteht mich nicht.',3.0],['e','Erzähl mir mehr über deine Mutter.',4.3]];
+const ELZ=[['u','Ich bin so traurig.',0.9],['e','Warum bist du traurig?',2.1],['u','Niemand versteht mich.',3.4],['e','Erzähl mir mehr davon.',4.7],['u','Das hat mich noch nie jemand gefragt …',6.4]];
 SCN.eliza=(tl,t)=>{
   ctx.fillStyle=vgrad(0,H,[[0,'#1b0d45'],[.55,'#5a1d73'],[1,'#c23a8a']]);ctx.fillRect(0,0,W,H);
   starfield(t,.4);
-  const a=eBack(tl/.5);ctx.save();ctx.translate(CX,640);ctx.scale(a,a);ctx.translate(-CX,-640);
+  const shk=TL.events.find(e=>e.type==='shock'),su=shk?t-shk.t:-1,shake=(su>=0&&su<.45)?(1-su/.45)*22:0;
+  const a=eBack((tl-.15)/.5);ctx.save();ctx.translate(CX+(Math.random()-.5)*shake,640+(Math.random()-.5)*shake);ctx.scale(a,a);ctx.translate(-CX,-640);
   // Fenster
   ctx.shadowColor='rgba(10,0,40,.55)';ctx.shadowBlur=50;ctx.shadowOffsetY=20;ctx.fillStyle=PL.cream;rrect(110,250,800,780,44);ctx.fill();ctx.shadowColor='transparent';
   ctx.fillStyle=PL.plum;ctx.beginPath();ctx.roundRect(110,250,800,96,[44,44,0,0]);ctx.fill();
@@ -199,7 +203,11 @@ SCN.eliza=(tl,t)=>{
   if(nxt&&tl>nxt[2]-.7){const right=nxt[0]==='u',d=(Math.floor(tl*5)%3)+1;ctx.fillStyle='rgba(60,20,90,.35)';ctx.beginPath();ctx.roundRect(right?740:140,y,140,64,32);ctx.fill();
     ctx.fillStyle='#fff';ctx.font=`900 46px ${FONT}`;ctx.textAlign='center';ctx.fillText('.'.repeat(d),right?810:210,y+30)}
   ctx.restore();
-  if(tl>1.0){const b=eBack((tl-1.0)/.4);ctx.save();ctx.translate(CX,1090);ctx.scale(b,b);pill('Erstes Chat-Programm der Welt',0,0,PL.orange,32);ctx.restore()}
+  // grosses Jahr als Einstieg, faehrt nach oben weg
+  if(tl<2.6){const k=eBack(tl/.45),up=eOut((tl-1.6)/.8);ctx.save();ctx.globalAlpha=1-up;ctx.translate(CX,640-up*400);ctx.scale(k*(1-.45*up),k*(1-.45*up));bigText('1966',0,0,260,{color:'#ffd23c'});ctx.restore()}
+  if(tl>6.2){const b=eBack((tl-6.2)/.4);ctx.save();ctx.translate(CX,1090);ctx.scale(b,b);pill('Erstes Chat-Programm der Welt',0,0,PL.orange,32);ctx.restore()}
+  if(su>=0){const f=Math.max(0,1-su/.5);ctx.fillStyle=`rgba(255,40,60,${.42*f})`;ctx.fillRect(0,0,W,H);
+    const b=eBack(su/.35);ctx.save();ctx.translate(CX,1090);ctx.scale(b,b);pill('Erfinder: Joseph Weizenbaum',0,0,PL.red,32);ctx.restore()}
 };
 function chessPiece(x,y,s,kind,col,rot=0){
   ctx.save();ctx.translate(x,y);ctx.rotate(rot);ctx.scale(s,s);
@@ -233,7 +241,7 @@ SCN.chess=(tl,t)=>{
 SCN.go=(tl,t)=>{
   ctx.fillStyle=vgrad(0,H,[[0,'#060316'],[.5,'#1c0d47'],[1,'#5a1d73']]);ctx.fillRect(0,0,W,H);
   starfield(t,.9);
-  const a=eBack(tl/.5),X0=200,Y0=440,D=76;
+  const a=eBack(tl/.5),X0=200,Y0=360,D=76;
   ctx.save();ctx.translate(CX,Y0+D*4);ctx.scale(a,a);ctx.translate(-CX,-(Y0+D*4));
   ctx.shadowColor='rgba(0,0,30,.6)';ctx.shadowBlur=40;ctx.fillStyle='#d9a45a';rrect(X0-60,Y0-60,D*8+120,D*8+120,28);ctx.fill();ctx.shadowColor='transparent';
   ctx.strokeStyle='#3a2410';ctx.lineWidth=3;for(let i=0;i<9;i++){ctx.beginPath();ctx.moveTo(X0+i*D,Y0);ctx.lineTo(X0+i*D,Y0+8*D);ctx.moveTo(X0,Y0+i*D);ctx.lineTo(X0+8*D,Y0+i*D);ctx.stroke()}
@@ -248,14 +256,18 @@ SCN.go=(tl,t)=>{
     ctx.fillStyle='#fff';ctx.font=`900 44px ${FONT}`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('?',0,3);ctx.restore()}
   ctx.restore();
   const b=eBack((tl-.1)/.5);ctx.save();ctx.translate(CX,290);ctx.scale(b,b);bigText('2016',0,0,190,{color:'#ffd23c'});ctx.restore();
-  if(tl>1.0){const c=eBack((tl-1.0)/.4);ctx.save();ctx.translate(CX,1100);ctx.scale(c,c);pill('Teil 2: Das Spiel Go',0,0,PL.magenta,36);ctx.restore()}
+  if(tl>1.0){const c=eBack((tl-1.0)/.4);ctx.save();ctx.translate(CX,1060);ctx.scale(c,c);pill('Teil 2: Das Spiel Go',0,0,PL.magenta,36);ctx.restore()}
 };
 window.drawFrame=t=>{
   const sc=TL.scenes.find(s=>t>=s.start&&t<s.end)||TL.scenes[TL.scenes.length-1],tl=t-sc.start;
   ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,W,H);
-  ctx.save();const p=1+.05*clamp(1-tl/.4);ctx.translate(CX,700);ctx.scale(p,p);ctx.translate(-CX,-700);
+  const cs=TL.sentences.find(s=>t>=s.start&&t<s.end+.25);let p=1+.06*(1-eOut(tl/.4));             // Szenenstart
+  if(cs){const u=t-cs.start;p*=1+.045*(1-eOut(u/.35));                                            // Satzstart: Punch-in
+    for(const w of cs.words){if(cs.accent.some(a=>norm(a)===norm(w.w))&&t>=w.s&&t<w.s+.16)p*=1+.022*(1-(t-w.s)/.16)}}
+  const slen=(sc.end||TL.duration)-sc.start;p*=1+.035*clamp(tl/Math.max(1,slen));                     // langsame Drift
+  ctx.save();ctx.translate(CX,760);ctx.scale(p,p);ctx.translate(-CX,-760);
   (SCN[sc.id]||SCN.hook)(tl,t,sc);ctx.restore();
-  eraLabel(t,'KI-GESCHICHTE',t<5.4?'Teil 1':'ab 1950');
+  eraLabel(t,'KI-GESCHICHTE','Teil 1');
   drawSubs(t);
   ctx.save();ctx.globalAlpha=1;ctx.fillStyle=ctx.createPattern(GRAIN,'repeat');ctx.fillRect(0,0,W,H);ctx.restore();
   const g=ctx.createRadialGradient(540,960,600,540,960,1300);g.addColorStop(0,'rgba(0,0,0,0)');g.addColorStop(1,'rgba(10,0,30,.45)');ctx.fillStyle=g;ctx.fillRect(0,0,W,H);

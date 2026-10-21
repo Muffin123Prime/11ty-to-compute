@@ -33,13 +33,27 @@ def gemini_tts(i, text):
                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": ep.get("gemini_voice", "Algenib")}}}}}
     last = None
     for model in ep.get("gemini_models", ["gemini-3.8-flash-tts", "gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"]):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        req = urllib.request.Request(url, data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json", "x-goog-api-key": key})
+        if model.startswith("gemini-3.8"):
+            # Neue Schnittstelle: Text ist woertliches Transkript, Stil-Anweisung getrennt in speech_metadata
+            url = "https://generativelanguage.googleapis.com/v1beta/interactions"
+            b38 = {"model": model, "response_format": {"type": "audio"},
+                   "generation_config": {"speech_config": [{"voice": ep.get("gemini_voice", "Algenib")}]},
+                   "input": [{"type": "user_input", "content": [{"type": "text", "text": text,
+                              "annotations": [{"type": "speech_metadata", "style": style}] if style else []}]}]}
+            req = urllib.request.Request(url, data=json.dumps(b38).encode(),
+                                         headers={"Content-Type": "application/json", "x-goog-api-key": key})
+        else:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json", "x-goog-api-key": key})
         for attempt in range(8):
             try:
                 resp = json.load(urllib.request.urlopen(req, timeout=180))
-                part = resp["candidates"][0]["content"]["parts"][0]["inlineData"]
+                if model.startswith("gemini-3.8"):
+                    part = next(c for st in resp["steps"] for c in st.get("content", []) if c.get("type") == "audio")
+                    part = {"data": part["data"], "mimeType": part.get("mime_type", part.get("mimeType", "audio/wav"))}
+                else:
+                    part = resp["candidates"][0]["content"]["parts"][0]["inlineData"]
                 m = re.search(r"rate=(\d+)", part.get("mimeType", "")); rate = int(m.group(1)) if m else 24000
                 data = base64.b64decode(part["data"])
                 path = cache
@@ -52,7 +66,8 @@ def gemini_tts(i, text):
                 return path
             except Exception as e:
                 last = e
-                import time; time.sleep(25 if '429' in str(e) else 3)
+                if '429' in str(e): break          # Tageskontingent erschoepft: naechstes Modell
+                import time; time.sleep(3)
     raise RuntimeError(f"Gemini-Sprachausgabe fehlgeschlagen: {last}")
 
 async def synth(i, text):
@@ -196,6 +211,8 @@ for i, s in enumerate(sentences):
         events.append({"type": "stamp", "t": s["end"] - 0.45})
     if s["event"] == "cta":
         events.append({"type": "cta", "t": s["start"] + 0.1})
+    if s["event"] and s["event"] not in ("stamp", "cta"):   # frei benennbare Ereignisse (z.B. shock) am Satzende
+        events.append({"type": s["event"], "t": s["end"] - 0.35})
 tl = {"id": ep["id"], "series": ep["series"], "part": ep["part"], "title": ep["title"],
       "duration": total, "sentences": sentences, "scenes": scenes, "events": events}
 json.dump(tl, open(f"{out}/timeline.json", "w", ensure_ascii=False and None or None, ) if False else open(f"{out}/timeline.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)

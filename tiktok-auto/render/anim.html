@@ -227,7 +227,7 @@ function prepSubs(){
     s._chunks=[];let cur=[],chars=0;
     s.words.forEach((w,i)=>{
       cur.push(i);chars+=w.w.length+1;
-      const brk=/[.,!?:;]$/.test(w.w)||cur.length>=3||chars>20;
+      const brk=/[.,!?:;]$/.test(w.w)||cur.length>=3||chars>16;
       if(brk||i===s.words.length-1){s._chunks.push(cur);cur=[];chars=0}
     });
   }
@@ -250,7 +250,7 @@ function drawSubs(t){
     const tw=ln.reduce((a,b)=>a+b.w,0);let x=cxm-tw/2;const y=cy+li*lh;
     for(const it of ln){
       const w=s.words[it.i],spoken=t>=w.s,cur_=spoken&&t<w.e+.04,acc=s.accent.some(a=>norm(a)===norm(w.w));
-      const pop=cur_?1+.14*(1-clamp((t-w.s)/.12)):1;
+      const pop=cur_?1+(acc?.3:.14)*(1-clamp((t-w.s)/.12)):1;
       ctx.save();ctx.translate(x+it.w/2,y);ctx.scale(pop,pop);ctx.translate(-it.w/2,0);
       ctx.font=font;ctx.lineWidth=18;ctx.strokeStyle='rgba(0,0,10,.92)';ctx.strokeText(it.txt,0,0);
       ctx.fillStyle=!spoken?'rgba(255,255,255,.28)':(acc?COL.green:'#fff');

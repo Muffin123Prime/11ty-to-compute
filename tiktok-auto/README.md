@@ -22,12 +22,24 @@ Ziel: täglich automatisch kurze, hochkante Erklärvideos (TikTok und Instagram 
 - Quellen nur als Stil-Vorbild nutzen. Keine Bilder, Figuren oder Videos anderer Kanäle übernehmen.
 
 ## Gelernte Regeln für Folgen (Rückmeldung des Auftraggebers)
-- Stimme: Gemini "Fenrir", Stil "mitreißend, motivierend, überzeugend, nicht rau". Tempo `tempo` 1.04 bis 1.05, nicht schneller.
-- Ton: sehr leiser Klangteppich, weiche Töne nur an Einblendungen, keine Schläge, nichts Lautes.
+- Stimme (Stand 21.10., zweite Runde): Gemini "Charon" über `gemini-3.8-flash-tts`, Stil "Trailer-Sprecher, tief, klar, zügig, dramatisch, nicht rau". Tempo `tempo` 1.12. Fenrir wurde als "komisch" empfunden: Grundton lag bei ca. 219 Hz, Charon liegt bei ca. 120 bis 135 Hz. Hörproben anderer Stimmen (Puck, Orus, Iapetus, Sadaltager, Enceladus) wurden gemacht, Charon hatte die stärkste Tonhöhen- und Lautstärkevariation bei tiefer Lage.
+- Gemini 3.8 TTS hat eine **neue Schnittstelle** (`/v1beta/interactions`): Der Text ist wörtliches Transkript, die Stil-Anweisung steht getrennt in `speech_metadata.style`. Schickt man den Stil wie früher im Text mit, liest das Modell ihn laut vor. `tools/make_voice.py` unterscheidet das nach Modellnamen. Kontingente pro Modell getrennt, je ca. 10 Anfragen pro Tag.
+- Ton (Stand 21.10., zweite Runde): Rückmeldung zur ersten Fassung war "todesuninteressant, nach 10 Sekunden keine Konzentration mehr". Deshalb jetzt: leiser Puls im Herzschlag-Tempo (104 BPM), der zum Ende dichter wird, Whoosh plus weicher Bass an jedem Szenenwechsel, kleiner Luftzug an jedem Satzanfang, leiser Akzentton auf betonten Wörtern, Riser vor der Schlusswendung, dissonanter Schlag beim Ereignis `shock`. Weiterhin keine harten, lauten Schläge.
 - Aufbau: Hook mit der Frage in den ersten Sekunden, Versprechen, Entwicklung, eigenes Ergebnis, dann offene Frage zum nächsten Teil. Leitlinien: kein künstlicher Cliffhanger, keine falschen Versprechen, kein Flackern.
 - Keine Aufzählungen im Text ("Moment eins, Moment zwei, Moment drei"). Das fühlt sich länger an und die Konzentration sinkt. Stattdessen eine durchlaufende Geschichte erzählen, ohne Zählwörter.
 - Kurz halten: Ziel deutlich unter 45 Sekunden, kurze Sätze, pro Szene wenig Text.
-- Beispielvideo ki_01 war mit 58,8 s zu lang.
+- Beispielvideo ki_01 war mit 58,8 s zu lang. Die zweite Fassung hat 34,5 s und 71 Wörter.
+
+## Recherche: Was Kurzvideos spannend hält (21.10.)
+Quellen sind Ratgeber von Werkzeuganbietern und Agenturen, keine kontrollierten Studien. Die Zahlen darin widersprechen sich teils, die Richtung ist aber einheitlich.
+- Hook: Die ersten 3 Sekunden entscheiden über die Verbreitung. Eine starke Behauptung, ein Widerspruch oder eine offene Frage, kein Vorspann, kein Logo, keine Vorstellung ("Ich zeige dir drei Momente" ist ein Vorspann). Umgesetzt: "1966. Ein Computer bringt Menschen zum Weinen, ohne ein einziges Wort zu verstehen."
+- Offene Schleife: Frage früh stellen, Spannung halten, am Ende auflösen oder bewusst offen lassen. Keine generischen "Bleib bis zum Ende"-Sätze.
+- Tempo: Ein Bildwechsel alle 2 bis 4 Sekunden (Schnitt, Zoom, Einblendung, Ton). Umgesetzt im Renderer: Punch-in bei jedem Satzanfang, langsame Drift innerhalb der Szene, kleiner Kick auf betonten Wörtern, Szenenwechsel alle 3 bis 7 Sekunden.
+- Länge: 15 bis 30 s ist der Normalfall, 45 bis 60 s nur bei sehr starkem Hook.
+- Untertitel: Große fette Wörter, 2 bis 3 Wörter gleichzeitig, Schlüsselwort farbig (Gelb), Wort-für-Wort-Aufbau, in der Bildmitte, nicht am unteren Rand. Zu viel Animation schadet. Das entspricht dem bestehenden Stil, die Blöcke wurden auf maximal 16 Zeichen verkürzt, damit keine dritte Zeile entsteht.
+- Ton: Belege für einzelne Effekte fehlen, Praktiker setzen einen kurzen Klang auf jeden Schnitt und auf Einblendungen als Energiesignal. Viele schauen ohne Ton, deshalb muss der Hook auch nur mit Bild und Text funktionieren.
+- Stimme: Für Gemini TTS gilt, Stil in natürlicher Sprache beschreiben (Szene, Tempo, Haltung) statt eines einzelnen Adjektivs, Pausen über Satzzeichen und Auslassungspunkte, Tags in spitzen Klammern nur für kurze Ereignisse.
+Quellen: teleprompter.com (3-Sekunden-Regel), stackmatix.com (Hook-Typen, Länge), influenceflow.io (Schnitte alle 2 bis 4 s), clipspeed.ai (Untertitel-Stile), socialk.it (offene Schleife), ai.google.dev/gemini-api/docs/speech-generation (Stimmen, Schnittstelle), livekit.com (Stil-Prompting).
 - API-Kontingent: gemini-3.8-flash-tts erlaubt im kostenlosen Tarif nur 10 Anfragen pro Tag. Stimme deshalb pro Szene erzeugen (`group_by_scene`).
 
 ## TikTok-Upload (Stand)
@@ -45,3 +57,5 @@ Ziel: täglich automatisch kurze, hochkante Erklärvideos (TikTok und Instagram 
 - Danach in der Cloud-Umgebung "Ki" die Variablen `TIKTOK_CLIENT_KEY` und `TIKTOK_CLIENT_SECRET` auf die **Sandbox-Werte** setzen und `TIKTOK_REDIRECT_URI=https://nachgehakt.netlify.app/callback.html` ergänzen. Dann neue Sitzung starten (Zweig tiktok-auto-pipeline).
 - Dann: `python3 upload/tiktok_upload.py auth-url`, Anmeldung im Browser, Code von callback.html kopieren, `exchange <code>`, danach Testupload mit `--send` als Entwurf.
 - Ungeprüfte Apps posten nur privat, das Konto muss privat sein.
+- **Upload geprüft (21.10.):** Anmeldung über callback.html und `exchange` funktioniert, Entwurf kam im TikTok-Posteingang an. Der Status bleibt lange auf PROCESSING_UPLOAD, auch wenn der Entwurf längst da ist. Nicht darauf warten.
+- Ereignisse in der Episodendatei: `stamp` (Stempel), `cta` (Schlusswendung mit Riser), `shock` (roter Blitz, Fensterwackeln, dissonanter Ton). Weitere Namen landen als Ereignis am Satzende in `timeline.json`.

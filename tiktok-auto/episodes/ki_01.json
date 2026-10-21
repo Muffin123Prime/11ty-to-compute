@@ -2,111 +2,39 @@
  "id": "ki_01",
  "series": "KI-WOCHE",
  "part": 1,
- "title": "Wie die KI angefangen hat",
+ "title": "Der Computer, der Menschen zum Weinen brachte",
  "provider": "gemini",
- "gemini_voice": "Fenrir",
+ "gemini_voice": "Charon",
  "gemini_models": [
+  "gemini-3.8-flash-tts",
+  "gemini-2.5-flash-preview-tts",
   "gemini-3.1-flash-tts-preview"
  ],
- "style": "Sprich auf Deutsch als mitreißender, selbstbewusster Erzähler eines Wissenskanals: motivierend, überzeugend, energiegeladen, klare deutliche Betonung, zügiges Tempo, bei Fragen und Wendungen steigende Spannung, am Ende jedes Satzes Zug nach vorn, kein Flüstern, nicht rau",
- "voice": "it-IT-GiuseppeMultilingualNeural",
- "rate": "+4%",
+ "style": "Du bist der Erzähler eines spannenden deutschen Wissens-Kurzvideos, wie ein Trailer-Sprecher: tiefe, klare, junge Männerstimme, zügig, dramatisch, mit Spannungsbogen, kurze Pause vor jeder Pointe, Fragen mit steigender Spannung, nicht rau, nicht übertrieben. Sprich ausschließlich den folgenden Text auf Deutsch",
+ "voice": "de-DE-ConradNeural",
+ "rate": "+8%",
  "pitch": "-2Hz",
- "start_offset": 0.55,
+ "start_offset": 0.35,
+ "tempo": 1.12,
+ "group_by_scene": true,
  "sentences": [
-  {
-   "text": "1950 stellt ein Mathematiker eine Frage, die bis heute nachwirkt.",
-   "scene": "hook",
-   "accent": [
-    "1950",
-    "Frage"
-   ],
-   "gap_after": 0.12
-  },
-  {
-   "text": "Können Maschinen denken?",
-   "scene": "question",
-   "accent": [
-    "denken?"
-   ],
-   "gap_after": 0.3
-  },
-  {
-   "text": "Sein Name: Alan Turing. Ich zeige dir drei Momente, in denen Maschinen Menschen überrascht haben.",
-   "scene": "turing",
-   "accent": [
-    "Alan",
-    "Turing.",
-    "drei",
-    "überrascht"
-   ]
-  },
-  {
-   "text": "Moment eins: der Turing-Test. Du schreibst mit zwei Unbekannten. Einer ist ein Mensch, einer eine Maschine.",
-   "scene": "test",
-   "accent": [
-    "eins:",
-    "Mensch,",
-    "Maschine."
-   ]
-  },
-  {
-   "text": "Erkennst du den Unterschied nicht, hat die Maschine bestanden.",
-   "scene": "test",
-   "accent": [
-    "bestanden."
-   ],
-   "event": "stamp"
-  },
-  {
-   "text": "Moment zwei, 1966: Das Programm Eliza stellt fast nur Gegenfragen. Trotzdem erzählen ihm Leute ihre Geheimnisse.",
-   "scene": "eliza",
-   "accent": [
-    "zwei,",
-    "1966:",
-    "Eliza",
-    "Geheimnisse."
-   ]
-  },
-  {
-   "text": "Sogar sein Erfinder war schockiert.",
-   "scene": "eliza",
-   "accent": [
-    "schockiert."
-   ],
-   "gap_after": 0.45
-  },
-  {
-   "text": "Moment drei, 1997: Der Computer Deep Blue schlägt den Schachweltmeister Kasparow.",
-   "scene": "chess",
-   "accent": [
-    "drei,",
-    "1997:",
-    "Deep",
-    "Blue",
-    "Kasparow."
-   ]
-  },
-  {
-   "text": "Maschinen konnten jetzt rechnen und Regeln befolgen. Aber denken?",
-   "scene": "chess",
-   "accent": [
-    "denken?"
-   ],
-   "gap_after": 0.35
-  },
-  {
-   "text": "Dann kam 2016, und alles kippte. Was genau passiert ist, erfährst du im nächsten Teil.",
-   "scene": "go",
-   "accent": [
-    "2016,",
-    "kippte.",
-    "nächsten",
-    "Teil."
-   ],
-   "event": "cta"
-  }
- ],
- "tempo": 1.05,
- "group_by_scene": true
+  {"text": "1966. Ein Computer bringt Menschen zum Weinen, ohne ein einziges Wort zu verstehen.",
+   "scene": "eliza", "accent": ["1966.", "Weinen,", "einziges", "Wort"], "gap_after": 0.25},
+  {"text": "Eliza stellt nur Gegenfragen. Trotzdem erzählen ihm Leute ihre Geheimnisse.",
+   "scene": "eliza", "accent": ["Eliza", "Gegenfragen.", "Geheimnisse."], "gap_after": 0.2},
+  {"text": "Sein Erfinder ist entsetzt.",
+   "scene": "eliza", "accent": ["entsetzt."], "event": "shock", "gap_after": 0.4},
+  {"text": "Alan Turing hatte genau das gefragt: Können Maschinen denken?",
+   "scene": "turing", "accent": ["Alan", "Turing", "denken?"], "gap_after": 0.3},
+  {"text": "Sein Test: Chatte mit zwei Unbekannten.",
+   "scene": "test", "accent": ["Test:", "zwei", "Unbekannten."], "gap_after": 0.15},
+  {"text": "Erkennst du die Maschine nicht, hat sie gewonnen.",
+   "scene": "test", "accent": ["Maschine", "gewonnen."], "event": "stamp", "gap_after": 0.4},
+  {"text": "1997 schlägt ein Computer den Schachweltmeister. Aber denken? Nein.",
+   "scene": "chess", "accent": ["1997", "Schachweltmeister.", "denken?", "Nein."], "gap_after": 0.35},
+  {"text": "2016 passiert etwas, das selbst die Entwickler nicht erklären können.",
+   "scene": "go", "accent": ["2016", "Entwickler", "erklären"], "event": "cta", "gap_after": 0.2},
+  {"text": "Teil 2 folgt.",
+   "scene": "go", "accent": ["Teil", "2"], "gap_after": 0.1}
+ ]
 }
