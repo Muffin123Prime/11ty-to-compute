@@ -199,6 +199,7 @@ for i, s in enumerate(sentences):
     else:
         scenes.append({"id": s["scene"], "sentences": [i]})
 for k, sc in enumerate(scenes):
+    if sc["id"] in ep.get("scenes", {}): sc["visual"] = ep["scenes"][sc["id"]]   # generische Szene aus der Episodendatei
     first = sentences[sc["sentences"][0]]
     sc["start"] = 0.0 if k == 0 else max(0.0, first["start"] - 0.12)
     sc["end"] = total if k == len(scenes) - 1 else None
@@ -213,7 +214,7 @@ for i, s in enumerate(sentences):
         events.append({"type": "cta", "t": s["start"] + 0.1})
     if s["event"] and s["event"] not in ("stamp", "cta"):   # frei benennbare Ereignisse (z.B. shock) am Satzende
         events.append({"type": s["event"], "t": s["end"] - 0.35})
-tl = {"id": ep["id"], "series": ep["series"], "part": ep["part"], "title": ep["title"],
+tl = {"id": ep["id"], "series": ep["series"], "part": ep["part"], "title": ep["title"], "label": ep.get("label", ep["series"]),
       "duration": total, "sentences": sentences, "scenes": scenes, "events": events}
 json.dump(tl, open(f"{out}/timeline.json", "w", ensure_ascii=False and None or None, ) if False else open(f"{out}/timeline.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 print("Dauer gesamt: %.1f s" % total)

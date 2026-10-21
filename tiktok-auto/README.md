@@ -1,5 +1,29 @@
 # TikTok-Automation: Stand und Übergabe
 
+## Tagesbetrieb (ab 21.10.)
+- Die Beispielphase ist vorbei. Themen und Genres stehen in `themen.json`. Der Auftraggeber trägt Themen ein (oder nennt sie im Chat), Claude schreibt daraus Episoden.
+- Status eines Themas: `offen` (Idee) -> `bereit` (Episodendatei geschrieben und mit Standbildern geprüft) -> `hochgeladen` (Entwurf bei TikTok, mit `publish_id` und Datum).
+- `daily.sh` ist der Tageslauf: richtet die Python-Umgebung her, baut das erste Thema mit Status `bereit`, lädt es als Entwurf hoch, setzt den Status und sichert `themen.json` per git. `tools/daily.py --next` zeigt nur, was dran wäre. `--dry` baut ohne Upload. Rückgabe 3 heißt: keine Episode bereit, erst eine schreiben.
+- Geplante Aufgabe "TikTok Tagesentwurf": täglich 11:41 Uhr (Europa/Berlin), neue Cloud-Sitzung, führt `daily.sh` aus und schreibt bei Bedarf vorher die nächste Episode. Nur Entwürfe, keine Direktposts.
+- Voraussetzung in der Cloud-Umgebung: `TIKTOK_REFRESH_TOKEN` zusätzlich zu den anderen Variablen, weil `.secrets/` mit jeder Sitzung verloren geht. TikTok gibt beim Erneuern denselben Refresh-Token zurück (geprüft am 21.10.), er gilt ein Jahr.
+
+## Episodenformat (für neue Folgen)
+Datei `episodes/<id>.json`, Vorlage ist `episodes/ki_01.json`.
+- Kopf: `id`, `series`, `part`, `title` (wird Bildunterschrift), `label` (Kanalzeile oben rechts, z.B. aus dem Genre), `provider` "gemini", `gemini_voice` "Charon", `gemini_models` wie in ki_01, `style` wie in ki_01, `tempo` 1.12, `group_by_scene` true, `start_offset` 0.35.
+- `sentences`: Liste mit `text`, `scene` (Szenen-Kennung), `accent` (betonte Wörter, genau wie im Text geschrieben), optional `event` (`stamp`, `cta`, `shock`), `gap_after`.
+- `scenes`: Objekt Kennung -> Bildbeschreibung. Handgemalte Szenen (hook, question, turing, test, eliza, chess, go) brauchen keinen Eintrag. Alle anderen nutzen generische Szenen:
+  - `{"visual":"year","text":"1969","pill":"vor 57 Jahren","bg":"nacht"}` große Zahl über der Erde (`"earth":false` ohne Erde)
+  - `{"visual":"headline","lines":["WARUM VERGISST DU","NAMEN?"],"pill":"Teil 3"}` Karte mit 1 bis 3 Zeilen, letzte Zeile gelb
+  - `{"visual":"chat","title":"ELIZA · 1966","messages":[["u","Text",0.5],["e","Antwort",1.6]],"pill":"..."}` Chatfenster, Zeiten in Sekunden ab Szenenstart, u rechts, e links
+  - `{"visual":"versus","left":"MENSCH","right":"MASCHINE","title":"DUELL"}` zwei Figuren, VS in der Mitte
+  - `{"visual":"stat","value":"86 %","label":"aller Erinnerungen sind nach einer Woche weg","pill":"Studie 1885"}` Zahl zählt hoch
+  - `{"visual":"quote","text":"Zitat","author":"Name"}` Zitatkarte
+  - `{"visual":"list","title":"DREI TRICKS","items":["...","...","..."],"step":1.1}` bis 4 Zeilen, erscheinen nacheinander
+  - `{"visual":"question","text":"Können Maschinen denken?"}` Figur mit Gedankenblase
+  - `bg`: violett, rot, blau, gruen, orange, nacht. Nebeneinanderliegende Szenen sollten verschiedene Hintergründe haben.
+- Prüfen vor Status `bereit`: Dauer unter 40 s (`tools/make_voice.py` druckt sie), Standbilder mit `node render/render.mjs out/<id>/timeline.json out/<id>/stills --html render/anim_illu.html --stills 1,5,10,...` ansehen, kein Text über den Rand, Untertitel überdecken keine Pille.
+- Texte prüfen: Fakten müssen stimmen (Jahreszahlen, Namen, Zahlen), keine erfundenen Zitate. Lieber eine Zahl weglassen als raten.
+
 Ziel: täglich automatisch kurze, hochkante Erklärvideos (TikTok und Instagram Reels) im gemalten Illustrationsstil, deutsche männliche KI-Stimme, offenes Ende pro Folge, Wochenthema (aktuell: KI-Woche).
 
 ## Stand
