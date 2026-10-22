@@ -375,6 +375,108 @@ SCN.offen=(tl,t)=>{
   if(tl>2.6){const b=eBack((tl-2.6)/.4);ctx.save();ctx.translate(CX,540);ctx.scale(b,b);pill('Von Chemie zu Leben: ungeklärt',0,0,PL.magenta,34);ctx.restore()}
 };
 
+
+/* ===== Nachrichtenformat (news_*): Studio-Look, Bauchbinden, Laufband ===== */
+const NEWS={navy:'#061233',navy2:'#0c2256',red:'#e8192c',white:'#ffffff',grey:'#c9d3ea',gold:'#ffc93c'};
+function newsBG(t,warm=0){ctx.fillStyle=vgrad(0,H,[[0,'#040a22'],[.5,NEWS.navy],[1,NEWS.navy2]]);ctx.fillRect(0,0,W,H);
+  ctx.save();ctx.globalAlpha=.09;ctx.strokeStyle='#8fb3ff';ctx.lineWidth=2;for(let x=-200;x<W+200;x+=90){ctx.beginPath();ctx.moveTo(x+Math.sin(t*.2)*30,0);ctx.lineTo(x-400,H);ctx.stroke()}ctx.restore();
+  const g=ctx.createRadialGradient(CX,600,50,CX,600,900);g.addColorStop(0,warm?'rgba(255,120,60,.25)':'rgba(70,130,255,.25)');g.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=g;ctx.fillRect(0,0,W,H)}
+function newsTop(t){ctx.save();ctx.fillStyle=NEWS.red;ctx.fillRect(60,120,14,70);ctx.fillStyle='#fff';ctx.font=`900 44px ${FONT}`;ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText('NACHGEHAKT',96,142);
+  ctx.font=`800 30px ${FONT}`;ctx.fillStyle=NEWS.gold;ctx.fillText('NEWS  ·  DIE WOCHE',96,180);ctx.restore()}
+function lowerThird(tl,title,sub,at=.3){if(tl<at)return;const u=eOut((tl-at)/.4);ctx.save();ctx.translate((1-u)*-900,0);
+  ctx.fillStyle=NEWS.red;ctx.fillRect(60,990,16,110);ctx.fillStyle='rgba(255,255,255,.96)';ctx.fillRect(76,990,820,110);
+  ctx.fillStyle=NEWS.navy;ctx.font=`900 46px ${FONT}`;ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText(title,104,1028);
+  ctx.font=`700 30px ${FONT}`;ctx.fillStyle='#3b4a70';ctx.fillText(sub,104,1072);ctx.restore()}
+function ticker(t,items){ctx.save();ctx.fillStyle='rgba(4,10,34,.92)';ctx.fillRect(0,1480,W,74);ctx.fillStyle=NEWS.red;ctx.fillRect(0,1480,W,6);
+  ctx.font=`800 32px ${FONT}`;ctx.textBaseline='middle';ctx.textAlign='left';ctx.fillStyle='#fff';const txt=items.join('     +++     ')+'     +++     ';const w=ctx.measureText(txt).width;
+  const x=W-((t*140)%(w+W));ctx.fillText(txt,x,1518);ctx.fillText(txt,x+w,1518);
+  ctx.fillStyle=NEWS.red;ctx.fillRect(0,1486,230,68);ctx.fillStyle='#fff';ctx.font=`900 30px ${FONT}`;ctx.fillText('EILMELDUNG',18,1520);ctx.restore()}
+const TICKER=['Frankreich: 550.000 demonstrieren, Innenministerium','Rund 2.400 Festnahmen landesweit','Rathaus von Limoges ausgebrannt','Spanien: Sturm Adam, mindestens 4 Tote','Paris: Ausgangssperre rund um die République','Neue Proteste für Freitag angekündigt'];
+const FR=[[.46,.05],[.56,.10],[.66,.16],[.72,.28],[.68,.40],[.74,.54],[.70,.70],[.56,.78],[.42,.96],[.34,.82],[.22,.70],[.10,.52],[.16,.36],[.06,.22],[.22,.12],[.34,.04]];
+const CITIES={Paris:[.47,.26],Lyon:[.62,.60],Bordeaux:[.24,.66],Limoges:[.40,.56],Marseille:[.64,.86],Nantes:[.18,.42]};
+function franceMap(cx,cy,sz,t,tl){ctx.save();ctx.translate(cx-sz/2,cy-sz/2);
+  ctx.shadowColor='rgba(0,0,0,.6)';ctx.shadowBlur=40;ctx.shadowOffsetY=16;ctx.beginPath();FR.forEach(([x,y],i)=>i?ctx.lineTo(x*sz,y*sz):ctx.moveTo(x*sz,y*sz));ctx.closePath();
+  const g=ctx.createLinearGradient(0,0,sz,sz);g.addColorStop(0,'#2f6bff');g.addColorStop(1,'#163a9a');ctx.fillStyle=g;ctx.fill();ctx.shadowColor='transparent';ctx.lineWidth=6;ctx.strokeStyle='#cfe0ff';ctx.stroke();
+  Object.entries(CITIES).forEach(([n,[x,y]],i)=>{const at=.6+i*.35,p=eBack((tl-at)/.4);if(p<=0)return;const px=x*sz,py=y*sz;ctx.save();ctx.translate(px,py);ctx.scale(p,p);
+    const pulse=1+.5*Math.sin(t*5+i)**2;ctx.fillStyle=`rgba(232,25,44,${.35/pulse})`;ctx.beginPath();ctx.arc(0,0,(n==='Paris'?42:26)*pulse,0,7);ctx.fill();
+    ctx.fillStyle=NEWS.red;ctx.beginPath();ctx.arc(0,0,n==='Paris'?20:12,0,7);ctx.fill();ctx.fillStyle='#fff';ctx.font=`900 ${n==='Paris'?40:28}px ${FONT}`;ctx.textAlign='left';ctx.textBaseline='middle';ctx.shadowColor='rgba(0,0,0,.8)';ctx.shadowBlur=8;ctx.fillText(n,26,-4);ctx.restore()});
+  ctx.restore()}
+function flames(x,y,w,h,t,seed,n=7){const rr=rng(seed);for(let i=0;i<n;i++){const fx=x+rr()*w,ph=rr()*6,sc=.6+rr()*.8,fl=Math.sin(t*9+ph)*.2+1;
+  ctx.save();ctx.translate(fx,y);ctx.scale(sc,sc*fl);const g=ctx.createLinearGradient(0,0,0,-h);g.addColorStop(0,'rgba(255,230,120,.95)');g.addColorStop(.5,'rgba(255,120,30,.9)');g.addColorStop(1,'rgba(255,40,10,0)');ctx.fillStyle=g;
+  ctx.beginPath();ctx.moveTo(-40,0);ctx.quadraticCurveTo(-60+Math.sin(t*7+ph)*15,-h*.5,0,-h);ctx.quadraticCurveTo(60+Math.cos(t*6+ph)*15,-h*.5,40,0);ctx.fill();ctx.restore()}}
+function smoke(x,y,t,seed,n=8){const rr=rng(seed);for(let i=0;i<n;i++){const ph=rr()*10,sp=40+rr()*40,dx=(rr()-.5)*120,yy=((ph*50-t*sp)%500+500)%500;ctx.fillStyle=`rgba(90,90,110,${.35*(1-yy/500)})`;ctx.beginPath();ctx.arc(x+dx+Math.sin(t+ph)*20,y-yy,40+yy*.15,0,7);ctx.fill()}}
+function crowd(t,tl,y0){const rr=rng(77);for(let row=0;row<5;row++){const n=10+row*3,yy=y0+row*70,sc=.55+row*.12;for(let i=0;i<n;i++){const x=(i+.5)/n*W+(rr()-.5)*40,bob=Math.sin(t*3+i+row)*5,col=['#2b1260','#c23a8a','#1fd6c1','#ff7a3c','#f2b48c'][Math.floor(rr()*5)];
+  ctx.save();ctx.translate(x,yy+bob);ctx.scale(sc,sc);ctx.fillStyle=col;ctx.beginPath();ctx.roundRect(-40,0,80,110,[40,40,8,8]);ctx.fill();ctx.fillStyle='#f2b48c';ctx.beginPath();ctx.arc(0,-28,30,0,7);ctx.fill();
+  if(rr()>.6){const up=Math.sin(t*2+i)*8;ctx.fillStyle='#fff6e0';ctx.fillRect(-55,-150+up,110,70);ctx.fillStyle='#8a5a2a';ctx.fillRect(-4,-80+up,8,80)}ctx.restore()}}}
+
+SCN.news_intro=(tl,t)=>{newsBG(t,1);
+  const k=eBack(tl/.6);ctx.save();ctx.translate(CX,560);ctx.scale(k,k);earth(0,0,230,t*1.5);ctx.restore();
+  ctx.save();ctx.translate(0,(1-eOut(tl/.5))*-120);ctx.fillStyle=NEWS.red;ctx.fillRect(60,120,900,150);bigText('NACHGEHAKT',CX,170,96);ctx.fillStyle='#fff';ctx.font=`800 40px ${FONT}`;ctx.textAlign='center';ctx.fillText('NEWS  ·  KALENDERWOCHE 43',CX,240);ctx.restore();
+  if(tl>1.2){const b=eBack((tl-1.2)/.4);ctx.save();ctx.translate(CX,880);ctx.scale(b,b);ctx.fillStyle='rgba(255,255,255,.96)';ctx.beginPath();ctx.roundRect(-420,-90,840,180,20);ctx.fill();ctx.fillStyle=NEWS.red;ctx.fillRect(-420,-90,18,180);bigText('FRANKREICH',0,-20,84,{color:NEWS.navy});ctx.font=`800 34px ${FONT}`;ctx.fillStyle='#3b4a70';ctx.textAlign='center';ctx.fillText('Die Woche der Unruhen',0,50);ctx.restore()}
+  ticker(t,TICKER)};
+SCN.news_map=(tl,t)=>{newsBG(t);newsTop(t);franceMap(CX,640,720,t,tl);
+  lowerThird(tl,'Proteste seit Mitte September','Schüler, Studenten, Lehrer, Gewerkschaften',.3);
+  if(tl>4.5){const b=eBack((tl-4.5)/.4);ctx.save();ctx.translate(CX,1230);ctx.scale(b,b);ctx.restore()}
+  ticker(t,TICKER)};
+SCN.news_crowd=(tl,t)=>{newsBG(t,1);newsTop(t);
+  ctx.fillStyle=vgrad(300,1000,[[0,'rgba(255,140,60,0)'],[1,'rgba(255,120,40,.25)']]);ctx.fillRect(0,300,W,700);crowd(t,tl,560);
+  const u=eOut((tl-.8)/1.6),n=Math.round(550000*u);const k=eBack((tl-.8)/.4);
+  if(k>0){ctx.save();ctx.translate(CX,330);ctx.scale(k,k);bigText(n.toLocaleString('de-DE'),0,0,150,{color:NEWS.gold});ctx.font=`800 34px ${FONT}`;ctx.fillStyle='#fff';ctx.textAlign='center';ctx.fillText('laut Innenministerium',0,100);ctx.restore()}
+  if(tl>5.6){const b=eBack((tl-5.6)/.4);ctx.save();ctx.translate(CX,930);ctx.scale(b,b);pill('Organisatoren: 800.000',0,0,NEWS.red,40);ctx.restore()}
+  lowerThird(tl,'Samstag, 17. Oktober','Landesweiter Protesttag',.3);ticker(t,TICKER)};
+SCN.news_paris=(tl,t)=>{newsBG(t,1);newsTop(t);
+  // Strasse mit Laeden, Scherben, brennendes Auto
+  ctx.fillStyle='#1a1430';ctx.fillRect(0,300,W,620);for(let i=0;i<4;i++){const x=40+i*260;ctx.fillStyle=['#3a2a5a','#4a2a4a','#2a3a5a','#3a3a4a'][i];ctx.fillRect(x,340,230,520);
+    ctx.fillStyle='rgba(120,200,255,.35)';ctx.fillRect(x+20,400,190,300);ctx.strokeStyle='rgba(255,255,255,.9)';ctx.lineWidth=3;const rr=rng(i+5);const cx=x+115+(rr()-.5)*120,cy=550+(rr()-.5)*160;
+    if(tl>.4+i*.25){for(let k=0;k<9;k++){const a=k/9*6.283+rr(),len=60+rr()*120;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+Math.cos(a)*len,cy+Math.sin(a)*len);ctx.stroke()}}
+    ctx.fillStyle='#ffe9a0';ctx.fillRect(x+30,360,170,26)}
+  ctx.fillStyle='#2b2238';ctx.fillRect(0,860,W,260);ctx.fillStyle='rgba(255,255,255,.2)';for(let x=0;x<W;x+=160)ctx.fillRect(x,990,90,8);
+  const rr2=rng(9);for(let i=0;i<30;i++){ctx.fillStyle='rgba(180,220,255,.7)';ctx.beginPath();ctx.moveTo(rr2()*W,880+rr2()*220);ctx.lineTo(rr2()*W,880+rr2()*220);ctx.lineTo(rr2()*W,880+rr2()*220);ctx.fill()}
+  ctx.save();ctx.translate(CX+80,930);ctx.fillStyle='#1f1b2e';ctx.beginPath();ctx.roundRect(-190,-70,380,110,[40,40,10,10]);ctx.fill();ctx.fillStyle='#14111e';ctx.beginPath();ctx.roundRect(-120,-130,220,70,[30,30,0,0]);ctx.fill();
+  ctx.fillStyle='#111';[-120,120].forEach(x=>{ctx.beginPath();ctx.arc(x,40,36,0,7);ctx.fill()});smoke(0,-120,t,3);flames(-150,-60,300,180,t,4,9);ctx.restore();
+  lowerThird(tl,'Paris · Place de la République','Plünderungen, brennende Fahrzeuge',.3);ticker(t,TICKER)};
+SCN.news_fire=(tl,t)=>{newsBG(t,1);newsTop(t);
+  ctx.save();ctx.translate(CX,900);const k=eOut(tl/.5);ctx.scale(k,k);
+  ctx.fillStyle='#3b2a44';ctx.fillRect(-360,-420,720,420);ctx.fillStyle='#2a1c33';ctx.beginPath();ctx.moveTo(-390,-420);ctx.lineTo(0,-560);ctx.lineTo(390,-420);ctx.closePath();ctx.fill();
+  ctx.fillStyle='#4a3858';ctx.fillRect(-60,-650,120,100);ctx.beginPath();ctx.moveTo(-70,-650);ctx.lineTo(0,-720);ctx.lineTo(70,-650);ctx.fill();
+  for(let r=0;r<3;r++)for(let c=0;c<5;c++){const fl=.6+.4*Math.sin(t*8+r*3+c);ctx.fillStyle=`rgba(255,${120+80*fl},40,.95)`;ctx.fillRect(-300+c*140,-380+r*120,80,90)}
+  ctx.fillStyle='#2a1c33';ctx.beginPath();ctx.roundRect(-70,-120,140,120,[70,70,0,0]);ctx.fill();
+  smoke(0,-560,t,11,12);flames(-330,-400,660,320,t,12,12);flames(-60,-640,120,160,t,13,4);ctx.restore();
+  if(tl>.6){const b=eBack((tl-.6)/.4);ctx.save();ctx.translate(CX,300);ctx.scale(b,b);bigText('LIMOGES',0,0,110);ctx.restore()}
+  if(tl>3.6){const b=eBack((tl-3.6)/.4);ctx.save();ctx.translate(CX,430);ctx.scale(b,b);pill('Bordeaux: bis zu 100 Geschäfte geplündert',0,0,NEWS.red,34);ctx.restore()}
+  lowerThird(tl,'Rathaus von Limoges','143 Jahre alt, bei Brandanschlag zerstört',.3);ticker(t,TICKER)};
+SCN.news_bilanz=(tl,t)=>{newsBG(t);newsTop(t);
+  if(tl>.2){const b=eBack((tl-.2)/.4);ctx.save();ctx.translate(CX,300);ctx.scale(b,b);bigText('DIE BILANZ',0,0,100);ctx.restore()}
+  const rows=[['≈ 2.400','Festnahmen landesweit',1.0],['Hunderte','verletzte Einsatzkräfte',3.1],['1 Toter','Demonstrant, Herzstillstand, Paris',5.4]];
+  rows.forEach(([n,l,at],i)=>{const p=eBack((tl-at)/.4);if(p<=0)return;const y=470+i*185;ctx.save();ctx.translate(CX,y);ctx.scale(p,p);
+    ctx.fillStyle='rgba(255,255,255,.96)';ctx.beginPath();ctx.roundRect(-420,-75,840,150,18);ctx.fill();ctx.fillStyle=i===2?NEWS.red:NEWS.navy;ctx.fillRect(-420,-75,18,150);
+    const ns=i===2?66:76;ctx.font=`900 ${ns}px ${FONT}`;const nw=ctx.measureText(n).width;bigText(n,-370+nw/2,0,ns,{color:i===2?NEWS.red:NEWS.navy});
+    ctx.font=`800 30px ${FONT}`;ctx.fillStyle='#3b4a70';ctx.textAlign='left';ctx.textBaseline='middle';
+    wrap(l,760-nw,`800 30px ${FONT}`).forEach((ln,k,arr)=>ctx.fillText(ln,-340+nw,(k-(arr.length-1)/2)*36));ctx.restore()});
+  lowerThird(tl,'Stand: Behördenangaben','Zahlen schwanken je nach Quelle',.3);ticker(t,TICKER)};
+SCN.news_macron=(tl,t)=>{newsBG(t);newsTop(t);
+  const a=eBack(tl/.5);ctx.save();ctx.translate(CX,520);ctx.scale(a,a);card(-420,-200,840,400,'rgba(255,255,255,.97)');ctx.fillStyle=NEWS.red;ctx.font=`900 180px ${FONT}`;ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText('“',-390,-110);
+  bigText('„Nichts',0,-50,96,{color:NEWS.navy});bigText('rechtfertigt das.“',0,60,80,{color:NEWS.navy});ctx.restore();
+  if(tl>.8){const b=eBack((tl-.8)/.4);ctx.save();ctx.translate(CX,780);ctx.scale(b,b);pill('Emmanuel Macron, Fernsehansprache',0,0,NEWS.navy2,34);ctx.restore()}
+  if(tl>2.6){const b=eBack((tl-2.6)/.4);ctx.save();ctx.translate(CX,900);ctx.scale(b,b);pill('Nächtliche Ausgangssperre · République, Les Halles',0,0,NEWS.red,30);ctx.restore()}
+  lowerThird(tl,'Freitag, 24. Oktober','Neue Proteste angekündigt',5.2);ticker(t,TICKER)};
+SCN.news_spain=(tl,t)=>{ctx.fillStyle=vgrad(0,H,[[0,'#0a1830'],[.5,'#1a3a66'],[1,'#0a2448']]);ctx.fillRect(0,0,W,H);newsTop(t);
+  const rr=rng(31);for(let i=0;i<120;i++){const x=rr()*W,ph=rr()*H,sp=900+rr()*500,len=30+rr()*40;const y=((ph+t*sp)%(H+100))-50;ctx.strokeStyle='rgba(200,225,255,.45)';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x-8,y+len);ctx.stroke()}
+  // Haeuser im Wasser
+  [[180,'#c98b5a'],[460,'#e0c08a'],[760,'#b86a4a']].forEach(([x,c],i)=>{ctx.fillStyle=c;ctx.fillRect(x-130,620,260,320);ctx.fillStyle='#7a3a2a';ctx.beginPath();ctx.moveTo(x-150,620);ctx.lineTo(x,500);ctx.lineTo(x+150,620);ctx.fill();
+    ctx.fillStyle='#ffe9a0';ctx.fillRect(x-80,680,60,70);ctx.fillRect(x+20,680,60,70);
+    if(i===1){ctx.fillStyle='#2b1260';ctx.beginPath();ctx.roundRect(x-30,520,60,80,[30,30,0,0]);ctx.fill();ctx.fillStyle='#f2b48c';ctx.beginPath();ctx.arc(x,505,22,0,7);ctx.fill();ctx.strokeStyle='#f2b48c';ctx.lineWidth=10;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(x-20,560);ctx.lineTo(x-60,480+Math.sin(t*6)*15);ctx.moveTo(x+20,560);ctx.lineTo(x+60,480+Math.cos(t*6)*15);ctx.stroke()}});
+  const wl=860-eOut(tl/3)*120;const g=ctx.createLinearGradient(0,wl,0,H);g.addColorStop(0,'rgba(120,90,50,.85)');g.addColorStop(1,'rgba(60,40,30,.95)');ctx.fillStyle=g;
+  ctx.beginPath();ctx.moveTo(0,wl);for(let x=0;x<=W;x+=30)ctx.lineTo(x,wl+Math.sin(x*.02+t*3)*12);ctx.lineTo(W,H);ctx.lineTo(0,H);ctx.fill();
+  if(tl>.4){const b=eBack((tl-.4)/.4);ctx.save();ctx.translate(CX,300);ctx.scale(b,b);bigText('SPANIEN',0,0,110);ctx.restore()}
+  if(tl>3.2){const b=eBack((tl-3.2)/.4);ctx.save();ctx.translate(CX,420);ctx.scale(b,b);pill('mindestens 4 Tote · Valencia und Alicante',0,0,NEWS.red,34);ctx.restore()}
+  lowerThird(tl,'Sturm „Adam“','Valencia unter Wasser',.3);ticker(t,TICKER)};
+SCN.news_outro=(tl,t)=>{newsBG(t);
+  ctx.save();ctx.fillStyle=NEWS.red;ctx.fillRect(60,120,900,150);bigText('NACHGEHAKT',CX,170,96);ctx.fillStyle='#fff';ctx.font=`800 40px ${FONT}`;ctx.textAlign='center';ctx.fillText('NEWS  ·  KALENDERWOCHE 43',CX,240);ctx.restore();
+  const k=eBack(tl/.5);ctx.save();ctx.translate(CX,620);ctx.scale(k,k);earth(0,0,230,t*1.5);ctx.restore();
+  if(tl>1.2){const b=eBack((tl-1.2)/.4);ctx.save();ctx.translate(CX,900);ctx.scale(b,b);ctx.fillStyle='rgba(255,255,255,.96)';ctx.beginPath();ctx.roundRect(-420,-90,840,180,20);ctx.fill();ctx.fillStyle=NEWS.red;ctx.fillRect(-420,-90,18,180);bigText('NÄCHSTES THEMA?',0,-20,70,{color:NEWS.navy});ctx.font=`800 34px ${FONT}`;ctx.fillStyle='#3b4a70';ctx.textAlign='center';ctx.fillText('Schreib es in die Kommentare',0,50);ctx.restore()}
+  ticker(t,TICKER)};
+
 /* ===== Generische Szenen: aus der Episodendatei steuerbar, kein Code pro Folge noetig =====
    scenes: { "<id>": {"visual":"year|headline|chat|versus|stat|quote|list|question", "bg":"violett|rot|blau|gruen|orange|nacht", ...} } */
 const BGS={violett:[['#1b0d45',0],['#5a1d73',.55],['#c23a8a',1]],rot:[['#2a0a1a',0],['#7a1430',.55],['#e0553c',1]],blau:[['#07102e',0],['#143a78',.6],['#1fa6c8',1]],
@@ -445,7 +547,7 @@ window.drawFrame=t=>{
   const slen=(sc.end||TL.duration)-sc.start;p*=1+.035*clamp(tl/Math.max(1,slen));                     // langsame Drift
   ctx.save();ctx.translate(CX,760);ctx.scale(p,p);ctx.translate(-CX,-760);
   drawScene(sc,tl,t);ctx.restore();
-  eraLabel(t,TL.label||TL.series||'',TL.part?'Teil '+TL.part:'');
+  if(TL.audio!=='news')eraLabel(t,TL.label||TL.series||'',TL.part?'Teil '+TL.part:'');
   drawSubs(t);
   ctx.save();ctx.globalAlpha=1;ctx.fillStyle=ctx.createPattern(GRAIN,'repeat');ctx.fillRect(0,0,W,H);ctx.restore();
   const g=ctx.createRadialGradient(540,960,600,540,960,1300);g.addColorStop(0,'rgba(0,0,0,0)');g.addColorStop(1,'rgba(10,0,30,.45)');ctx.fillStyle=g;ctx.fillRect(0,0,W,H);

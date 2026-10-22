@@ -7,6 +7,13 @@
 - Geplante Aufgabe "TikTok Tagesentwurf": täglich 11:41 Uhr (Europa/Berlin), neue Cloud-Sitzung, führt `daily.sh` aus und schreibt bei Bedarf vorher die nächste Episode. Nur Entwürfe, keine Direktposts.
 - Voraussetzung in der Cloud-Umgebung: `TIKTOK_REFRESH_TOKEN` zusätzlich zu den anderen Variablen, weil `.secrets/` mit jeder Sitzung verloren geht. TikTok gibt beim Erneuern denselben Refresh-Token zurück (geprüft am 21.10.), er gilt ein Jahr.
 
+## Nachrichtenformat (news_*, seit 22.10.)
+- Episoden mit `"audio": "news"` nutzen den Studio-Look: roter Kopf NACHGEHAKT NEWS, Bauchbinden (`lowerThird`), Laufband unten (`ticker`, Texte in `TICKER` in `render/illu_scenes.js` je Folge anpassen), Nachrichten-Signet im Ton, ruhigerer Puls. Keine Kanalzeile oben rechts.
+- Szenen: news_intro, news_map (Frankreich-Karte mit Städten), news_crowd (Menge mit Zähler), news_paris (Straße, Scherben, brennendes Auto), news_fire (brennendes Gebäude), news_bilanz (Zahlentafel), news_macron (Zitatkarte), news_spain (Flut), news_outro. Für neue Wochen die Texte in den Szenen anpassen oder neue Szenen nach dem Muster bauen.
+- Stil-Satz für die Stimme: Nachrichtensprecher, sachlich, Zahlen betont (siehe `episodes/news_43.json`). Tempo 1.08.
+- Regeln: Jede Zahl mit Quelle nennen (Innenministerium, Organisatoren, Behörden). Bei widersprüchlichen Zahlen die vorsichtigere nehmen und "rund" sagen. Keine Spekulation über Ursachen, keine Schuldzuweisung ohne Zuschreibung. Tote nur nennen, wenn von mindestens zwei Quellen bestätigt und mit Umstand. Länge nach Wunsch des Auftraggebers 40 Sekunden oder länger.
+- Recherche vor dem Skript: WebSearch (extended) nach dem Ereignis, dann zwei bis drei Originalartikel lesen (ZDF, Al Jazeera, Wikipedia-Zeitleiste haben sich bewährt). Quellen und Datum in der Themenliste oder im Commit festhalten.
+
 ## Episodenformat (für neue Folgen)
 Datei `episodes/<id>.json`, Vorlage ist `episodes/ki_01.json`.
 - Kopf: `id`, `series`, `part`, `title` (wird Bildunterschrift), `hashtags` (z.B. "#nachgehakt #wissen #weltraum", passend zum Genre), `label` (Kanalzeile oben rechts, z.B. aus dem Genre), `provider` "gemini", `gemini_voice` "Charon", `gemini_models` wie in ki_01, `style` wie in ki_01, `tempo` 1.12, `group_by_scene` true, `start_offset` 0.35.

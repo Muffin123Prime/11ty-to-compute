@@ -32,7 +32,14 @@ music = np.zeros(N, dtype=np.float32)
 pad = sum(np.sin(2 * np.pi * f * t + i) for i, f in enumerate([55, 82.41, 110.2, 164.8, 220.4]))
 pad *= (0.6 + 0.4 * np.sin(2 * np.pi * t / 11.0)) * 0.011
 music += pad.astype(np.float32)
-BPM = 104; beat = 60.0 / BPM
+NEWS = TL.get("audio") == "news"
+BPM = 120 if NEWS else 104; beat = 60.0 / BPM
+if NEWS:   # Nachrichten-Signet: drei aufsteigende Toene, dann ein tiefer Akzent
+    for k, (f, at) in enumerate([(440, 0.05), (554, 0.25), (659, 0.45)]):
+        tau = np.arange(int(0.5 * SR)) / SR
+        put(music, (0.09 * np.sin(2 * np.pi * f * tau) * np.exp(-tau * 5)).astype(np.float32), at)
+    tau = np.arange(int(0.8 * SR)) / SR
+    put(music, (0.12 * np.sin(2 * np.pi * 110 * tau) * np.exp(-tau * 4)).astype(np.float32), 0.65)
 def sub_pulse(amp):
     tau = np.arange(int(0.26 * SR)) / SR
     return (amp * np.sin(2 * np.pi * 52 * tau) * np.exp(-tau * 14)).astype(np.float32)
@@ -42,7 +49,7 @@ def hat(amp):
 k = 0
 while k * beat < D - 1.5:
     at = k * beat; grow = 0.55 + 0.45 * at / D       # Spannung steigt
-    put(music, sub_pulse(0.075 * grow * (1.0 if k % 2 == 0 else 0.7)), at)
+    put(music, sub_pulse((0.045 if NEWS else 0.075) * grow * (1.0 if k % 2 == 0 else 0.7)), at)
     if k % 2 == 1: put(music, hat(0.014 * grow), at + beat / 2)
     k += 1
 

@@ -1,0 +1,43 @@
+{
+ "id": "news_43",
+ "series": "NACHGEHAKT NEWS",
+ "label": "NACHGEHAKT NEWS",
+ "part": 1,
+ "title": "Die Woche, in der Frankreich brannte",
+ "hashtags": "#nachgehakt #news #frankreich #paris #nachrichten",
+ "provider": "gemini",
+ "gemini_voice": "Charon",
+ "gemini_models": [
+  "gemini-3.8-flash-tts",
+  "gemini-2.5-flash-preview-tts",
+  "gemini-3.1-flash-tts-preview"
+ ],
+ "style": "Du bist Nachrichtensprecher einer seriösen deutschen Abendnachrichtensendung: tiefe, klare, ruhige Männerstimme, sachlich, ernst, präzise, zügiges aber nicht gehetztes Tempo, kurze Pausen zwischen den Meldungen, Zahlen deutlich betont, keine Dramatisierung, kein Lächeln. Sprich ausschließlich den folgenden Text auf Deutsch",
+ "voice": "de-DE-ConradNeural",
+ "rate": "+6%",
+ "pitch": "-2Hz",
+ "start_offset": 0.9,
+ "tempo": 1.08,
+ "group_size": 2,
+ "audio": "news",
+ "sentences": [
+  {"text": "Nachgehakt News. Die Woche, in der Frankreich brannte.",
+   "scene": "news_intro", "accent": ["News.", "Frankreich", "brannte."], "gap_after": 0.5},
+  {"text": "Seit Mitte September protestieren Schüler und Studenten: überfüllte Klassen, fehlende Lehrer, 61 Milliarden Euro Kürzungen.",
+   "scene": "news_map", "accent": ["September", "Schüler", "Studenten:", "61", "Milliarden"], "gap_after": 0.35},
+  {"text": "Am Samstag wurde daraus ein Aufstand. 550.000 Menschen auf der Straße, sagt das Innenministerium. Die Organisatoren sagen: 800.000.",
+   "scene": "news_crowd", "accent": ["Samstag", "Aufstand.", "550.000", "Innenministerium.", "800.000."], "gap_after": 0.35},
+  {"text": "In Paris: zerschlagene Schaufenster, brennende Autos, geplünderte Läden am Place de la République.",
+   "scene": "news_paris", "accent": ["Paris:", "Schaufenster,", "Autos,", "geplünderte", "République."], "gap_after": 0.3},
+  {"text": "In Limoges brannte das 143 Jahre alte Rathaus aus. In Bordeaux wurden bis zu 100 Geschäfte geplündert.",
+   "scene": "news_fire", "accent": ["Limoges", "143", "Rathaus", "Bordeaux", "100"], "gap_after": 0.35},
+  {"text": "Die Bilanz der Behörden: rund 2.400 Festnahmen, Hunderte verletzte Polizisten. Ein Demonstrant starb in Paris an Herzstillstand.",
+   "scene": "news_bilanz", "accent": ["Bilanz", "2.400", "Festnahmen,", "Hunderte", "verletzte", "starb"], "gap_after": 0.4},
+  {"text": "Macron: Nichts rechtfertigt das. Nachts gilt Ausgangssperre rund um die République. Für Freitag sind neue Proteste angekündigt.",
+   "scene": "news_macron", "accent": ["Macron:", "Nichts", "rechtfertigt", "Ausgangssperre", "Freitag", "neue"], "gap_after": 0.5},
+  {"text": "Spanien: Sturm Adam setzt Valencia unter Wasser. Mindestens vier Tote. Menschen warteten auf Dächern auf Rettung.",
+   "scene": "news_spain", "accent": ["Spanien:", "Adam", "Valencia", "vier", "Tote.", "Dächern"], "gap_after": 0.45},
+  {"text": "Das war die Woche. Was wir als Nächstes nachhaken, entscheidet ihr in den Kommentaren.",
+   "scene": "news_outro", "accent": ["Woche.", "nachhaken,", "Kommentaren."], "event": "cta", "gap_after": 0.2}
+ ]
+}

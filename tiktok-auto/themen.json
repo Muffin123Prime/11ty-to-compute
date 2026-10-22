@@ -40,9 +40,23 @@
    "name": "Mysterien & Rätsel",
    "label": "UNGELÖST",
    "ton": "Belegte Fakten, offene Frage am Ende. Keine Verschwörungserzählungen."
+  },
+  "news": {
+   "name": "Wochen-News",
+   "label": "NACHGEHAKT NEWS",
+   "ton": "Nachrichtensprecher, sachlich, Zahlen immer mit Quelle. Nur die viralsten Themen der Woche, Hauptthema zuerst, 40 bis 70 Sekunden. Vorher im Netz recherchieren, nie aus dem Gedächtnis."
   }
  },
  "themen": [
+  {
+   "id": "news_43",
+   "genre": "news",
+   "thema": "Wochenrückblick KW 43: Unruhen in Frankreich (Schülerproteste, 17. Oktober, Limoges, Bilanz, Macron, Ausgangssperre), Sturm Adam in Spanien.",
+   "status": "hochgeladen",
+   "episode": "episodes/news_43.json",
+   "publish_id": "v_inbox_file~v2.7699427954392238102",
+   "datum": "2026-10-22"
+  },
   {
    "id": "leben_01",
    "genre": "wissenschaft",
