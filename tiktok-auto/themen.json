@@ -49,6 +49,15 @@
  },
  "themen": [
   {
+   "id": "wow_01",
+   "genre": "raetsel",
+   "thema": "Das Wow!-Signal 1977: Big Ear, 72 Sekunden, 6EQUJ5, 1420 MHz, Schütze, nie wieder gehört, Kometen-These 2017 verworfen, Magnetar-These 2024 unbewiesen.",
+   "status": "hochgeladen",
+   "episode": "episodes/wow_01.json",
+   "publish_id": "v_inbox_file~v2.7699898040492460054",
+   "datum": "2026-10-23"
+  },
+  {
    "id": "news_43",
    "genre": "news",
    "thema": "Wochenrückblick KW 43: Unruhen in Frankreich (Schülerproteste, 17. Oktober, Limoges, Bilanz, Macron, Ausgangssperre), Sturm Adam in Spanien.",

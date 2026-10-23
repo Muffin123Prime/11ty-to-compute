@@ -1,0 +1,110 @@
+{
+ "id": "wow_01",
+ "series": "UNGELÖST",
+ "label": "UNGELÖST",
+ "part": 1,
+ "title": "72 Sekunden, die niemand erklären kann",
+ "hashtags": "#nachgehakt #ungelöst #weltraum #wissen #aliens",
+ "provider": "gemini",
+ "gemini_voice": "Charon",
+ "gemini_models": [
+  "gemini-3.8-flash-tts",
+  "gemini-2.5-flash-preview-tts",
+  "gemini-3.1-flash-tts-preview"
+ ],
+ "style": "Du bist der Erzähler eines spannenden deutschen Wissens-Kurzvideos, wie ein Trailer-Sprecher: tiefe, klare, junge Männerstimme, zügig, dramatisch, mit Spannungsbogen, kurze Pause vor jeder Pointe, Fragen mit steigender Spannung, nicht rau, nicht übertrieben. Buchstabenfolgen einzeln buchstabieren. Sprich ausschließlich den folgenden Text auf Deutsch",
+ "voice": "de-DE-ConradNeural",
+ "rate": "+8%",
+ "pitch": "-2Hz",
+ "start_offset": 0.35,
+ "tempo": 1.14,
+ "group_size": 2,
+ "sentences": [
+  {
+   "text": "1977 hört ein Teleskop 72 Sekunden lang etwas, das es nicht geben dürfte.",
+   "scene": "wow_teleskop",
+   "accent": [
+    "1977",
+    "72",
+    "Sekunden",
+    "nicht",
+    "dürfte."
+   ],
+   "gap_after": 0.35
+  },
+  {
+   "text": "Big Ear, Ohio. Nachts druckt ein Computer Zahlen. Fast nur Einsen und Zweien.",
+   "scene": "wow_ausdruck",
+   "accent": [
+    "Big",
+    "Ear,",
+    "Zahlen.",
+    "Einsen",
+    "Zweien."
+   ],
+   "gap_after": 0.3
+  },
+  {
+   "text": "Dann: sechs, E, Q, U, J, fünf. Dreißigmal stärker als das Rauschen. Jerry Ehman kreist es ein: Wow!",
+   "scene": "wow_ausdruck",
+   "accent": [
+    "Dann:",
+    "Dreißigmal",
+    "stärker",
+    "Ehman",
+    "Wow!"
+   ],
+   "event": "wow",
+   "gap_after": 0.45
+  },
+  {
+   "text": "1420 Megahertz: die Wasserstoff-Linie, auf der Außerirdische laut Theorie senden würden.",
+   "scene": "wow_frequenz",
+   "accent": [
+    "1420",
+    "Megahertz:",
+    "Wasserstoff-Linie,",
+    "Außerirdische"
+   ],
+   "gap_after": 0.3
+  },
+  {
+   "text": "Richtung Sternbild Schütze. Seitdem immer wieder gesucht. Nie wieder gehört.",
+   "scene": "wow_himmel",
+   "accent": [
+    "Schütze.",
+    "gesucht.",
+    "Nie",
+    "wieder"
+   ],
+   "gap_after": 0.4
+  },
+  {
+   "text": "2017 soll ein Komet schuld sein. Verworfen. 2024 eine neue Idee: ein Magnetar. Nicht bewiesen.",
+   "scene": "wow_komet",
+   "accent": [
+    "2017",
+    "Komet",
+    "Verworfen.",
+    "2024",
+    "Magnetar.",
+    "Nicht",
+    "bewiesen."
+   ],
+   "event": "stamp",
+   "gap_after": 0.45
+  },
+  {
+   "text": "Zufall, Fehler oder Nachricht? Bis heute weiß es niemand.",
+   "scene": "wow_offen",
+   "accent": [
+    "Zufall,",
+    "Fehler",
+    "Nachricht?",
+    "niemand."
+   ],
+   "event": "cta",
+   "gap_after": 0.2
+  }
+ ]
+}

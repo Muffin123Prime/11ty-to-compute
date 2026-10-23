@@ -477,6 +477,107 @@ SCN.news_outro=(tl,t)=>{newsBG(t);
   if(tl>1.2){const b=eBack((tl-1.2)/.4);ctx.save();ctx.translate(CX,900);ctx.scale(b,b);ctx.fillStyle='rgba(255,255,255,.96)';ctx.beginPath();ctx.roundRect(-420,-90,840,180,20);ctx.fill();ctx.fillStyle=NEWS.red;ctx.fillRect(-420,-90,18,180);bigText('NÄCHSTES THEMA?',0,-20,70,{color:NEWS.navy});ctx.font=`800 34px ${FONT}`;ctx.fillStyle='#3b4a70';ctx.textAlign='center';ctx.fillText('Schreib es in die Kommentare',0,50);ctx.restore()}
   ticker(t,TICKER)};
 
+
+/* ===== Folge wow_01: Das Wow!-Signal ===== */
+function milkyWay(t){ctx.save();ctx.translate(CX,700);ctx.rotate(-.55);const g=ctx.createLinearGradient(0,-260,0,260);g.addColorStop(0,'rgba(120,140,255,0)');g.addColorStop(.5,'rgba(190,200,255,.16)');g.addColorStop(1,'rgba(120,140,255,0)');ctx.fillStyle=g;ctx.fillRect(-1600,-260,3200,520);
+  const rr=rng(88);for(let i=0;i<260;i++){const x=(rr()-.5)*3000,y=(rr()-.5)*380,a=.2+.6*rr();ctx.fillStyle=`rgba(255,250,240,${a*(.6+.4*Math.sin(t*2+i))})`;ctx.fillRect(x,y,1+rr()*2,1+rr()*2)}ctx.restore()}
+function bigEar(x,y,t,tl){ctx.save();ctx.translate(x,y);
+  // Bodenplatte (Reflektorfeld)
+  ctx.fillStyle='#1b2a44';ctx.beginPath();ctx.moveTo(-520,160);ctx.lineTo(520,160);ctx.lineTo(380,60);ctx.lineTo(-380,60);ctx.closePath();ctx.fill();
+  ctx.strokeStyle='rgba(160,200,255,.35)';ctx.lineWidth=2;for(let i=-6;i<=6;i++){ctx.beginPath();ctx.moveTo(i*60,60);ctx.lineTo(i*84,160);ctx.stroke()}for(let k=0;k<5;k++){const yy=60+k*25;ctx.beginPath();ctx.moveTo(-380-140*k/4,yy);ctx.lineTo(380+140*k/4,yy);ctx.stroke()}
+  // flacher, geneigter Reflektor (Kraus-Bauweise)
+  ctx.fillStyle='#2e4a78';ctx.beginPath();ctx.moveTo(-420,60);ctx.lineTo(420,60);ctx.lineTo(300,-260);ctx.lineTo(-300,-260);ctx.closePath();ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,.08)';for(let i=-4;i<=4;i++){ctx.beginPath();ctx.moveTo(i*95,60);ctx.lineTo(i*68,-260);ctx.lineTo(i*68+10,-260);ctx.lineTo(i*95+10,60);ctx.fill()}
+  for(let k=1;k<6;k++){const u=k/6,yy=60-320*u,hw=420-120*u;ctx.strokeStyle='rgba(200,225,255,.35)';ctx.beginPath();ctx.moveTo(-hw,yy);ctx.lineTo(hw,yy);ctx.stroke()}
+  ctx.strokeStyle='#cfe0ff';ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(-420,60);ctx.lineTo(420,60);ctx.lineTo(300,-260);ctx.lineTo(-300,-260);ctx.closePath();ctx.stroke();
+  // Empfangshorn
+  ctx.fillStyle='#3b5280';ctx.beginPath();ctx.roundRect(-70,-60,140,120,14);ctx.fill();ctx.fillStyle='#0b1226';ctx.beginPath();ctx.ellipse(0,0,46,56,0,0,7);ctx.fill();
+  // einfallender Strahl
+  const gl=.5+.5*Math.sin(t*3);const g=ctx.createLinearGradient(0,-900,0,0);g.addColorStop(0,'rgba(120,230,255,0)');g.addColorStop(1,`rgba(120,230,255,${.25+.2*gl})`);ctx.fillStyle=g;ctx.beginPath();ctx.moveTo(-40,0);ctx.lineTo(40,0);ctx.lineTo(160,-900);ctx.lineTo(-160,-900);ctx.fill();
+  ctx.restore()}
+function hydrogenAtom(x,y,r,t){ctx.save();ctx.translate(x,y);ctx.strokeStyle='rgba(255,255,255,.55)';ctx.lineWidth=4;ctx.beginPath();ctx.ellipse(0,0,r,r*.45,.5,0,7);ctx.stroke();
+  ctx.fillStyle=PL.orange;ctx.shadowColor=PL.orange;ctx.shadowBlur=20;ctx.beginPath();ctx.arc(0,0,r*.22,0,7);ctx.fill();
+  const a=t*2.5,ex=Math.cos(a)*r,ey=Math.sin(a)*r*.45;const px=ex*Math.cos(.5)-ey*Math.sin(.5),py=ex*Math.sin(.5)+ey*Math.cos(.5);ctx.fillStyle=PL.teal;ctx.shadowColor=PL.teal;ctx.beginPath();ctx.arc(px,py,r*.1,0,7);ctx.fill();ctx.restore()}
+const PRINT_ROWS=(()=>{const rr=rng(1977),rows=[];for(let r=0;r<22;r++){let line='';for(let c=0;c<18;c++){const v=rr();line+=(c===9&&r>=6&&r<=13)?' ':v<.55?' ':v<.85?'1':v<.97?'2':'3'}rows.push(line)}return rows})();
+SCN.wow_teleskop=(tl,t)=>{
+  ctx.fillStyle=vgrad(0,H,[[0,'#02030e'],[.6,'#070b2a'],[1,'#0b1a3a']]);ctx.fillRect(0,0,W,H);milkyWay(t);starfield(t,1);
+  ctx.fillStyle=vgrad(1150,H,[[0,'#0b1a3a'],[1,'#050a18']]);ctx.fillRect(0,1150,W,H-1150);
+  const k=eOut(tl/.7);ctx.save();ctx.globalAlpha=k;ctx.translate(0,(1-k)*60);bigEar(CX,1000,t,tl);ctx.restore();
+  const b=eBack(tl/.5);ctx.save();ctx.translate(CX,300);ctx.scale(b,b);bigText('1977',0,0,230,{color:'#ffd23c'});ctx.restore();
+  if(tl>1.0){const sec=Math.min(72,Math.floor((tl-1.0)*32));const c=eBack((tl-1.0)/.4);ctx.save();ctx.translate(CX,560);ctx.scale(c,c);pill(`${sec} Sekunden`,0,0,PL.red,44);ctx.restore()}
+};
+SCN.wow_ausdruck=(tl,t,sc)=>{
+  ctx.fillStyle=vgrad(0,H,[[0,'#0b0a24'],[.5,'#1b1a44'],[1,'#2b1260']]);ctx.fillRect(0,0,W,H);starfield(t,.4);
+  const a=eBack(tl/.5);ctx.save();ctx.translate(CX,700);ctx.scale(a,a);ctx.translate(-CX,-700);
+  // Endlospapier mit Lochrand und gruenen Streifen
+  card(130,220,760,960,'#f4efdf');ctx.save();rrect(130,220,760,960,44);ctx.clip();
+  for(let r=0;r<12;r++){if(r%2)continue;ctx.fillStyle='rgba(120,190,140,.22)';ctx.fillRect(130,220+r*80,760,80)}
+  ctx.fillStyle='#e8e0cc';for(let y=250;y<1180;y+=60){ctx.beginPath();ctx.arc(160,y,10,0,7);ctx.arc(860,y,10,0,7);ctx.fill()}
+  ctx.font=`700 30px ${MONO}`;ctx.textBaseline='top';ctx.textAlign='left';ctx.fillStyle='#3a3a4a';
+  const shown=Math.min(PRINT_ROWS.length,Math.floor(tl*9));
+  for(let r=0;r<shown;r++){const row=PRINT_ROWS[r];for(let c=0;c<row.length;c++)ctx.fillText(row[c],215+c*35,262+r*40)}
+  // die Spalte des Signals: 6 E Q U J 5 ab Zeile 7, Spalte 9
+  const code='6EQUJ5';const at=sc?Math.max(0,TL.sentences[sc.sentences[1]||sc.sentences[0]].start-sc.start):2.5;
+  for(let i=0;i<code.length;i++){if(tl>at+.25+i*.22){ctx.fillStyle='#120a3a';ctx.font=`900 40px ${MONO}`;ctx.fillText(code[i],215+9*35-4,262+(7+i)*40-4)}}
+  ctx.restore();
+  // roter Kreis und Wow!
+  const ev=TL.events.find(e=>e.type==='wow');
+  if(ev&&t>=ev.t){const u=clamp((t-ev.t)/.6);ctx.save();ctx.strokeStyle='#d8262c';ctx.lineWidth=9;ctx.lineCap='round';ctx.beginPath();
+    for(let i=0;i<=40*u;i++){const ang=-1.2+i/40*6.6,wob=1+.04*Math.sin(i*1.7);const x=215+9*35+16+Math.cos(ang)*48*wob,y=262+9.5*40+Math.sin(ang)*150*wob;i?ctx.lineTo(x,y):ctx.moveTo(x,y)}ctx.stroke();
+    if(t>ev.t+.5){const v=eBack((t-ev.t-.5)/.4);ctx.translate(215+9*35+150,262+9.5*40);ctx.rotate(-.18);ctx.scale(v,v);ctx.fillStyle='#d8262c';ctx.font=`italic 900 96px ${FONT}`;ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText('Wow!',0,0)}
+    ctx.restore()}
+  ctx.restore();
+  if(tl>.6){const b=eBack((tl-.6)/.4);ctx.save();ctx.translate(CX,160);ctx.scale(b,b);pill('Big Ear · Ohio · 15. August 1977',0,0,PL.magenta,34);ctx.restore()}
+};
+SCN.wow_frequenz=(tl,t)=>{
+  ctx.fillStyle=vgrad(0,H,[[0,'#03101c'],[.5,'#083247'],[1,'#0b4a55']]);ctx.fillRect(0,0,W,H);starfield(t,.5);
+  // Spektrum
+  const x0=90,x1=930,yb=900,rr=rng(5);ctx.save();ctx.strokeStyle='rgba(255,255,255,.3)';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(x0,yb);ctx.lineTo(x1,yb);ctx.stroke();
+  const u=eOut(tl/1.2);ctx.beginPath();for(let x=x0;x<=x1;x+=4){const n=(rr()-.5)*30+Math.sin(x*.05+t*3)*8;const d=(x-CX)/22;const peak=440*u*Math.exp(-d*d);const y=yb-30-Math.abs(n)-peak;x===x0?ctx.moveTo(x,y):ctx.lineTo(x,y)}
+  ctx.strokeStyle=PL.teal;ctx.lineWidth=7;ctx.shadowColor=PL.teal;ctx.shadowBlur=24;ctx.stroke();ctx.restore();
+  ctx.fillStyle='rgba(255,255,255,.7)';ctx.font=`700 28px ${FONT}`;ctx.textAlign='center';ctx.textBaseline='top';[['1400',x0+60],['1420',CX],['1440',x1-60]].forEach(([l,x])=>ctx.fillText(l+' MHz',x,yb+16));
+  if(tl>1.0){const b=eBack((tl-1.0)/.4);ctx.save();ctx.translate(CX,330);ctx.scale(b,b);bigText('1420 MHz',0,0,150,{color:'#ffd23c'});ctx.restore()}
+  if(tl>1.8){const b=eBack((tl-1.8)/.4);ctx.save();ctx.translate(CX,1070);ctx.scale(b,b);pill('Wasserstoff-Linie: das „Wasserloch“ der Alien-Suche',0,0,PL.blue,30);ctx.restore()}
+  hydrogenAtom(CX+300,520,100,t);
+};
+const SAG=[[.30,.62],[.38,.50],[.46,.54],[.52,.42],[.60,.46],[.66,.58],[.56,.66],[.44,.70],[.30,.62]];
+SCN.wow_himmel=(tl,t)=>{
+  ctx.fillStyle=vgrad(0,H,[[0,'#02030e'],[.5,'#0a0a2e'],[1,'#1c0d47']]);ctx.fillRect(0,0,W,H);milkyWay(t);starfield(t,1);
+  const a=eOut(tl/.6),sz=800,ox=CX-sz/2,oy=380;ctx.save();ctx.globalAlpha=a;
+  ctx.strokeStyle='rgba(255,220,120,.7)';ctx.lineWidth=4;ctx.beginPath();SAG.forEach(([x,y],i)=>i?ctx.lineTo(ox+x*sz,oy+y*sz):ctx.moveTo(ox+x*sz,oy+y*sz));ctx.stroke();
+  SAG.forEach(([x,y],i)=>{if(i===SAG.length-1)return;ctx.fillStyle='#fff';ctx.shadowColor='#fff';ctx.shadowBlur=16;ctx.beginPath();ctx.arc(ox+x*sz,oy+y*sz,9,0,7);ctx.fill()});ctx.shadowBlur=0;
+  ctx.fillStyle='rgba(255,255,255,.85)';ctx.font=`800 40px ${FONT}`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('SCHÜTZE',CX,oy+.79*sz);ctx.restore();
+  // Signalposition mit Radar-Sweep
+  const px=ox+.70*sz,py=oy+.36*sz;if(tl>.8){const p=eBack((tl-.8)/.4);ctx.save();ctx.translate(px,py);ctx.scale(p,p);
+    for(let k=0;k<3;k++){const ph=((t*.8+k/3)%1);ctx.strokeStyle=`rgba(255,80,100,${.7*(1-ph)})`;ctx.lineWidth=4;ctx.beginPath();ctx.arc(0,0,20+ph*160,0,7);ctx.stroke()}
+    ctx.fillStyle=PL.red;ctx.shadowColor=PL.red;ctx.shadowBlur=30;ctx.beginPath();ctx.arc(0,0,18,0,7);ctx.fill();ctx.restore()}
+  if(tl>2.2){const b=eBack((tl-2.2)/.4);ctx.save();ctx.translate(CX,1090);ctx.scale(b,b);pill('seit 1977 nie wieder empfangen',0,0,PL.red,36);ctx.restore()}
+  const k=eBack(tl/.5);ctx.save();ctx.translate(CX,250);ctx.scale(k,k);bigText('WOHER?',0,0,140);ctx.restore();
+};
+SCN.wow_komet=(tl,t)=>{
+  ctx.fillStyle=vgrad(0,H,[[0,'#060316'],[.5,'#1c0d47'],[1,'#3b1566']]);ctx.fillRect(0,0,W,H);starfield(t,.9);
+  // Komet links, Magnetar rechts (erscheint spaeter)
+  const cu=eOut(tl/1.0);ctx.save();ctx.translate(lerp(-200,300,cu),lerp(300,620,cu));const g=ctx.createLinearGradient(-600,-260,0,0);g.addColorStop(0,'rgba(120,220,255,0)');g.addColorStop(1,'rgba(200,240,255,.7)');ctx.strokeStyle=g;ctx.lineWidth=60;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(-600,-260);ctx.lineTo(0,0);ctx.stroke();meteor(0,0,70,t*1.5,5);ctx.restore();
+  if(tl>.4){const b=eBack((tl-.4)/.4);ctx.save();ctx.translate(300,820);ctx.scale(b,b);pill('2017: Komet?',0,0,PL.blue,38);ctx.restore()}
+  if(tl>1.7){const u=tl-1.7,s=lerp(2.6,1,eOut(u/.18));ctx.save();ctx.translate(300,640);ctx.rotate(-.2);ctx.scale(s,s);ctx.fillStyle='rgba(255,246,224,.96)';ctx.beginPath();ctx.roundRect(-230,-60,460,120,18);ctx.fill();ctx.lineWidth=10;ctx.strokeStyle=PL.red;ctx.stroke();bigText('VERWORFEN',0,4,66,{color:PL.red});ctx.restore()}
+  if(tl>3.2){const p=eBack((tl-3.2)/.5);ctx.save();ctx.translate(760,560);ctx.scale(p,p);
+    for(let i=0;i<4;i++){ctx.strokeStyle=`rgba(255,120,220,${.5-i*.1})`;ctx.lineWidth=4;ctx.beginPath();ctx.ellipse(0,0,60+i*45,160+i*60,.3,0,7);ctx.stroke()}
+    ctx.fillStyle='#fff';ctx.shadowColor=PL.magenta;ctx.shadowBlur=50+20*Math.sin(t*9);ctx.beginPath();ctx.arc(0,0,44,0,7);ctx.fill();ctx.shadowBlur=0;
+    for(let i=0;i<3;i++){ctx.fillStyle='rgba(160,220,255,.32)';blob(-60+i*120,-320+(i%2)*60,90,60+i,9,.3);ctx.fill()}ctx.restore()}
+  if(tl>3.6){const b=eBack((tl-3.6)/.4);ctx.save();ctx.translate(760,820);ctx.scale(b,b);pill('2024: Magnetar + Wasserstoff?',0,0,PL.magenta,34);ctx.restore()}
+  const ev=TL.events.find(e=>e.type==='stamp');
+  if(ev&&t>=ev.t){const u=t-ev.t,s=lerp(3,1,eOut(u/.18)),sh=u<.3?(Math.random()-.5)*14*(1-u/.3):0;ctx.save();ctx.translate(CX+sh,1000+sh);ctx.rotate(-.14);ctx.scale(s,s);
+    ctx.fillStyle='rgba(255,246,224,.96)';ctx.beginPath();ctx.roundRect(-400,-85,800,170,22);ctx.fill();ctx.lineWidth=12;ctx.strokeStyle=PL.red;ctx.stroke();bigText('NICHT BEWIESEN',0,6,96,{color:PL.red});ctx.restore();
+    if(u<.12){ctx.fillStyle=`rgba(255,255,255,${.5*(1-u/.12)})`;ctx.fillRect(0,0,W,H)}}
+};
+SCN.wow_offen=(tl,t)=>{
+  ctx.fillStyle=vgrad(0,H,[[0,'#02030e'],[.5,'#0a0a2e'],[1,'#2b1260']]);ctx.fillRect(0,0,W,H);milkyWay(t);starfield(t,1);
+  [['ZUFALL',PL.blue,.2],['FEHLER',PL.orange,.6],['NACHRICHT',PL.magenta,1.0]].forEach(([l,c,at],i)=>{const p=eBack((tl-at)/.45);if(p<=0)return;ctx.save();ctx.translate(CX,330+i*170);ctx.scale(p,p);
+    ctx.fillStyle='rgba(20,6,50,.8)';ctx.beginPath();ctx.roundRect(-360,-65,720,130,30);ctx.fill();ctx.lineWidth=6;ctx.strokeStyle=c;ctx.stroke();bigText(l,0,2,76,{color:'#fff'});ctx.restore()});
+  if(tl>1.6){const b=eBack((tl-1.6)/.5);ctx.save();ctx.translate(CX,900);ctx.scale(b*(1+.03*Math.sin(t*4)),b*(1+.03*Math.sin(t*4)));ctx.fillStyle='rgba(255,246,224,.96)';ctx.shadowColor='#fff';ctx.shadowBlur=60;ctx.beginPath();ctx.arc(0,0,150,0,7);ctx.fill();ctx.shadowBlur=0;bigText('?',0,12,230,{color:PL.magenta});ctx.restore()}
+  if(tl>2.4){const b=eBack((tl-2.4)/.4);ctx.save();ctx.translate(CX,1110);ctx.scale(b,b);pill('Teil 2: Wie man heute nach Signalen sucht',0,0,PL.teal,32);ctx.restore()}
+};
+
 /* ===== Generische Szenen: aus der Episodendatei steuerbar, kein Code pro Folge noetig =====
    scenes: { "<id>": {"visual":"year|headline|chat|versus|stat|quote|list|question", "bg":"violett|rot|blau|gruen|orange|nacht", ...} } */
 const BGS={violett:[['#1b0d45',0],['#5a1d73',.55],['#c23a8a',1]],rot:[['#2a0a1a',0],['#7a1430',.55],['#e0553c',1]],blau:[['#07102e',0],['#143a78',.6],['#1fa6c8',1]],
