@@ -14,6 +14,10 @@ const stills=opt('stills'); // z.B. --stills 0.1,1,2.5  -> JPGs neben outPath
 const browser=await chromium.launch({args:['--disable-gpu','--font-render-hinting=none']});
 const page=await browser.newPage({viewport:{width:1080,height:1920}});
 await page.goto('file://'+path.resolve(opt('html')||'render/anim.html'));
+// Fotos (schlichter Look) vorladen: alle visual.img / visual.imgs[] / visual.left/right der Szenen
+const imgs=new Set();for(const sc of TL.scenes||[]){const v=sc.visual||{};for(const k of ['img','left','right'])if(typeof v[k]==='string'&&/\.(jpe?g|png|webp)$/i.test(v[k]))imgs.add(v[k]);for(const x of v.imgs||[])if(typeof x==='string')imgs.add(x);else if(x&&x.img)imgs.add(x.img)}
+const imgMap={};for(const rel of imgs){try{const buf=fs.readFileSync(path.resolve(rel));const ext=rel.split('.').pop().toLowerCase();imgMap[rel]=`data:image/${ext==='jpg'?'jpeg':ext};base64,`+buf.toString('base64')}catch(e){console.error('Bild fehlt',rel)}}  // als Daten-URL, sonst gilt der Canvas als fremd
+await page.evaluate(async m=>{window.IMGS={};await Promise.all(Object.entries(m).map(([k,src])=>new Promise(res=>{const im=new Image();im.onload=()=>{window.IMGS[k]=im;res()};im.onerror=()=>{console.error('Bild fehlt',k);res()};im.src=src})))},imgMap);
 await page.evaluate(tl=>window.setTimeline(tl),TL);
 if(args.includes('--guides'))await page.evaluate(()=>{window.GUIDES=true});
 await page.evaluate(()=>document.fonts.ready);

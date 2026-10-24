@@ -104,5 +104,55 @@
    "thema": "2016: AlphaGo schlägt Lee Sedol, Zug 37, den niemand verstand. Teil 2 der KI-Woche.",
    "status": "offen"
   }
- ]
+ ],
+ "_hinweis_marken": "Zweites Format: Markengeschichten im schlichten Look mit echten Fotos (nur Public Domain, CC0, CC BY, CC BY-SA von Wikimedia Commons, Nachweis im Bild). Pro Marke zwei Tage, zwei Videos pro Tag: Teil 1 Entstehung, Teil 2 Produkte, Teil 3 Krasse Fakten, Teil 4 Heute (Zahlen, Skandale, Zukunft). Der Markenlauf (9:11 und 17:11 Uhr) nimmt den ersten Teil mit Status offen oder bereit der aktuellen Marke. Ist eine Marke komplett, kommt die nächste aus der Warteschlange.",
+ "marken": {
+  "aktuell": "adidas",
+  "warteschlange": [
+   "nike",
+   "lego",
+   "redbull",
+   "haribo",
+   "ikea",
+   "nintendo",
+   "rolex",
+   "nutella",
+   "porsche",
+   "spotify"
+  ],
+  "teile": {
+   "1": "Entstehung",
+   "2": "Produkte",
+   "3": "Krasse Fakten",
+   "4": "Heute: Zahlen, Skandale, Zukunft"
+  },
+  "adidas": {
+   "name": "Adidas",
+   "accent_color": "#111111",
+   "teile": [
+    {
+     "teil": 1,
+     "status": "hochgeladen",
+     "episode": "episodes/marke_adidas_1.json",
+     "publish_id": "v_inbox_file~v2.7700274053755521046",
+     "datum": "2026-10-24"
+    },
+    {
+     "teil": 2,
+     "status": "offen",
+     "thema": "Samba, Superstar 1969, Stan Smith 1971, Gazelle, Predator, Yeezy. Fotos in assets/adidas/ (samba, stan smith, yeezy) vorhanden, Superstar fehlt."
+    },
+    {
+     "teil": 3,
+     "status": "offen",
+     "thema": "Drei Streifen 1952 von Karhu gekauft, Trefoil 1971, Pelé-Pakt 1970, Brüder auf demselben Friedhof, Herzogenaurach gesenkte Köpfe, Reebok 2006 gekauft und 2022 verkauft."
+    },
+    {
+     "teil": 4,
+     "status": "offen",
+     "thema": "Umsatz 24,8 Mrd. Euro 2025, 64.938 Mitarbeiter, Yeezy-Ende 25.10.2022, Rechtsstreit um Streifen, Zukunft."
+    }
+   ]
+  }
+ }
 }

@@ -1,0 +1,182 @@
+{
+ "id": "marke_adidas_1",
+ "series": "Adidas",
+ "label": "ADIDAS",
+ "part": 1,
+ "title": "Adidas: Zwei Brüder, ein Streit, zwei Weltkonzerne",
+ "hashtags": "#nachgehakt #adidas #marken #wissen #puma #herzogenaurach #geschichte #fakten",
+ "look": "schlicht",
+ "accent_color": "#111111",
+ "provider": "gemini",
+ "gemini_voice": "Charon",
+ "gemini_models": [
+  "gemini-3.8-flash-tts",
+  "gemini-2.5-flash-preview-tts",
+  "gemini-3.1-flash-tts-preview"
+ ],
+ "style": "Du bist der Erzähler einer ruhigen, hochwertigen deutschen Marken-Dokumentation: tiefe, klare Männerstimme, gelassen, präzise, leicht trocken, kleine Pausen vor Pointen, keine Übertreibung, kein Werbeton. Sprich ausschließlich den folgenden Text auf Deutsch",
+ "voice": "de-DE-ConradNeural",
+ "rate": "+4%",
+ "pitch": "-2Hz",
+ "start_offset": 0.4,
+ "tempo": 1.16,
+ "group_size": 2,
+ "quellen": [
+  "https://en.wikipedia.org/wiki/Dassler_brothers_feud",
+  "https://de.wikipedia.org/wiki/Adidas",
+  "https://www.erih.net/how-it-started/stories-about-people-biographies/biography/dassler"
+ ],
+ "credits_file": "assets/adidas/credits.json",
+ "sentences": [
+  {
+   "text": "Zwei Brüder, eine Kleinstadt, ein Streit, aus dem zwei Weltkonzerne entstehen.",
+   "scene": "s1",
+   "accent": [
+    "Zwei",
+    "Brüder,",
+    "Streit,",
+    "Weltkonzerne"
+   ],
+   "gap_after": 0.4
+  },
+  {
+   "text": "Herzogenaurach, 1924. Adolf und Rudolf Dassler gründen ihre Schuhfabrik.",
+   "scene": "s2",
+   "accent": [
+    "Herzogenaurach,",
+    "1924.",
+    "Adolf",
+    "Rudolf",
+    "Schuhfabrik."
+   ],
+   "gap_after": 0.35
+  },
+  {
+   "text": "1936 gewinnt Jesse Owens in Berlin vier Goldmedaillen. In Dassler-Schuhen.",
+   "scene": "s3",
+   "accent": [
+    "1936",
+    "Owens",
+    "vier",
+    "Dassler-Schuhen."
+   ],
+   "gap_after": 0.4
+  },
+  {
+   "text": "1948 zerbricht die Firma. Warum genau, weiß bis heute niemand sicher. Die Belegschaft muss sich entscheiden.",
+   "scene": "s4",
+   "accent": [
+    "1948",
+    "zerbricht",
+    "niemand",
+    "entscheiden."
+   ],
+   "gap_after": 0.35
+  },
+  {
+   "text": "Rudolf gründet Puma. Adolf nennt seine Firma Adidas, nach Adi Dassler. Dieselbe Stadt, getrennt durch einen Fluss.",
+   "scene": "s5",
+   "accent": [
+    "Rudolf",
+    "Puma.",
+    "Adidas,",
+    "Adi",
+    "Dassler.",
+    "Fluss."
+   ],
+   "gap_after": 0.35
+  },
+  {
+   "text": "Herzogenaurach wird die Stadt der gesenkten Köpfe. Man schaut erst auf die Schuhe, dann redet man.",
+   "scene": "s6",
+   "accent": [
+    "gesenkten",
+    "Köpfe.",
+    "Schuhe,"
+   ],
+   "gap_after": 0.4
+  },
+  {
+   "text": "1954, Wunder von Bern. Deutschland wird Weltmeister in Adidas-Schuhen mit Schraubstollen.",
+   "scene": "s7",
+   "accent": [
+    "1954,",
+    "Wunder",
+    "Bern.",
+    "Weltmeister",
+    "Schraubstollen."
+   ],
+   "event": "stamp",
+   "gap_after": 0.4
+  },
+  {
+   "text": "Die Brüder sprachen nie wieder miteinander. Teil 2: die Schuhe, die Adidas groß machten.",
+   "scene": "s8",
+   "accent": [
+    "nie",
+    "wieder",
+    "Teil",
+    "2:"
+   ],
+   "event": "cta",
+   "gap_after": 0.2
+  }
+ ],
+ "scenes": {
+  "s1": {
+   "visual": "zwei_fotos",
+   "left": "assets/adidas/herzogenaurach_adidas_2016.jpg",
+   "right": "assets/adidas/daniel_cox_puma_headquarters_in_herzogenaurach_deu.jpg",
+   "leftLabel": "Adidas",
+   "rightLabel": "Puma",
+   "text": "Beide aus Herzogenaurach. Beide von einem Dassler."
+  },
+  "s2": {
+   "visual": "foto_karte",
+   "img": "assets/adidas/adi_dassler_young.jpg",
+   "jahr": "1924",
+   "text": "Adolf Dassler, genannt Adi. Mit seinem Bruder Rudolf gründet er die Gebrüder Dassler Schuhfabrik."
+  },
+  "s3": {
+   "visual": "foto_karte",
+   "img": "assets/adidas/jesse_owens_1936.jpg",
+   "jahr": "1936",
+   "text": "Jesse Owens, Olympia Berlin: vier Goldmedaillen, Schuhe aus Herzogenaurach.",
+   "py": 0.2
+  },
+  "s4": {
+   "visual": "jahr",
+   "text": "1948",
+   "sub": "Die Firma zerbricht. Zwei Drittel der Belegschaft gehen mit Adi, ein Drittel mit Rudolf.",
+   "klein": "Die Gründe sind bis heute umstritten."
+  },
+  "s5": {
+   "visual": "zwei_fotos",
+   "left": "assets/adidas/herzogenaurach_adidas_2016.jpg",
+   "right": "assets/adidas/daniel_cox_puma_headquarters_in_herzogenaurach_deu.jpg",
+   "leftLabel": "Adidas · 1949",
+   "rightLabel": "Puma · 1948",
+   "text": "Nördlich der Aurach: Adidas. Südlich: Puma."
+  },
+  "s6": {
+   "visual": "foto",
+   "img": "assets/adidas/marktplatz_10_8_6_herzogenaurach_20180219_003.jpg",
+   "h": 900,
+   "text": "„Stadt der gesenkten Köpfe“: Erst der Blick auf die Schuhe, dann das Gespräch.",
+   "size": 50
+  },
+  "s7": {
+   "visual": "foto_karte",
+   "img": "assets/adidas/fussball_weltmeisterschaft_1954_com_m03_0108_005_0021_croppe.jpg",
+   "jahr": "1954",
+   "text": "Wunder von Bern. Schraubstollen von Adidas, erstmals eine WM im Fernsehen."
+  },
+  "s8": {
+   "visual": "foto",
+   "img": "assets/adidas/adi_dassler_and_wife_1934.jpg",
+   "h": 900,
+   "text": "Rudolf starb 1974, Adi 1978. Begraben auf demselben Friedhof, so weit voneinander entfernt wie möglich.",
+   "size": 46
+  }
+ }
+}

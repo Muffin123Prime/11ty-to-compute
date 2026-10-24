@@ -246,7 +246,7 @@ function drawSubs(t){
     lines=[];let cur=[],cw=0;for(const it of items){if(cw+it.w>maxW&&cur.length){lines.push(cur);cur=[];cw=0}cur.push(it);cw+=it.w}if(cur.length)lines.push(cur);
     if(lines.length<=2)break;size_=Math.round(size_*.86)}   // hoechstens zwei Zeilen, sonst kleiner
   const font_=`900 ${size_}px ${FONT}`;
-  const lh=size_*1.2,cy=1100-(lines.length-1)*lh/2,cxm=510;
+  const SUBY=(TL.look==='schlicht'?1490:1100);const lh=size_*1.2,cy=SUBY-(lines.length-1)*lh/2,cxm=510;
   ctx.textBaseline='middle';ctx.textAlign='left';ctx.lineJoin='round';
   lines.forEach((ln,li)=>{
     const tw=ln.reduce((a,b)=>a+b.w,0);let x=cxm-tw/2;const y=cy+li*lh;
@@ -254,9 +254,9 @@ function drawSubs(t){
       const w=s.words[it.i],spoken=t>=w.s,cur_=spoken&&t<w.e+.04,acc=s.accent.some(a=>norm(a)===norm(w.w));
       const pop=cur_?1+(acc?.3:.14)*(1-clamp((t-w.s)/.12)):1;
       ctx.save();ctx.translate(x+it.w/2,y);ctx.scale(pop,pop);ctx.translate(-it.w/2,0);
-      ctx.font=font_;ctx.lineWidth=18;ctx.strokeStyle='rgba(0,0,10,.92)';ctx.strokeText(it.txt,0,0);
-      ctx.fillStyle=!spoken?'rgba(255,255,255,.28)':(acc?COL.green:'#fff');
-      if(spoken&&acc){ctx.shadowColor=COL.green;ctx.shadowBlur=20}
+      const S_=TL.look==='schlicht';ctx.font=font_;ctx.lineWidth=S_?14:18;ctx.strokeStyle=S_?'rgba(255,255,255,.96)':'rgba(0,0,10,.92)';ctx.strokeText(it.txt,0,0);
+      ctx.fillStyle=!spoken?(S_?'rgba(20,20,20,.3)':'rgba(255,255,255,.28)'):(acc?(S_?(TL.accent_color||'#111'):COL.green):(S_?'#111':'#fff'));
+      if(spoken&&acc&&!S_){ctx.shadowColor=COL.green;ctx.shadowBlur=20}
       ctx.fillText(it.txt,0,0);ctx.restore();x+=it.w;
     }
   });
