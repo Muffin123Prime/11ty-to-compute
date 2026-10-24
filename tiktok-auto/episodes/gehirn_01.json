@@ -1,0 +1,38 @@
+{
+ "id": "gehirn_01",
+ "series": "DEIN GEHIRN",
+ "label": "DEIN GEHIRN",
+ "part": 1,
+ "title": "Warum du vergisst, was du im Zimmer wolltest",
+ "hashtags": "#nachgehakt #psychologie #gehirn #wissen #lernen #gedächtnis #fakten",
+ "provider": "gemini",
+ "gemini_voice": "Charon",
+ "gemini_models": [
+  "gemini-3.8-flash-tts",
+  "gemini-2.5-flash-preview-tts",
+  "gemini-3.1-flash-tts-preview"
+ ],
+ "style": "Du bist der Erzähler eines spannenden deutschen Wissens-Kurzvideos, wie ein Trailer-Sprecher: tiefe, klare, junge Männerstimme, zügig, dramatisch, mit Spannungsbogen, kurze Pause vor jeder Pointe, Fragen mit steigender Spannung, nicht rau, nicht übertrieben. Sprich ausschließlich den folgenden Text auf Deutsch",
+ "voice": "de-DE-ConradNeural",
+ "rate": "+8%",
+ "pitch": "-2Hz",
+ "start_offset": 0.35,
+ "tempo": 1.14,
+ "group_size": 2,
+ "sentences": [
+  {"text": "Du stehst in der Küche und weißt nicht mehr, warum. Schuld ist die Tür.",
+   "scene": "tuer_kueche", "accent": ["Küche", "warum.", "Schuld", "Tür."], "gap_after": 0.4},
+  {"text": "Dein Gehirn speichert den Tag in Kapiteln. Eine Tür ist ein Kapitelende.",
+   "scene": "kapitel", "accent": ["Gehirn", "Kapiteln.", "Tür", "Kapitelende."], "event": "shock", "gap_after": 0.35},
+  {"text": "2011, Notre Dame: Versuchspersonen tragen Gegenstände durch Räume. Nach einer Tür vergessen sie deutlich öfter, was sie tragen.",
+   "scene": "experiment", "accent": ["2011,", "Notre", "Dame:", "Tür", "vergessen", "öfter"], "gap_after": 0.3},
+  {"text": "Gleiche Strecke ohne Tür: kein Problem. Zurück in den alten Raum: hilft nichts.",
+   "scene": "vergleich", "accent": ["ohne", "Tür:", "kein", "Zurück", "nichts."], "gap_after": 0.4},
+  {"text": "2021 prüfen Forscher nach: Der Effekt ist kleiner und zeigt sich vor allem, wenn dein Kopf gerade voll ist.",
+   "scene": "pruefung", "accent": ["2021", "kleiner", "Kopf", "voll"], "event": "stamp", "gap_after": 0.4},
+  {"text": "Der Trick: Sag laut, was du holen willst, bevor du losgehst.",
+   "scene": "trick", "accent": ["Trick:", "laut,", "bevor"], "gap_after": 0.35},
+  {"text": "Was dein Gehirn sonst noch löscht: Teil 2.",
+   "scene": "gehirn_offen", "accent": ["löscht:", "Teil", "2."], "event": "cta", "gap_after": 0.2}
+ ]
+}

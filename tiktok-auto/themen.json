@@ -49,6 +49,20 @@
  },
  "themen": [
   {
+   "id": "gehirn_01",
+   "genre": "psychologie",
+   "thema": "Türschwellen-Effekt: Warum du vergisst, was du im Zimmer wolltest. Radvansky 2011 (Notre Dame), Nachprüfung Bond University 2021 (Effekt kleiner, bei kognitiver Last), Trick: Absicht laut aussprechen.",
+   "status": "hochgeladen",
+   "episode": "episodes/gehirn_01.json",
+   "publish_id": "v_inbox_file~v2.7700226937394694166",
+   "datum": "2026-10-24",
+   "quellen": [
+    "https://provost.nd.edu/news/walking-through-doorways-causes-forgetting-new-research-shows",
+    "https://pmc.ncbi.nlm.nih.gov/articles/PMC7938580",
+    "https://www.scimex.org/newsfeed/unlocking-the-mysteries-of-the-doorway-effect"
+   ]
+  },
+  {
    "id": "wow_01",
    "genre": "raetsel",
    "thema": "Das Wow!-Signal 1977: Big Ear, 72 Sekunden, 6EQUJ5, 1420 MHz, Schütze, nie wieder gehört, Kometen-These 2017 verworfen, Magnetar-These 2024 unbewiesen.",
