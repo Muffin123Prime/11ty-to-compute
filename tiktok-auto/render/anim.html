@@ -246,7 +246,7 @@ function drawSubs(t){
     lines=[];let cur=[],cw=0;for(const it of items){if(cw+it.w>maxW&&cur.length){lines.push(cur);cur=[];cw=0}cur.push(it);cw+=it.w}if(cur.length)lines.push(cur);
     if(lines.length<=2)break;size_=Math.round(size_*.86)}   // hoechstens zwei Zeilen, sonst kleiner
   const font_=`900 ${size_}px ${FONT}`;
-  const SUBY=(TL.look==='schlicht'?1490:1100);const lh=size_*1.2,cy=SUBY-(lines.length-1)*lh/2,cxm=510;
+  const SUBY=(TL.look==='schlicht'?1300:1100);const lh=size_*1.2,cy=SUBY-(lines.length-1)*lh/2,cxm=510;
   ctx.textBaseline='middle';ctx.textAlign='left';ctx.lineJoin='round';
   lines.forEach((ln,li)=>{
     const tw=ln.reduce((a,b)=>a+b.w,0);let x=cxm-tw/2;const y=cy+li*lh;
@@ -285,8 +285,12 @@ function hud(t){
 
 /* ---------- Frame ---------- */
 window.GUIDES=false;
-function guides(){ctx.save();ctx.strokeStyle='rgba(255,40,60,.95)';ctx.lineWidth=4;ctx.setLineDash([18,12]);ctx.strokeRect(60,108,900,1492);
-  ctx.fillStyle='rgba(255,40,60,.18)';ctx.fillRect(0,0,W,108);ctx.fillRect(960,108,120,H-108);ctx.fillRect(0,1600,960,H-1600);ctx.restore()}
+function guides(){ctx.save();ctx.fillStyle='rgba(255,40,60,.22)';
+  ctx.fillRect(0,0,W,230);                 // Statusleiste und Reiter "Folge ich | Für dich"
+  ctx.fillRect(930,860,150,760);           // rechte Symbolspalte: Profil, Herz, Kommentare, Teilen, Ton
+  ctx.fillRect(0,1460,820,H-1460);         // Nutzername, Beschreibung, Musikzeile
+  ctx.fillRect(0,1620,W,H-1620);           // Navigationsleiste
+  ctx.strokeStyle='rgba(255,40,60,.95)';ctx.lineWidth=4;ctx.setLineDash([18,12]);ctx.strokeRect(60,240,870,1210);ctx.restore()}
 window.setTimeline=tl=>{TL=tl;prepSubs()};
 window.drawFrame=t=>{
   const sc=TL.scenes.find(s=>t>=s.start&&t<s.end)||TL.scenes[TL.scenes.length-1],tl=t-sc.start;
