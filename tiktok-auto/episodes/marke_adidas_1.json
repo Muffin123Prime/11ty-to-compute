@@ -161,9 +161,8 @@
   "s6": {
    "visual": "foto",
    "img": "assets/adidas/marktplatz_10_8_6_herzogenaurach_20180219_003.jpg",
-   "h": 900,
-   "text": "„Stadt der gesenkten Köpfe“: Erst der Blick auf die Schuhe, dann das Gespräch.",
-   "size": 50
+   "h": 700,
+   "text": "„Stadt der gesenkten Köpfe“: erst der Blick auf die Schuhe, dann das Gespräch."
   },
   "s7": {
    "visual": "foto_karte",
@@ -174,9 +173,8 @@
   "s8": {
    "visual": "foto",
    "img": "assets/adidas/adi_dassler_and_wife_1934.jpg",
-   "h": 900,
-   "text": "Rudolf starb 1974, Adi 1978. Begraben auf demselben Friedhof, so weit voneinander entfernt wie möglich.",
-   "size": 46
+   "h": 700,
+   "text": "Rudolf starb 1974, Adi 1978. Begraben so weit voneinander entfernt wie möglich."
   }
  },
  "next": "Teil 2: Die Schuhe, die Adidas groß machten"

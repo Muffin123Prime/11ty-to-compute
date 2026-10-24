@@ -862,10 +862,10 @@ function drawCover(im,x,y,w,h,r,zoom=1,px=.5,py=.5){if(!im){ctx.fillStyle='#ddd'
 function credit(v,y=1430){const c=v.img&&TL.credits&&TL.credits[v.img.split('/').pop()];if(!c)return;ctx.save();ctx.font=`500 22px ${FONT}`;ctx.textAlign='right';ctx.textBaseline='middle';ctx.fillStyle='rgba(60,60,60,.85)';ctx.fillText(`Foto: ${c.author} · ${c.license} · Wikimedia Commons`,930,y);ctx.restore()}
 function schText(txt,x,y,size,color=SCH.ink,align='left',maxW=840){ctx.save();ctx.font=`800 ${size}px ${FONT}`;ctx.textAlign=align;ctx.textBaseline='top';ctx.fillStyle=color;const L=wrap(txt,maxW,`800 ${size}px ${FONT}`);L.forEach((l,i)=>ctx.fillText(l,x,y+i*size*1.18));ctx.restore();return size*1.18*wrap(txt,maxW,`800 ${size}px ${FONT}`).length}
 const IMG=k=>(window.IMGS||{})[k];
-GEN.foto=(v,tl,t)=>{schBG();const im=IMG(v.img);const zoom=1.04+.06*clamp(tl/8);const a=eOut(tl/.5);
-  ctx.save();ctx.globalAlpha=a;drawCover(im,60,350,870,v.h||700,28,zoom,v.px??.5,v.py??.5);ctx.restore();
+GEN.foto=(v,tl,t)=>{schBG();const im=IMG(v.img);const zoom=1.04+.06*clamp(tl/8);const a=eOut(tl/.5);const hh=Math.min(v.h||700,v.text?700:1000);   // mit Text endet das Foto spaetestens bei 1050
+  ctx.save();ctx.globalAlpha=a;drawCover(im,60,350,870,hh,28,zoom,v.px??.5,v.py??.5);ctx.restore();
   if(v.jahr){const b=eBack((tl-.2)/.4);ctx.save();ctx.translate(110,400);ctx.scale(b,b);ctx.fillStyle=TL.accent_color||SCH.ink;ctx.beginPath();ctx.roundRect(0,0,200,70,12);ctx.fill();ctx.fillStyle='#fff';ctx.font=`900 42px ${FONT}`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(v.jahr,100,37);ctx.restore()}
-  if(v.text){ctx.save();ctx.globalAlpha=eOut((tl-.4)/.5);schText(v.text,60,350+(v.h||700)+36,v.size||42,SCH.ink,'left',870);ctx.restore()}
+  if(v.text){ctx.save();ctx.globalAlpha=eOut((tl-.4)/.5);schText(v.text,60,350+hh+36,v.size||40,SCH.ink,'left',870);ctx.restore()}
   credit(v)};
 GEN.foto_karte=(v,tl,t)=>{schBG();const im=IMG(v.img);const a=eOut(tl/.5);
   ctx.save();ctx.globalAlpha=a;ctx.translate(0,(1-a)*30);drawCover(im,60,350,870,580,28,1.03+.05*clamp(tl/8),v.px??.5,v.py??.5);ctx.restore();
@@ -908,9 +908,10 @@ window.drawFrame=t=>{
   drawScene(sc,tl,t);ctx.restore();
   if(TL.look==='schlicht')schLabel(t);else if(TL.audio!=='news')eraLabel(t,TL.label||TL.series||'',TL.part>1?'Teil '+TL.part:'');
   if(TL.next&&t>TL.duration-3.2){const u=eOut((t-(TL.duration-3.2))/.5);const S_=TL.look==='schlicht';ctx.save();ctx.globalAlpha=u;ctx.translate(0,(1-u)*30);
-    ctx.fillStyle=S_?(TL.accent_color||'#111'):'rgba(20,6,50,.9)';ctx.beginPath();ctx.roundRect(60,1100,870,110,S_?18:40);ctx.fill();
-    ctx.fillStyle='#fff';ctx.font=`600 28px ${FONT}`;ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText('ALS NÄCHSTES',96,1136);
-    ctx.font=`900 48px ${FONT}`;ctx.fillText(TL.next.toUpperCase(),96,1176);ctx.restore()}
+    const y0=S_?372:900,txt=TL.next.toUpperCase();let fs=44;ctx.font=`900 ${fs}px ${FONT}`;while(ctx.measureText(txt).width>760&&fs>24){fs-=2;ctx.font=`900 ${fs}px ${FONT}`}
+    ctx.fillStyle=S_?'rgba(17,17,17,.92)':'rgba(20,6,50,.92)';ctx.beginPath();ctx.roundRect(84,y0,822,104,S_?16:36);ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,.75)';ctx.font=`700 24px ${FONT}`;ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText('ALS NÄCHSTES',112,y0+30);
+    ctx.fillStyle='#fff';ctx.font=`900 ${fs}px ${FONT}`;ctx.fillText(txt,112,y0+68);ctx.restore()}
   if(TL.part>1&&t<1.6){const u=t<1.1?0:eOut((t-1.1)/.5);const col=TL.look==='schlicht'?(TL.accent_color||'#111'):'#1b0d45';ctx.save();ctx.translate(0,-u*H);
     ctx.fillStyle=col;ctx.fillRect(0,0,W,H);const k=eBack(t/.5);ctx.translate(CX,900);ctx.scale(k,k);
     ctx.fillStyle='#fff';ctx.font=`800 48px ${FONT}`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText((TL.series||'').toUpperCase(),0,-150);
