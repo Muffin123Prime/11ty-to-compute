@@ -8,6 +8,12 @@
 - Jede Folge braucht 5 bis 8 Hashtags im Feld `hashtags`, immer mit #nachgehakt und #wissen; der Auftraggeber bekommt sie zusätzlich im Chat genannt.
 - Voraussetzung in der Cloud-Umgebung: `TIKTOK_REFRESH_TOKEN` zusätzlich zu den anderen Variablen, weil `.secrets/` mit jeder Sitzung verloren geht. TikTok gibt beim Erneuern denselben Refresh-Token zurück (geprüft am 21.10.), er gilt ein Jahr.
 
+## Kanalstil seit 24.10.
+- Der Auftraggeber hat entschieden: Der schlichte Look mit echten Fotos (Markenformat) ist der Kanalstil. Der gemalte Neon-Stil wird nicht weitergeführt, die Aufgabe "TikTok Tagesentwurf" ist deaktiviert (kann jederzeit wieder eingeschaltet oder auf den schlichten Look umgestellt werden). Es läuft nur noch "TikTok Markenvideo" (9:11 und 17:11 Uhr).
+- Profilbild neu im schlichten Look: `brand/profil_schlicht_1.png` (hell, Haken, Wortmarke), `_2` (schwarz, heller Haken), `_3` (Wortmarke mit kleinem Haken). Erzeugt mit `node tools/profilbild.mjs brand/`.
+- Jedes Video endet mit der Ansage, was als Nächstes kommt: Feld `next` in der Episode, der Renderer blendet es in den letzten drei Sekunden als Karte bei y 1100 ein, der letzte gesprochene Satz nennt es ebenfalls. Teil 1 bis 3 nennen den nächsten Teil, Teil 4 die nächste Marke. Bewusst kein Schaubild mit der Reihenfolge, damit Marken jederzeit eingeschoben werden können.
+- Markenwünsche des Auftraggebers: Schuhe (Adidas, Nike, Puma, New Balance), Handys (Apple, Samsung), Süßwaren (Snickers, Mars, Haribo, Nutella) und weitere; Warteschlange in `themen.json` unter `marken.warteschlange`.
+
 ## Markenformat (marke_*, seit 24.10.)
 - Wunsch des Auftraggebers: alle zwei Tage eine neue Marke, zwei Videos pro Tag (Teil 1 Entstehung, Teil 2 Produkte, Teil 3 Krasse Fakten, Teil 4 Heute: Zahlen, Skandale, Zukunft). Stil schlichter als die Wissensvideos, mit echten Fotos.
 - Look `"look": "schlicht"` in der Episode: helle Fläche (#f4f1ea), schwarze Schrift, eine Akzentfarbe (`accent_color`), Markenname oben links (y 250) mit Fortschrittsbalken, keine Körnung, keine Vignette. Fotos ab y 350, Bildtexte bis höchstens y 1200 (zwei Zeilen), Untertitel dunkel mit weißem Rand bei y=1300, Bildnachweis klein bei y=1430. Erste Fassung von Adidas Teil 1 lag mit Untertiteln bei 1490 in der TikTok-Beschreibung, das war der Fehler.

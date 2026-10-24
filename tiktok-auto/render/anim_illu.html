@@ -907,6 +907,10 @@ window.drawFrame=t=>{
   ctx.save();ctx.translate(CX,760);ctx.scale(p,p);ctx.translate(-CX,-760);
   drawScene(sc,tl,t);ctx.restore();
   if(TL.look==='schlicht')schLabel(t);else if(TL.audio!=='news')eraLabel(t,TL.label||TL.series||'',TL.part>1?'Teil '+TL.part:'');
+  if(TL.next&&t>TL.duration-3.2){const u=eOut((t-(TL.duration-3.2))/.5);const S_=TL.look==='schlicht';ctx.save();ctx.globalAlpha=u;ctx.translate(0,(1-u)*30);
+    ctx.fillStyle=S_?(TL.accent_color||'#111'):'rgba(20,6,50,.9)';ctx.beginPath();ctx.roundRect(60,1100,870,110,S_?18:40);ctx.fill();
+    ctx.fillStyle='#fff';ctx.font=`600 28px ${FONT}`;ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText('ALS NÄCHSTES',96,1136);
+    ctx.font=`900 48px ${FONT}`;ctx.fillText(TL.next.toUpperCase(),96,1176);ctx.restore()}
   if(TL.part>1&&t<1.6){const u=t<1.1?0:eOut((t-1.1)/.5);const col=TL.look==='schlicht'?(TL.accent_color||'#111'):'#1b0d45';ctx.save();ctx.translate(0,-u*H);
     ctx.fillStyle=col;ctx.fillRect(0,0,W,H);const k=eBack(t/.5);ctx.translate(CX,900);ctx.scale(k,k);
     ctx.fillStyle='#fff';ctx.font=`800 48px ${FONT}`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText((TL.series||'').toUpperCase(),0,-150);

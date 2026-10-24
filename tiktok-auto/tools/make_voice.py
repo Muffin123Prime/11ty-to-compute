@@ -217,7 +217,7 @@ for i, s in enumerate(sentences):
         events.append({"type": "cta", "t": s["start"] + 0.1})
     if s["event"] and s["event"] not in ("stamp", "cta"):   # frei benennbare Ereignisse (z.B. shock) am Satzende
         events.append({"type": s["event"], "t": s["end"] - 0.35})
-tl = {"id": ep["id"], "series": ep["series"], "part": ep["part"], "title": ep["title"], "label": ep.get("label", ep["series"]), "audio": ep.get("audio", "story"), "date": ep.get("date", ""), "look": ep.get("look", "illu"), "accent_color": ep.get("accent_color", "#111111"), "credits": (json.load(open(ep["credits_file"], encoding="utf-8")) if ep.get("credits_file") and os.path.exists(ep["credits_file"]) else ep.get("credits", {})),
+tl = {"id": ep["id"], "series": ep["series"], "part": ep["part"], "title": ep["title"], "label": ep.get("label", ep["series"]), "audio": ep.get("audio", "story"), "date": ep.get("date", ""), "look": ep.get("look", "illu"), "next": ep.get("next", ""), "accent_color": ep.get("accent_color", "#111111"), "credits": (json.load(open(ep["credits_file"], encoding="utf-8")) if ep.get("credits_file") and os.path.exists(ep["credits_file"]) else ep.get("credits", {})),
       "duration": total, "sentences": sentences, "scenes": scenes, "events": events}
 json.dump(tl, open(f"{out}/timeline.json", "w", ensure_ascii=False and None or None, ) if False else open(f"{out}/timeline.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 print("Dauer gesamt: %.1f s" % total)

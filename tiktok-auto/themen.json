@@ -110,6 +110,10 @@
   "aktuell": "adidas",
   "warteschlange": [
    "nike",
+   "apple",
+   "samsung",
+   "snickers",
+   "mars",
    "lego",
    "redbull",
    "haribo",
@@ -118,6 +122,8 @@
    "rolex",
    "nutella",
    "porsche",
+   "puma",
+   "newbalance",
    "spotify"
   ],
   "teile": {
@@ -153,6 +159,8 @@
      "thema": "Umsatz 24,8 Mrd. Euro 2025, 64.938 Mitarbeiter, Yeezy-Ende 25.10.2022, Rechtsstreit um Streifen, Zukunft."
     }
    ]
-  }
- }
+  },
+  "_hinweis_ansage": "Jedes Video endet mit der Ansage, was als Nächstes kommt (Teil 1 bis 3: nächster Teil, Teil 4: nächste Marke aus der Warteschlange). Kein Schaubild der Reihenfolge, damit Marken jederzeit eingeschoben werden können."
+ },
+ "_hinweis_stil": "Seit 24.10. ist der schlichte Look mit echten Fotos der Kanalstil. Der gemalte Neon-Stil (Wissensvideos) wird nicht weitergeführt; die Aufgabe 'TikTok Tagesentwurf' ist deshalb deaktiviert. Profilbild: brand/profil_schlicht_*.png."
 }
