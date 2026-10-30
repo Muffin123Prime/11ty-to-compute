@@ -43,5 +43,5 @@ jobs:
           body: |
             Fertige Mod-Datei für Minecraft 26.3 mit Fabric Loader + Fabric API.
             Installation: Fabric Loader für 26.3 installieren, Fabric API und diese .jar in den `mods`-Ordner legen.
-            Tasten: X = X-Ray, N = Fullbright, K = Fly, V = ESP, G = Kreativ/Überleben (braucht OP).
+            Taste L öffnet das Menü. Direkt: X = X-Ray, N = Fullbright, K = Fly, V = ESP, B = Speed, G = Kreativ/Überleben (braucht OP).
           files: minecraft-mod/build/libs/*.jar

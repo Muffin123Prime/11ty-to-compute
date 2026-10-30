@@ -61,6 +61,9 @@ public class Config {
 	/** ESP nur für Spieler (true) oder für alle Lebewesen (false). */
 	public boolean espPlayersOnly = false;
 
+	/** Geschwindigkeits-Multiplikator für den Speed-Cheat am Boden (1.0 = normal). */
+	public float speedMultiplier = 1.8f;
+
 	public static Config load() {
 		if (Files.exists(PATH)) {
 			try {

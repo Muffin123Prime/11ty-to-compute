@@ -8,7 +8,7 @@ import java.util.HashSet;
 import java.util.Set;
 
 /**
- * Globaler Zustand der Cheats. Wird von den Mixins (hot path!) gelesen, deshalb nur
+ * Globaler Zustand der Client-Cheats. Wird von den Mixins (hot path!) gelesen, deshalb nur
  * einfache statische Felder.
  */
 public final class Cheats {
@@ -16,6 +16,8 @@ public final class Cheats {
 	public static volatile boolean fullbright = false;
 	public static volatile boolean fly = false;
 	public static volatile boolean esp = false;
+	public static volatile boolean speed = false;
+	public static volatile boolean autoSprint = false;
 
 	private static volatile Set<Block> xrayBlocks = new HashSet<>();
 

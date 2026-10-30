@@ -1,8 +1,10 @@
 {
 	"key.category.privatecheats.main": "PrivateCheats",
+	"key.privatecheats.menu": "Open cheat menu",
 	"key.privatecheats.xray": "Toggle X-Ray",
 	"key.privatecheats.fullbright": "Toggle Fullbright",
 	"key.privatecheats.fly": "Toggle Fly",
 	"key.privatecheats.esp": "Toggle ESP (glowing entities)",
+	"key.privatecheats.speed": "Toggle Speed",
 	"key.privatecheats.gamemode": "Creative / Survival (needs OP)"
 }
