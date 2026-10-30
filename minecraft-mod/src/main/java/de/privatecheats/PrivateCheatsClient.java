@@ -46,7 +46,7 @@ public class PrivateCheatsClient implements ClientModInitializer {
 
 		KeyMapping.Category category = KeyMapping.Category.register(Identifier.fromNamespaceAndPath(MOD_ID, "main"));
 
-		menuKey = key("menu", SDLScancode.SDL_SCANCODE_L, category);
+		menuKey = key("menu", SDLScancode.SDL_SCANCODE_F6, category);
 		xrayKey = key("xray", SDLScancode.SDL_SCANCODE_X, category);
 		fullbrightKey = key("fullbright", SDLScancode.SDL_SCANCODE_N, category);
 		flyKey = key("fly", SDLScancode.SDL_SCANCODE_K, category);
@@ -61,7 +61,7 @@ public class PrivateCheatsClient implements ClientModInitializer {
 				return;
 			}
 
-			graphics.text(Minecraft.getInstance().font, "§bPrivateCheats §7[L = Menü]", 4, 4, CommonColors.WHITE);
+			graphics.text(Minecraft.getInstance().font, "§bPrivateCheats §7[" + menuKeyName() + " = Menü]", 4, 4, CommonColors.WHITE);
 			List<String> active = activeFeatures();
 
 			if (!active.isEmpty()) {
@@ -69,7 +69,16 @@ public class PrivateCheatsClient implements ClientModInitializer {
 			}
 		});
 
-		LOGGER.info("PrivateCheats geladen. L = Menü, X = X-Ray, N = Fullbright, K = Fly, V = ESP, B = Speed, G = Gamemode");
+		LOGGER.info("PrivateCheats geladen. F6 = Menü, X = X-Ray, N = Fullbright, K = Fly, V = ESP, B = Speed, G = Gamemode");
+	}
+
+	/** Name der aktuell gebundenen Menü-Taste (änderbar unter Optionen → Steuerung → Tastenbelegung → PrivateCheats). */
+	public static String menuKeyName() {
+		if (menuKey == null) {
+			return "F6";
+		}
+
+		return KeyMappingHelper.getBoundKeyOf(menuKey).getDisplayName().getString();
 	}
 
 	private static KeyMapping key(String name, int scancode, KeyMapping.Category category) {

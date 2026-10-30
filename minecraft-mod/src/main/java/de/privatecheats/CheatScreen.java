@@ -146,7 +146,8 @@ public class CheatScreen extends Screen {
 		graphics.fill(panelX, panelY + 26, x2, panelY + 27, COLOR_BORDER);
 
 		graphics.text(this.font, "PrivateCheats", panelX + 12, panelY + 9, COLOR_SECTION);
-		graphics.text(this.font, "Minecraft 26.3  |  Taste L = Menü", x2 - 12 - this.font.width("Minecraft 26.3  |  Taste L = Menü"), panelY + 9, COLOR_HINT);
+		String hint = "Menü-Taste: " + PrivateCheatsClient.menuKeyName() + "  (änderbar unter Steuerung)";
+		graphics.text(this.font, hint, x2 - 12 - this.font.width(hint), panelY + 9, COLOR_HINT);
 
 		graphics.text(this.font, "Client-Cheats", panelX + 12, panelY + 34, COLOR_TEXT);
 		graphics.text(this.font, "Server-Cheats (ihr braucht OP auf dem Server)", panelX + 182, panelY + 34, COLOR_TEXT);
