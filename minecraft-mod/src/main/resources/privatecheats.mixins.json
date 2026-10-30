@@ -1,0 +1,16 @@
+{
+	"required": true,
+	"package": "de.privatecheats.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"BlockMixin",
+		"BlockStateBaseMixin",
+		"EntityMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
+}

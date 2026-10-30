@@ -1,0 +1,47 @@
+# Baut die Fabric-Mod in minecraft-mod/ und veröffentlicht die fertige .jar
+# als GitHub-Release "minecraft-mod-latest" (Download ohne Build-Tools).
+
+name: minecraft-mod
+on:
+  push:
+    paths:
+      - 'minecraft-mod/**'
+      - '.github/workflows/minecraft-mod.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: minecraft-mod
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v4
+      - name: setup jdk
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'microsoft'
+      - name: make gradle wrapper executable
+        run: chmod +x ./gradlew
+      - name: build
+        run: ./gradlew build --no-daemon --stacktrace
+      - name: capture build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: privatecheats-mod
+          path: minecraft-mod/build/libs/*.jar
+      - name: publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: minecraft-mod-latest
+          name: PrivateCheats Mod (Minecraft 26.3, Fabric)
+          body: |
+            Fertige Mod-Datei für Minecraft 26.3 mit Fabric Loader + Fabric API.
+            Installation: Fabric Loader für 26.3 installieren, Fabric API und diese .jar in den `mods`-Ordner legen.
+            Tasten: X = X-Ray, N = Fullbright, K = Fly, V = ESP, G = Kreativ/Überleben (braucht OP).
+          files: minecraft-mod/build/libs/*.jar

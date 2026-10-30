@@ -1,0 +1,29 @@
+{
+	"schemaVersion": 1,
+	"id": "privatecheats",
+	"version": "${version}",
+	"name": "PrivateCheats",
+	"description": "Client-Mod fuer den eigenen privaten Server: X-Ray, Fullbright, Fly, ESP und Gamemode-Schalter.",
+	"authors": [
+		"muffin123prime"
+	],
+	"license": "MIT",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"de.privatecheats.PrivateCheatsClient"
+		]
+	},
+	"mixins": [
+		{
+			"config": "privatecheats.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
