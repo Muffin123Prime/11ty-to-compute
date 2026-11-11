@@ -21,14 +21,17 @@ await page.getByRole("button", { name: "Verstanden" }).click();
 await foto("1-start");
 
 // Stunde starten (ohne echte Spracherkennung: Headless-Chromium hat keinen Dienst)
+await page.getByRole("button", { name: "Zuhören starten" }).click();
+await page.getByText("Erst oben das Fach antippen.").waitFor();
 await page.getByRole("button", { name: "Chemie", exact: true }).click();
+await page.getByRole("button", { name: "Zuhören starten" }).click();
 await page.waitForURL(/#live/);
 await page.evaluate(() => {
   window.unterricht.einspeisen("so heute machen wir weiter mit den molekülen");
   window.unterricht.einspeisen("wasser besteht aus wasserstoff und sauerstoff");
 });
 await page.waitForTimeout(300);
-assert.equal(await page.locator(".transkript .seg").count(), 2);
+assert.match(await page.locator(".live-text").textContent(), /wasserstoff und sauerstoff/);
 assert.equal(await page.locator(".antwort-karte").count(), 0, "ohne Frage keine Karte");
 
 // Lehrerfrage → automatische Antwort mit Bild
@@ -39,6 +42,13 @@ assert.match(antwort, /Sauerstoffatom/);
 await page.locator(".antwort-karte img").first().waitFor();
 assert.match(await page.locator(".antwort-karte img").first().getAttribute("src"), /pubchem/);
 await foto("2-live-antwort");
+// linke Spalte zeigt die erkannte Frage
+assert.match(await page.locator(".spalte-links").textContent(), /Wassermolekül/);
+
+// Zwischenstand (rechte Spalte)
+await page.evaluate(() => window.unterricht.zwischenstand());
+await page.locator(".zwischenstand").getByText("Attrappen-Stunde", { exact: false }).or(page.locator(".zwischenstand").getByText("Beispielstunde")).first().waitFor({ timeout: 10000 });
+assert.match(await page.locator(".spalte-links").textContent(), /Seite 42/);
 
 // Eingetippte Frage
 await page.getByPlaceholder(/Frage eintippen/).fill("Was ist ein Dipol?");

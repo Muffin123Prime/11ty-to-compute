@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#1b1f2a"/>
+  <rect width="512" height="512" rx="112" fill="#000000"/>
   <rect x="96" y="128" width="320" height="256" rx="28" fill="#f6f3ec"/>
-  <rect x="136" y="176" width="240" height="18" rx="9" fill="#1b1f2a" opacity=".35"/>
-  <rect x="136" y="222" width="180" height="18" rx="9" fill="#1b1f2a" opacity=".35"/>
-  <rect x="136" y="268" width="210" height="18" rx="9" fill="#1b1f2a" opacity=".35"/>
-  <circle cx="368" cy="352" r="76" fill="#e8552b"/>
+  <rect x="136" y="176" width="240" height="18" rx="9" fill="#000000" opacity=".35"/>
+  <rect x="136" y="222" width="180" height="18" rx="9" fill="#000000" opacity=".35"/>
+  <rect x="136" y="268" width="210" height="18" rx="9" fill="#000000" opacity=".35"/>
+  <circle cx="368" cy="352" r="76" fill="#ff2d2d"/>
   <path d="M368 384a28 28 0 0 0 28-28v-30a28 28 0 1 0-56 0v30a28 28 0 0 0 28 28Zm44-28a44 44 0 0 1-88 0h-16a60 60 0 0 0 52 59.4V432h16v-16.6A60 60 0 0 0 428 356h-16Z" fill="#fff"/>
 </svg>

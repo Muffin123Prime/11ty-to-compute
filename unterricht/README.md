@@ -17,15 +17,22 @@ einmal für die Zusammenfassung. Der Server ruft Claude (Anthropic) auf.
 
 ## Was die App kann
 
-- **Stunde wählen und starten**: Fach antippen, los geht's. Die Mitschrift läuft
-  mit Zeitmarken, der Bildschirm bleibt an (Wake Lock, wo der Browser es erlaubt).
+- **Schwarz-weiß, ein roter Punkt**: Fach antippen, auf den leuchtenden Punkt tippen,
+  die App hört zu. Oben läuft der Live-Text mit, links sammeln sich Fragen und
+  Aufgaben der Lehrkraft, in der Mitte stehen Antworten und Bilder, rechts eine
+  Zusammenfassung der bisherigen Stunde (alle vier Minuten neu, oder per Knopf).
+  Auf dem Handy liegen die drei Spalten untereinander, auf dem iPad nebeneinander.
+- **Mitschrift** mit Zeitmarken, der Bildschirm bleibt an (Wake Lock, wo der Browser es erlaubt).
 - **Fragen erkennen**: Sätze wie „Wer kann mir sagen …“, „Wie sieht … aus“,
   „Nennt mir drei …“ werden im Text markiert und (wenn eingeschaltet) an Claude
   geschickt. Claude prüft, ob es wirklich eine Frage an die Klasse war, und schreibt
   eine Antwort in ein bis drei Sätzen, so wie ein guter Schüler sie sagen würde.
   Dazu bei Bedarf ein Satz Hintergrund für Rückfragen.
-- **Jetzt antworten**: großer Knopf, wenn die automatische Erkennung die Frage
+- **Jetzt antworten**: Knopf, wenn die automatische Erkennung die Frage
   verpasst hat. Oder die Frage eintippen.
+- **Web-Suche**: Claude darf im Internet nachschlagen, wenn es sich bei einer Zahl,
+  einem Namen oder einem aktuellen Ereignis nicht sicher ist (in den Einstellungen
+  abschaltbar, weil jede Suche ein paar Sekunden kostet).
 - **Bilder**: Moleküle als Strukturformel aus PubChem, Dinge mit gutem
   Wikipedia-Hauptbild aus der deutschen Wikipedia, einfache Skizzen (Lewis-Formel,
   Kräfte, Winkel, Aufbau) zeichnet Claude selbst als SVG.
@@ -55,7 +62,23 @@ Claude wird über das offizielle SDK (`@anthropic-ai/sdk`) aufgerufen, Modell
 `claude-opus-5-5` (änderbar über die Variable `MODELL`), mit strukturierter
 JSON-Ausgabe und eingeschaltetem Server-Fallback bei Ablehnungen.
 
-## Ins Netz bringen (Cloudflare Workers, kostenlos)
+## Ins Netz bringen, Weg 1: automatisch über GitHub
+
+Der Workflow `.github/workflows/unterricht.yml` veröffentlicht die App bei jedem
+Push in `unterricht/` auf Cloudflare. Dafür einmalig drei Secrets im Repo anlegen
+(Settings → Secrets and variables → Actions → New repository secret):
+
+| Secret | Woher |
+| --- | --- |
+| `CLOUDFLARE_API_TOKEN` | dash.cloudflare.com → Profil → API Tokens → Vorlage „Edit Cloudflare Workers“ |
+| `ANTHROPIC_API_KEY` | console.anthropic.com → API Keys |
+| `APP_KEY` | selbst ausdenken, das Passwort für die App |
+
+Danach den Workflow unter Actions → „Unterrichts-App deployen“ einmal von Hand
+starten oder einfach etwas pushen. Die Adresse steht am Ende des Laufs
+(`https://unterricht.<name>.workers.dev`).
+
+## Ins Netz bringen, Weg 2: von Hand (Cloudflare Workers, kostenlos)
 
 Du brauchst ein Cloudflare-Konto und einen Anthropic-Schlüssel (console.anthropic.com).
 
@@ -108,8 +131,10 @@ node test/e2e.mjs        # Durchlauf im Browser (braucht Playwright)
 - **Bildschirm**: Die Erkennung läuft nur, solange die Seite im Vordergrund ist.
   Die App hält den Bildschirm wach, Display nicht sperren.
 - **Kosten**: Pro erkannter Frage geht ein Aufruf mit etwa zwei Minuten Text an
-  Claude, das sind grob ein bis zwei Cent. Die Zusammenfassung einer 45-Minuten-Stunde
-  liegt bei etwa fünf bis zehn Cent. Ein Vorfilter in der App sorgt dafür, dass nicht
+  Claude, das sind grob ein bis zwei Cent, mit Web-Suche etwas mehr. Die laufende
+  Zusammenfassung alle vier Minuten und die Endzusammenfassung einer 45-Minuten-Stunde
+  liegen zusammen bei etwa 20 bis 40 Cent (das Transkript wird zwischengespeichert,
+  deshalb nicht mehr). Ein Vorfilter in der App sorgt dafür, dass nicht
   jeder Satz, sondern nur fragend klingende Sätze geprüft werden, höchstens alle
   zwölf Sekunden.
 - **Daten**: Alle Stunden liegen nur im Browser-Speicher des Geräts (IndexedDB).

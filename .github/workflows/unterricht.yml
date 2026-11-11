@@ -1,0 +1,46 @@
+# Baut und veröffentlicht die Unterrichts-App (unterricht/) auf Cloudflare Workers,
+# sobald sich dort etwas ändert. Braucht drei Secrets im Repo
+# (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   Token mit der Vorlage "Edit Cloudflare Workers"
+#   ANTHROPIC_API_KEY      Schlüssel von console.anthropic.com
+#   APP_KEY                selbst gewähltes Passwort für die App
+# Optional CLOUDFLARE_ACCOUNT_ID, falls der Token mehrere Konten sieht.
+name: Unterrichts-App deployen
+
+on:
+  push:
+    branches: [main, tiktok-auto-pipeline, claude/classroom-lecture-qa-app-o5cx2u]
+    paths: ["unterricht/**", ".github/workflows/unterricht.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: unterricht-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: unterricht
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: unterricht/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - name: Auf Cloudflare veröffentlichen
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: unterricht
+          secrets: |
+            ANTHROPIC_API_KEY
+            APP_KEY
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          APP_KEY: ${{ secrets.APP_KEY }}

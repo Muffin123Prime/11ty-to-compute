@@ -3,8 +3,8 @@
 // Anfrage an /api/* an `apiAnfrage` weiter.
 //
 //   GET  /api/status            Läuft der Server, ist ein Schlüssel da, welches Modell
-//   POST /api/antwort           Lehrerfrage im Transkript erkennen und beantworten
-//   POST /api/zusammenfassung   Stunde zusammenfassen
+//   POST /api/antwort           Lehrerfrage im Transkript erkennen und beantworten (websuche: true erlaubt Claude die Web-Suche)
+//   POST /api/zusammenfassung   Stunde zusammenfassen (laufend: true = kurzer Zwischenstand)
 //   POST /api/nachfrage         Frage zu gespeicherten Stunden
 //
 // Ist APP_KEY gesetzt, muss jede Anfrage ihn im Header x-app-key tragen,
@@ -110,6 +110,7 @@ export async function apiAnfrage(request, env, optionen = {}) {
         transkript,
         frage,
         modus: body.modus === "manuell" ? "manuell" : "auto",
+        websuche: body.websuche === true,
         profil,
         modell,
       });
@@ -124,6 +125,7 @@ export async function apiAnfrage(request, env, optionen = {}) {
         fach: String(body.fach || "").slice(0, 80),
         datum: String(body.datum || "").slice(0, 40),
         dauer: typeof body.dauer === "number" ? body.dauer : undefined,
+        laufend: body.laufend === true,
         transkript,
         profil,
         modell,

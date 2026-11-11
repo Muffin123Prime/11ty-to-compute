@@ -14,6 +14,7 @@
     schulform: "",
     name: "",
     auto: true,
+    websuche: true,
     ton: true,
     vibrieren: true,
     sprache: "de-DE",
@@ -175,6 +176,9 @@
     timer: null,
     speicherTimer: null,
     neustarts: 0,
+    zwischenstandLaeuft: false,
+    zwischenstandTimer: null,
+    zwischenstandSegmente: 0,
   };
   const liveSekunden = () => (live.startMs ? (Date.now() - live.startMs - live.pausenMs - (live.pauseSeitMs ? Date.now() - live.pauseSeitMs : 0)) / 1000 : 0);
 
@@ -289,6 +293,7 @@
         transkript: letzteSegmente(),
         frage,
         modus,
+        websuche: Boolean(einst.websuche),
         profil: profil(),
       });
       if (!d.frage_erkannt) {
@@ -313,6 +318,34 @@
     }
   }
 
+  // ---------- Zwischenstand (laufende Zusammenfassung) -------------------------
+  const ZWISCHENSTAND_ALLE_MS = 4 * 60 * 1000;
+  async function zwischenstandHolen(erzwungen = false) {
+    const st = live.stunde;
+    if (!st || live.zwischenstandLaeuft) return;
+    const neue = st.transkript.length - live.zwischenstandSegmente;
+    if (!erzwungen && (st.transkript.length < 8 || neue < 6)) return;
+    if (st.transkript.length < 3) {
+      if (erzwungen) meldung("Dafür ist noch zu wenig Text da.");
+      return;
+    }
+    live.zwischenstandLaeuft = true;
+    zwischenstandZeichnen();
+    try {
+      const d = await api("/api/zusammenfassung", { fach: st.fach, datum: st.datum, dauer: Math.round(liveSekunden()), transkript: st.transkript, laufend: true, profil: profil() });
+      if (live.stunde !== st) return;
+      st.zwischenstand = { thema: d.thema, text: d.zusammenfassung, kernpunkte: d.kernpunkte || [], fragen: d.fragen || [], hausaufgaben: d.hausaufgaben || [], begriffe: d.begriffe || [], stand: Math.round(liveSekunden()) };
+      live.zwischenstandSegmente = st.transkript.length;
+      speichernBald();
+    } catch (e) {
+      if (erzwungen) meldung(`Zwischenstand fehlgeschlagen: ${e.message}`, 5000);
+    } finally {
+      live.zwischenstandLaeuft = false;
+      zwischenstandZeichnen();
+      fragenSpalteZeichnen();
+    }
+  }
+
   // ---------- Live: Start / Pause / Ende --------------------------------------
   async function stundeStarten(fach) {
     const start = new Date();
@@ -325,9 +358,13 @@
       transkript: [],
       fragen: [],
       zusammenfassung: null,
+      zwischenstand: null,
       notizen: "",
     };
     live.startMs = Date.now();
+    live.zwischenstandSegmente = 0;
+    clearInterval(live.zwischenstandTimer);
+    live.zwischenstandTimer = setInterval(() => zwischenstandHolen(false), ZWISCHENSTAND_ALLE_MS);
     live.pausenMs = 0;
     live.pauseSeitMs = 0;
     live.zwischen = "";
@@ -390,6 +427,8 @@
     live.stunde = null;
     live.startMs = 0;
     clearInterval(live.timer);
+    clearInterval(live.zwischenstandTimer);
+    document.body.classList.remove("gedimmt");
     try {
       live.wakeLock?.release();
     } catch {
@@ -441,14 +480,17 @@
   const app = $("#app");
   const navMarkieren = (name) => document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("aktiv", a.dataset.nav === name));
 
+  let gewaehltesFach = "";
   function zeigeStart() {
     navMarkieren("start");
+    app.classList.remove("breit");
+    document.body.classList.remove("gedimmt");
     const kinder = [];
     if (!einst.hinweisGesehen) {
       kinder.push(
-        el("div", { class: "karte" },
-          el("h2", { style: "margin-top:0" }, "Bevor es losgeht"),
-          el("p", {}, "Die App hört über das Mikrofon mit und schreibt den Unterricht als Text auf dieses Gerät. Sag deiner Lehrkraft Bescheid und frag, ob das für dich in Ordnung ist: Unterricht ohne Einverständnis aufzunehmen ist in Deutschland nicht erlaubt. Mit Text statt Tonaufnahme und nur für dich selbst bist du auf der sicheren Seite, wenn die Lehrkraft zugestimmt hat."),
+        el("div", { class: "karte", style: "max-width:560px;text-align:left" },
+          el("h3", { style: "margin-top:0" }, "Bevor es losgeht"),
+          el("p", {}, "Die App hört über das Mikrofon mit und schreibt den Unterricht als Text auf dieses Gerät. Sag deiner Lehrkraft Bescheid und frag, ob das für dich in Ordnung ist: Unterricht ohne Einverständnis aufzunehmen ist in Deutschland nicht erlaubt."),
           el("p", {}, "Wenn die Lehrkraft eine Frage stellt, bekommst du einen Vorschlag, den du laut vorlesen kannst. Lies ihn kurz, bevor du dich meldest: Die Spracherkennung verhört sich manchmal."),
           el("button", { class: "knopf primaer", onclick: () => { einst.hinweisGesehen = true; speichereEinstellungen(); zeigeStart(); } }, "Verstanden"),
         ),
@@ -456,34 +498,43 @@
     }
     if (live.stunde) {
       kinder.push(
-        el("div", { class: "karte" },
-          el("div", { class: "status" }, el("span", { class: `punkt ${live.pausiert ? "pause" : live.hoert ? "an" : ""}` }), `Läuft gerade: ${live.stunde.fach}`),
-          el("p", { class: "muted klein" }, `seit ${uhrText(live.stunde.start)}, ${live.stunde.transkript.length} Sätze`),
+        el("div", { class: "karte", style: "max-width:420px" },
+          el("div", { class: "reihe", style: "justify-content:center" }, el("span", { class: `punkt-klein ${live.pausiert ? "pause" : live.hoert ? "" : "aus"}`, style: "width:28px;height:28px" }), `Läuft gerade: ${live.stunde.fach}`),
+          el("p", { class: "muted klein", style: "margin:8px 0" }, `seit ${uhrText(live.stunde.start)}, ${live.stunde.transkript.length} Sätze`),
           el("a", { class: "knopf primaer", href: "#live" }, "Zurück zur Stunde"),
         ),
       );
     }
-    kinder.push(el("h1", {}, "Welche Stunde ist jetzt?"));
+    const eigenes = el("input", { placeholder: "anderes Fach …", value: einst.faecher.includes(gewaehltesFach) ? "" : gewaehltesFach, oninput: (e) => { gewaehltesFach = e.target.value.trim(); chipsZeichnen(); } });
+    const chips = el("div", { class: "chips" });
+    const chipsZeichnen = () =>
+      ersetze(chips,
+        einst.faecher.map((f) => el("button", { class: `chip${gewaehltesFach === f ? " aktiv" : ""}`, onclick: () => { gewaehltesFach = f; eigenes.value = ""; chipsZeichnen(); } }, f)),
+        el("span", { class: `chip eingabe${gewaehltesFach && !einst.faecher.includes(gewaehltesFach) ? " aktiv" : ""}` }, eigenes),
+      );
+    chipsZeichnen();
+    const punkt = el("button", {
+      class: "punkt-gross",
+      "aria-label": "Zuhören starten",
+      disabled: Boolean(live.stunde),
+      onclick: () => {
+        if (!gewaehltesFach) return meldung("Erst oben das Fach antippen.");
+        stundeStarten(gewaehltesFach);
+      },
+    }, "Zuhören");
     kinder.push(
-      el("div", { class: "fach-raster" },
-        einst.faecher.map((f) => el("button", { class: "knopf", onclick: () => stundeStarten(f), disabled: Boolean(live.stunde) }, f)),
+      el("div", { class: "start" },
+        el("div", {}, el("h2", {}, "Welche Stunde?"), chips),
+        punkt,
+        el("p", { class: "unter" }, SR ? "Fach wählen, auf den Punkt tippen. Dann hört die App zu, schreibt mit und meldet sich, wenn die Lehrkraft etwas fragt." : "Dieser Browser kann nicht zuhören. Auf iPhone und iPad Safari benutzen, am Computer Chrome oder Edge. Mitschreiben per Tastatur geht trotzdem."),
       ),
     );
-    const eigenes = el("input", { class: "feld", placeholder: "Anderes Fach oder Thema …" });
-    kinder.push(
-      el("form", { class: "reihe abstand", onsubmit: (e) => { e.preventDefault(); const v = eigenes.value.trim(); if (v) stundeStarten(v); } },
-        eigenes,
-        el("button", { class: "knopf", type: "submit", disabled: Boolean(live.stunde) }, "Starten"),
-      ),
-    );
-    if (!SR) kinder.push(el("p", { class: "hinweis abstand" }, "Hinweis: Dieser Browser kann nicht zuhören. Auf iPhone und iPad bitte Safari benutzen, am Computer Chrome oder Edge."));
     ersetze(app, ...kinder);
     db.alle().then((liste) => {
-      if (!liste.length || location.hash !== "#start" && location.hash !== "") return;
-      const letzte = liste.slice(0, 3);
+      if (!liste.length || (location.hash !== "#start" && location.hash !== "")) return;
       app.append(
         el("h2", {}, "Zuletzt"),
-        el("div", { class: "liste" }, letzte.map(stundenKarte)),
+        el("div", { class: "liste" }, liste.slice(0, 3).map(stundenKarte)),
         el("a", { class: "knopf leise", href: "#archiv" }, "Alle Stunden →"),
       );
     });
@@ -509,65 +560,110 @@
       location.hash = "#start";
       return;
     }
-    const kopf = el("div", { class: "live-kopf" });
-    const transkript = el("div", { class: "transkript", "aria-live": "polite" });
+    app.classList.add("breit");
+    document.body.classList.add("gedimmt");
+    const band = el("div", { class: "live-band" });
+    const links = el("div", {});
     const antworten = el("div", { class: "spalte" });
-    const eingabe = el("input", { class: "feld", placeholder: "Frage eintippen, falls die Erkennung sie verpasst hat …", autocomplete: "off" });
-    const mitschrift = el("input", { class: "feld", placeholder: SR ? "Gehörtes von Hand ergänzen …" : "Mitschrift eintippen (keine Spracherkennung) …", autocomplete: "off" });
-    const autoSchalter = el("input", { type: "checkbox", checked: einst.auto, onchange: (e) => { einst.auto = e.target.checked; speichereEinstellungen(); } });
+    const rechts = el("div", { class: "zwischenstand" });
+    const eingabe = el("input", { class: "feld", placeholder: "Frage eintippen …", autocomplete: "off" });
     const leiste = el("div", { class: "leiste" },
-      el("button", { class: "knopf primaer gross", onclick: () => frageStellen({ modus: "manuell" }) }, "Jetzt antworten"),
+      el("button", { class: "knopf primaer", style: "min-height:52px;padding:0 22px;font-size:17px", onclick: () => frageStellen({ modus: "manuell" }) }, "Jetzt antworten"),
       el("form", { onsubmit: (e) => { e.preventDefault(); const v = eingabe.value.trim(); if (!v) return; eingabe.value = ""; frageStellen({ modus: "manuell", frage: v }); } },
         eingabe,
         el("button", { class: "knopf", type: "submit" }, "Fragen"),
       ),
     );
-    const notieren = el("form", { class: "reihe", style: "margin-top:8px", onsubmit: (e) => { e.preventDefault(); const v = mitschrift.value.trim(); if (!v) return; mitschrift.value = ""; segmentHinzu(v); transkriptZeichnen(); } },
-      mitschrift,
-      el("button", { class: "knopf", type: "submit" }, "Notieren"),
+    liveTeile = { band, links, antworten, rechts };
+    ersetze(app,
+      band,
+      el("div", { class: "spalten" },
+        el("section", { class: "spalte-links" }, el("h2", {}, "Fragen und Aufgaben"), links),
+        el("section", { class: "spalte-mitte" }, el("h2", {}, "Antworten"), antworten),
+        el("section", { class: "spalte-rechts" }, el("h2", {}, "Zusammenfassung bisher"), rechts),
+      ),
+      leiste,
     );
-    notieren.style.display = "flex";
-    mitschrift.style.flex = "1";
-    liveTeile = { kopf, transkript, antworten, autoSchalter };
-    ersetze(app, kopf, el("h2", { style: "margin-top:4px" }, "Antworten"), antworten, el("h2", {}, "Mitschrift"), transkript, notieren, leiste);
     liveKopfZeichnen();
     transkriptZeichnen();
     antwortenZeichnen();
+    fragenSpalteZeichnen();
+    zwischenstandZeichnen();
     clearInterval(live.timer);
     live.timer = setInterval(() => {
-      const z = liveTeile && $(".zeit", liveTeile.kopf);
+      const z = liveTeile && $(".zeit", liveTeile.band);
       if (z) z.textContent = zeit(liveSekunden());
     }, 1000);
   }
 
   function liveKopfZeichnen() {
-    if (!liveTeile || !live.stunde || !document.contains(liveTeile.kopf)) return;
+    if (!liveTeile || !live.stunde || !document.contains(liveTeile.band)) return;
     const zustand = !live.hoert ? "aus" : live.pausiert ? "pause" : "an";
     const text = zustand === "an" ? "hört zu" : zustand === "pause" ? "Pause" : SR ? "aus" : "nur Tippen";
-    ersetze(liveTeile.kopf,
-      el("div", { class: "reihe", style: "justify-content:space-between" },
-        el("div", { class: "status" }, el("span", { class: `punkt ${zustand === "an" ? "an" : zustand === "pause" ? "pause" : ""}` }), live.stunde.fach, el("span", { class: "muted" }, ` · ${text}`), el("span", { class: "zeit" }, ` ${zeit(liveSekunden())}`)),
-        el("div", { class: "reihe", style: "gap:6px" },
-          SR ? el("button", { class: "knopf", onclick: () => (live.pausiert || !live.hoert ? hoerenStarten() : hoerenPausieren()) }, live.pausiert || !live.hoert ? "Weiter" : "Pause") : null,
-          el("button", { class: "knopf", onclick: () => { if (confirm("Stunde beenden und zusammenfassen?")) stundeBeenden(); } }, "Beenden"),
-        ),
+    let liveText = $(".live-text", liveTeile.band);
+    if (!liveText) liveText = el("div", { class: "live-text", "aria-live": "polite" });
+    ersetze(liveTeile.band,
+      el("button", {
+        class: `punkt-klein ${zustand === "an" ? "" : zustand}`,
+        "aria-label": zustand === "an" ? "Pause" : "Weiter",
+        title: zustand === "an" ? "Tippen: Pause" : "Tippen: weiter zuhören",
+        onclick: () => (zustand === "an" ? hoerenPausieren() : hoerenStarten()),
+      }),
+      liveText,
+      el("div", { class: "live-meta" },
+        el("strong", {}, live.stunde.fach),
+        el("span", {}, `${text} · `, el("span", { class: "zeit" }, zeit(liveSekunden()))),
+        el("div", { style: "margin-top:6px" }, el("button", { class: "knopf klein", onclick: () => { if (confirm("Stunde beenden und zusammenfassen?")) stundeBeenden(); } }, "Beenden")),
       ),
-      el("label", { class: "schalter", style: "margin-top:6px" }, liveTeile.autoSchalter, "Fragen automatisch erkennen und beantworten"),
+    );
+    transkriptZeichnen();
+  }
+
+  // Oben im Band: die letzten Sätze, der neueste weiß, davor grau, dazu das Halbfertige.
+  function transkriptZeichnen() {
+    if (!liveTeile || !live.stunde || !document.contains(liveTeile.band)) return;
+    const box = $(".live-text", liveTeile.band);
+    if (!box) return;
+    const tr = live.stunde.transkript;
+    const letzte = tr.slice(-3);
+    ersetze(box,
+      tr.length === 0 && !live.zwischen ? el("span", { class: "leer" }, live.hoert ? "Ich höre zu … Sobald jemand spricht, steht der Text hier." : SR ? "Pause. Auf den Punkt tippen, um weiter zuzuhören." : "Keine Spracherkennung in diesem Browser.") : null,
+      letzte.map((s, i) => el("span", { class: i === letzte.length - 1 && !live.zwischen ? "neu" : "alt" }, `${s.text} `)),
+      live.zwischen ? el("span", { class: "zwischen" }, live.zwischen) : null,
     );
   }
 
-  function transkriptZeichnen() {
-    if (!liveTeile || !live.stunde || !document.contains(liveTeile.transkript)) return;
-    const box = liveTeile.transkript;
-    const unten = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
-    const tr = live.stunde.transkript;
-    const sichtbar = tr.slice(-120);
-    ersetze(box, 
-      tr.length === 0 && !live.zwischen ? el("p", { class: "leer" }, live.hoert ? "Ich höre zu … Sobald jemand spricht, erscheint der Text hier." : "Noch nichts aufgeschrieben.") : null,
-      sichtbar.map((s) => el("p", { class: `seg${istFrage(s.text) ? " frage" : ""}` }, el("time", {}, zeit(s.t)), s.text)),
-      live.zwischen ? el("p", { class: "seg zwischen" }, live.zwischen) : null,
+  function fragenSpalteZeichnen() {
+    if (!liveTeile || !live.stunde || !document.contains(liveTeile.links)) return;
+    const st = live.stunde;
+    const erkannte = st.fragen.filter((f) => f.status === "fertig");
+    const zs = st.zwischenstand;
+    const aufgaben = [...(zs?.hausaufgaben || [])];
+    const lehrerFragen = zs?.fragen || [];
+    ersetze(liveTeile.links,
+      erkannte.length ? erkannte.map((f) => el("div", { class: "klein-karte", onclick: () => $(`[data-frage="${f.id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }) }, el("div", { class: "wann" }, zeit(f.t)), f.frage)) : null,
+      lehrerFragen.length ? [el("h3", {}, "Aus der Stunde"), lehrerFragen.map((f) => el("div", { class: "klein-karte aufgabe" }, el("strong", {}, f.frage), el("div", { class: "muted klein" }, f.antwort)))] : null,
+      aufgaben.length ? [el("h3", {}, "Aufgaben und Termine"), aufgaben.map((a) => el("div", { class: "klein-karte aufgabe" }, a))] : null,
+      !erkannte.length && !lehrerFragen.length && !aufgaben.length ? el("p", { class: "muted klein" }, "Hier sammeln sich die Fragen der Lehrkraft sowie Aufgaben und Termine.") : null,
     );
-    if (unten) box.scrollTop = box.scrollHeight;
+  }
+
+  function zwischenstandZeichnen() {
+    if (!liveTeile || !live.stunde || !document.contains(liveTeile.rechts)) return;
+    const zs = live.stunde.zwischenstand;
+    const knopf = el("button", { class: "knopf klein", disabled: live.zwischenstandLaeuft, onclick: () => zwischenstandHolen(true) }, live.zwischenstandLaeuft ? el("span", { class: "lade" }) : null, live.zwischenstandLaeuft ? " wird erstellt …" : zs ? "Aktualisieren" : "Jetzt erstellen");
+    ersetze(liveTeile.rechts,
+      zs
+        ? [
+            el("p", {}, el("strong", {}, zs.thema)),
+            el("p", {}, zs.text),
+            zs.kernpunkte?.length ? el("ul", {}, zs.kernpunkte.map((k) => el("li", {}, k))) : null,
+            zs.begriffe?.length ? el("ul", {}, zs.begriffe.map((b) => el("li", {}, el("strong", {}, b.begriff), ": ", b.erklaerung))) : null,
+            el("div", { class: "stand" }, `Stand ${zeit(zs.stand)}`),
+          ]
+        : el("p", { class: "muted klein" }, "Alle vier Minuten fasst Claude zusammen, was bisher dran war. Das Erste kommt nach ein paar Minuten."),
+      el("div", { style: "margin-top:8px" }, knopf),
+    );
   }
 
   function bildElement(bild) {
@@ -583,7 +679,7 @@
 
   function antwortKarte(f, st) {
     const klasse = `karte antwort-karte ${f.status === "wartet" ? "wartet" : f.status === "fertig" ? "" : "nichts"}`;
-    return el("div", { class: klasse },
+    return el("div", { class: klasse, dataset: { frage: f.id } },
       el("div", { class: "frage" }, f.status === "wartet" ? el("span", {}, el("span", { class: "lade" }), " Ich überlege … ") : null, f.frage ? `Frage: ${f.frage}` : f.modus === "manuell" ? "Was will die Lehrkraft gerade wissen?" : ""),
       f.antwort ? el("p", { class: "antwort" }, f.antwort) : null,
       f.erklaerung ? el("p", { class: "erklaerung" }, f.erklaerung) : null,
@@ -601,13 +697,16 @@
     if (!liveTeile || !live.stunde || !document.contains(liveTeile.antworten)) return;
     const fragen = live.stunde.fragen;
     ersetze(liveTeile.antworten, 
-      fragen.length ? fragen.map((f) => antwortKarte(f, live.stunde)) : el("p", { class: "muted" }, "Wenn die Lehrkraft etwas fragt, steht hier der Vorschlag. Oder drück „Jetzt antworten“."),
+      fragen.length ? fragen.map((f) => antwortKarte(f, live.stunde)) : el("p", { class: "muted klein" }, "Wenn die Lehrkraft etwas fragt, steht hier der Vorschlag mit Bild. Oder unten „Jetzt antworten“ drücken."),
     );
+    fragenSpalteZeichnen();
   }
 
   // Archiv ------------------------------------------------------------------------
   async function zeigeArchiv() {
     navMarkieren("archiv");
+    app.classList.remove("breit");
+    document.body.classList.remove("gedimmt");
     const liste = await db.alle();
     if (location.hash !== "#archiv") return;
     const faecher = [...new Set(liste.map((s) => s.fach))];
@@ -669,6 +768,8 @@
 
   async function zeigeStunde(id) {
     navMarkieren("archiv");
+    app.classList.remove("breit");
+    document.body.classList.remove("gedimmt");
     const st = await db.hole(id);
     if (location.hash !== `#stunde/${id}`) return;
     if (!st) {
@@ -696,7 +797,7 @@
         ),
       );
     } else {
-      kinder.push(el("div", { class: "karte" }, el("p", {}, "Noch keine Zusammenfassung."), el("button", { class: "knopf primaer", onclick: () => zusammenfassen(id), disabled: st.transkript.length < 3 }, "Jetzt zusammenfassen")));
+      kinder.push(el("div", { class: "karte" }, st.zwischenstand ? [el("p", {}, el("strong", {}, st.zwischenstand.thema)), el("p", {}, st.zwischenstand.text), el("p", { class: "muted klein" }, `Zwischenstand von ${zeit(st.zwischenstand.stand)}, noch keine Endzusammenfassung.`)] : el("p", {}, "Noch keine Zusammenfassung."), el("button", { class: "knopf primaer", onclick: () => zusammenfassen(id), disabled: st.transkript.length < 3 }, "Jetzt zusammenfassen")));
     }
     const antworten = st.fragen.filter((f) => f.status === "fertig" || f.status === "nichts");
     if (antworten.length) kinder.push(el("h2", {}, "Antworten in dieser Stunde"), el("div", { class: "spalte" }, antworten.map((f) => antwortKarte(f, st))));
@@ -755,6 +856,8 @@
   // Einstellungen --------------------------------------------------------------------
   function zeigeEinstellungen() {
     navMarkieren("einstellungen");
+    app.classList.remove("breit");
+    document.body.classList.remove("gedimmt");
     const f = (name, attrs = {}) => el("input", { class: "feld", value: einst[name] ?? "", ...attrs, onchange: (e) => { einst[name] = e.target.value.trim(); speichereEinstellungen(); } });
     const schalter = (name, text) => el("label", { class: "schalter", style: "display:flex;margin:8px 0" }, el("input", { type: "checkbox", checked: einst[name], onchange: (e) => { einst[name] = e.target.checked; speichereEinstellungen(); } }), text);
     const faecher = el("textarea", { class: "feld", onchange: (e) => { einst.faecher = e.target.value.split(/[,\n]/).map((s) => s.trim()).filter(Boolean); speichereEinstellungen(); } }, einst.faecher.join(", "));
@@ -797,6 +900,7 @@
       el("div", { class: "karte" },
         el("h3", { style: "margin-top:0" }, "Zuhören"),
         schalter("auto", "Fragen automatisch erkennen und beantworten"),
+        schalter("websuche", "Claude darf im Internet nachschlagen (Web-Suche), wenn es sich nicht sicher ist"),
         schalter("ton", "Kurzer Ton, wenn eine Antwort da ist"),
         schalter("vibrieren", "Vibrieren, wenn eine Antwort da ist"),
         el("label", { class: "block" }, "Sprache der Erkennung"),
@@ -835,6 +939,7 @@
   window.unterricht = {
     einspeisen: (text) => { segmentHinzu(text); transkriptZeichnen(); },
     zustand: () => ({ hoert: live.hoert, pausiert: live.pausiert, stunde: live.stunde }),
+    zwischenstand: () => zwischenstandHolen(true),
     exportText,
     istFrage,
   };

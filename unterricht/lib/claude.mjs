@@ -115,6 +115,7 @@ Deine Aufgabe:
 2. Wenn ja: Schreibe die Antwort so, wie der Schüler sie laut sagen würde, wenn er aufgerufen wird. Natürlich, kurz (ein bis drei Sätze), fachlich richtig, auf dem Niveau der Klassenstufe, ohne Einleitung wie "Die Antwort ist", ohne Aufzählungszeichen, ohne Fachjargon, den die Klasse nicht kennt. Nutze den Zusammenhang aus dem Transkript (worum ging es gerade, welche Begriffe hat die Lehrkraft benutzt). Bei Rechenaufgaben nenne das Ergebnis und in einem Halbsatz den Weg.
 3. Fragt die Lehrkraft, wie etwas aussieht, dargestellt oder gezeichnet wird (Molekül, Strukturformel, Zelle, Organ, Schaltkreis, Diagramm, Karte, geometrische Figur), liefere ein Bild: Für chemische Stoffe "molekuel" mit dem englischen Stoffnamen. Für Dinge mit gutem Wikipedia-Hauptbild "wikipedia" mit dem deutschen Artikeltitel. Wenn eine einfache eigene Skizze besser passt (Lewis-Formel, Kräftediagramm, Winkel, Reaktionsgleichung, Aufbau), zeichne sie als SVG: schlicht, schwarze Linien auf weißem Grund, Beschriftungen in Deutsch, viewBox 0 0 400 300, keine Skripte, kein externes Laden.
 4. Wenn keine Frage da ist: frage_erkannt = false und alle anderen Felder leer bzw. typ "keins". Erfinde keine Frage.
+5. Steht dir die Web-Suche zur Verfügung, nutze sie nur, wenn du dir bei einer Zahl, einem Datum, einem Namen oder einem aktuellen Ereignis nicht sicher bist. Für Schulstoff, den du sicher weißt, antworte direkt: Der Schüler wartet, jede Suche kostet Sekunden.
 
 Antworte ausschließlich im vorgegebenen JSON-Format. Alle Texte auf Deutsch.`;
 }
@@ -140,7 +141,10 @@ export function antwortUserPrompt({ fach, transkript, frage, modus }) {
   return `${kopf}\n\nTranskript der letzten Minuten (das Neueste steht unten):\n<transkript>\n${transkriptText(transkript)}\n</transkript>${eigene}`;
 }
 
-export function zusammenfassungSystemPrompt(profil) {
+export function zusammenfassungSystemPrompt(profil, laufend = false) {
+  if (laufend) {
+    return `Die Stunde läuft noch. Du bekommst das bisherige automatische Transkript (mit Hörfehlern, ohne Satzzeichen) und schreibst für den Schüler (${profilText(profil)}) einen knappen Zwischenstand: Worum geht es bisher, die wichtigsten Aussagen bis jetzt (höchstens sechs Kernpunkte), Fragen und Aufgaben, die die Lehrkraft bisher gestellt hat, sowie Hausaufgaben, Tests und Termine, die genannt wurden. Kurz und konkret, auf Deutsch, nur was im Transkript vorkommt. Die Zusammenfassung ist drei bis fünf Sätze. Antworte ausschließlich im vorgegebenen JSON-Format.`;
+  }
   return `Du fasst eine Unterrichtsstunde für einen Schüler zusammen (${profilText(profil)}). Grundlage ist ein automatisches Transkript mit Hörfehlern und ohne Satzzeichen. Schreibe so, dass der Schüler die Stunde eine Woche später daraus nachlernen kann: klar, konkret, in seinen Worten, auf Deutsch. Gib nur wieder, was im Transkript vorkommt. Wenn etwas unverständlich war, lass es weg, statt zu raten. Hausaufgaben, Tests und Termine, die genannt wurden, gehören immer hinein. Antworte ausschließlich im vorgegebenen JSON-Format.`;
 }
 
@@ -150,16 +154,25 @@ export function nachfrageSystemPrompt(profil) {
 
 // --- Aufrufe ----------------------------------------------------------------
 
-async function strukturiert(client, { modell, system, user, schema, effort, maxTokens }) {
-  const response = await client.beta.messages.create({
+async function strukturiert(client, { modell, system, user, schema, effort, maxTokens, websuche }) {
+  const messages = [{ role: "user", content: user }];
+  const params = {
     model: modell || STANDARD_MODELL,
     max_tokens: maxTokens || 8000,
     betas: BETAS,
     fallbacks: "default",
     system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
-    messages: [{ role: "user", content: user }],
+    messages,
     output_config: { effort: effort || "medium", format: { type: "json_schema", schema } },
-  });
+  };
+  if (websuche) params.tools = [{ type: "web_search_20260209", name: "web_search", max_uses: 3 }];
+
+  let response = await client.beta.messages.create(params);
+  // Ein langer Such-Durchlauf kann mit pause_turn anhalten: Antwort anhängen und weitermachen.
+  for (let runde = 0; response.stop_reason === "pause_turn" && runde < 3; runde++) {
+    messages.push({ role: "assistant", content: response.content });
+    response = await client.beta.messages.create(params);
+  }
 
   if (response.stop_reason === "refusal") {
     const grund = response.stop_details?.explanation || response.stop_details?.category || "ohne Angabe";
@@ -168,16 +181,16 @@ async function strukturiert(client, { modell, system, user, schema, effort, maxT
   if (response.stop_reason === "max_tokens") {
     throw new Error("Die Antwort war zu lang und wurde abgeschnitten.");
   }
-  const text = response.content
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("");
+  // Bei Web-Suche stehen vor dem JSON Such-Blöcke; das Ergebnis ist der letzte Textblock.
+  const texte = response.content.filter((b) => b.type === "text").map((b) => b.text);
+  const text = texte.at(-1) || "";
   let daten;
   try {
     daten = JSON.parse(text);
   } catch {
     throw new Error("Claude hat kein gültiges JSON geliefert.");
   }
+  const suchen = response.content.filter((b) => b.type === "server_tool_use").length;
   return {
     daten,
     nutzung: {
@@ -185,6 +198,7 @@ async function strukturiert(client, { modell, system, user, schema, effort, maxT
       eingabe: response.usage?.input_tokens ?? 0,
       ausgabe: response.usage?.output_tokens ?? 0,
       cache: response.usage?.cache_read_input_tokens ?? 0,
+      suchen,
     },
   };
 }
@@ -201,6 +215,7 @@ export async function antwort(client, eingabe) {
     user: antwortUserPrompt(eingabe),
     schema: ANTWORT_SCHEMA,
     effort: eingabe.modus === "manuell" ? "high" : "medium",
+    websuche: Boolean(eingabe.websuche),
   });
   if (!daten.frage_erkannt) {
     return { frage_erkannt: false, frage: "", antwort: "", erklaerung: "", bild: null, nutzung };
@@ -213,10 +228,10 @@ export async function zusammenfassung(client, eingabe) {
   const user = `Fach: ${eingabe.fach || "unbekannt"}\nDatum: ${eingabe.datum || "unbekannt"}\nDauer: ${eingabe.dauer ? formatZeit(eingabe.dauer) : "unbekannt"}\n\n<transkript>\n${transkriptText(eingabe.transkript)}\n</transkript>`;
   const { daten, nutzung } = await strukturiert(client, {
     modell: eingabe.modell,
-    system: zusammenfassungSystemPrompt(eingabe.profil),
+    system: zusammenfassungSystemPrompt(eingabe.profil, Boolean(eingabe.laufend)),
     user,
     schema: ZUSAMMENFASSUNG_SCHEMA,
-    effort: "high",
+    effort: eingabe.laufend ? "low" : "high",
     maxTokens: 16000,
   });
   return { ...daten, nutzung };

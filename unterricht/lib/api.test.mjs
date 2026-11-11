@@ -126,3 +126,45 @@ test("bildAufloesen holt das Wikipedia-Hauptbild", async () => {
   const nichts = await bildAufloesen({ typ: "wikipedia", wert: "Gibtsnicht" }, async () => new Response("", { status: 404 }));
   assert.equal(nichts, null);
 });
+
+test("antwort: websuche schaltet das Web-Such-Werkzeug ein", async () => {
+  const client = attrappenClient();
+  await apiAnfrage(post("/api/antwort", { frage: "Wann war die Mondlandung?", websuche: true }), env, { client });
+  assert.deepEqual(client.aufrufe[0].tools, [{ type: "web_search_20260209", name: "web_search", max_uses: 3 }]);
+  const ohne = attrappenClient();
+  await apiAnfrage(post("/api/antwort", { frage: "?" }), env, { client: ohne });
+  assert.equal(ohne.aufrufe[0].tools, undefined);
+});
+
+test("zusammenfassung: laufend nutzt den Zwischenstand-Prompt mit effort low", async () => {
+  const client = attrappenClient();
+  const tr = [{ t: 0, text: "a" }, { t: 5, text: "b" }, { t: 9, text: "c" }];
+  await apiAnfrage(post("/api/zusammenfassung", { fach: "Bio", transkript: tr, laufend: true }), env, { client });
+  assert.equal(client.aufrufe[0].output_config.effort, "low");
+  assert.match(client.aufrufe[0].system[0].text, /Die Stunde läuft noch/);
+});
+
+test("strukturiert: nimmt den letzten Textblock und folgt pause_turn", async () => {
+  let runde = 0;
+  const client = {
+    beta: {
+      messages: {
+        async create(params) {
+          runde++;
+          if (runde === 1) return { stop_reason: "pause_turn", content: [{ type: "server_tool_use", id: "x", name: "web_search", input: { query: "q" } }], usage: {} };
+          assert.equal(params.messages.length, 2);
+          return {
+            model: params.model,
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "Ich suche kurz." }, { type: "text", text: JSON.stringify({ antwort: "1969", quellen: ["Netz"] }) }],
+            usage: { input_tokens: 1, output_tokens: 1 },
+          };
+        },
+      },
+    },
+  };
+  const r = await apiAnfrage(post("/api/nachfrage", { frage: "Wann?", stunden: [{ fach: "G" }] }), env, { client });
+  const d = await r.json();
+  assert.equal(d.antwort, "1969");
+  assert.equal(runde, 2);
+});
