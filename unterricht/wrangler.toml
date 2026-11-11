@@ -1,0 +1,24 @@
+# Unterrichts-App auf Cloudflare Workers (kostenloser Plan reicht).
+#
+#   npx wrangler login                       einmalig
+#   npx wrangler secret put ANTHROPIC_API_KEY  Schlüssel von console.anthropic.com
+#   npx wrangler secret put APP_KEY            frei gewähltes Passwort für die App
+#   npm run deploy
+#
+# Danach läuft die App unter https://unterricht.<dein-name>.workers.dev
+name = "unterricht"
+main = "worker.mjs"
+compatibility_date = "2025-10-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[vars]
+# Modell, das Claude benutzt; leer = Standard aus lib/claude.mjs
+MODELL = ""
+# Kommagetrennte Seiten-Origins, die die API aufrufen dürfen; leer = alle
+ALLOWED_ORIGINS = ""

@@ -1,0 +1,3 @@
+# Für `npm run preview` (wrangler dev) nach .dev.vars kopieren
+ANTHROPIC_API_KEY=sk-ant-...
+APP_KEY=
