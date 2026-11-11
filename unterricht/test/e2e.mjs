@@ -18,6 +18,7 @@ const foto = async (name) => bilder && (await page.screenshot({ path: `${bilder}
 
 await page.goto(`${basis}/#start`);
 await page.getByRole("button", { name: "Verstanden" }).click();
+await page.getByText("Server verbunden.").waitFor({ timeout: 10000 });
 await foto("1-start");
 
 // Stunde starten (ohne echte Spracherkennung: Headless-Chromium hat keinen Dienst)
@@ -40,6 +41,8 @@ await page.locator(".antwort-karte .antwort").waitFor({ timeout: 10000 });
 const antwort = await page.locator(".antwort-karte .antwort").first().textContent();
 assert.match(antwort, /Sauerstoffatom/);
 await page.locator(".antwort-karte img").first().waitFor();
+assert.match(await page.locator(".antwort-karte .kurz").first().textContent(), /Kurz: Ein Sauerstoffatom/);
+await page.getByText("Server verbunden.").or(page.locator(".live-band")).first().waitFor();
 assert.match(await page.locator(".antwort-karte img").first().getAttribute("src"), /pubchem/);
 await foto("2-live-antwort");
 // linke Spalte zeigt die erkannte Frage

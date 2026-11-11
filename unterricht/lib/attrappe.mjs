@@ -34,7 +34,7 @@ function standardAntwort(felder, params) {
     const letzte = user.split("\n").filter((z) => z.trim() && !z.startsWith("<")).at(-1) || "";
     const fragend = eingetippt || manuell || /\?|wie sieht|was ist|warum|wer kann|erklär/i.test(letzte);
     if (!fragend) {
-      return { frage_erkannt: false, frage: "", antwort: "", erklaerung: "", bild: { typ: "keins", wert: "", beschreibung: "" } };
+      return { frage_erkannt: false, frage: "", antwort: "", kurz: "", erklaerung: "", bild: { typ: "keins", wert: "", beschreibung: "" } };
     }
     const wasser = /h2o|wasser/i.test(eingetippt || user);
     return {
@@ -43,6 +43,7 @@ function standardAntwort(felder, params) {
       antwort: wasser
         ? "Ein Wassermolekül besteht aus einem Sauerstoffatom, an dem zwei Wasserstoffatome hängen. Die beiden Bindungen stehen in einem Winkel von etwa 104 Grad, deshalb ist das Molekül gewinkelt und nicht gerade."
         : "Das ist eine Attrappen-Antwort: Hier stünde, was du laut sagen könntest.",
+      kurz: wasser ? "Ein Sauerstoffatom mit zwei Wasserstoffatomen dran, gewinkelt." : "Kurze Attrappen-Antwort.",
       erklaerung: wasser ? "Der Sauerstoff zieht die Elektronen stärker an, dadurch ist Wasser ein Dipol." : "",
       bild: wasser
         ? { typ: "molekuel", wert: "water", beschreibung: "Wassermolekül H₂O, Strukturformel aus PubChem" }

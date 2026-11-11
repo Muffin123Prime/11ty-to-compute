@@ -62,7 +62,8 @@ function transkriptPruefen(transkript) {
 function profilPruefen(profil) {
   if (!profil || typeof profil !== "object") return {};
   const kurz = (v) => (typeof v === "string" ? v.slice(0, 80) : undefined);
-  return { klasse: kurz(profil.klasse), schulform: kurz(profil.schulform), name: kurz(profil.name) };
+  const laenge = ["kurz", "mittel", "lang"].includes(profil.antwortlaenge) ? profil.antwortlaenge : "mittel";
+  return { klasse: kurz(profil.klasse), schulform: kurz(profil.schulform), name: kurz(profil.name), antwortlaenge: laenge };
 }
 
 /**
@@ -110,6 +111,8 @@ export async function apiAnfrage(request, env, optionen = {}) {
         transkript,
         frage,
         modus: body.modus === "manuell" ? "manuell" : "auto",
+        kontext: typeof body.kontext === "string" ? body.kontext.slice(0, 4000) : "",
+        bisherige: Array.isArray(body.bisherige) ? body.bisherige.slice(-8).map((f) => String(f).slice(0, 200)) : [],
         websuche: body.websuche === true,
         profil,
         modell,

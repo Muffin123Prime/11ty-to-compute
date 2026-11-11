@@ -13,6 +13,7 @@
     klasse: "",
     schulform: "",
     name: "",
+    antwortlaenge: "mittel",
     auto: true,
     websuche: true,
     ton: true,
@@ -122,7 +123,7 @@
     if (!r.ok) throw new Error(d.fehler || `Fehler ${r.status}`);
     return d;
   }
-  const profil = () => ({ klasse: einst.klasse, schulform: einst.schulform, name: einst.name });
+  const profil = () => ({ klasse: einst.klasse, schulform: einst.schulform, name: einst.name, antwortlaenge: einst.antwortlaenge });
 
   // ---------- Signal ----------------------------------------------------------
   let audioCtx;
@@ -179,6 +180,10 @@
     zwischenstandLaeuft: false,
     zwischenstandTimer: null,
     zwischenstandSegmente: 0,
+    recLaeuft: false,
+    recZuletztMs: 0,
+    wachhund: null,
+    serverOk: null,
   };
   const liveSekunden = () => (live.startMs ? (Date.now() - live.startMs - live.pausenMs - (live.pauseSeitMs ? Date.now() - live.pauseSeitMs : 0)) / 1000 : 0);
 
@@ -191,6 +196,7 @@
     rec.interimResults = true;
     rec.maxAlternatives = 1;
     rec.onresult = (e) => {
+      live.recZuletztMs = Date.now();
       let zwischen = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const r = e.results[i];
@@ -214,6 +220,7 @@
       }
     };
     rec.onend = () => {
+      live.recLaeuft = false;
       live.zwischen = "";
       if (live.hoert && !live.pausiert) {
         // Safari und Chrome beenden die Erkennung nach einer Weile von selbst:
@@ -232,9 +239,38 @@
       liveKopfZeichnen();
     };
     rec.onstart = () => {
+      live.recLaeuft = true;
+      live.recZuletztMs = Date.now();
       liveKopfZeichnen();
     };
     return rec;
+  }
+
+  // Wachhund: Safari lässt die Erkennung manchmal ohne onend einschlafen.
+  // Läuft sie angeblich, liefert aber seit 45 s nichts, oder läuft sie gar
+  // nicht, obwohl sie soll, wird sie neu gestartet.
+  function wachhundStarten() {
+    clearInterval(live.wachhund);
+    live.wachhund = setInterval(() => {
+      if (!live.hoert || live.pausiert || !live.rec) return;
+      const still = Date.now() - live.recZuletztMs > 45000;
+      if (!live.recLaeuft || still) {
+        try {
+          live.rec.abort();
+        } catch {
+          /* egal */
+        }
+        live.recLaeuft = false;
+        setTimeout(() => {
+          if (!live.hoert || live.pausiert) return;
+          try {
+            live.rec.start();
+          } catch {
+            /* läuft schon */
+          }
+        }, 300);
+      }
+    }, 5000);
   }
 
   async function wakeLockHolen() {
@@ -249,6 +285,13 @@
   }
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && live.hoert && !live.pausiert) wakeLockHolen();
+    if (document.visibilityState === "hidden" && live.stunde) {
+      clearTimeout(live.speicherTimer);
+      db.speichere(live.stunde).catch(() => {});
+    }
+  });
+  window.addEventListener("pagehide", () => {
+    if (live.stunde) db.speichere(live.stunde).catch(() => {});
   });
 
   function segmentHinzu(text) {
@@ -256,7 +299,11 @@
     const t = Math.max(0, Math.round(liveSekunden()));
     live.stunde.transkript.push({ t, text });
     speichernBald();
-    if (einst.auto && istFrage(text)) autoAntwort(text);
+    if (!einst.auto) return;
+    // Fragen ziehen sich oft über zwei Erkennungs-Stücke ("wer kann mir sagen" / "wie das molekül aussieht").
+    const vor = live.stunde.transkript.at(-2);
+    const paar = vor && t - vor.t <= 8 ? `${vor.text} ${text}` : text;
+    if (istFrage(text) || istFrage(paar)) autoAntwort(paar);
   }
 
   function speichernBald() {
@@ -274,16 +321,25 @@
 
   async function autoAntwort(text) {
     const jetzt = Date.now();
-    if (jetzt - live.letzteAnfrageMs < 12000) return; // nicht bei jedem Satz
+    if (jetzt - live.letzteAnfrageMs < 8000) return; // nicht bei jedem Satz
     if (text === live.letzteFrageText) return;
     live.letzteAnfrageMs = jetzt;
     live.letzteFrageText = text;
     await frageStellen({ modus: "auto", hinweisText: text });
   }
 
+  function kontextText() {
+    const zs = live.stunde?.zwischenstand;
+    if (!zs) return "";
+    const teile = [zs.thema, zs.text];
+    if (zs.kernpunkte?.length) teile.push(`Kernpunkte: ${zs.kernpunkte.join(" / ")}`);
+    if (zs.begriffe?.length) teile.push(`Begriffe: ${zs.begriffe.map((b) => b.begriff).join(", ")}`);
+    return teile.filter(Boolean).join("\n");
+  }
+
   async function frageStellen({ modus, frage = "", hinweisText = "" }) {
     if (!live.stunde) return;
-    const karte = { id: neueId(), t: Math.round(liveSekunden()), modus, frage: frage || hinweisText, antwort: "", erklaerung: "", bild: null, status: "wartet" };
+    const karte = { id: neueId(), t: Math.round(liveSekunden()), modus, frage: frage || hinweisText, antwort: "", kurz: "", erklaerung: "", bild: null, status: "wartet" };
     live.stunde.fragen.unshift(karte);
     live.laufend++;
     antwortenZeichnen();
@@ -293,6 +349,8 @@
         transkript: letzteSegmente(),
         frage,
         modus,
+        kontext: kontextText(),
+        bisherige: live.stunde.fragen.filter((f) => f.status === "fertig" && f.id !== karte.id).slice(0, 8).map((f) => f.frage),
         websuche: Boolean(einst.websuche),
         profil: profil(),
       });
@@ -305,7 +363,7 @@
           karte.antwort = "Ich habe gerade keine Frage der Lehrkraft gefunden. Tipp sie unten ein, dann beantworte ich sie.";
         }
       } else {
-        Object.assign(karte, { status: "fertig", frage: d.frage || karte.frage, antwort: d.antwort, erklaerung: d.erklaerung || "", bild: d.bild || null });
+        Object.assign(karte, { status: "fertig", frage: d.frage || karte.frage, antwort: d.antwort, kurz: d.kurz || "", erklaerung: d.erklaerung || "", bild: d.bild || null, neu: true });
         signal();
       }
     } catch (e) {
@@ -390,11 +448,13 @@
       live.pauseSeitMs = 0;
     }
     live.rec ||= recAnlegen();
+    live.recZuletztMs = Date.now();
     try {
       live.rec.start();
     } catch {
       /* läuft schon */
     }
+    wachhundStarten();
     wakeLockHolen();
     liveKopfZeichnen();
   }
@@ -423,6 +483,7 @@
       /* egal */
     }
     live.rec = null;
+    clearInterval(live.wachhund);
     st.dauer = Math.round(liveSekunden());
     live.stunde = null;
     live.startMs = 0;
@@ -480,6 +541,28 @@
   const app = $("#app");
   const navMarkieren = (name) => document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("aktiv", a.dataset.nav === name));
 
+  async function serverPruefen() {
+    try {
+      const d = await api("/api/status");
+      live.serverOk = d.schluessel ? true : "schluessel";
+    } catch {
+      live.serverOk = false;
+    }
+    return live.serverOk;
+  }
+  function serverZeile() {
+    const z = el("p", { class: "unter klein", style: "margin:0" });
+    const setzen = () => {
+      if (live.serverOk === true) ersetze(z, "Server verbunden.");
+      else if (live.serverOk === "schluessel") ersetze(z, "Server erreichbar, aber ohne Anthropic-Schlüssel. ", el("a", { href: "#einstellungen" }, "Einstellungen"));
+      else if (live.serverOk === false) ersetze(z, "Kein Server erreichbar: Zuhören und Mitschreiben geht, Antworten nicht. ", el("a", { href: "#einstellungen" }, "Einstellungen"));
+      else ersetze(z, el("span", { class: "lade" }), " Server wird geprüft …");
+    };
+    setzen();
+    if (live.serverOk === null) serverPruefen().then(setzen);
+    return z;
+  }
+
   let gewaehltesFach = "";
   function zeigeStart() {
     navMarkieren("start");
@@ -526,6 +609,7 @@
       el("div", { class: "start" },
         el("div", {}, el("h2", {}, "Welche Stunde?"), chips),
         punkt,
+        serverZeile(),
         el("p", { class: "unter" }, SR ? "Fach wählen, auf den Punkt tippen. Dann hört die App zu, schreibt mit und meldet sich, wenn die Lehrkraft etwas fragt." : "Dieser Browser kann nicht zuhören. Auf iPhone und iPad Safari benutzen, am Computer Chrome oder Edge. Mitschreiben per Tastatur geht trotzdem."),
       ),
     );
@@ -678,17 +762,29 @@
   }
 
   function antwortKarte(f, st) {
-    const klasse = `karte antwort-karte ${f.status === "wartet" ? "wartet" : f.status === "fertig" ? "" : "nichts"}`;
+    const klasse = `karte antwort-karte ${f.status === "wartet" ? "wartet" : f.status === "fertig" ? "" : "nichts"}${f.neu ? " neu" : ""}`;
+    if (f.neu) setTimeout(() => { f.neu = false; }, 4000);
+    const entfernen = () => {
+      st.fragen = st.fragen.filter((x) => x.id !== f.id);
+      if (live.stunde === st) {
+        speichernBald();
+        antwortenZeichnen();
+      } else db.speichere(st).then(() => zeigeStunde(st.id));
+    };
     return el("div", { class: klasse, dataset: { frage: f.id } },
-      el("div", { class: "frage" }, f.status === "wartet" ? el("span", {}, el("span", { class: "lade" }), " Ich überlege … ") : null, f.frage ? `Frage: ${f.frage}` : f.modus === "manuell" ? "Was will die Lehrkraft gerade wissen?" : ""),
-      f.antwort ? el("p", { class: "antwort" }, f.antwort) : null,
+      el("div", { class: "frage" },
+        f.status === "wartet" ? el("span", {}, el("span", { class: "lade" }), " Ich überlege … ") : null,
+        f.frage ? f.frage : f.modus === "manuell" ? "Was will die Lehrkraft gerade wissen?" : "",
+      ),
+      f.status === "fehler" ? el("p", { class: "fehler" }, f.antwort) : f.antwort ? el("p", { class: "antwort" }, f.antwort) : null,
+      f.kurz && f.status === "fertig" ? el("p", { class: "kurz" }, el("span", { class: "muted" }, "Kurz: "), f.kurz) : null,
       f.erklaerung ? el("p", { class: "erklaerung" }, f.erklaerung) : null,
       bildElement(f.bild),
       el("div", { class: "fuss" },
         el("span", { class: "tag" }, zeit(f.t)),
         f.antwort && f.status === "fertig" ? el("button", { class: "knopf leise klein", onclick: () => navigator.clipboard?.writeText(f.antwort).then(() => meldung("Kopiert.")) }, "Kopieren") : null,
-        f.status === "fehler" ? el("button", { class: "knopf leise klein", onclick: () => { st.fragen = st.fragen.filter((x) => x.id !== f.id); frageStellen({ modus: f.modus, frage: f.modus === "manuell" && f.frage && !f.antwort.startsWith("Ich") ? f.frage : "" }); } }, "Noch mal") : null,
-        el("button", { class: "knopf leise klein", onclick: () => { st.fragen = st.fragen.filter((x) => x.id !== f.id); speichernBald(); antwortenZeichnen(); if (!live.stunde) db.speichere(st).then(() => zeigeStunde(st.id)); } }, "Weg"),
+        f.status === "fehler" ? el("button", { class: "knopf klein", onclick: () => { entfernen(); frageStellen({ modus: f.modus, frage: f.modus === "manuell" && f.frage ? f.frage : "" }); } }, "Noch mal") : null,
+        el("button", { class: "knopf leise klein", onclick: entfernen }, "Weg"),
       ),
     );
   }
@@ -828,7 +924,7 @@
       if (z.begriffe?.length) zeilen.push("Begriffe:", ...z.begriffe.map((b) => `- ${b.begriff}: ${b.erklaerung}`), "");
     }
     const antworten = st.fragen.filter((f) => f.status === "fertig");
-    if (antworten.length) zeilen.push("Antworten:", ...antworten.map((f) => `- [${zeit(f.t)}] ${f.frage}\n  ${f.antwort}`), "");
+    if (antworten.length) zeilen.push("Antworten:", ...antworten.map((f) => `- [${zeit(f.t)}] ${f.frage}\n  ${f.antwort}${f.kurz ? `\n  Kurz: ${f.kurz}` : ""}`), "");
     if (st.notizen) zeilen.push("Notizen:", st.notizen, "");
     zeilen.push("Mitschrift:", ...st.transkript.map((s) => `[${zeit(s.t)}] ${s.text}`));
     return zeilen.join("\n");
@@ -891,6 +987,10 @@
         f("schulform", { placeholder: "z. B. Gymnasium" }),
         el("label", { class: "block" }, "Vorname (optional)"),
         f("name", { placeholder: "" }),
+        el("label", { class: "block" }, "Antwortlänge"),
+        el("select", { class: "feld", onchange: (e) => { einst.antwortlaenge = e.target.value; speichereEinstellungen(); } },
+          [["kurz", "Kurz: ein Satz"], ["mittel", "Mittel: ein bis drei Sätze"], ["lang", "Lang: mit Begründung und Beispiel"]].map(([w, t]) => el("option", { value: w, selected: einst.antwortlaenge === w }, t)),
+        ),
       ),
       el("div", { class: "karte" },
         el("h3", { style: "margin-top:0" }, "Fächer"),

@@ -137,6 +137,10 @@ label.block { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 1
 .antwort-karte .bild img { max-width: 100%; max-height: 320px; height: auto; }
 .antwort-karte .bild figcaption { font-size: 13px; color: #444; margin-top: 4px; }
 .antwort-karte .fuss { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+.antwort-karte .kurz { font-size: 16px; margin: 0 0 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg2); }
+.antwort-karte .fehler { color: var(--muted); font-size: 15px; }
+.antwort-karte.neu { animation: aufleuchten 1.2s ease-out; }
+@keyframes aufleuchten { 0% { background: #2a2a2a; border-left-color: var(--rot); } 100% { background: var(--karte); border-left-color: #fff; } }
 .antwort-karte.wartet { border-left-color: var(--muted); }
 .antwort-karte.nichts { border-left-color: var(--line); }
 

@@ -168,3 +168,18 @@ test("strukturiert: nimmt den letzten Textblock und folgt pause_turn", async () 
   assert.equal(d.antwort, "1969");
   assert.equal(runde, 2);
 });
+
+test("antwort: Stundenkontext, bisherige Fragen und Niveau landen im Prompt", async () => {
+  const client = attrappenClient();
+  await apiAnfrage(
+    post("/api/antwort", { fach: "Chemie", transkript: [{ text: "x" }], kontext: "Thema: Wasser als Dipol", bisherige: ["Wie sieht H2O aus?"], profil: { klasse: "11", antwortlaenge: "kurz" } }),
+    env,
+    { client },
+  );
+  const p = client.aufrufe[0];
+  assert.match(p.messages[0].content, /Stundenkontext.*Thema: Wasser als Dipol/s);
+  assert.match(p.messages[0].content, /Schon beantwortete Fragen.*Wie sieht H2O aus\?/s);
+  assert.match(p.system[0].text, /Oberstufe \(Klassenstufe 11\)/);
+  assert.match(p.system[0].text, /kurze Antworten/);
+  assert.ok(p.output_config.format.schema.required.includes("kurz"));
+});
