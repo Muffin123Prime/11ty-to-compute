@@ -115,6 +115,15 @@ label.block { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 1
 .live-text .neu { color: #fff; }
 .live-text .zwischen { color: #777; font-style: italic; }
 .live-text .leer { color: #666; font-size: 16px; }
+.live-text .original { font-size: 16px; color: var(--muted); }
+.live-text .original .neu { color: #ccc; }
+.live-text .uebersetzung { font-size: 21px; margin-top: 4px; }
+.live-text .uebersetzung .alt { color: var(--muted); }
+.live-text .uebersetzung .neu { color: #fff; }
+.live-text .marke-de { font-size: 11px; letter-spacing: 0.1em; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; margin-right: 6px; vertical-align: middle; }
+.transkript .seg .de { color: var(--muted); }
+.chips.sprachen { margin-top: 10px; }
+.chip.klein { padding: 5px 11px; font-size: 13px; }
 .live-meta { text-align: right; color: var(--muted); font-size: 14px; white-space: nowrap; }
 .live-meta strong { display: block; color: #fff; font-size: 16px; }
 .zeit { font-variant-numeric: tabular-nums; }

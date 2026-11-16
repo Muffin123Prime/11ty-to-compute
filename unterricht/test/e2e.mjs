@@ -75,6 +75,23 @@ await page.getByRole("button", { name: "Fragen", exact: true }).click();
 await page.getByText("Attrappen-Antwort zu deinen Stunden").waitFor({ timeout: 10000 });
 await foto("4-archiv");
 
+// Fremdsprachige Stunde mit Live-Übersetzung
+await page.goto(`${basis}/#start`);
+await page.getByRole("button", { name: "Englisch", exact: true }).first().click();
+assert.match(await page.locator(".chips.sprachen").textContent(), /Mitschrift auf Englisch/);
+await page.getByRole("button", { name: "Zuhören starten" }).click();
+await page.waitForURL(/#live/);
+await page.evaluate(() => { window.unterricht.einspeisen("the water molecule is bent"); window.unterricht.einspeisen("who can tell me why"); });
+await page.locator(".live-text .uebersetzung").getByText("[DE] who can tell me why").waitFor({ timeout: 10000 });
+assert.match(await page.locator(".live-meta").textContent(), /Englisch/);
+await page.locator(".antwort-karte .antwort").first().waitFor({ timeout: 10000 });
+await foto("6-englisch");
+page.once("dialog", (d) => d.accept());
+await page.getByRole("button", { name: "Beenden" }).click();
+await page.waitForURL(/#stunde\//);
+await page.locator("details summary").click();
+await page.getByText("[DE] the water molecule is bent").waitFor();
+
 // Einstellungen: Verbindungsprüfung
 await page.goto(`${basis}/#einstellungen`);
 await page.getByText(/Server erreichbar/).waitFor({ timeout: 10000 });
@@ -85,7 +102,7 @@ const text = await page.evaluate(async () => {
   const r = indexedDB.open("unterricht", 1);
   const db = await new Promise((ok) => (r.onsuccess = () => ok(r.result)));
   const alle = await new Promise((ok) => { const q = db.transaction("stunden").objectStore("stunden").getAll(); q.onsuccess = () => ok(q.result); });
-  return window.unterricht.exportText(alle[0]);
+  return window.unterricht.exportText(alle.find((s) => s.fach === "Chemie"));
 });
 assert.match(text, /Mitschrift:/);
 assert.match(text, /wie sieht h2o aus/);

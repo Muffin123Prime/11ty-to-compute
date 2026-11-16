@@ -6,13 +6,14 @@
 //   POST /api/antwort           Lehrerfrage im Transkript erkennen und beantworten (websuche: true erlaubt Claude die Web-Suche)
 //   POST /api/zusammenfassung   Stunde zusammenfassen (laufend: true = kurzer Zwischenstand)
 //   POST /api/nachfrage         Frage zu gespeicherten Stunden
+//   POST /api/uebersetzung      Transkript-Stücke live ins Deutsche übersetzen
 //
 // Ist APP_KEY gesetzt, muss jede Anfrage ihn im Header x-app-key tragen,
 // damit nicht jeder, der die Adresse kennt, auf Kosten des Schülers
 // Claude benutzt.
 
 import Anthropic from "@anthropic-ai/sdk";
-import { antwort, zusammenfassung, nachfrage, STANDARD_MODELL } from "./claude.mjs";
+import { antwort, zusammenfassung, nachfrage, uebersetzung, STANDARD_MODELL } from "./claude.mjs";
 import { bildAufloesen } from "./bilder.mjs";
 
 const MAX_SEGMENTE = 4000;
@@ -112,6 +113,7 @@ export async function apiAnfrage(request, env, optionen = {}) {
         frage,
         modus: body.modus === "manuell" ? "manuell" : "auto",
         kontext: typeof body.kontext === "string" ? body.kontext.slice(0, 4000) : "",
+        sprache: /^[a-z]{2}$/.test(String(body.sprache || "")) ? body.sprache : "de",
         bisherige: Array.isArray(body.bisherige) ? body.bisherige.slice(-8).map((f) => String(f).slice(0, 200)) : [],
         websuche: body.websuche === true,
         profil,
@@ -154,6 +156,17 @@ export async function apiAnfrage(request, env, optionen = {}) {
         profil,
         modell,
       });
+      return json(ergebnis, 200, cors);
+    }
+
+    if (pfad === "/api/uebersetzung") {
+      const segmente = (Array.isArray(body.segmente) ? body.segmente : [])
+        .filter((s) => s && typeof s.text === "string" && s.text.trim())
+        .slice(0, 30)
+        .map((s, i) => ({ id: String(s.id ?? i).slice(0, 40), text: s.text.trim().slice(0, 1000) }));
+      if (!segmente.length) return json({ fehler: "Nichts zu übersetzen." }, 400, cors);
+      const von = /^[a-z]{2}$/.test(String(body.von || "")) ? body.von : "en";
+      const ergebnis = await uebersetzung(client, { segmente, von, fach: String(body.fach || "").slice(0, 80), modell });
       return json(ergebnis, 200, cors);
     }
 

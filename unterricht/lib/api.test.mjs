@@ -183,3 +183,19 @@ test("antwort: Stundenkontext, bisherige Fragen und Niveau landen im Prompt", as
   assert.match(p.system[0].text, /kurze Antworten/);
   assert.ok(p.output_config.format.schema.required.includes("kurz"));
 });
+
+test("uebersetzung liefert pro Segment eine deutsche Fassung mit gleicher id", async () => {
+  const client = attrappenClient();
+  const r = await apiAnfrage(
+    post("/api/uebersetzung", { von: "en", fach: "Englisch", segmente: [{ id: "a", text: "the water molecule is bent" }, { id: "b", text: "who can tell me why" }] }),
+    env,
+    { client },
+  );
+  const d = await r.json();
+  assert.deepEqual(d.uebersetzungen.map((u) => u.id), ["a", "b"]);
+  assert.match(d.uebersetzungen[0].text, /water molecule/);
+  assert.equal(client.aufrufe[0].output_config.effort, "low");
+  assert.match(client.aufrufe[0].system[0].text, /Die Lehrkraft spricht Englisch \(Fach: Englisch\)/);
+  const leer = await apiAnfrage(post("/api/uebersetzung", { segmente: [] }), env, { client });
+  assert.equal(leer.status, 400);
+});

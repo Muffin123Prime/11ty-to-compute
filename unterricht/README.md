@@ -42,7 +42,12 @@ einmal für die Zusammenfassung. Der Server ruft Claude (Anthropic) auf.
   als Textdatei teilen oder löschen.
 - **Frag deine Stunden**: „Worum ging es letzte Woche in Bio?“ über die
   gespeicherten Zusammenfassungen (bei bis zu drei Stunden auch mit Mitschrift).
-- **Englischunterricht**: Erkennungssprache in den Einstellungen auf `en-GB` stellen.
+- **Fremdsprachen mit Live-Übersetzung**: Beim Start „Lehrkraft spricht: Englisch,
+  Französisch, Spanisch, Italienisch, Türkisch, Russisch“ wählen (bei Englisch,
+  Französisch, Spanisch wird es aus dem Fachnamen vorgeschlagen). Die Mitschrift läuft
+  dann in dieser Sprache, darunter steht ein, zwei Sekunden später die deutsche
+  Übersetzung. Fragen werden auch auf Englisch, Französisch und Spanisch erkannt,
+  die Antwort kommt in der Sprache der Lehrkraft, die Erklärung auf Deutsch.
 
 ## Aufbau
 

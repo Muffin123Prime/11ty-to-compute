@@ -65,6 +65,30 @@
     };
   })();
 
+  // ---------- Sprachen --------------------------------------------------------
+  const SPRACHEN = [
+    ["de", "Deutsch", "de-DE"],
+    ["en", "Englisch", "en-GB"],
+    ["fr", "Französisch", "fr-FR"],
+    ["es", "Spanisch", "es-ES"],
+    ["it", "Italienisch", "it-IT"],
+    ["tr", "Türkisch", "tr-TR"],
+    ["ru", "Russisch", "ru-RU"],
+  ];
+  const spracheName = (code) => SPRACHEN.find((s) => s[0] === code)?.[1] || code;
+  const erkennungsSprache = (code) => SPRACHEN.find((s) => s[0] === code)?.[2] || "de-DE";
+  // Aus dem Fachnamen die Sprache der Lehrkraft raten (überschreibbar auf der Startseite).
+  function spracheAusFach(fach) {
+    const f = (fach || "").toLowerCase();
+    if (/englis|english/.test(f)) return "en";
+    if (/franz|français|french/.test(f)) return "fr";
+    if (/spanis|español|spanish/.test(f)) return "es";
+    if (/italien|italiano/.test(f)) return "it";
+    if (/türk|turk/.test(f)) return "tr";
+    if (/russ/.test(f)) return "ru";
+    return "de";
+  }
+
   // ---------- Hilfen ----------------------------------------------------------
   const $ = (sel, el = document) => el.querySelector(sel);
   function el(tag, attrs = {}, ...kinder) {
@@ -157,6 +181,15 @@
     /\b(nenn(t|e)? (mir|uns)|erklär(t|e)?( mir| uns)?|beschreib(t|e)?( mir| uns)?|definier(t|e)?|zähl(t|e)? (mal )?auf|fass(t|e)? (mal )?zusammen|rechne(t)? (mal )?(aus|nach)|zeichne(t)?|überleg(t)? (mal|euch))\b/i,
     /\b(wie heißt|wie nennt man|wie viel|wieviel|wie groß|wie lange|wie schnell|wie schwer|wie funktioniert|wie lautet|wie rechnet man|wie kommt man|wie entsteht|wie wird|wie kann man|wie würde|wie berechnet|wofür steht|wofür braucht|woraus besteht|welche rolle)\b/i,
     /\b(stimmt das|richtig oder falsch|ja oder nein|oder nicht)\s*$/i,
+    // Englisch
+    /^(who|what|where|when|why|how|which|whose|can anyone|can anybody|can someone|does anyone|does anybody|is there anyone|do you know|tell me|explain|describe|give me|name)\b/i,
+    /\b(who can tell|who knows|what is|what are|what does|what do you|what did|what would|how do|how does|how many|how much|how would|why do|why does|why did|why is|anyone know|any ideas|what about|can you tell|tell me)\b/i,
+    // Französisch
+    /^(qui|que|qu'|quoi|où|quand|pourquoi|comment|quel|quelle|quels|quelles|est-ce que|qui peut|qui sait|dites-moi|expliquez|décrivez)\b/i,
+    /\b(qui peut me dire|qui sait|qu'est-ce que|qu'est-ce qui|est-ce que|pourquoi est-ce|comment est-ce|combien de|quelqu'un sait|quelqu'un peut)\b/i,
+    // Spanisch
+    /^(quién|quien|qué|que|dónde|donde|cuándo|cuando|por qué|porque|cómo|como|cuál|cual|cuánto|cuanto|alguien sabe|alguien puede|decidme|explicad|describid)\b/i,
+    /\b(quién puede|quién sabe|qué es|qué son|por qué|cómo se|cuántos|cuántas|alguien sabe|alguien puede|me puede decir)\b/i,
   ];
   const istFrage = (text) => FRAGE_MUSTER.some((m) => m.test(text.trim()));
 
@@ -180,6 +213,8 @@
     zwischenstandLaeuft: false,
     zwischenstandTimer: null,
     zwischenstandSegmente: 0,
+    uebersetzTimer: null,
+    uebersetzLaeuft: false,
     recLaeuft: false,
     recZuletztMs: 0,
     wachhund: null,
@@ -191,7 +226,7 @@
 
   function recAnlegen() {
     const rec = new SR();
-    rec.lang = einst.sprache || "de-DE";
+    rec.lang = erkennungsSprache(live.stunde?.sprache || "de");
     rec.continuous = true;
     rec.interimResults = true;
     rec.maxAlternatives = 1;
@@ -299,11 +334,43 @@
     const t = Math.max(0, Math.round(liveSekunden()));
     live.stunde.transkript.push({ t, text });
     speichernBald();
+    uebersetzungAnstossen();
     if (!einst.auto) return;
     // Fragen ziehen sich oft über zwei Erkennungs-Stücke ("wer kann mir sagen" / "wie das molekül aussieht").
     const vor = live.stunde.transkript.at(-2);
     const paar = vor && t - vor.t <= 8 ? `${vor.text} ${text}` : text;
     if (istFrage(text) || istFrage(paar)) autoAntwort(paar);
+  }
+
+  // ---------- Live-Übersetzung ----------------------------------------------
+  // Fremdsprachige Stunden: neue Stücke werden gesammelt und nach kurzer Pause
+  // gebündelt übersetzt, damit die Übersetzung ein, zwei Sekunden hinterherläuft.
+  function uebersetzungAnstossen() {
+    if (!live.stunde || live.stunde.sprache === "de") return;
+    clearTimeout(live.uebersetzTimer);
+    live.uebersetzTimer = setTimeout(uebersetzen, 1500);
+  }
+  async function uebersetzen() {
+    const st = live.stunde;
+    if (!st || st.sprache === "de" || live.uebersetzLaeuft) return;
+    const offen = st.transkript.filter((s) => s.de === undefined).slice(-30);
+    if (!offen.length) return;
+    live.uebersetzLaeuft = true;
+    offen.forEach((s) => (s.de = null)); // null = unterwegs
+    transkriptZeichnen();
+    try {
+      const d = await api("/api/uebersetzung", { von: st.sprache, fach: st.fach, segmente: offen.map((s) => ({ id: String(s.t) + ":" + s.text.length, text: s.text })) });
+      const nachId = new Map(d.uebersetzungen.map((u) => [u.id, u.text]));
+      offen.forEach((s) => (s.de = nachId.get(String(s.t) + ":" + s.text.length) || ""));
+      speichernBald();
+    } catch (e) {
+      offen.forEach((s) => delete s.de); // beim nächsten Mal noch einmal versuchen
+      meldung(`Übersetzung fehlgeschlagen: ${e.message}`, 4000);
+    } finally {
+      live.uebersetzLaeuft = false;
+      transkriptZeichnen();
+      if (live.stunde === st && st.transkript.some((s) => s.de === undefined)) uebersetzungAnstossen();
+    }
   }
 
   function speichernBald() {
@@ -350,6 +417,7 @@
         frage,
         modus,
         kontext: kontextText(),
+        sprache: live.stunde.sprache || "de",
         bisherige: live.stunde.fragen.filter((f) => f.status === "fertig" && f.id !== karte.id).slice(0, 8).map((f) => f.frage),
         websuche: Boolean(einst.websuche),
         profil: profil(),
@@ -405,11 +473,12 @@
   }
 
   // ---------- Live: Start / Pause / Ende --------------------------------------
-  async function stundeStarten(fach) {
+  async function stundeStarten(fach, sprache = "de") {
     const start = new Date();
     live.stunde = {
       id: neueId(),
       fach,
+      sprache,
       datum: start.toISOString().slice(0, 10),
       start: start.toISOString(),
       dauer: 0,
@@ -484,6 +553,7 @@
     }
     live.rec = null;
     clearInterval(live.wachhund);
+    clearTimeout(live.uebersetzTimer);
     st.dauer = Math.round(liveSekunden());
     live.stunde = null;
     live.startMs = 0;
@@ -564,6 +634,7 @@
   }
 
   let gewaehltesFach = "";
+  let gewaehlteSprache = "";
   function zeigeStart() {
     navMarkieren("start");
     app.classList.remove("breit");
@@ -588,13 +659,21 @@
         ),
       );
     }
-    const eigenes = el("input", { placeholder: "anderes Fach …", value: einst.faecher.includes(gewaehltesFach) ? "" : gewaehltesFach, oninput: (e) => { gewaehltesFach = e.target.value.trim(); chipsZeichnen(); } });
+    const eigenes = el("input", { placeholder: "anderes Fach …", value: einst.faecher.includes(gewaehltesFach) ? "" : gewaehltesFach, oninput: (e) => { gewaehltesFach = e.target.value.trim(); gewaehlteSprache = spracheAusFach(gewaehltesFach); chipsZeichnen(); } });
     const chips = el("div", { class: "chips" });
-    const chipsZeichnen = () =>
+    const sprachChips = el("div", { class: "chips sprachen" });
+    const chipsZeichnen = () => {
       ersetze(chips,
-        einst.faecher.map((f) => el("button", { class: `chip${gewaehltesFach === f ? " aktiv" : ""}`, onclick: () => { gewaehltesFach = f; eigenes.value = ""; chipsZeichnen(); } }, f)),
+        einst.faecher.map((f) => el("button", { class: `chip${gewaehltesFach === f ? " aktiv" : ""}`, onclick: () => { gewaehltesFach = f; gewaehlteSprache = spracheAusFach(f); eigenes.value = ""; chipsZeichnen(); } }, f)),
         el("span", { class: `chip eingabe${gewaehltesFach && !einst.faecher.includes(gewaehltesFach) ? " aktiv" : ""}` }, eigenes),
       );
+      const sprache = gewaehlteSprache || "de";
+      ersetze(sprachChips,
+        el("span", { class: "muted klein", style: "align-self:center;margin-right:4px" }, "Lehrkraft spricht:"),
+        SPRACHEN.map(([code, name]) => el("button", { class: `chip klein${sprache === code ? " aktiv" : ""}`, onclick: () => { gewaehlteSprache = code; chipsZeichnen(); } }, name)),
+        sprache !== "de" ? el("span", { class: "muted klein", style: "flex-basis:100%;text-align:center" }, `Mitschrift auf ${spracheName(sprache)}, dazu live die deutsche Übersetzung. Antworten kommen auf ${spracheName(sprache)}.`) : null,
+      );
+    };
     chipsZeichnen();
     const punkt = el("button", {
       class: "punkt-gross",
@@ -602,12 +681,12 @@
       disabled: Boolean(live.stunde),
       onclick: () => {
         if (!gewaehltesFach) return meldung("Erst oben das Fach antippen.");
-        stundeStarten(gewaehltesFach);
+        stundeStarten(gewaehltesFach, gewaehlteSprache || "de");
       },
     }, "Zuhören");
     kinder.push(
       el("div", { class: "start" },
-        el("div", {}, el("h2", {}, "Welche Stunde?"), chips),
+        el("div", {}, el("h2", {}, "Welche Stunde?"), chips, sprachChips),
         punkt,
         serverZeile(),
         el("p", { class: "unter" }, SR ? "Fach wählen, auf den Punkt tippen. Dann hört die App zu, schreibt mit und meldet sich, wenn die Lehrkraft etwas fragt." : "Dieser Browser kann nicht zuhören. Auf iPhone und iPad Safari benutzen, am Computer Chrome oder Edge. Mitschreiben per Tastatur geht trotzdem."),
@@ -695,7 +774,7 @@
       }),
       liveText,
       el("div", { class: "live-meta" },
-        el("strong", {}, live.stunde.fach),
+        el("strong", {}, live.stunde.fach, live.stunde.sprache && live.stunde.sprache !== "de" && spracheName(live.stunde.sprache) !== live.stunde.fach ? ` · ${spracheName(live.stunde.sprache)}` : ""),
         el("span", {}, `${text} · `, el("span", { class: "zeit" }, zeit(liveSekunden()))),
         el("div", { style: "margin-top:6px" }, el("button", { class: "knopf klein", onclick: () => { if (confirm("Stunde beenden und zusammenfassen?")) stundeBeenden(); } }, "Beenden")),
       ),
@@ -704,17 +783,27 @@
   }
 
   // Oben im Band: die letzten Sätze, der neueste weiß, davor grau, dazu das Halbfertige.
+  // In fremdsprachigen Stunden darunter die deutsche Übersetzung.
   function transkriptZeichnen() {
     if (!liveTeile || !live.stunde || !document.contains(liveTeile.band)) return;
     const box = $(".live-text", liveTeile.band);
     if (!box) return;
-    const tr = live.stunde.transkript;
+    const st = live.stunde;
+    const tr = st.transkript;
     const letzte = tr.slice(-3);
-    ersetze(box,
-      tr.length === 0 && !live.zwischen ? el("span", { class: "leer" }, live.hoert ? "Ich höre zu … Sobald jemand spricht, steht der Text hier." : SR ? "Pause. Auf den Punkt tippen, um weiter zuzuhören." : "Keine Spracherkennung in diesem Browser.") : null,
+    const fremd = st.sprache && st.sprache !== "de";
+    const original = el("div", { class: fremd ? "original" : "" },
+      tr.length === 0 && !live.zwischen ? el("span", { class: "leer" }, live.hoert ? (fremd ? `Ich höre zu (${spracheName(st.sprache)}) … Sobald jemand spricht, steht hier der Text und darunter die Übersetzung.` : "Ich höre zu … Sobald jemand spricht, steht der Text hier.") : SR ? "Pause. Auf den Punkt tippen, um weiter zuzuhören." : "Keine Spracherkennung in diesem Browser.") : null,
       letzte.map((s, i) => el("span", { class: i === letzte.length - 1 && !live.zwischen ? "neu" : "alt" }, `${s.text} `)),
       live.zwischen ? el("span", { class: "zwischen" }, live.zwischen) : null,
     );
+    const uebersetzung = fremd && tr.length
+      ? el("div", { class: "uebersetzung" },
+          el("span", { class: "marke-de" }, "DE "),
+          letzte.map((s, i) => el("span", { class: i === letzte.length - 1 ? "neu" : "alt" }, s.de ? `${s.de} ` : s.de === null || s.de === undefined ? "… " : "")),
+        )
+      : null;
+    ersetze(box, original, uebersetzung);
   }
 
   function fragenSpalteZeichnen() {
@@ -877,7 +966,7 @@
     const kinder = [
       el("a", { class: "knopf leise", href: "#archiv" }, "← Alle Stunden"),
       el("h1", {}, z?.titel || st.fach),
-      el("p", { class: "muted" }, `${st.fach} · ${datumText(st.start)}, ${uhrText(st.start)} · ${zeit(st.dauer || 0)}`),
+      el("p", { class: "muted" }, `${st.fach}${st.sprache && st.sprache !== "de" ? ` (${spracheName(st.sprache)}, mit Übersetzung)` : ""} · ${datumText(st.start)}, ${uhrText(st.start)} · ${zeit(st.dauer || 0)}`),
     ];
     if (st.zusammenfassungLaeuft) kinder.push(el("div", { class: "karte" }, el("span", { class: "lade" }), " Claude fasst die Stunde zusammen …"));
     else if (z) {
@@ -902,7 +991,7 @@
       notizen,
       el("details", {},
         el("summary", {}, `Mitschrift (${st.transkript.length} Sätze)`),
-        el("div", { class: "transkript", style: "max-height:60vh" }, st.transkript.length ? st.transkript.map((s) => el("p", { class: "seg" }, el("time", {}, zeit(s.t)), s.text)) : el("p", { class: "leer" }, "Leer.")),
+        el("div", { class: "transkript", style: "max-height:60vh" }, st.transkript.length ? st.transkript.map((s) => el("p", { class: "seg" }, el("time", {}, zeit(s.t)), s.text, s.de ? el("span", { class: "de" }, ` · ${s.de}`) : null)) : el("p", { class: "leer" }, "Leer.")),
       ),
       el("div", { class: "reihe abstand" },
         el("button", { class: "knopf", onclick: () => exportieren(st) }, "Als Text teilen"),
@@ -926,7 +1015,7 @@
     const antworten = st.fragen.filter((f) => f.status === "fertig");
     if (antworten.length) zeilen.push("Antworten:", ...antworten.map((f) => `- [${zeit(f.t)}] ${f.frage}\n  ${f.antwort}${f.kurz ? `\n  Kurz: ${f.kurz}` : ""}`), "");
     if (st.notizen) zeilen.push("Notizen:", st.notizen, "");
-    zeilen.push("Mitschrift:", ...st.transkript.map((s) => `[${zeit(s.t)}] ${s.text}`));
+    zeilen.push("Mitschrift:", ...st.transkript.map((s) => `[${zeit(s.t)}] ${s.text}${s.de ? `\n        DE: ${s.de}` : ""}`));
     return zeilen.join("\n");
   }
 
@@ -1003,9 +1092,7 @@
         schalter("websuche", "Claude darf im Internet nachschlagen (Web-Suche), wenn es sich nicht sicher ist"),
         schalter("ton", "Kurzer Ton, wenn eine Antwort da ist"),
         schalter("vibrieren", "Vibrieren, wenn eine Antwort da ist"),
-        el("label", { class: "block" }, "Sprache der Erkennung"),
-        f("sprache", { placeholder: "de-DE" }),
-        el("p", { class: "hinweis" }, "Für Englischunterricht en-GB oder en-US eintragen, danach die Stunde neu starten."),
+        el("p", { class: "hinweis" }, "Die Sprache der Lehrkraft wählst du beim Start jeder Stunde (bei Englisch, Französisch, Spanisch wird sie automatisch vorgeschlagen). Dann läuft die Mitschrift in dieser Sprache und darunter die deutsche Übersetzung."),
       ),
       el("div", { class: "karte" },
         el("h3", { style: "margin-top:0" }, "Daten"),
@@ -1040,6 +1127,7 @@
     einspeisen: (text) => { segmentHinzu(text); transkriptZeichnen(); },
     zustand: () => ({ hoert: live.hoert, pausiert: live.pausiert, stunde: live.stunde }),
     zwischenstand: () => zwischenstandHolen(true),
+    uebersetzen,
     exportText,
     istFrage,
   };

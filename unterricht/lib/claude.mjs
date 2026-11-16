@@ -89,6 +89,24 @@ export const ZUSAMMENFASSUNG_SCHEMA = {
   },
 };
 
+export const UEBERSETZUNG_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["uebersetzungen"],
+  properties: {
+    uebersetzungen: {
+      type: "array",
+      description: "Für jedes Segment genau ein Eintrag mit derselben id, in derselben Reihenfolge.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "text"],
+        properties: { id: { type: "string" }, text: { type: "string", description: "Die deutsche Übersetzung des Segments." } },
+      },
+    },
+  },
+};
+
 export const NACHFRAGE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -171,8 +189,9 @@ export function formatZeit(sekunden) {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
-export function antwortUserPrompt({ fach, transkript, frage, modus, kontext, bisherige }) {
-  const kopf = `Fach: ${fach || "unbekannt"}\nModus: ${modus === "manuell" ? "Der Schüler hat auf 'Jetzt antworten' gedrückt: Beantworte die letzte Frage oder, wenn keine klare Frage da ist, das, was die Lehrkraft gerade wissen will." : "automatische Erkennung"}`;
+export function antwortUserPrompt({ fach, transkript, frage, modus, kontext, bisherige, sprache }) {
+  const spr = sprache && sprache !== "de" ? `\nSprache der Lehrkraft: ${SPRACHEN[sprache] || sprache} (antworte in dieser Sprache, auf dem Niveau der Klasse; Erklärung und Frage-Feld auf Deutsch)` : "";
+  const kopf = `Fach: ${fach || "unbekannt"}${spr}\nModus: ${modus === "manuell" ? "Der Schüler hat auf 'Jetzt antworten' gedrückt: Beantworte die letzte Frage oder, wenn keine klare Frage da ist, das, was die Lehrkraft gerade wissen will." : "automatische Erkennung"}`;
   const ctx = kontext ? `\n\nStundenkontext (bisheriger Zwischenstand):\n${kontext}` : "";
   const alt = bisherige?.length ? `\n\nSchon beantwortete Fragen dieser Stunde (nicht noch einmal beantworten, außer die Lehrkraft fragt sie erneut):\n- ${bisherige.join("\n- ")}` : "";
   const eigene = frage ? `\n\nVom Schüler eingetippte Frage (hat Vorrang): ${frage}` : "";
@@ -188,6 +207,13 @@ export function zusammenfassungSystemPrompt(profil, laufend = false) {
 
 export function nachfrageSystemPrompt(profil) {
   return `Du beantwortest Fragen eines Schülers (${profilText(profil)}) zu seinen gespeicherten Unterrichtsstunden. Du bekommst Zusammenfassungen und, wo vorhanden, Transkripte. Antworte auf Deutsch, kurz und konkret, und nenne, aus welcher Stunde die Information stammt. Wenn die Stunden nichts dazu hergeben, sag das offen und gib höchstens eine knappe allgemeine Antwort, deutlich als solche gekennzeichnet. Antworte ausschließlich im vorgegebenen JSON-Format.`;
+}
+
+export const SPRACHEN = { de: "Deutsch", en: "Englisch", fr: "Französisch", es: "Spanisch", it: "Italienisch", la: "Latein", tr: "Türkisch", ru: "Russisch" };
+
+export function uebersetzungSystemPrompt(von, fach) {
+  const sprache = SPRACHEN[von] || von;
+  return `Du übersetzt live den Unterricht für einen Schüler. Die Lehrkraft spricht ${sprache}${fach ? ` (Fach: ${fach})` : ""}. Du bekommst kurze Stücke aus einer automatischen Spracherkennung: ohne Satzzeichen, mit Hörfehlern, manchmal mitten im Satz abgeschnitten. Übersetze jedes Stück für sich ins Deutsche, natürlich und so, wie es im Unterricht gemeint ist. Korrigiere offensichtliche Hörfehler stillschweigend. Stücke, die schon Deutsch sind (die Lehrkraft wechselt die Sprache), lässt du unverändert. Namen, Zahlen und Fachbegriffe bleiben erhalten; bei Fachbegriffen darfst du das Original in Klammern dazusetzen, wenn es der Klasse hilft. Keine Kommentare, keine Erklärungen, pro Stück genau eine Übersetzung mit derselben id. Antworte ausschließlich im vorgegebenen JSON-Format.`;
 }
 
 // --- Aufrufe ----------------------------------------------------------------
@@ -294,4 +320,22 @@ export async function nachfrage(client, eingabe) {
     effort: "medium",
   });
   return { ...daten, nutzung };
+}
+
+/**
+ * Live-Übersetzung von Transkript-Stücken ins Deutsche.
+ * @param eingabe { segmente: [{id, text}], von: "en", fach?, modell? }
+ */
+export async function uebersetzung(client, eingabe) {
+  const user = eingabe.segmente.map((s) => `<segment id="${s.id}">${s.text}</segment>`).join("\n");
+  const { daten, nutzung } = await strukturiert(client, {
+    modell: eingabe.modell,
+    system: uebersetzungSystemPrompt(eingabe.von, eingabe.fach),
+    user,
+    schema: UEBERSETZUNG_SCHEMA,
+    effort: "low",
+    maxTokens: 4000,
+  });
+  const nachId = new Map((daten.uebersetzungen || []).map((u) => [u.id, u.text]));
+  return { uebersetzungen: eingabe.segmente.map((s) => ({ id: s.id, text: nachId.get(s.id) ?? "" })), nutzung };
 }
