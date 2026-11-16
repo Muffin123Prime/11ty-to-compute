@@ -1,6 +1,7 @@
 // Lokaler Server zum Ausprobieren ohne Cloudflare:
-//   ANTHROPIC_API_KEY=sk-... node server.mjs      → http://localhost:8787
+//   GROQ_API_KEY=gsk_... node server.mjs           → http://localhost:8787 (oder GEMINI_API_KEY, ANTHROPIC_API_KEY)
 //   node server.mjs --mock                         → ohne Schlüssel, mit Attrappen-Antworten
+// Workers AI gibt es lokal nicht; dafür `npm run preview` (wrangler dev, nutzt dein Cloudflare-Konto).
 // Spracherkennung im Browser braucht https oder localhost; localhost reicht.
 import { createServer } from "node:http";
 import { readFile, stat } from "node:fs/promises";
@@ -16,11 +17,14 @@ const mock = process.argv.includes("--mock");
 
 const env = {
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || "",
+  GROQ_API_KEY: process.env.GROQ_API_KEY || "",
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
+  KI_ANBIETER: process.env.KI_ANBIETER || "",
+  KI_MODELL: process.env.KI_MODELL || "",
+  KI_MODELL_SCHNELL: process.env.KI_MODELL_SCHNELL || "",
   APP_KEY: process.env.APP_KEY || "",
-  MODELL: process.env.MODELL || "",
   ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || "",
 };
-if (mock) env.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY || "mock";
 
 const TYPEN = {
   ".html": "text/html; charset=utf-8",
@@ -68,5 +72,6 @@ createServer(async (req, res) => {
   res.writeHead(antwort.status, Object.fromEntries(antwort.headers));
   res.end(Buffer.from(await antwort.arrayBuffer()));
 }).listen(port, () => {
-  console.log(`Unterrichts-App: http://localhost:${port}${mock ? "  (Attrappen-Modus, kein Claude)" : env.ANTHROPIC_API_KEY ? "" : "  (kein ANTHROPIC_API_KEY gesetzt)"}`);
+  const schluessel = env.GROQ_API_KEY || env.GEMINI_API_KEY || env.ANTHROPIC_API_KEY;
+  console.log(`Unterrichts-App: http://localhost:${port}${mock ? "  (Attrappen-Modus, keine KI)" : schluessel ? "" : "  (kein KI-Schlüssel gesetzt: GROQ_API_KEY, GEMINI_API_KEY oder ANTHROPIC_API_KEY)"}`);
 });

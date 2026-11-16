@@ -1,13 +1,10 @@
 // Alle Claude-Aufrufe der Unterrichts-App: Antwort auf eine Lehrerfrage,
 // Zusammenfassung einer Stunde, Nachfrage zu gespeicherten Stunden.
 //
-// Der Client wird von außen hereingereicht (Worker: Schlüssel aus dem
-// Secret, lokal: aus der Umgebung), damit die Funktionen in Tests mit einem
-// Attrappen-Client laufen.
+// Der Anbieter (lib/anbieter.mjs) wird hereingereicht: Workers AI, Groq,
+// Gemini oder Claude. Hier stehen nur Prompts, Schemas und die Aufrufe.
 
 export const STANDARD_MODELL = "claude-opus-5-5";
-
-const BETAS = ["server-side-fallback-2026-07-01"];
 
 // --- Schemas für die strukturierte Ausgabe ---------------------------------
 
@@ -218,53 +215,8 @@ export function uebersetzungSystemPrompt(von, fach) {
 
 // --- Aufrufe ----------------------------------------------------------------
 
-async function strukturiert(client, { modell, system, user, schema, effort, maxTokens, websuche }) {
-  const messages = [{ role: "user", content: user }];
-  const params = {
-    model: modell || STANDARD_MODELL,
-    max_tokens: maxTokens || 8000,
-    betas: BETAS,
-    fallbacks: "default",
-    system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
-    messages,
-    output_config: { effort: effort || "medium", format: { type: "json_schema", schema } },
-  };
-  if (websuche) params.tools = [{ type: "web_search_20260209", name: "web_search", max_uses: 3 }];
-
-  let response = await client.beta.messages.create(params);
-  // Ein langer Such-Durchlauf kann mit pause_turn anhalten: Antwort anhängen und weitermachen.
-  for (let runde = 0; response.stop_reason === "pause_turn" && runde < 3; runde++) {
-    messages.push({ role: "assistant", content: response.content });
-    response = await client.beta.messages.create(params);
-  }
-
-  if (response.stop_reason === "refusal") {
-    const grund = response.stop_details?.explanation || response.stop_details?.category || "ohne Angabe";
-    throw new Error(`Claude hat die Anfrage abgelehnt (${grund}).`);
-  }
-  if (response.stop_reason === "max_tokens") {
-    throw new Error("Die Antwort war zu lang und wurde abgeschnitten.");
-  }
-  // Bei Web-Suche stehen vor dem JSON Such-Blöcke; das Ergebnis ist der letzte Textblock.
-  const texte = response.content.filter((b) => b.type === "text").map((b) => b.text);
-  const text = texte.at(-1) || "";
-  let daten;
-  try {
-    daten = JSON.parse(text);
-  } catch {
-    throw new Error("Claude hat kein gültiges JSON geliefert.");
-  }
-  const suchen = response.content.filter((b) => b.type === "server_tool_use").length;
-  return {
-    daten,
-    nutzung: {
-      modell: response.model,
-      eingabe: response.usage?.input_tokens ?? 0,
-      ausgabe: response.usage?.output_tokens ?? 0,
-      cache: response.usage?.cache_read_input_tokens ?? 0,
-      suchen,
-    },
-  };
+async function strukturiert(anbieter, params) {
+  return anbieter.strukturiert(params);
 }
 
 /**
@@ -272,9 +224,8 @@ async function strukturiert(client, { modell, system, user, schema, effort, maxT
  * @param client Anthropic-Client
  * @param eingabe { fach, transkript: [{t, text}], frage?, modus: "auto"|"manuell", profil?, modell? }
  */
-export async function antwort(client, eingabe) {
-  const { daten, nutzung } = await strukturiert(client, {
-    modell: eingabe.modell,
+export async function antwort(anbieter, eingabe) {
+  const { daten, nutzung } = await strukturiert(anbieter, {
     system: antwortSystemPrompt(eingabe.profil),
     user: antwortUserPrompt(eingabe),
     schema: ANTWORT_SCHEMA,
@@ -288,20 +239,20 @@ export async function antwort(client, eingabe) {
   return { ...daten, bild, nutzung };
 }
 
-export async function zusammenfassung(client, eingabe) {
+export async function zusammenfassung(anbieter, eingabe) {
   const user = `Fach: ${eingabe.fach || "unbekannt"}\nDatum: ${eingabe.datum || "unbekannt"}\nDauer: ${eingabe.dauer ? formatZeit(eingabe.dauer) : "unbekannt"}\n\n<transkript>\n${transkriptText(eingabe.transkript)}\n</transkript>`;
-  const { daten, nutzung } = await strukturiert(client, {
-    modell: eingabe.modell,
+  const { daten, nutzung } = await strukturiert(anbieter, {
     system: zusammenfassungSystemPrompt(eingabe.profil, Boolean(eingabe.laufend)),
     user,
     schema: ZUSAMMENFASSUNG_SCHEMA,
     effort: eingabe.laufend ? "low" : "high",
-    maxTokens: 16000,
+    schnell: Boolean(eingabe.laufend),
+    maxTokens: eingabe.laufend ? 3000 : 6000,
   });
   return { ...daten, nutzung };
 }
 
-export async function nachfrage(client, eingabe) {
+export async function nachfrage(anbieter, eingabe) {
   const stunden = (eingabe.stunden || [])
     .map((s, i) => {
       const kopf = `<stunde nr="${i + 1}" fach="${s.fach || ""}" datum="${s.datum || ""}" titel="${s.titel || ""}">`;
@@ -312,8 +263,7 @@ export async function nachfrage(client, eingabe) {
     })
     .join("\n\n");
   const user = `${stunden}\n\nFrage des Schülers: ${eingabe.frage}`;
-  const { daten, nutzung } = await strukturiert(client, {
-    modell: eingabe.modell,
+  const { daten, nutzung } = await strukturiert(anbieter, {
     system: nachfrageSystemPrompt(eingabe.profil),
     user,
     schema: NACHFRAGE_SCHEMA,
@@ -326,15 +276,15 @@ export async function nachfrage(client, eingabe) {
  * Live-Übersetzung von Transkript-Stücken ins Deutsche.
  * @param eingabe { segmente: [{id, text}], von: "en", fach?, modell? }
  */
-export async function uebersetzung(client, eingabe) {
+export async function uebersetzung(anbieter, eingabe) {
   const user = eingabe.segmente.map((s) => `<segment id="${s.id}">${s.text}</segment>`).join("\n");
-  const { daten, nutzung } = await strukturiert(client, {
-    modell: eingabe.modell,
+  const { daten, nutzung } = await strukturiert(anbieter, {
     system: uebersetzungSystemPrompt(eingabe.von, eingabe.fach),
     user,
     schema: UEBERSETZUNG_SCHEMA,
     effort: "low",
-    maxTokens: 4000,
+    schnell: true,
+    maxTokens: 3000,
   });
   const nachId = new Map((daten.uebersetzungen || []).map((u) => [u.id, u.text]));
   return { uebersetzungen: eingabe.segmente.map((s) => ({ id: s.id, text: nachId.get(s.id) ?? "" })), nutzung };

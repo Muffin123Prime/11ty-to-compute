@@ -63,21 +63,36 @@ unterricht/
 └── test/e2e.mjs     Durchlauf der Oberfläche im Browser (Playwright)
 ```
 
-Claude wird über das offizielle SDK (`@anthropic-ai/sdk`) aufgerufen, Modell
-`claude-opus-5-5` (änderbar über die Variable `MODELL`), mit strukturierter
-JSON-Ausgabe und eingeschaltetem Server-Fallback bei Ablehnungen.
+Die KI ist austauschbar (`lib/anbieter.mjs`). Standard ist **Cloudflare Workers AI**:
+läuft im selben Worker, braucht keinen Schlüssel und ist bis 10.000 Neuronen am Tag
+kostenlos, das reicht für etwa fünf bis acht Unterrichtsstunden täglich (Antworten mit
+Llama 3.3 70B, Übersetzung und Zwischenstand mit dem kleineren Llama 3.1 8B). Sind
+weitere Schlüssel hinterlegt, bilden sie eine Kette: Ist das Tageskontingent eines
+Anbieters aufgebraucht, übernimmt der nächste.
+
+| Anbieter | Kosten | Secret | Hinweis |
+| --- | --- | --- | --- |
+| Cloudflare Workers AI | kostenlos, 10.000 Neuronen/Tag | keins | Standard, nichts einzurichten |
+| Groq | kostenlos, etwa 1.000 Anfragen/Tag | `GROQ_API_KEY` | sehr schnell, Schlüssel unter console.groq.com/keys |
+| Google Gemini | kostenlos, aber nur rund 20 bis 500 Anfragen/Tag je Modell | `GEMINI_API_KEY` | reicht nur für wenige Antworten; Google nutzt Eingaben im Gratis-Plan zum Training |
+| Claude (Anthropic) | kostet Geld | `ANTHROPIC_API_KEY` | beste Antworten, einzige mit Web-Suche |
+
+Mit `KI_ANBIETER` in `wrangler.toml` legt man einen Anbieter fest, mit `KI_MODELL` und
+`KI_MODELL_SCHNELL` die Modelle.
 
 ## Ins Netz bringen, Weg 1: automatisch über GitHub
 
 Der Workflow `.github/workflows/unterricht.yml` veröffentlicht die App bei jedem
-Push in `unterricht/` auf Cloudflare. Dafür einmalig drei Secrets im Repo anlegen
+Push in `unterricht/` auf Cloudflare. Dafür einmalig zwei Secrets im Repo anlegen
 (Settings → Secrets and variables → Actions → New repository secret):
 
 | Secret | Woher |
 | --- | --- |
 | `CLOUDFLARE_API_TOKEN` | dash.cloudflare.com → Profil → API Tokens → Vorlage „Edit Cloudflare Workers“ |
-| `ANTHROPIC_API_KEY` | console.anthropic.com → API Keys |
 | `APP_KEY` | selbst ausdenken, das Passwort für die App |
+
+Optional, nur wenn man einen anderen Anbieter will: `GROQ_API_KEY`, `GEMINI_API_KEY`,
+`ANTHROPIC_API_KEY`. Nicht hinterlegte Secrets überspringt der Workflow.
 
 Danach den Workflow unter Actions → „Unterrichts-App deployen“ einmal von Hand
 starten oder einfach etwas pushen. Die Adresse steht am Ende des Laufs
@@ -85,13 +100,12 @@ starten oder einfach etwas pushen. Die Adresse steht am Ende des Laufs
 
 ## Ins Netz bringen, Weg 2: von Hand (Cloudflare Workers, kostenlos)
 
-Du brauchst ein Cloudflare-Konto und einen Anthropic-Schlüssel (console.anthropic.com).
+Du brauchst nur ein Cloudflare-Konto.
 
 ```bash
 cd unterricht
 npm install
 npx wrangler login                          # einmalig, öffnet den Browser
-npx wrangler secret put ANTHROPIC_API_KEY   # den Anthropic-Schlüssel eingeben
 npx wrangler secret put APP_KEY             # ein selbst gewähltes Passwort für die App
 npm run deploy
 ```
@@ -101,7 +115,7 @@ Auf dem Handy in **Safari** (iPhone/iPad) oder **Chrome** (Android) öffnen,
 unter Einstellungen den App-Schlüssel eintragen, „Verbindung prüfen“, dann
 „Zum Home-Bildschirm“ hinzufügen. Beim ersten Start fragt der Browser nach dem Mikrofon.
 
-Ohne `APP_KEY` kann jeder, der die Adresse kennt, auf deine Kosten Claude benutzen.
+Ohne `APP_KEY` kann jeder, der die Adresse kennt, dein Tageskontingent verbrauchen.
 Also setzen.
 
 ## Lokal ausprobieren
@@ -110,7 +124,8 @@ Also setzen.
 cd unterricht
 npm install
 npm run mock                      # ohne Schlüssel, mit Attrappen-Antworten
-ANTHROPIC_API_KEY=sk-... npm run dev   # echt
+GROQ_API_KEY=gsk_... npm run dev  # echt (oder GEMINI_API_KEY / ANTHROPIC_API_KEY)
+npm run preview                   # wrangler dev: wie auf Cloudflare, mit Workers AI
 ```
 
 Dann http://localhost:8787 öffnen. Chrome am Computer kann zuhören (die Erkennung
@@ -135,13 +150,10 @@ node test/e2e.mjs        # Durchlauf im Browser (braucht Playwright)
   mit dem Mikrofon Richtung Lehrkraft auf dem Tisch liegen.
 - **Bildschirm**: Die Erkennung läuft nur, solange die Seite im Vordergrund ist.
   Die App hält den Bildschirm wach, Display nicht sperren.
-- **Kosten**: Pro erkannter Frage geht ein Aufruf mit etwa zwei Minuten Text an
-  Claude, das sind grob ein bis zwei Cent, mit Web-Suche etwas mehr. Die laufende
-  Zusammenfassung alle vier Minuten und die Endzusammenfassung einer 45-Minuten-Stunde
-  liegen zusammen bei etwa 20 bis 40 Cent (das Transkript wird zwischengespeichert,
-  deshalb nicht mehr). Ein Vorfilter in der App sorgt dafür, dass nicht
-  jeder Satz, sondern nur fragend klingende Sätze geprüft werden, höchstens alle
-  zwölf Sekunden.
+- **Kosten**: Mit Workers AI null. Das Tageskontingent reicht für etwa fünf bis acht
+  Stunden pro Tag (Fremdsprachenstunden mit Übersetzung verbrauchen etwa doppelt so viel
+  wie deutsche). Ist es aufgebraucht, sagt die App das; ab Mitternacht UTC geht es weiter.
+  Ein kostenloser Groq-Schlüssel als zweiter Anbieter fängt das ab.
 - **Daten**: Alle Stunden liegen nur im Browser-Speicher des Geräts (IndexedDB).
   Löscht man die Website-Daten, sind sie weg. Wichtige Stunden als Text teilen.
 - **Antworten prüfen**: Die Erkennung verhört sich, und Claude antwortet auf das,
@@ -151,7 +163,8 @@ node test/e2e.mjs        # Durchlauf im Browser (braucht Playwright)
 
 | Name | Wo | Bedeutung |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | Secret | Pflicht. Schlüssel von console.anthropic.com |
 | `APP_KEY` | Secret | Passwort, das die App im Header `x-app-key` mitschickt |
-| `MODELL` | wrangler.toml `[vars]` | Claude-Modell, leer = `claude-opus-5-5` |
+| `GROQ_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` | Secret | optional, weitere Anbieter |
+| `KI_ANBIETER` | wrangler.toml `[vars]` | `cloudflare` (Standard), `groq`, `gemini`, `anthropic`; leer = Kette aller vorhandenen |
+| `KI_MODELL`, `KI_MODELL_SCHNELL` | wrangler.toml `[vars]` | Modelle, leer = Standard des Anbieters |
 | `ALLOWED_ORIGINS` | wrangler.toml `[vars]` | Seiten-Origins, die die API nutzen dürfen; leer = alle |

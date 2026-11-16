@@ -1,10 +1,11 @@
 # Baut und veröffentlicht die Unterrichts-App (unterricht/) auf Cloudflare Workers,
-# sobald sich dort etwas ändert. Braucht drei Secrets im Repo
+# sobald sich dort etwas ändert. Pflicht-Secret im Repo
 # (Settings → Secrets and variables → Actions):
 #   CLOUDFLARE_API_TOKEN   Token mit der Vorlage "Edit Cloudflare Workers"
-#   ANTHROPIC_API_KEY      Schlüssel von console.anthropic.com
+# Empfohlen:
 #   APP_KEY                selbst gewähltes Passwort für die App
-# Optional CLOUDFLARE_ACCOUNT_ID, falls der Token mehrere Konten sieht.
+# Optional (nur wenn nicht Workers AI genutzt wird):
+#   GROQ_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, CLOUDFLARE_ACCOUNT_ID
 name: Unterrichts-App deployen
 
 on:
@@ -23,6 +24,9 @@ jobs:
     defaults:
       run:
         working-directory: unterricht
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,14 +37,24 @@ jobs:
       - run: npm ci
       - run: npm test
       - name: Auf Cloudflare veröffentlichen
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: unterricht
-          secrets: |
-            ANTHROPIC_API_KEY
-            APP_KEY
+        run: npx wrangler deploy
+      - name: Secrets setzen (nur die, die im Repo hinterlegt sind)
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           APP_KEY: ${{ secrets.APP_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          for name in APP_KEY GROQ_API_KEY GEMINI_API_KEY ANTHROPIC_API_KEY; do
+            wert="${!name}"
+            if [ -n "$wert" ]; then
+              printf '%s' "$wert" | npx wrangler secret put "$name"
+              echo "$name gesetzt"
+            else
+              echo "$name nicht hinterlegt, übersprungen"
+            fi
+          done
+      - name: Adresse anzeigen
+        run: |
+          echo "## Fertig" >> "$GITHUB_STEP_SUMMARY"
+          echo "Die App läuft unter der Adresse, die oben im Schritt 'Auf Cloudflare veröffentlichen' steht (https://unterricht.<name>.workers.dev)." >> "$GITHUB_STEP_SUMMARY"

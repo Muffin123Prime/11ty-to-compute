@@ -1,11 +1,14 @@
 # Unterrichts-App auf Cloudflare Workers (kostenloser Plan reicht).
 #
-#   npx wrangler login                       einmalig
-#   npx wrangler secret put ANTHROPIC_API_KEY  Schlüssel von console.anthropic.com
-#   npx wrangler secret put APP_KEY            frei gewähltes Passwort für die App
-#   npm run deploy
+# Die KI läuft standardmäßig ebenfalls bei Cloudflare (Workers AI, Binding
+# "AI", 10.000 Neuronen am Tag kostenlos) und braucht keinen Schlüssel.
+# Alternativ ein Schlüssel als Secret: GROQ_API_KEY (kostenlos),
+# GEMINI_API_KEY (kostenlos, kleine Kontingente) oder ANTHROPIC_API_KEY
+# (kostet Geld), dazu KI_ANBIETER unten passend setzen.
 #
-# Danach läuft die App unter https://unterricht.<dein-name>.workers.dev
+#   npx wrangler login
+#   npx wrangler secret put APP_KEY      Passwort für die App (empfohlen)
+#   npm run deploy
 name = "unterricht"
 main = "worker.mjs"
 compatibility_date = "2025-10-01"
@@ -17,8 +20,15 @@ directory = "./public"
 binding = "ASSETS"
 run_worker_first = ["/api/*"]
 
+[ai]
+binding = "AI"
+
 [vars]
-# Modell, das Claude benutzt; leer = Standard aus lib/claude.mjs
-MODELL = ""
+# cloudflare (Standard, kostenlos) | groq | gemini | anthropic
+KI_ANBIETER = "cloudflare"
+# Modell für Antworten und Zusammenfassungen; leer = Standard des Anbieters
+KI_MODELL = ""
+# kleineres Modell für Übersetzung und Zwischenstand; leer = Standard des Anbieters
+KI_MODELL_SCHNELL = ""
 # Kommagetrennte Seiten-Origins, die die API aufrufen dürfen; leer = alle
 ALLOWED_ORIGINS = ""

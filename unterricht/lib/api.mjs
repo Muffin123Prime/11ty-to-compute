@@ -8,12 +8,13 @@
 //   POST /api/nachfrage         Frage zu gespeicherten Stunden
 //   POST /api/uebersetzung      Transkript-Stücke live ins Deutsche übersetzen
 //
-// Ist APP_KEY gesetzt, muss jede Anfrage ihn im Header x-app-key tragen,
+// Welche KI antwortet, entscheidet lib/anbieter.mjs (KI_ANBIETER, Standard:
+// Workers AI im selben Worker, kostenlos). Ist APP_KEY gesetzt, muss jede Anfrage ihn im Header x-app-key tragen,
 // damit nicht jeder, der die Adresse kennt, auf Kosten des Schülers
 // Claude benutzt.
 
-import Anthropic from "@anthropic-ai/sdk";
-import { antwort, zusammenfassung, nachfrage, uebersetzung, STANDARD_MODELL } from "./claude.mjs";
+import { antwort, zusammenfassung, nachfrage, uebersetzung } from "./claude.mjs";
+import { erzeugeAnbieter, anbieterName } from "./anbieter.mjs";
 import { bildAufloesen } from "./bilder.mjs";
 
 const MAX_SEGMENTE = 4000;
@@ -69,8 +70,8 @@ function profilPruefen(profil) {
 
 /**
  * @param request Fetch-Request
- * @param env { ANTHROPIC_API_KEY, APP_KEY?, MODELL?, ALLOWED_ORIGINS? }
- * @param optionen { client?: Anthropic-Attrappe für Tests, fetchFn? }
+ * @param env { AI?, KI_ANBIETER?, KI_MODELL?, KI_MODELL_SCHNELL?, ANTHROPIC_API_KEY?, GROQ_API_KEY?, GEMINI_API_KEY?, APP_KEY?, ALLOWED_ORIGINS? }
+ * @param optionen { client?: Anthropic-Attrappe für Tests, anbieter?, fetchFn? }
  */
 export async function apiAnfrage(request, env, optionen = {}) {
   const url = new URL(request.url);
@@ -78,18 +79,30 @@ export async function apiAnfrage(request, env, optionen = {}) {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
 
   const pfad = url.pathname.replace(/\/+$/, "");
-  const modell = env.MODELL || STANDARD_MODELL;
+  const anbieter = optionen.anbieter || erzeugeAnbieter(env, optionen);
 
   if (pfad === "/api/status") {
-    return json({ ok: true, modell, schluessel: Boolean(env.ANTHROPIC_API_KEY), geschuetzt: Boolean(env.APP_KEY) }, 200, cors);
+    return json(
+      {
+        ok: true,
+        anbieter: anbieter?.name || null,
+        anbieterName: anbieter ? anbieterName(anbieter.name) : null,
+        modell: anbieter?.modell || null,
+        schluessel: Boolean(anbieter),
+        websuche: anbieter?.name === "anthropic",
+        geschuetzt: Boolean(env.APP_KEY),
+      },
+      200,
+      cors,
+    );
   }
 
   if (env.APP_KEY && request.headers.get("x-app-key") !== env.APP_KEY) {
     return json({ fehler: "App-Schlüssel fehlt oder ist falsch (Einstellungen → App-Schlüssel)." }, 401, cors);
   }
   if (request.method !== "POST") return json({ fehler: "Nur POST." }, 405, cors);
-  if (!env.ANTHROPIC_API_KEY && !optionen.client) {
-    return json({ fehler: "Auf dem Server ist kein ANTHROPIC_API_KEY hinterlegt." }, 503, cors);
+  if (!anbieter) {
+    return json({ fehler: "Auf dem Server ist keine KI eingerichtet (Workers-AI-Binding oder ein Schlüssel für Groq, Gemini oder Anthropic)." }, 503, cors);
   }
 
   let body;
@@ -99,7 +112,7 @@ export async function apiAnfrage(request, env, optionen = {}) {
     return json({ fehler: "Ungültiges JSON." }, 400, cors);
   }
 
-  const client = optionen.client || new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 2, timeout: 120_000 });
+  const client = anbieter;
   const profil = profilPruefen(body.profil);
 
   try {
@@ -115,9 +128,8 @@ export async function apiAnfrage(request, env, optionen = {}) {
         kontext: typeof body.kontext === "string" ? body.kontext.slice(0, 4000) : "",
         sprache: /^[a-z]{2}$/.test(String(body.sprache || "")) ? body.sprache : "de",
         bisherige: Array.isArray(body.bisherige) ? body.bisherige.slice(-8).map((f) => String(f).slice(0, 200)) : [],
-        websuche: body.websuche === true,
+        websuche: body.websuche === true && anbieter.name === "anthropic",
         profil,
-        modell,
       });
       const bild = await bildAufloesen(ergebnis.bild, optionen.fetchFn);
       return json({ ...ergebnis, bild }, 200, cors);
@@ -133,7 +145,6 @@ export async function apiAnfrage(request, env, optionen = {}) {
         laufend: body.laufend === true,
         transkript,
         profil,
-        modell,
       });
       return json(ergebnis, 200, cors);
     }
@@ -154,7 +165,6 @@ export async function apiAnfrage(request, env, optionen = {}) {
           transkript: transkriptPruefen(s.transkript),
         })),
         profil,
-        modell,
       });
       return json(ergebnis, 200, cors);
     }
@@ -166,19 +176,15 @@ export async function apiAnfrage(request, env, optionen = {}) {
         .map((s, i) => ({ id: String(s.id ?? i).slice(0, 40), text: s.text.trim().slice(0, 1000) }));
       if (!segmente.length) return json({ fehler: "Nichts zu übersetzen." }, 400, cors);
       const von = /^[a-z]{2}$/.test(String(body.von || "")) ? body.von : "en";
-      const ergebnis = await uebersetzung(client, { segmente, von, fach: String(body.fach || "").slice(0, 80), modell });
+      const ergebnis = await uebersetzung(client, { segmente, von, fach: String(body.fach || "").slice(0, 80) });
       return json(ergebnis, 200, cors);
     }
 
     return json({ fehler: "Unbekannter Pfad." }, 404, cors);
   } catch (e) {
-    const status = e instanceof Anthropic.AuthenticationError ? 503 : e instanceof Anthropic.RateLimitError ? 429 : e instanceof Anthropic.APIError ? 502 : 500;
-    const text =
-      e instanceof Anthropic.AuthenticationError
-        ? "Der Anthropic-Schlüssel auf dem Server ist ungültig."
-        : e instanceof Anthropic.RateLimitError
-          ? "Claude ist gerade ausgelastet, bitte gleich noch einmal."
-          : e?.message || "Unbekannter Fehler.";
-    return json({ fehler: text }, status, cors);
+    const bekannt = anbieter.fehlerText?.(e);
+    if (bekannt) return json({ fehler: bekannt.text }, bekannt.status, cors);
+    const status = /kontingent|ausgelastet|limit|429/i.test(e?.message || "") ? 429 : 500;
+    return json({ fehler: e?.message || "Unbekannter Fehler." }, status, cors);
   }
 }

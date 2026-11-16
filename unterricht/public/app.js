@@ -348,7 +348,7 @@
   function uebersetzungAnstossen() {
     if (!live.stunde || live.stunde.sprache === "de") return;
     clearTimeout(live.uebersetzTimer);
-    live.uebersetzTimer = setTimeout(uebersetzen, 1500);
+    live.uebersetzTimer = setTimeout(uebersetzen, 3000);
   }
   async function uebersetzen() {
     const st = live.stunde;
@@ -615,6 +615,7 @@
     try {
       const d = await api("/api/status");
       live.serverOk = d.schluessel ? true : "schluessel";
+      live.anbieter = d;
     } catch {
       live.serverOk = false;
     }
@@ -623,8 +624,8 @@
   function serverZeile() {
     const z = el("p", { class: "unter klein", style: "margin:0" });
     const setzen = () => {
-      if (live.serverOk === true) ersetze(z, "Server verbunden.");
-      else if (live.serverOk === "schluessel") ersetze(z, "Server erreichbar, aber ohne Anthropic-Schlüssel. ", el("a", { href: "#einstellungen" }, "Einstellungen"));
+      if (live.serverOk === true) ersetze(z, `Server verbunden · ${live.anbieter?.anbieterName || "KI"}`);
+      else if (live.serverOk === "schluessel") ersetze(z, "Server erreichbar, aber ohne KI (Workers-AI-Binding oder Schlüssel fehlt). ", el("a", { href: "#einstellungen" }, "Einstellungen"));
       else if (live.serverOk === false) ersetze(z, "Kein Server erreichbar: Zuhören und Mitschreiben geht, Antworten nicht. ", el("a", { href: "#einstellungen" }, "Einstellungen"));
       else ersetze(z, el("span", { class: "lade" }), " Server wird geprüft …");
     };
@@ -1051,7 +1052,8 @@
       ersetze(status, el("span", { class: "lade" }));
       try {
         const d = await api("/api/status");
-        status.textContent = `Server erreichbar · Modell ${d.modell} · Anthropic-Schlüssel ${d.schluessel ? "vorhanden" : "FEHLT"} · App-Schlüssel ${d.geschuetzt ? "nötig" : "nicht gesetzt"}`;
+        live.anbieter = d;
+        status.textContent = d.schluessel ? `Server erreichbar · ${d.anbieterName} · Modell ${d.modell} · App-Schlüssel ${d.geschuetzt ? "nötig" : "nicht gesetzt"}` : "Server erreichbar, aber keine KI eingerichtet (Workers-AI-Binding oder Schlüssel fehlt).";
       } catch (e) {
         status.textContent = e.message;
       }
@@ -1089,7 +1091,7 @@
       el("div", { class: "karte" },
         el("h3", { style: "margin-top:0" }, "Zuhören"),
         schalter("auto", "Fragen automatisch erkennen und beantworten"),
-        schalter("websuche", "Claude darf im Internet nachschlagen (Web-Suche), wenn es sich nicht sicher ist"),
+        schalter("websuche", "Im Internet nachschlagen, wenn die KI sich nicht sicher ist (nur mit Claude als Anbieter)"),
         schalter("ton", "Kurzer Ton, wenn eine Antwort da ist"),
         schalter("vibrieren", "Vibrieren, wenn eine Antwort da ist"),
         el("p", { class: "hinweis" }, "Die Sprache der Lehrkraft wählst du beim Start jeder Stunde (bei Englisch, Französisch, Spanisch wird sie automatisch vorgeschlagen). Dann läuft die Mitschrift in dieser Sprache und darunter die deutsche Übersetzung."),
