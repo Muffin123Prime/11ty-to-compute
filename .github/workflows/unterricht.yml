@@ -37,7 +37,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - name: Auf Cloudflare veröffentlichen
-        run: npx wrangler deploy
+        run: npm run deploy
       - name: Secrets setzen (nur die, die im Repo hinterlegt sind)
         env:
           APP_KEY: ${{ secrets.APP_KEY }}

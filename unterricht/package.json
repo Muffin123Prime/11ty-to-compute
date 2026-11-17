@@ -8,7 +8,10 @@
     "dev": "node server.mjs",
     "mock": "node server.mjs --mock",
     "test": "node --test lib/*.test.mjs",
+    "bundle": "node scripts/bundle-public.mjs",
+    "predeploy": "node scripts/bundle-public.mjs",
     "deploy": "wrangler deploy",
+    "prepreview": "node scripts/bundle-public.mjs",
     "preview": "wrangler dev"
   },
   "dependencies": {

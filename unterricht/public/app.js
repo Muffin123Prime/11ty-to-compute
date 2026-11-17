@@ -1106,7 +1106,21 @@
   }
 
   // Router ------------------------------------------------------------------------
+  // Einrichtungslink: https://…/#schluessel=PASSWORT speichert den App-Schlüssel
+  // und die Server-Adresse von selbst, damit auf dem Gerät nichts getippt werden muss.
+  function einrichtungsLink() {
+    const m = (location.hash || "").match(/^#schluessel=([^&]+)/);
+    if (!m) return false;
+    einst.appKey = decodeURIComponent(m[1]);
+    einst.server = "";
+    einst.hinweisGesehen = einst.hinweisGesehen || false;
+    speichereEinstellungen();
+    history.replaceState(null, "", "#start");
+    meldung("Eingerichtet. Jetzt noch „Zum Home-Bildschirm“ über das Teilen-Symbol.", 8000);
+    return true;
+  }
   function routen() {
+    if (einrichtungsLink()) return routen();
     const h = location.hash || "#start";
     if (h === "#start") zeigeStart();
     else if (h === "#live") zeigeLive();
