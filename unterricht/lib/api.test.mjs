@@ -220,3 +220,20 @@ test("antwort: erkannte Frage wird immer beantwortet", async () => {
   assert.equal(d.frage, "Warum ist Wasser ein Dipol?");
   assert.match(client.aufrufe[0].messages[0].content, /Vom Frage-Wächter erkannte Frage/);
 });
+
+test("manuell ohne Frage: zweiter Anlauf liefert eine Zusammenfassung zum Sagen", async () => {
+  let runde = 0;
+  const client = { beta: { messages: { async create(params) {
+    runde++;
+    const leer = { frage_erkannt: false, frage: "", antwort: "", kurz: "", erklaerung: "", bild: { typ: "keins", wert: "", beschreibung: "" } };
+    const voll = { frage_erkannt: false, frage: "", antwort: "Die Zelle ist die kleinste Einheit des Lebens, und Pflanzenzellen haben eine Zellwand.", kurz: "Zelle, kleinste Einheit.", erklaerung: "", bild: { typ: "keins", wert: "", beschreibung: "" } };
+    if (runde === 2) assert.match(params.messages[0].content, /zuletzt erklärt hat/);
+    return { model: params.model, stop_reason: "end_turn", content: [{ type: "text", text: JSON.stringify(runde === 1 ? leer : voll) }], usage: { input_tokens: 10, output_tokens: 5 } };
+  } } } };
+  const r = await apiAnfrage(post("/api/antwort", { modus: "manuell", transkript: [{ text: "die zelle ist die kleinste einheit" }] }), env, { client });
+  const d = await r.json();
+  assert.equal(runde, 2);
+  assert.equal(d.frage_erkannt, true);
+  assert.match(d.antwort, /kleinste Einheit/);
+  assert.equal(d.nutzung.eingabe, 20);
+});

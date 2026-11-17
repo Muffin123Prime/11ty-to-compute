@@ -260,13 +260,33 @@ async function strukturiert(anbieter, params) {
  * @param eingabe { fach, transkript: [{t, text}], frage?, modus: "auto"|"manuell", profil?, modell? }
  */
 export async function antwort(anbieter, eingabe) {
-  const { daten, nutzung } = await strukturiert(anbieter, {
+  let { daten, nutzung } = await strukturiert(anbieter, {
     system: antwortSystemPrompt(eingabe.profil),
     user: antwortUserPrompt(eingabe),
     schema: ANTWORT_SCHEMA,
     effort: eingabe.modus === "manuell" ? "high" : "medium",
     websuche: Boolean(eingabe.websuche),
   });
+  // "Jetzt antworten" ohne erkennbare Frage: zweiter Anlauf mit klarem Auftrag,
+  // damit der Schüler auf jeden Fall etwas zum Sagen hat.
+  if (eingabe.modus === "manuell" && !eingabe.frage && !daten.frage_erkannt && eingabe.transkript?.length) {
+    const zweiter = await strukturiert(anbieter, {
+      system: antwortSystemPrompt(eingabe.profil),
+      user: antwortUserPrompt({
+        ...eingabe,
+        erkannt: true,
+        frage: "Fasse in zwei Sätzen zusammen, was die Lehrkraft zuletzt erklärt hat, so wie ich es sagen würde, wenn ich jetzt aufgerufen werde.",
+      }),
+      schema: ANTWORT_SCHEMA,
+      effort: "medium",
+    });
+    daten = zweiter.daten;
+    nutzung = { ...zweiter.nutzung, eingabe: (nutzung.eingabe || 0) + (zweiter.nutzung.eingabe || 0), ausgabe: (nutzung.ausgabe || 0) + (zweiter.nutzung.ausgabe || 0) };
+    if (daten.antwort) {
+      daten.frage_erkannt = true;
+      daten.frage = daten.frage || "Was wurde zuletzt erklärt?";
+    }
+  }
   const erzwungen = eingabe.modus === "manuell" || Boolean(eingabe.frage);
   if (!daten.frage_erkannt && !(erzwungen && daten.antwort)) {
     return { frage_erkannt: false, frage: "", antwort: "", kurz: "", erklaerung: "", bild: null, nutzung };
