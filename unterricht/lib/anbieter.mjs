@@ -204,6 +204,24 @@ export function cloudflareAnbieter(ai, modelle = {}) {
       const daten = jsonAusText(text);
       return { daten, nutzung: { anbieter: "cloudflare", modell, eingabe: nutzung.prompt_tokens ?? 0, ausgabe: nutzung.completion_tokens ?? 0 } };
     },
+    // Spracherkennung mit Whisper: erkennt die Sprache pro Stück selbst (Deutsch, Englisch, …).
+    async transkribieren({ audioBase64 }) {
+      let r;
+      try {
+        r = await ai.run("@cf/openai/whisper-large-v3-turbo", { audio: audioBase64, task: "transcribe" });
+      } catch (e) {
+        throw cfFehler(e);
+      }
+      const info = r?.transcription_info || {};
+      return {
+        text: (r?.text || "").trim(),
+        sprache: info.language || "",
+        sicherheit: info.language_probability ?? 0,
+        dauer: info.duration ?? 0,
+        gesprochen: info.duration_after_vad ?? info.duration ?? 0,
+        nutzung: { anbieter: "cloudflare", modell: "@cf/openai/whisper-large-v3-turbo", neuronen: r?.usage?.neurons ?? 0 },
+      };
+    },
     fehlerText: () => null,
   };
 }

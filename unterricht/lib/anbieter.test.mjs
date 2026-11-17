@@ -134,3 +134,13 @@ test("stream ohne Stream-Anbieter: ein einziges fertig-Ereignis", async () => {
   assert.equal(events[0].typ, "fertig");
   assert.equal(events[0].frage_erkannt, true);
 });
+
+test("cloudflare: transkribieren ruft Whisper und liefert Text, Sprache, Dauer", async () => {
+  const ai = { run: async (modell, params) => { assert.equal(modell, "@cf/openai/whisper-large-v3-turbo"); assert.equal(params.audio, "QUJD"); return { text: " who can tell me ", transcription_info: { language: "en", language_probability: 0.98, duration: 4.5, duration_after_vad: 4.1 }, usage: { neurons: 3.4 } }; } };
+  const r = await apiAnfrage(post("/api/transkribieren", { audio: "QUJD" }), { AI: ai });
+  const d = await r.json();
+  assert.equal(d.text, "who can tell me");
+  assert.equal(d.sprache, "en");
+  assert.equal(d.gesprochen, 4.1);
+  assert.equal(d.nutzung.neuronen, 3.4);
+});

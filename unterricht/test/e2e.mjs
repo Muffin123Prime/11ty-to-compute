@@ -71,6 +71,16 @@ await page.waitForFunction(() => /Antwort da|schon beantwortet|keine Frage/.test
 const waechterText = await page.locator(".waechter").textContent();
 assert.match(waechterText, /Antwort da|schon beantwortet/);
 
+// Aufgabe der Lehrkraft: Karte links, erst Vorbereitung, nach Eintippen die Lösung
+await page.evaluate(() => window.unterricht.einspeisen("macht bis morgen bitte aufgabe 3 auf seite 42"));
+await page.locator(".aufgabe-karte .auftrag").waitFor({ timeout: 10000 });
+await page.waitForFunction(() => /Seite 42/.test(document.querySelector(".aufgabe-karte .auftrag")?.textContent || ""), null, { timeout: 10000 });
+assert.match(await page.locator(".aufgabe-karte").first().textContent(), /Schon vorbereitet/);
+await page.locator(".aufgabe-karte textarea").first().fill("Erkläre die Funktion der Zellwand.");
+await page.locator(".aufgabe-karte").getByRole("button", { name: "Lösen" }).click();
+await page.waitForFunction(() => /Erledigt:/.test(document.querySelector(".aufgabe-karte")?.textContent || ""), null, { timeout: 10000 });
+assert.match(await page.locator(".aufgabe-karte .loesung-text").first().textContent(), /Zellulose/);
+
 // Eingetippte Frage
 await page.getByPlaceholder(/Frage eintippen/).fill("Was ist ein Dipol?");
 await page.getByRole("button", { name: "Fragen", exact: true }).click();

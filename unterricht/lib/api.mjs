@@ -8,13 +8,15 @@
 //   POST /api/nachfrage         Frage zu gespeicherten Stunden
 //   POST /api/uebersetzung      Transkript-Stücke live ins Deutsche übersetzen
 //   POST /api/frage             Frage-Wächter: steckt im neuesten Text eine Frage der Lehrkraft?
+//   POST /api/aufgabe           Arbeitsauftrag der Lehrkraft zusammenfassen und erledigen
+//   POST /api/transkribieren    Audio-Stück (base64) mit Whisper in Text wandeln, Sprache wird erkannt
 //
 // Welche KI antwortet, entscheidet lib/anbieter.mjs (KI_ANBIETER, Standard:
 // Workers AI im selben Worker, kostenlos). Ist APP_KEY gesetzt, muss jede Anfrage ihn im Header x-app-key tragen,
 // damit nicht jeder, der die Adresse kennt, auf Kosten des Schülers
 // Claude benutzt.
 
-import { antwort, zusammenfassung, nachfrage, uebersetzung, frageErkennen } from "./claude.mjs";
+import { antwort, zusammenfassung, nachfrage, uebersetzung, frageErkennen, aufgabe } from "./claude.mjs";
 import { erzeugeAnbieter, anbieterName } from "./anbieter.mjs";
 import { bildAufloesen } from "./bilder.mjs";
 
@@ -213,6 +215,28 @@ export async function apiAnfrage(request, env, optionen = {}) {
         transkript,
         bisherige: Array.isArray(body.bisherige) ? body.bisherige.slice(-8).map((f) => String(f).slice(0, 200)) : [],
       });
+      return json(ergebnis, 200, cors);
+    }
+
+    if (pfad === "/api/aufgabe") {
+      const text = typeof body.aufgabe === "string" ? body.aufgabe.trim().slice(0, 1500) : "";
+      if (!text) return json({ fehler: "Keine Aufgabe." }, 400, cors);
+      const ergebnis = await aufgabe(client, {
+        fach: String(body.fach || "").slice(0, 80),
+        aufgabe: text,
+        zusatz: typeof body.zusatz === "string" ? body.zusatz.trim().slice(0, 6000) : "",
+        kontext: typeof body.kontext === "string" ? body.kontext.slice(0, 4000) : "",
+        transkript: transkriptPruefen(body.transkript).slice(-30),
+        profil,
+      });
+      return json(ergebnis, 200, cors);
+    }
+
+    if (pfad === "/api/transkribieren") {
+      if (!anbieter.transkribieren) return json({ fehler: "Die Sprach-Erkennung mit Whisper gibt es nur mit Workers AI (Cloudflare)." }, 501, cors);
+      const audio = typeof body.audio === "string" ? body.audio : "";
+      if (!audio || audio.length > 3_000_000) return json({ fehler: "Kein oder zu großes Audio-Stück." }, 400, cors);
+      const ergebnis = await anbieter.transkribieren({ audioBase64: audio });
       return json(ergebnis, 200, cors);
     }
 

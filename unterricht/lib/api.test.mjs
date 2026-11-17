@@ -237,3 +237,21 @@ test("manuell ohne Frage: zweiter Anlauf liefert eine Zusammenfassung zum Sagen"
   assert.match(d.antwort, /kleinste Einheit/);
   assert.equal(d.nutzung.eingabe, 20);
 });
+
+test("aufgabe: ohne Aufgabentext Vorbereitung, mit Text vollständige Lösung", async () => {
+  const client = attrappenClient();
+  const ohne = await (await apiAnfrage(post("/api/aufgabe", { fach: "Biologie", aufgabe: "macht bis morgen aufgabe 3 auf seite 42" }), env, { client })).json();
+  assert.equal(ohne.braucht_text, true);
+  assert.match(ohne.aufgabe, /Seite 42/);
+  assert.match(client.aufrufe[0].messages[0].content, /Arbeitsauftrag der Lehrkraft: macht bis morgen/);
+  const mit = await (await apiAnfrage(post("/api/aufgabe", { fach: "Biologie", aufgabe: "aufgabe 3", zusatz: "Erkläre die Funktion der Zellwand." }), env, { client })).json();
+  assert.equal(mit.braucht_text, false);
+  assert.match(mit.loesung, /Zellulose/);
+  const leer = await apiAnfrage(post("/api/aufgabe", {}), env, { client });
+  assert.equal(leer.status, 400);
+});
+
+test("transkribieren: nur mit Workers AI, sonst 501", async () => {
+  const r = await apiAnfrage(post("/api/transkribieren", { audio: "AAAA" }), env, { client: attrappenClient() });
+  assert.equal(r.status, 501);
+});

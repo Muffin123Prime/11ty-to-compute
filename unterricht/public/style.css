@@ -162,6 +162,16 @@ label.block { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 1
 @keyframes aufleuchten { 0% { background: #2a2a2a; border-left-color: var(--rot); } 100% { background: var(--karte); border-left-color: #fff; } }
 .antwort-karte.wartet { border-left-color: var(--muted); }
 .antwort-karte.nichts { border-left-color: var(--line); }
+.aufgabe-karte { padding: 14px 16px; border-left: 4px solid var(--muted); }
+.aufgabe-karte.wartet { opacity: 0.8; }
+.aufgabe-karte .auftrag { font-weight: 600; font-size: 16px; margin: 6px 0 8px; }
+.aufgabe-karte .schritte { margin: 0 0 10px; padding-left: 20px; font-size: 14px; color: var(--muted); }
+.aufgabe-karte .loesung { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--bg2); margin-bottom: 8px; }
+.aufgabe-karte .loesung-text { white-space: pre-wrap; font-size: 15px; line-height: 1.45; }
+.aufgabe-karte details summary { font-size: 14px; }
+.aufgabe-karte textarea.feld { min-height: 64px; font-size: 14px; }
+.aufgabe-karte .hinweis { margin: 0 0 6px; }
+.aufgabe-karte .fehler { color: #ffb0b0; font-size: 14px; }
 .leer-karte { border: 1px dashed var(--line); border-radius: var(--radius); padding: 24px; text-align: center; color: var(--muted); }
 .leer-karte .lade { margin-bottom: 10px; }
 

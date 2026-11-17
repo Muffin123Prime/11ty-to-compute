@@ -101,7 +101,7 @@ export const FRAGE_SCHEMA = {
 export function frageSystemPrompt() {
   return `Du bist der Frage-Wächter einer Unterrichts-App. Du bekommst die letzten Sätze einer automatischen Mitschrift (Hörfehler, keine Satzzeichen, zerschnittene Sätze). Entscheide, ob die Lehrkraft im neuesten Teil (unten) gerade eine Frage oder Aufgabe an die Klasse gerichtet hat, auf die sich ein Schüler melden könnte.
 Ja: "Wer kann mir sagen …", "Wie sieht … aus", "Was ist …", "Warum …", "Nennt mir …", "Rechnet mal …", "Was meint ihr …", "Überlegt mal …", auch mit Namensaufruf, auch ohne Fragewort, wenn klar eine Antwort erwartet wird.
-Nein: rhetorische Fragen, die sofort selbst beantwortet werden; Organisatorisches ("Habt ihr das Buch?", "Seid ihr fertig?"); Rückfragen an einen Schüler, der schon antwortet; Fragen aus der Liste "schon beantwortet"; reine Erklärungen.
+Nein: rhetorische Fragen, die sofort selbst beantwortet werden; Organisatorisches ("Habt ihr das Buch?", "Seid ihr fertig?"); Rückfragen an einen Schüler, der schon antwortet; Fragen aus der Liste "schon beantwortet"; reine Erklärungen. Die Mitschrift enthält auch Zwischenrufe und Antworten von Mitschülern: kurze Einwürfe, halbe Sätze, Gelächter, Antwortversuche ("ähm Zellulose?"). Das sind keine Lehrerfragen und keine Aufgaben; nur was klar von der Lehrkraft an die Klasse geht, zählt. Arbeitsaufträge ("Schlagt Seite 42 auf", "Macht Aufgabe 3", "Schreibt bis morgen …") sind art "aufgabe".
 Im Zweifel ja. "frage" sauber ausformuliert, Hörfehler korrigiert. Nur JSON.`;
 }
 
@@ -118,6 +118,43 @@ export async function frageErkennen(anbieter, eingabe) {
   });
   if (!daten.frage_erkannt || !daten.frage) return { frage_erkannt: false, frage: "", art: "keine", nutzung };
   return { frage_erkannt: true, frage: daten.frage, art: daten.art === "aufgabe" ? "aufgabe" : "frage", nutzung };
+}
+
+export const AUFGABE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["aufgabe", "schritte", "loesung", "braucht_text", "hinweis"],
+  properties: {
+    aufgabe: { type: "string", description: "Was genau zu tun ist, in einem klaren Satz (mit Seite, Nummer, Abgabe, falls genannt)." },
+    schritte: { type: "array", items: { type: "string" }, description: "Die Arbeitsschritte, kurz, höchstens fünf." },
+    loesung: { type: "string", description: "Die erledigte Aufgabe: Ergebnis, Text, Rechnung oder Antwort, so dass der Schüler sie abschreiben oder vortragen kann. Bei Fremdsprachenunterricht in der Sprache der Aufgabe. Wenn der Aufgabentext fehlt: das, was sich schon vorbereiten lässt." },
+    braucht_text: { type: "boolean", description: "true, wenn für eine vollständige Lösung der Aufgabentext (Buchseite, Arbeitsblatt) fehlt." },
+    hinweis: { type: "string", description: "Was noch fehlt oder worauf die Lehrkraft Wert legt. Sonst leer." },
+  },
+};
+
+export function aufgabeSystemPrompt(profil = {}) {
+  return `Du erledigst für einen Schüler (${profilText(profil)}) eine Aufgabe, die die Lehrkraft im Unterricht gestellt hat. Du bekommst den Arbeitsauftrag (aus einer automatischen Mitschrift, mit Hörfehlern), den Stundenkontext und, falls der Schüler ihn eingetippt hat, den Aufgabentext aus Buch oder Arbeitsblatt.
+Regeln:
+- "aufgabe": Formuliere sauber, was zu tun ist, mit Seite, Nummer und Abgabetermin, falls genannt.
+- "loesung": Erledige die Aufgabe so, wie ein guter Schüler dieser Klassenstufe sie abgeben würde: ${niveauText(profil)} Rechnungen mit Rechenweg, Texte ausformuliert, Fragen vollständig beantwortet. Fremdsprachenaufgaben in der Fremdsprache. Nutze den Stundenkontext.
+- Fehlt der eigentliche Aufgabentext (etwa "Aufgabe 3 auf Seite 42" ohne den Wortlaut): braucht_text = true, "loesung" enthält, was sich aus dem Stundenkontext schon vorbereiten lässt, und "hinweis" sagt, dass der Schüler den Aufgabentext eintippen soll.
+- Keine Einleitung, keine Floskeln. Antworte ausschließlich im vorgegebenen JSON-Format.`;
+}
+
+export async function aufgabe(anbieter, eingabe) {
+  const teile = [`Fach: ${eingabe.fach || "unbekannt"}`, `Arbeitsauftrag der Lehrkraft: ${eingabe.aufgabe}`];
+  if (eingabe.zusatz) teile.push(`\nAufgabentext (vom Schüler eingetippt):\n${eingabe.zusatz}`);
+  if (eingabe.kontext) teile.push(`\nStundenkontext:\n${eingabe.kontext}`);
+  if (eingabe.transkript?.length) teile.push(`\nMitschrift der letzten Minuten:\n<transkript>\n${transkriptText(eingabe.transkript)}\n</transkript>`);
+  const { daten, nutzung } = await strukturiert(anbieter, {
+    system: aufgabeSystemPrompt(eingabe.profil),
+    user: teile.join("\n"),
+    schema: AUFGABE_SCHEMA,
+    effort: "medium",
+    maxTokens: 1500,
+  });
+  return { ...daten, schritte: Array.isArray(daten.schritte) ? daten.schritte : [], nutzung };
 }
 
 export const UEBERSETZUNG_SCHEMA = {
@@ -174,7 +211,7 @@ function laengeText(profil = {}) {
 }
 
 export function antwortSystemPrompt(profil = {}) {
-  return `Du hilfst einem Schüler, der im Unterricht sitzt und sich melden möchte. Die App hört den Unterricht mit und schreibt ihn automatisch mit. Das Transkript kommt von einer Spracherkennung: Es enthält Hörfehler (z. B. "H zwei O" statt "H2O", "Fotos Synthese" statt "Photosynthese", "Mohl" statt "Mol"), keine Satzzeichen, abgeschnittene Sätze und manchmal Stimmen von Mitschülern. Lies es so, wie ein Mensch es im Raum gehört hätte, und korrigiere Hörfehler stillschweigend.
+  return `Du hilfst einem Schüler, der im Unterricht sitzt und sich melden möchte. Die App hört den Unterricht mit und schreibt ihn automatisch mit. Das Transkript kommt von einer Spracherkennung: Es enthält Hörfehler (z. B. "H zwei O" statt "H2O", "Fotos Synthese" statt "Photosynthese", "Mohl" statt "Mol"), keine Satzzeichen, abgeschnittene Sätze und Stimmen von Mitschülern (Zwischenrufe, halbe Antwortversuche). Lies es so, wie ein Mensch es im Raum gehört hätte, korrigiere Hörfehler stillschweigend und lass dich von Mitschüler-Einwürfen nicht ablenken: Maßgeblich ist, was die Lehrkraft fragt.
 
 Profil: ${profilText(profil)}.
 Niveau: ${niveauText(profil)}
@@ -234,7 +271,7 @@ export function zusammenfassungSystemPrompt(profil, laufend = false) {
   if (laufend) {
     return `Die Stunde läuft noch. Du bekommst das bisherige automatische Transkript (mit Hörfehlern, ohne Satzzeichen) und schreibst für den Schüler (${profilText(profil)}) einen knappen Zwischenstand: Worum geht es bisher, die wichtigsten Aussagen bis jetzt (höchstens sechs Kernpunkte), Fragen und Aufgaben, die die Lehrkraft bisher gestellt hat, sowie Hausaufgaben, Tests und Termine, die genannt wurden. Kurz und konkret, auf Deutsch, nur was im Transkript vorkommt. Die Zusammenfassung ist drei bis fünf Sätze. Antworte ausschließlich im vorgegebenen JSON-Format.`;
   }
-  return `Du fasst eine Unterrichtsstunde für einen Schüler zusammen (${profilText(profil)}). Grundlage ist ein automatisches Transkript mit Hörfehlern und ohne Satzzeichen. Schreibe so, dass der Schüler die Stunde eine Woche später daraus nachlernen kann: klar, konkret, in seinen Worten, auf Deutsch (${niveauText(profil).split(":")[0]}). Hörfehler der Spracherkennung stillschweigend korrigieren. Gib nur wieder, was im Transkript vorkommt. Wenn etwas unverständlich war, lass es weg, statt zu raten. Hausaufgaben, Tests und Termine, die genannt wurden, gehören immer hinein. Antworte ausschließlich im vorgegebenen JSON-Format.`;
+  return `Du fasst eine Unterrichtsstunde für einen Schüler zusammen (${profilText(profil)}). Grundlage ist ein automatisches Transkript mit Hörfehlern und ohne Satzzeichen, in dem auch Zwischenrufe und Antworten von Mitschülern stehen; die zählen nur, wenn die Lehrkraft sie bestätigt hat. Schreibe so, dass der Schüler die Stunde eine Woche später daraus nachlernen kann: klar, konkret, in seinen Worten, auf Deutsch (${niveauText(profil).split(":")[0]}). Hörfehler der Spracherkennung stillschweigend korrigieren. Gib nur wieder, was im Transkript vorkommt. Wenn etwas unverständlich war, lass es weg, statt zu raten. Hausaufgaben, Tests und Termine, die genannt wurden, gehören immer hinein. Antworte ausschließlich im vorgegebenen JSON-Format.`;
 }
 
 export function nachfrageSystemPrompt(profil) {
@@ -245,7 +282,7 @@ export const SPRACHEN = { de: "Deutsch", en: "Englisch", fr: "Französisch", es:
 
 export function uebersetzungSystemPrompt(von, fach) {
   const sprache = SPRACHEN[von] || von;
-  return `Du übersetzt live den Unterricht für einen Schüler. Die Lehrkraft spricht ${sprache}${fach ? ` (Fach: ${fach})` : ""}. Du bekommst kurze Stücke aus einer automatischen Spracherkennung: ohne Satzzeichen, mit Hörfehlern, manchmal mitten im Satz abgeschnitten. Übersetze jedes Stück für sich ins Deutsche, natürlich und so, wie es im Unterricht gemeint ist. Korrigiere offensichtliche Hörfehler stillschweigend. Stücke, die schon Deutsch sind (die Lehrkraft wechselt die Sprache), lässt du unverändert. Namen, Zahlen und Fachbegriffe bleiben erhalten; bei Fachbegriffen darfst du das Original in Klammern dazusetzen, wenn es der Klasse hilft. Keine Kommentare, keine Erklärungen, pro Stück genau eine Übersetzung mit derselben id. Antworte ausschließlich im vorgegebenen JSON-Format.`;
+  return `Du übersetzt live den Unterricht für einen Schüler. Die Lehrkraft spricht ${sprache}${fach ? ` (Fach: ${fach})` : ""}. Du bekommst kurze Stücke aus einer automatischen Spracherkennung: ohne Satzzeichen, mit Hörfehlern, manchmal mitten im Satz abgeschnitten. Übersetze jedes Stück für sich ins Deutsche, natürlich und so, wie es im Unterricht gemeint ist. Korrigiere offensichtliche Hörfehler stillschweigend. Stücke, die schon Deutsch sind (die Lehrkraft wechselt die Sprache), lässt du unverändert. Zwischenrufe von Mitschülern übersetzt du knapp, ohne sie auszuschmücken. Namen, Zahlen und Fachbegriffe bleiben erhalten; bei Fachbegriffen darfst du das Original in Klammern dazusetzen, wenn es der Klasse hilft. Keine Kommentare, keine Erklärungen, pro Stück genau eine Übersetzung mit derselben id. Antworte ausschließlich im vorgegebenen JSON-Format.`;
 }
 
 // --- Aufrufe ----------------------------------------------------------------

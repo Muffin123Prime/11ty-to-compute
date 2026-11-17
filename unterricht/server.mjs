@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { apiAnfrage } from "./lib/api.mjs";
 import { attrappenClient } from "./lib/attrappe.mjs";
+import { anthropicAnbieter } from "./lib/anbieter.mjs";
 
 const hier = path.dirname(fileURLToPath(import.meta.url));
 const oeffentlich = path.join(hier, "public");
@@ -25,6 +26,10 @@ const env = {
   APP_KEY: process.env.APP_KEY || "",
   ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || "",
 };
+
+// Attrappe inklusive Whisper-Ersatz, damit der Misch-Modus lokal durchläuft.
+const attrappenAnbieter = anthropicAnbieter(attrappenClient());
+attrappenAnbieter.transkribieren = async () => ({ text: "who can tell me why water is a dipole", sprache: "en", sicherheit: 0.9, dauer: 4, gesprochen: 3.5, nutzung: {} });
 
 const TYPEN = {
   ".html": "text/html; charset=utf-8",
@@ -64,7 +69,7 @@ createServer(async (req, res) => {
   let antwort;
   try {
     antwort = url.pathname.startsWith("/api/")
-      ? await apiAnfrage(request, env, mock ? { client: attrappenClient() } : {})
+      ? await apiAnfrage(request, env, mock ? { anbieter: attrappenAnbieter } : {})
       : await statisch(decodeURIComponent(url.pathname));
   } catch (e) {
     antwort = new Response(JSON.stringify({ fehler: e.message }), { status: 500, headers: { "content-type": "application/json" } });

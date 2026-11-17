@@ -67,6 +67,16 @@ function standardAntwort(felder, params) {
     const fragend = /\?|wie sieht|was ist|warum|wer kann|erklär|nennt|rechnet|^who|^what|^why|who can/i.test(letzte);
     return fragend ? { frage_erkannt: true, frage: "Wie sieht ein Wassermolekül aus?", art: "frage" } : { frage_erkannt: false, frage: "", art: "keine" };
   }
+  if (felder.includes("loesung")) {
+    const fehlt = !/Aufgabentext \(vom Schüler eingetippt\)/.test(user);
+    return {
+      aufgabe: "Seite 42, Aufgabe 3 bearbeiten (bis morgen).",
+      schritte: ["Seite 42 aufschlagen", "Aufgabe 3 lesen", "Antwort ins Heft schreiben"],
+      loesung: fehlt ? "Vorbereitung: Es geht um die Zellwand. Zellulose gibt der Zelle Form und Festigkeit." : "Die Zellwand besteht aus Zellulose. Sie gibt der Pflanzenzelle ihre Form und Festigkeit.",
+      braucht_text: fehlt,
+      hinweis: fehlt ? "Tipp den Aufgabentext von Seite 42 ein, dann löse ich sie vollständig." : "",
+    };
+  }
   if (felder.includes("uebersetzungen")) {
     const ids = [...user.matchAll(/<segment id="([^"]+)">([^<]*)<\/segment>/g)];
     return { uebersetzungen: ids.map(([, id, text]) => ({ id, text: `[DE] ${text}` })) };

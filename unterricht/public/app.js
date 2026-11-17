@@ -193,6 +193,13 @@
     /\b(quién puede|quién sabe|qué es|qué son|por qué|cómo se|cuántos|cuántas|alguien sabe|alguien puede|me puede decir)\b/i,
   ];
   const istFrage = (text) => FRAGE_MUSTER.some((m) => m.test(text.trim()));
+  const AUFGABE_MUSTER = [
+    /\b(schlagt|schlag|öffnet|lest|liest|macht (bitte |mal |jetzt |euch |alle )*(die |mal )?(aufgabe|nummer|seite|übung|aufgaben)|bearbeitet|bearbeite|löst|lös(t|en) (bitte|mal)|rechnet|berechnet|schreibt|notiert|zeichnet|markiert|unterstreicht|ergänzt|übersetzt|fasst .{0,30}zusammen|erstellt|bereitet .{0,30}vor|lernt|übt|hausaufgabe|hausaufgaben|zur nächsten stunde|bis (morgen|montag|dienstag|mittwoch|donnerstag|freitag|nächste woche|nächsten)|seite \d+|aufgabe \d+|nummer \d+|arbeitsblatt)\b/i,
+    /\b(open your books|turn to page|page \d+|exercise \d+|do (the )?exercise|read the text|write (a|an|down)|fill in|homework|for (tomorrow|monday|tuesday|wednesday|thursday|friday|next week)|translate|work in pairs|in groups)\b/i,
+    /\b(ouvrez|lisez|écrivez|faites l'exercice|page \d+|exercice \d+|pour demain|devoirs)\b/i,
+    /\b(abrid|leed|escribid|haced el ejercicio|página \d+|ejercicio \d+|para mañana|deberes)\b/i,
+  ];
+  const istAufgabe = (text) => AUFGABE_MUSTER.some((m) => m.test(text.trim()));
 
   // ---------- Live-Zustand ----------------------------------------------------
   const live = {
@@ -219,6 +226,10 @@
     waechterNochmal: false,
     waechterZuletztMs: 0,
     vorlaeufig: null, // Segment aus dem noch unfertigen Erkennungs-Text
+    audioStream: null, // Whisper-Modus
+    recorder: null,
+    recorderTimer: null,
+    whisperWarteschlange: Promise.resolve(),
     stabilTimer: null,
     waechterStand: 0, // Anzahl Segmente beim letzten Prüfen
     waechterText: "", // Statuszeile
@@ -319,6 +330,111 @@
     }, 5000);
   }
 
+  // ---------- Whisper-Modus: Audio in 6-Sekunden-Stücken an den Server ------------
+  // Für Stunden, in denen die Lehrkraft zwischen Deutsch und einer Fremdsprache
+  // wechselt: Whisper erkennt die Sprache jedes Stücks selbst. Dafür etwa fünf
+  // Sekunden langsamer als die Erkennung im Browser.
+  const WHISPER_STUECK_MS = 6000;
+  function whisperMime() {
+    for (const t of ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"]) if (MediaRecorder.isTypeSupported(t)) return t;
+    return "";
+  }
+  async function whisperStarten() {
+    live.hoert = true;
+    live.pausiert = false;
+    if (live.pauseSeitMs) {
+      live.pausenMs += Date.now() - live.pauseSeitMs;
+      live.pauseSeitMs = 0;
+    }
+    try {
+      live.audioStream ||= await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    } catch {
+      live.hoert = false;
+      meldung("Kein Zugriff aufs Mikrofon. Bitte in den Browser-Einstellungen erlauben.", 6000);
+      liveKopfZeichnen();
+      return;
+    }
+    live.recLaeuft = true;
+    whisperStueck();
+    wakeLockHolen();
+    liveKopfZeichnen();
+  }
+  function whisperStueck() {
+    const st = live.stunde;
+    if (!st || !live.hoert || live.pausiert || !live.audioStream) return;
+    const mime = whisperMime();
+    let rec;
+    try {
+      rec = new MediaRecorder(live.audioStream, mime ? { mimeType: mime, audioBitsPerSecond: 48000 } : undefined);
+    } catch (e) {
+      meldung(`Aufnahme nicht möglich: ${e.message}`, 6000);
+      return;
+    }
+    const teile = [];
+    const tStart = Math.max(0, Math.round(liveSekunden()));
+    rec.ondataavailable = (e) => e.data && e.data.size && teile.push(e.data);
+    rec.onstop = () => {
+      const blob = new Blob(teile, { type: rec.mimeType || mime });
+      if (blob.size > 2000) whisperSenden(blob, tStart, st);
+    };
+    live.recorder = rec;
+    rec.start();
+    clearTimeout(live.recorderTimer);
+    live.recorderTimer = setTimeout(() => {
+      // Nächstes Stück sofort anfangen, dann das alte beenden: keine Lücke.
+      whisperStueck();
+      try {
+        rec.stop();
+      } catch {
+        /* egal */
+      }
+    }, WHISPER_STUECK_MS);
+  }
+  function whisperStoppen() {
+    clearTimeout(live.recorderTimer);
+    const rec = live.recorder;
+    live.recorder = null;
+    try {
+      if (rec && rec.state !== "inactive") rec.stop();
+    } catch {
+      /* egal */
+    }
+    live.recLaeuft = false;
+    if (!live.hoert || live.stunde === null) {
+      live.audioStream?.getTracks().forEach((t) => t.stop());
+      live.audioStream = null;
+    }
+  }
+  const HALLUZINATION = /untertitel|amara\.org|thank you for watching|thanks for watching|vielen dank für.? zuschauen|subscribe|abonnier/i;
+  function whisperSenden(blob, tStart, st) {
+    // Nacheinander senden, damit die Reihenfolge stimmt.
+    live.whisperWarteschlange = live.whisperWarteschlange.then(async () => {
+      if (live.stunde !== st) return;
+      const base64 = await new Promise((ok, nein) => {
+        const r = new FileReader();
+        r.onload = () => ok(String(r.result).split(",")[1] || "");
+        r.onerror = () => nein(r.error);
+        r.readAsDataURL(blob);
+      });
+      try {
+        const d = await api("/api/transkribieren", { audio: base64 });
+        live.recZuletztMs = Date.now();
+        const text = (d.text || "").trim();
+        if (!text || d.gesprochen < 0.6 || (d.gesprochen < 2.5 && HALLUZINATION.test(text))) return;
+        const seg = { t: tStart, text, sprache: d.sprache || "" };
+        if (seg.sprache === "de") seg.de = text; // schon Deutsch, nichts zu übersetzen
+        st.transkript.push(seg);
+        speichernBald();
+        transkriptZeichnen();
+        uebersetzungAnstossen(200);
+        fragePruefen(text, false);
+      } catch (e) {
+        live.uebersetzFehler = `Erkennung: ${e.message}`;
+        transkriptZeichnen();
+      }
+    });
+  }
+
   async function wakeLockHolen() {
     try {
       if ("wakeLock" in navigator && !live.wakeLock) {
@@ -391,9 +507,10 @@
     const letzter = tr.at(-1);
     const vor = tr.at(-2);
     const paar = vor && letzter && letzter.t - vor.t <= 8 ? `${vor.text} ${text}` : text;
-    // Erst der neue Text allein, sonst zusammen mit dem Stück davor (zerschnittene Frage).
-    const hinweis = istFrage(text) ? text : istFrage(paar) ? paar : null;
-    if (hinweis) autoAntwort(hinweis);
+    // Erst der neue Text allein (Frage oder Aufgabe), dann zusammen mit dem Stück davor (zerschnittene Frage).
+    if (istFrage(text)) autoAntwort(text);
+    else if (!vorlaeufig && istAufgabe(text)) aufgabeAnlegen(text);
+    else if (istFrage(paar)) autoAntwort(paar);
     else waechterAnstossen(vorlaeufig);
   }
 
@@ -401,14 +518,14 @@
   // Fremdsprachige Stunden: neue Stücke werden gesammelt und nach kurzer Pause
   // gebündelt übersetzt, damit die Übersetzung ein, zwei Sekunden hinterherläuft.
   function uebersetzungAnstossen(wartezeit = 700) {
-    if (!live.stunde || live.stunde.sprache === "de") return;
+    if (!live.stunde || (live.stunde.sprache === "de" && live.stunde.erkennung !== "whisper")) return;
     clearTimeout(live.uebersetzTimer);
     live.uebersetzTimer = setTimeout(uebersetzen, wartezeit);
   }
   async function uebersetzen() {
     const st = live.stunde;
-    if (!st || st.sprache === "de" || live.uebersetzLaeuft) return;
-    const offen = st.transkript.filter((s) => s.de === undefined).slice(-30);
+    if (!st || (st.sprache === "de" && st.erkennung !== "whisper") || live.uebersetzLaeuft) return;
+    const offen = st.transkript.filter((s) => s.de === undefined && s.sprache !== "de").slice(-30);
     if (!offen.length) return;
     live.uebersetzLaeuft = true;
     offen.forEach((s) => (s.de = null)); // null = unterwegs
@@ -531,7 +648,10 @@
         bisherige: st.fragen.filter((f) => f.status !== "fehler").slice(0, 8).map((f) => f.frage),
       });
       if (live.stunde !== st) return;
-      if (d.frage_erkannt && d.frage) {
+      if (d.frage_erkannt && d.frage && d.art === "aufgabe") {
+        setzeWaechterText(`${zeit(liveSekunden())} Aufgabe erkannt`);
+        aufgabeAnlegen(d.frage);
+      } else if (d.frage_erkannt && d.frage) {
         if (schonGestellt(d.frage)) setzeWaechterText(`${zeit(liveSekunden())} schon beantwortet`);
         else {
           setzeWaechterText(`${zeit(liveSekunden())} ${d.art === "aufgabe" ? "Aufgabe" : "Frage"} erkannt`);
@@ -696,6 +816,65 @@
     p.textContent = karte.antwort + " ▍";
   }
 
+  // ---------- Aufgaben: Arbeitsaufträge der Lehrkraft erledigen ----------------
+  async function aufgabeAnlegen(text, zusatz = "", vorhandene = null) {
+    const st = live.stunde;
+    if (!st) return;
+    st.aufgaben ||= [];
+    let karte = vorhandene;
+    if (!karte) {
+      const kuerzlich = st.aufgaben.filter((a) => liveSekunden() - a.t < 900);
+      if (kuerzlich.some((a) => aehnlich(a.text, text))) return;
+      karte = { id: neueId(), t: Math.round(liveSekunden()), text, status: "wartet", aufgabe: "", schritte: [], loesung: "", braucht_text: false, hinweis: "", zusatz: "" };
+      st.aufgaben.unshift(karte);
+    } else {
+      karte.status = "wartet";
+      karte.zusatz = zusatz;
+    }
+    fragenSpalteZeichnen();
+    try {
+      const d = await api("/api/aufgabe", { fach: st.fach, aufgabe: text, zusatz, kontext: kontextText(), transkript: letzteSegmente(120, 4, 30), profil: profil() });
+      Object.assign(karte, { status: "fertig", aufgabe: d.aufgabe || text, schritte: d.schritte || [], loesung: d.loesung || "", braucht_text: Boolean(d.braucht_text), hinweis: d.hinweis || "" });
+      signal();
+    } catch (e) {
+      karte.status = "fehler";
+      karte.hinweis = e.message;
+    } finally {
+      speichernBald();
+      fragenSpalteZeichnen();
+    }
+  }
+
+  function aufgabeKarte(a, st) {
+    const entfernen = () => {
+      st.aufgaben = st.aufgaben.filter((x) => x.id !== a.id);
+      if (live.stunde === st) {
+        speichernBald();
+        fragenSpalteZeichnen();
+      } else db.speichere(st).then(() => zeigeStunde(st.id));
+    };
+    const eingabe = el("textarea", { class: "feld", placeholder: "Aufgabentext aus dem Buch eintippen …", rows: 3 }, a.zusatz || "");
+    return el("div", { class: `karte aufgabe-karte${a.status === "wartet" ? " wartet" : ""}` },
+      el("div", { class: "kopfzeile" }, el("span", { class: "tag" }, zeit(a.t)), el("span", { class: "tag" }, "Aufgabe"), a.status === "wartet" ? el("span", { class: "lade" }) : null),
+      el("div", { class: "auftrag" }, a.status === "fertig" ? a.aufgabe : a.text),
+      a.schritte?.length ? el("ol", { class: "schritte" }, a.schritte.map((sch) => el("li", {}, sch))) : null,
+      a.loesung ? el("div", { class: "loesung" }, el("div", { class: "muted klein", style: "margin-bottom:4px" }, a.braucht_text ? "Schon vorbereitet:" : "Erledigt:"), el("div", { class: "loesung-text" }, a.loesung)) : null,
+      a.hinweis ? el("p", { class: a.status === "fehler" ? "fehler" : "hinweis" }, a.hinweis) : null,
+      live.stunde === st && a.status !== "wartet"
+        ? el("details", { open: a.braucht_text || undefined },
+            el("summary", {}, a.braucht_text ? "Aufgabentext eintippen, dann löse ich sie ganz" : "Aufgabentext ergänzen"),
+            eingabe,
+            el("button", { class: "knopf klein", style: "margin-top:6px", onclick: () => aufgabeAnlegen(a.text, eingabe.value.trim(), a) }, "Lösen"),
+          )
+        : null,
+      el("div", { class: "fuss" },
+        a.loesung ? el("button", { class: "knopf leise klein", onclick: () => navigator.clipboard?.writeText(`${a.aufgabe}\n\n${a.loesung}`).then(() => meldung("Kopiert.")) }, "Kopieren") : null,
+        a.status === "fehler" ? el("button", { class: "knopf klein", onclick: () => aufgabeAnlegen(a.text, a.zusatz, a) }, "Noch mal") : null,
+        el("button", { class: "knopf leise klein", onclick: entfernen }, "Weg"),
+      ),
+    );
+  }
+
   // ---------- Zwischenstand (laufende Zusammenfassung) -------------------------
   const ZWISCHENSTAND_ALLE_MS = 4 * 60 * 1000;
   async function zwischenstandHolen(erzwungen = false) {
@@ -725,12 +904,13 @@
   }
 
   // ---------- Live: Start / Pause / Ende --------------------------------------
-  async function stundeStarten(fach, sprache = "de") {
+  async function stundeStarten(fach, sprache = "de", gemischt = false) {
     const start = new Date();
     live.stunde = {
       id: neueId(),
       fach,
       sprache,
+      erkennung: gemischt ? "whisper" : "browser",
       datum: start.toISOString().slice(0, 10),
       start: start.toISOString(),
       dauer: 0,
@@ -738,6 +918,7 @@
       fragen: [],
       zusammenfassung: null,
       zwischenstand: null,
+      aufgaben: [],
       notizen: "",
     };
     live.startMs = Date.now();
@@ -761,6 +942,7 @@
   }
 
   function hoerenStarten() {
+    if (live.stunde?.erkennung === "whisper") return whisperStarten();
     if (!SR) {
       meldung("Dieser Browser hat keine Spracherkennung. Auf dem iPhone/iPad Safari nehmen, sonst Chrome. Du kannst unten trotzdem mitschreiben.", 8000);
       live.hoert = false;
@@ -788,6 +970,7 @@
   function hoerenPausieren() {
     live.pausiert = true;
     live.pauseSeitMs = Date.now();
+    whisperStoppen();
     try {
       live.rec?.stop();
     } catch {
@@ -803,6 +986,7 @@
     const st = live.stunde;
     live.hoert = false;
     live.pausiert = false;
+    whisperStoppen();
     try {
       live.rec?.stop();
     } catch {
@@ -899,6 +1083,8 @@
 
   let gewaehltesFach = "";
   let gewaehlteSprache = "";
+  let gewaehltGemischt = false;
+  const WHISPER_MOEGLICH = () => Boolean(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
   function zeigeStart() {
     navMarkieren("start");
     app.classList.remove("breit");
@@ -936,6 +1122,12 @@
         el("span", { class: "muted klein", style: "align-self:center;margin-right:4px" }, "Lehrkraft spricht:"),
         SPRACHEN.map(([code, name]) => el("button", { class: `chip klein${sprache === code ? " aktiv" : ""}`, onclick: () => { gewaehlteSprache = code; chipsZeichnen(); } }, name)),
         el("span", { class: "muted klein", style: "flex-basis:100%;text-align:center" }, sprache !== "de" ? `Mitschrift auf ${spracheName(sprache)}, dazu live die deutsche Übersetzung. Antworten kommen auf ${spracheName(sprache)}.` : "Spricht die Lehrkraft eine andere Sprache? Hier antippen, dann läuft die Live-Übersetzung. Geht auch später im Band."),
+        sprache !== "de" && WHISPER_MOEGLICH()
+          ? el("label", { class: "schalter", style: "flex-basis:100%;justify-content:center;margin-top:4px" },
+              el("input", { type: "checkbox", checked: gewaehltGemischt, onchange: (e) => { gewaehltGemischt = e.target.checked; chipsZeichnen(); } }),
+              `Lehrkraft wechselt zwischen Deutsch und ${spracheName(sprache)} (Erkennung über Whisper, erkennt die Sprache selbst, etwa 5 s Verzögerung)`,
+            )
+          : null,
       );
     };
     chipsZeichnen();
@@ -945,7 +1137,7 @@
       disabled: Boolean(live.stunde),
       onclick: () => {
         if (!gewaehltesFach) return meldung("Erst oben das Fach antippen.");
-        stundeStarten(gewaehltesFach, gewaehlteSprache || "de");
+        stundeStarten(gewaehltesFach, gewaehlteSprache || "de", gewaehltGemischt && gewaehlteSprache && gewaehlteSprache !== "de");
       },
     }, "Zuhören");
     kinder.push(
@@ -1026,7 +1218,7 @@
   function liveKopfZeichnen() {
     if (!liveTeile || !live.stunde || !document.contains(liveTeile.band)) return;
     const zustand = !live.hoert ? "aus" : live.pausiert ? "pause" : "an";
-    const text = zustand === "an" ? "hört zu" : zustand === "pause" ? "Pause" : SR ? "aus" : "nur Tippen";
+    const text = zustand === "an" ? (live.stunde.erkennung === "whisper" ? "hört zu (Whisper)" : "hört zu") : zustand === "pause" ? "Pause" : SR || live.stunde.erkennung === "whisper" ? "aus" : "nur Tippen";
     let liveText = $(".live-text", liveTeile.band);
     if (!liveText) liveText = el("div", { class: "live-text", "aria-live": "polite" });
     ersetze(liveTeile.band,
@@ -1035,6 +1227,7 @@
         "aria-label": zustand === "an" ? "Pause" : "Weiter",
         title: zustand === "an" ? "Tippen: Pause" : "Tippen: weiter zuhören",
         onclick: () => (zustand === "an" ? hoerenPausieren() : hoerenStarten()),
+        disabled: !SR && live.stunde.erkennung !== "whisper",
       }),
       liveText,
       el("div", { class: "live-meta" },
@@ -1042,9 +1235,11 @@
         el("span", {}, `${text} · `, el("span", { class: "zeit" }, zeit(liveSekunden()))),
         el("span", { class: `waechter${einst.auto ? "" : " aus"}` }, einst.auto ? live.waechterText || "Wächter an" : "Wächter aus"),
         el("div", { class: "reihe", style: "gap:6px;margin-top:6px" },
-          el("select", { class: "feld klein-select", title: "Sprache der Lehrkraft", onchange: (e) => spracheWechseln(e.target.value) },
-            SPRACHEN.map(([code, name]) => el("option", { value: code, selected: (live.stunde.sprache || "de") === code }, code === "de" ? "Deutsch, keine Übersetzung" : `${name} → Deutsch`)),
-          ),
+          live.stunde.erkennung === "whisper"
+            ? el("span", { class: "tag" }, `Whisper: Deutsch + ${spracheName(live.stunde.sprache)}`)
+            : el("select", { class: "feld klein-select", title: "Sprache der Lehrkraft", onchange: (e) => spracheWechseln(e.target.value) },
+                SPRACHEN.map(([code, name]) => el("option", { value: code, selected: (live.stunde.sprache || "de") === code }, code === "de" ? "Deutsch, keine Übersetzung" : `${name} → Deutsch`)),
+              ),
           el("button", { class: `knopf klein${einst.auto ? " primaer" : ""}`, onclick: () => { einst.auto = !einst.auto; speichereEinstellungen(); liveKopfZeichnen(); } }, einst.auto ? "Automatik an" : "Automatik aus"),
           el("button", { class: "knopf klein", onclick: () => { if (confirm("Stunde beenden und zusammenfassen?")) stundeBeenden(); } }, "Beenden"),
         ),
@@ -1062,10 +1257,10 @@
     const st = live.stunde;
     const tr = st.transkript;
     const letzte = tr.slice(-4);
-    const fremd = st.sprache && st.sprache !== "de";
+    const fremd = (st.sprache && st.sprache !== "de") || st.erkennung === "whisper";
     const original = el("div", { class: fremd ? "original" : "" },
       tr.length === 0 && !live.zwischen ? el("span", { class: "leer" }, live.hoert ? (fremd ? `Ich höre zu (${spracheName(st.sprache)}) … Sobald jemand spricht, steht hier der Text und darunter die Übersetzung.` : "Ich höre zu … Sobald jemand spricht, steht der Text hier.") : SR ? "Pause. Auf den Punkt tippen, um weiter zuzuhören." : "Keine Spracherkennung in diesem Browser.") : null,
-      letzte.map((s, i) => el("span", { class: s.vorlaeufig ? "zwischen" : i === letzte.length - 1 ? "neu" : "alt" }, `${s.text} `)),
+      letzte.map((s, i) => el("span", { class: s.vorlaeufig ? "zwischen" : i === letzte.length - 1 ? "neu" : "alt" }, s.sprache && st.erkennung === "whisper" ? [el("span", { class: "marke-de" }, s.sprache.toUpperCase()), " "] : null, `${s.text} `)),
     );
     const uebersetzung = fremd && tr.length
       ? el("div", { class: "uebersetzung" },
@@ -1084,11 +1279,13 @@
     const zs = st.zwischenstand;
     const aufgaben = [...(zs?.hausaufgaben || [])];
     const lehrerFragen = zs?.fragen || [];
+    const karten = st.aufgaben || [];
     ersetze(liveTeile.links,
+      karten.length ? [el("h3", { style: "margin-top:0" }, "Aufgaben"), karten.map((a) => aufgabeKarte(a, st))] : null,
       erkannte.length ? erkannte.map((f) => el("div", { class: "klein-karte", onclick: () => $(`[data-frage="${f.id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }) }, el("div", { class: "wann" }, zeit(f.t)), f.frage)) : null,
       lehrerFragen.length ? [el("h3", {}, "Aus der Stunde"), lehrerFragen.map((f) => el("div", { class: "klein-karte aufgabe" }, el("strong", {}, f.frage), el("div", { class: "muted klein" }, f.antwort)))] : null,
       aufgaben.length ? [el("h3", {}, "Aufgaben und Termine"), aufgaben.map((a) => el("div", { class: "klein-karte aufgabe" }, a))] : null,
-      !erkannte.length && !lehrerFragen.length && !aufgaben.length ? el("p", { class: "muted klein" }, "Hier sammeln sich die Fragen der Lehrkraft sowie Aufgaben und Termine.") : null,
+      !erkannte.length && !lehrerFragen.length && !aufgaben.length && !karten.length ? el("p", { class: "muted klein" }, "Hier sammeln sich Aufgaben der Lehrkraft (gleich erledigt), die erkannten Fragen sowie Termine.") : null,
     );
   }
 
@@ -1263,6 +1460,8 @@
     } else {
       kinder.push(el("div", { class: "karte" }, st.zwischenstand ? [el("p", {}, el("strong", {}, st.zwischenstand.thema)), el("p", {}, st.zwischenstand.text), el("p", { class: "muted klein" }, `Zwischenstand von ${zeit(st.zwischenstand.stand)}, noch keine Endzusammenfassung.`)] : el("p", {}, "Noch keine Zusammenfassung."), el("button", { class: "knopf primaer", onclick: () => zusammenfassen(id), disabled: st.transkript.length < 3 }, "Jetzt zusammenfassen")));
     }
+    const aufgabenFertig = (st.aufgaben || []).filter((a) => a.status === "fertig");
+    if (aufgabenFertig.length) kinder.push(el("h2", {}, "Aufgaben aus dieser Stunde"), el("div", { class: "spalte" }, aufgabenFertig.map((a) => aufgabeKarte(a, st))));
     const antworten = st.fragen.filter((f) => f.status === "fertig" || f.status === "nichts");
     if (antworten.length) kinder.push(el("h2", {}, "Antworten in dieser Stunde"), el("div", { class: "spalte" }, antworten.map((f) => antwortKarte(f, st))));
     kinder.push(
@@ -1291,6 +1490,8 @@
       if (z.fragen?.length) zeilen.push("Fragen der Lehrkraft:", ...z.fragen.map((f) => `- ${f.frage} → ${f.antwort}`), "");
       if (z.begriffe?.length) zeilen.push("Begriffe:", ...z.begriffe.map((b) => `- ${b.begriff}: ${b.erklaerung}`), "");
     }
+    const aufg = (st.aufgaben || []).filter((a) => a.status === "fertig");
+    if (aufg.length) zeilen.push("Aufgaben:", ...aufg.map((a) => `- [${zeit(a.t)}] ${a.aufgabe}\n  ${a.loesung.replace(/\n/g, "\n  ")}`), "");
     const antworten = st.fragen.filter((f) => f.status === "fertig");
     if (antworten.length) zeilen.push("Antworten:", ...antworten.map((f) => `- [${zeit(f.t)}] ${f.frage}\n  ${f.antwort}${f.kurz ? `\n  Kurz: ${f.kurz}` : ""}`), "");
     if (st.notizen) zeilen.push("Notizen:", st.notizen, "");
