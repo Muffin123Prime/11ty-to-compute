@@ -220,6 +220,7 @@
     waechterText: "", // Statuszeile
     uebersetzTimer: null,
     uebersetzLaeuft: false,
+    uebersetzFehler: "",
     recLaeuft: false,
     recZuletztMs: 0,
     wachhund: null,
@@ -367,15 +368,42 @@
       const d = await api("/api/uebersetzung", { von: st.sprache, fach: st.fach, segmente: offen.map((s) => ({ id: String(s.t) + ":" + s.text.length, text: s.text })) });
       const nachId = new Map(d.uebersetzungen.map((u) => [u.id, u.text]));
       offen.forEach((s) => (s.de = nachId.get(String(s.t) + ":" + s.text.length) || ""));
+      live.uebersetzFehler = "";
       speichernBald();
     } catch (e) {
       offen.forEach((s) => delete s.de); // beim nächsten Mal noch einmal versuchen
-      meldung(`Übersetzung fehlgeschlagen: ${e.message}`, 4000);
+      live.uebersetzFehler = e.message;
     } finally {
       live.uebersetzLaeuft = false;
       transkriptZeichnen();
-      if (live.stunde === st && st.transkript.some((s) => s.de === undefined)) uebersetzungAnstossen();
+      if (live.stunde === st && st.transkript.some((s) => s.de === undefined)) {
+        clearTimeout(live.uebersetzTimer);
+        live.uebersetzTimer = setTimeout(uebersetzen, live.uebersetzFehler ? 8000 : 1500);
+      }
     }
+  }
+
+  // Sprache der Lehrkraft mitten in der Stunde wechseln: Erkennung neu starten,
+  // ab jetzt (und für alles noch Unübersetzte) übersetzen.
+  function spracheWechseln(code) {
+    const st = live.stunde;
+    if (!st || st.sprache === code) return;
+    st.sprache = code;
+    live.uebersetzFehler = "";
+    if (code === "de") st.transkript.forEach((s) => { if (s.de === null) delete s.de; });
+    if (live.rec) {
+      try { live.rec.abort(); } catch { /* egal */ }
+      live.rec = null;
+      live.recLaeuft = false;
+      if (live.hoert && !live.pausiert) {
+        live.rec = recAnlegen();
+        try { live.rec.start(); } catch { /* egal */ }
+      }
+    }
+    speichernBald();
+    liveKopfZeichnen();
+    uebersetzungAnstossen();
+    meldung(code === "de" ? "Ohne Übersetzung, Erkennung auf Deutsch." : `Erkennung auf ${spracheName(code)}, Übersetzung ins Deutsche läuft.`, 4000);
   }
 
   function speichernBald() {
@@ -747,7 +775,7 @@
       ersetze(sprachChips,
         el("span", { class: "muted klein", style: "align-self:center;margin-right:4px" }, "Lehrkraft spricht:"),
         SPRACHEN.map(([code, name]) => el("button", { class: `chip klein${sprache === code ? " aktiv" : ""}`, onclick: () => { gewaehlteSprache = code; chipsZeichnen(); } }, name)),
-        sprache !== "de" ? el("span", { class: "muted klein", style: "flex-basis:100%;text-align:center" }, `Mitschrift auf ${spracheName(sprache)}, dazu live die deutsche Übersetzung. Antworten kommen auf ${spracheName(sprache)}.`) : null,
+        el("span", { class: "muted klein", style: "flex-basis:100%;text-align:center" }, sprache !== "de" ? `Mitschrift auf ${spracheName(sprache)}, dazu live die deutsche Übersetzung. Antworten kommen auf ${spracheName(sprache)}.` : "Spricht die Lehrkraft eine andere Sprache? Hier antippen, dann läuft die Live-Übersetzung. Geht auch später im Band."),
       );
     };
     chipsZeichnen();
@@ -854,6 +882,9 @@
         el("span", {}, `${text} · `, el("span", { class: "zeit" }, zeit(liveSekunden()))),
         el("span", { class: `waechter${einst.auto ? "" : " aus"}` }, einst.auto ? live.waechterText || "Wächter an" : "Wächter aus"),
         el("div", { class: "reihe", style: "gap:6px;margin-top:6px" },
+          el("select", { class: "feld klein-select", title: "Sprache der Lehrkraft", onchange: (e) => spracheWechseln(e.target.value) },
+            SPRACHEN.map(([code, name]) => el("option", { value: code, selected: (live.stunde.sprache || "de") === code }, code === "de" ? "Deutsch, keine Übersetzung" : `${name} → Deutsch`)),
+          ),
           el("button", { class: `knopf klein${einst.auto ? " primaer" : ""}`, onclick: () => { einst.auto = !einst.auto; speichereEinstellungen(); liveKopfZeichnen(); } }, einst.auto ? "Automatik an" : "Automatik aus"),
           el("button", { class: "knopf klein", onclick: () => { if (confirm("Stunde beenden und zusammenfassen?")) stundeBeenden(); } }, "Beenden"),
         ),
@@ -881,6 +912,7 @@
       ? el("div", { class: "uebersetzung" },
           el("span", { class: "marke-de" }, "DE "),
           letzte.map((s, i) => el("span", { class: i === letzte.length - 1 ? "neu" : "alt" }, s.de ? `${s.de} ` : s.de === null || s.de === undefined ? "… " : "")),
+          live.uebersetzFehler ? el("span", { class: "fehlerzeile" }, ` Übersetzung gerade nicht möglich: ${live.uebersetzFehler} (ich versuche es weiter)`) : null,
         )
       : null;
     ersetze(box, original, uebersetzung);

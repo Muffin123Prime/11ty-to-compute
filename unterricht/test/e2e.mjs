@@ -91,6 +91,11 @@ await page.waitForURL(/#live/);
 await page.evaluate(() => { window.unterricht.einspeisen("the water molecule is bent"); window.unterricht.einspeisen("who can tell me why"); });
 await page.locator(".live-text .uebersetzung").getByText("[DE] who can tell me why").waitFor({ timeout: 10000 });
 assert.match(await page.locator(".live-meta").textContent(), /Englisch/);
+// Sprachwechsel im Band auf Deutsch und zurück
+await page.locator(".klein-select").selectOption("de");
+assert.equal(await page.locator(".live-text .uebersetzung").count(), 0);
+await page.locator(".klein-select").selectOption("en");
+await page.locator(".live-text .uebersetzung").waitFor();
 await page.locator(".antwort-karte .antwort").first().waitFor({ timeout: 10000 });
 await foto("6-englisch");
 page.once("dialog", (d) => d.accept());

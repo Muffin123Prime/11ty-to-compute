@@ -129,6 +129,8 @@ label.block { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 1
 .live-meta .waechter { display: block; font-size: 12px; color: #7fd18f; margin-top: 2px; }
 .live-meta .waechter.aus { color: var(--muted); }
 .live-meta .reihe { justify-content: flex-end; }
+.klein-select { width: auto; min-height: 34px; padding: 4px 10px; font-size: 14px; border-radius: 999px; }
+.live-text .fehlerzeile { color: #ffb0b0; font-size: 14px; }
 .zeit { font-variant-numeric: tabular-nums; }
 
 .spalten { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 2fr) minmax(0, 0.9fr); gap: 18px; align-items: start; }
