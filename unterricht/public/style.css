@@ -126,9 +126,12 @@ label.block { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 1
 .chip.klein { padding: 5px 11px; font-size: 13px; }
 .live-meta { text-align: right; color: var(--muted); font-size: 14px; white-space: nowrap; }
 .live-meta strong { display: block; color: #fff; font-size: 16px; }
+.live-meta .waechter { display: block; font-size: 12px; color: #7fd18f; margin-top: 2px; }
+.live-meta .waechter.aus { color: var(--muted); }
+.live-meta .reihe { justify-content: flex-end; }
 .zeit { font-variant-numeric: tabular-nums; }
 
-.spalten { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.spalten { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 2fr) minmax(0, 0.9fr); gap: 18px; align-items: start; }
 .spalten > section { min-width: 0; }
 .spalten h2 { margin-top: 0; }
 .spalte-mitte .antwort-karte .antwort { font-size: 22px; }
@@ -138,20 +141,27 @@ label.block { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 1
 .klein-karte .wann { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .klein-karte.aufgabe { cursor: default; }
 
-.antwort-karte { border-left: 4px solid #fff; }
-.antwort-karte .frage { color: var(--muted); font-weight: 600; margin-bottom: 6px; font-size: 15px; }
-.antwort-karte .antwort { font-size: 21px; line-height: 1.4; font-weight: 500; margin: 0 0 8px; }
-.antwort-karte .erklaerung { font-size: 15px; color: var(--muted); }
-.antwort-karte .bild { margin: 10px 0 0; background: #fff; border-radius: 12px; padding: 8px; text-align: center; }
-.antwort-karte .bild img { max-width: 100%; max-height: 320px; height: auto; }
-.antwort-karte .bild figcaption { font-size: 13px; color: #444; margin-top: 4px; }
-.antwort-karte .fuss { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
-.antwort-karte .kurz { font-size: 16px; margin: 0 0 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg2); }
+.antwort-karte { border-left: 4px solid #fff; padding: 18px 20px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.antwort-karte.mit-bild { grid-template-columns: minmax(0, 1.4fr) minmax(220px, 1fr); }
+.antwort-karte .kopfzeile { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.antwort-karte .frage { color: #fff; font-weight: 600; margin-bottom: 10px; font-size: 16px; }
+.antwort-karte .antwort { font-size: 24px; line-height: 1.38; font-weight: 500; margin: 0 0 12px; letter-spacing: -0.005em; }
+.antwort-karte .kurz { font-size: 16px; margin: 0 0 10px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg2); }
+.antwort-karte .erklaerung { font-size: 15px; color: var(--muted); margin: 0 0 6px; }
+.antwort-karte .erklaerung summary { font-weight: 500; font-size: 14px; margin: 0; }
+.antwort-karte .erklaerung p { margin: 6px 0 0; }
 .antwort-karte .fehler { color: var(--muted); font-size: 15px; }
+.antwort-karte .bild { margin: 0; background: #fff; border-radius: 12px; padding: 10px; text-align: center; align-self: start; }
+.antwort-karte .bild img { max-width: 100%; max-height: 340px; height: auto; }
+.antwort-karte .bild figcaption { font-size: 13px; color: #444; margin-top: 6px; }
+.antwort-karte .fuss { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; align-items: center; }
 .antwort-karte.neu { animation: aufleuchten 1.2s ease-out; }
+.neu-tag { border-color: #fff; color: #fff; }
 @keyframes aufleuchten { 0% { background: #2a2a2a; border-left-color: var(--rot); } 100% { background: var(--karte); border-left-color: #fff; } }
 .antwort-karte.wartet { border-left-color: var(--muted); }
 .antwort-karte.nichts { border-left-color: var(--line); }
+.leer-karte { border: 1px dashed var(--line); border-radius: var(--radius); padding: 24px; text-align: center; color: var(--muted); }
+.leer-karte .lade { margin-bottom: 10px; }
 
 .zwischenstand p { font-size: 15px; }
 .zwischenstand ul { margin: 0 0 8px; padding-left: 18px; font-size: 15px; }
@@ -186,6 +196,10 @@ ul.punkte li { margin-bottom: 4px; }
 
 @media (max-width: 900px) {
   .spalten { grid-template-columns: 1fr; }
+  .antwort-karte.mit-bild { grid-template-columns: 1fr; }
+  .antwort-karte .antwort { font-size: 21px; }
+  .live-meta .reihe { justify-content: flex-start; }
+  .live-meta .waechter { display: inline; margin-left: 6px; }
   .spalte-mitte { order: 1; }
   .spalte-links { order: 2; }
   .spalte-rechts { order: 3; }

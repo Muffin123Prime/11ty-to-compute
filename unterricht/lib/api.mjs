@@ -7,13 +7,14 @@
 //   POST /api/zusammenfassung   Stunde zusammenfassen (laufend: true = kurzer Zwischenstand)
 //   POST /api/nachfrage         Frage zu gespeicherten Stunden
 //   POST /api/uebersetzung      Transkript-Stücke live ins Deutsche übersetzen
+//   POST /api/frage             Frage-Wächter: steckt im neuesten Text eine Frage der Lehrkraft?
 //
 // Welche KI antwortet, entscheidet lib/anbieter.mjs (KI_ANBIETER, Standard:
 // Workers AI im selben Worker, kostenlos). Ist APP_KEY gesetzt, muss jede Anfrage ihn im Header x-app-key tragen,
 // damit nicht jeder, der die Adresse kennt, auf Kosten des Schülers
 // Claude benutzt.
 
-import { antwort, zusammenfassung, nachfrage, uebersetzung } from "./claude.mjs";
+import { antwort, zusammenfassung, nachfrage, uebersetzung, frageErkennen } from "./claude.mjs";
 import { erzeugeAnbieter, anbieterName } from "./anbieter.mjs";
 import { bildAufloesen } from "./bilder.mjs";
 
@@ -124,6 +125,7 @@ export async function apiAnfrage(request, env, optionen = {}) {
         fach: String(body.fach || "").slice(0, 80),
         transkript,
         frage,
+        erkannt: body.erkannt === true,
         modus: body.modus === "manuell" ? "manuell" : "auto",
         kontext: typeof body.kontext === "string" ? body.kontext.slice(0, 4000) : "",
         sprache: /^[a-z]{2}$/.test(String(body.sprache || "")) ? body.sprache : "de",
@@ -178,6 +180,18 @@ export async function apiAnfrage(request, env, optionen = {}) {
           transkript: transkriptPruefen(s.transkript),
         })),
         profil,
+      });
+      return json(ergebnis, 200, cors);
+    }
+
+    if (pfad === "/api/frage") {
+      const transkript = transkriptPruefen(body.transkript);
+      if (!transkript.length) return json({ fehler: "Kein Transkript." }, 400, cors);
+      const ergebnis = await frageErkennen(client, {
+        fach: String(body.fach || "").slice(0, 80),
+        sprache: /^[a-z]{2}$/.test(String(body.sprache || "")) ? body.sprache : "de",
+        transkript,
+        bisherige: Array.isArray(body.bisherige) ? body.bisherige.slice(-8).map((f) => String(f).slice(0, 200)) : [],
       });
       return json(ergebnis, 200, cors);
     }

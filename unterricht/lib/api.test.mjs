@@ -199,3 +199,24 @@ test("uebersetzung liefert pro Segment eine deutsche Fassung mit gleicher id", a
   const leer = await apiAnfrage(post("/api/uebersetzung", { segmente: [] }), env, { client });
   assert.equal(leer.status, 400);
 });
+
+test("frage-wächter erkennt eine Lehrerfrage und nutzt das schnelle Modell", async () => {
+  const client = attrappenClient();
+  const r = await apiAnfrage(post("/api/frage", { fach: "Chemie", transkript: [{ t: 0, text: "wasser ist ein dipol" }, { t: 6, text: "wer kann mir sagen warum" }], bisherige: ["Was ist ein Atom?"] }), env, { client });
+  const d = await r.json();
+  assert.equal(d.frage_erkannt, true);
+  assert.equal(d.art, "frage");
+  assert.equal(client.aufrufe[0].output_config.format.schema.required.includes("art"), true);
+  assert.match(client.aufrufe[0].messages[0].content, /Schon beantwortet.*Was ist ein Atom\?/s);
+  const nein = await apiAnfrage(post("/api/frage", { transkript: [{ t: 0, text: "heute ist es kalt" }] }), env, { client });
+  assert.equal((await nein.json()).frage_erkannt, false);
+});
+
+test("antwort: erkannte Frage wird immer beantwortet", async () => {
+  const client = attrappenClient();
+  const r = await apiAnfrage(post("/api/antwort", { fach: "Chemie", frage: "Warum ist Wasser ein Dipol?", erkannt: true, transkript: [{ text: "heute ist es kalt" }] }), env, { client });
+  const d = await r.json();
+  assert.equal(d.frage_erkannt, true);
+  assert.equal(d.frage, "Warum ist Wasser ein Dipol?");
+  assert.match(client.aufrufe[0].messages[0].content, /Vom Frage-Wächter erkannte Frage/);
+});

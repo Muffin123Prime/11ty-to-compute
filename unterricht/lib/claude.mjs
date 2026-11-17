@@ -86,6 +86,40 @@ export const ZUSAMMENFASSUNG_SCHEMA = {
   },
 };
 
+export const FRAGE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["frage_erkannt", "frage", "art"],
+  properties: {
+    frage_erkannt: { type: "boolean", description: "true, wenn die Lehrkraft im neuesten Teil des Transkripts eine Frage oder Aufgabe an die Klasse gerichtet hat, die noch nicht beantwortet wurde." },
+    frage: { type: "string", description: "Die Frage oder Aufgabe in einem klaren Satz, so wie sie gemeint war. Leer, wenn keine." },
+    art: { type: "string", enum: ["frage", "aufgabe", "keine"], description: "frage: Wissensfrage an die Klasse. aufgabe: Arbeitsauftrag (rechnet, beschreibt, nennt). keine: nichts davon." },
+  },
+};
+
+export function frageSystemPrompt() {
+  return `Du bist der Frage-Wächter einer Unterrichts-App. Du bekommst die letzten Sätze aus einer automatischen Mitschrift des Unterrichts (Hörfehler, keine Satzzeichen, abgeschnittene Sätze, manchmal Mitschüler). Deine einzige Aufgabe: Erkennen, ob die Lehrkraft im neuesten Teil (unten) gerade eine Frage oder Aufgabe an die Klasse gerichtet hat, auf die sich ein Schüler melden könnte.
+
+Zählt als Frage oder Aufgabe: "Wer kann mir sagen …", "Wie sieht … aus", "Was ist …", "Warum …", "Nennt mir …", "Rechnet mal …", "Beschreibt …", "Was meint ihr …", "Weiß jemand …", "Wie würdet ihr …", "Überlegt mal, woran …", auch ohne Fragewort, wenn klar eine Antwort erwartet wird. Auch Fragen, die über zwei Zeilen gehen oder mitten im Satz von der Erkennung zerschnitten wurden.
+Zählt nicht: rhetorische Fragen, die die Lehrkraft sofort selbst beantwortet; Organisatorisches ("Habt ihr alle das Buch?", "Wer fehlt?", "Seid ihr fertig?"); Rückfragen an einen einzelnen Schüler, der gerade dran ist; Fragen, die in der Liste der schon beantworteten stehen; reine Erklärungen.
+Im Zweifel, wenn es nach einer echten Frage an die Klasse klingt: frage_erkannt = true. Formuliere "frage" sauber aus, mit Hörfehlern korrigiert, so wie die Lehrkraft sie gemeint hat. Antworte ausschließlich im vorgegebenen JSON-Format.`;
+}
+
+export async function frageErkennen(anbieter, eingabe) {
+  const alt = eingabe.bisherige?.length ? `Schon beantwortet (nicht noch einmal melden):\n- ${eingabe.bisherige.join("\n- ")}\n\n` : "";
+  const user = `Fach: ${eingabe.fach || "unbekannt"}${eingabe.sprache && eingabe.sprache !== "de" ? ` (Lehrkraft spricht ${SPRACHEN[eingabe.sprache] || eingabe.sprache})` : ""}\n\n${alt}Mitschrift, das Neueste steht unten:\n<transkript>\n${transkriptText(eingabe.transkript)}\n</transkript>`;
+  const { daten, nutzung } = await strukturiert(anbieter, {
+    system: frageSystemPrompt(),
+    user,
+    schema: FRAGE_SCHEMA,
+    effort: "low",
+    schnell: true,
+    maxTokens: 300,
+  });
+  if (!daten.frage_erkannt || !daten.frage) return { frage_erkannt: false, frage: "", art: "keine", nutzung };
+  return { frage_erkannt: true, frage: daten.frage, art: daten.art === "aufgabe" ? "aufgabe" : "frage", nutzung };
+}
+
 export const UEBERSETZUNG_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -147,7 +181,7 @@ Niveau: ${niveauText(profil)}
 Länge: ${laengeText(profil)}
 
 Deine Aufgabe:
-1. Prüfe, ob die Lehrkraft zuletzt (am Ende des Transkripts) eine Frage oder Aufgabe an die Klasse gerichtet hat. Rhetorische Fragen ("Ist doch klar, oder?"), Organisatorisches ("Habt ihr alle das Buch?", "Wer fehlt?"), Rückfragen an einen einzelnen Schüler und Fragen, die die Lehrkraft danach selbst beantwortet hat, zählen nicht. Hat der Schüler selbst eine Frage eingetippt, beantworte genau diese, auch wenn sie nicht im Transkript steht.
+1. Prüfe, ob die Lehrkraft zuletzt (am Ende des Transkripts) eine Frage oder Aufgabe an die Klasse gerichtet hat. Rhetorische Fragen ("Ist doch klar, oder?"), Organisatorisches ("Habt ihr alle das Buch?", "Wer fehlt?"), Rückfragen an einen einzelnen Schüler und Fragen, die die Lehrkraft danach selbst beantwortet hat, zählen nicht. Im Zweifel beantworte die wahrscheinlichste Frage, statt frage_erkannt = false zu liefern. Steht unten eine "erkannte" oder "eingetippte" Frage, beantworte genau diese, immer mit frage_erkannt = true, auch wenn sie nicht wörtlich im Transkript steht. Im Modus "Jetzt antworten" ist frage_erkannt ebenfalls immer true: Beantworte die letzte Frage oder Aufgabe; gibt es keine, fasse in zwei Sätzen das zuletzt Erklärte so zusammen, wie der Schüler es sagen könnte, wenn er aufgerufen wird.
 2. Wenn ja: Schreibe die Antwort so, wie der Schüler sie laut sagt, wenn er aufgerufen wird.
    - Gesprochene Sprache, erster Satz ist direkt die Antwort. Kein "Die Antwort ist", kein "Gerne", keine Anrede, keine Aufzählungszeichen, keine Klammern, keine Abkürzungen, die man nicht sprechen kann. Zahlen so, wie man sie sagt, wenn sie kompliziert sind ("ungefähr hundertvier Grad").
    - Nimm die Wörter auf, die die Lehrkraft gerade benutzt hat, und knüpfe an das an, was in der Stunde davor gesagt wurde. Der Stundenkontext unten sagt dir, worum es geht.
@@ -187,12 +221,12 @@ export function formatZeit(sekunden) {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
-export function antwortUserPrompt({ fach, transkript, frage, modus, kontext, bisherige, sprache }) {
+export function antwortUserPrompt({ fach, transkript, frage, modus, kontext, bisherige, sprache, erkannt }) {
   const spr = sprache && sprache !== "de" ? `\nSprache der Lehrkraft: ${SPRACHEN[sprache] || sprache} (antworte in dieser Sprache, auf dem Niveau der Klasse; Erklärung und Frage-Feld auf Deutsch)` : "";
   const kopf = `Fach: ${fach || "unbekannt"}${spr}\nModus: ${modus === "manuell" ? "Der Schüler hat auf 'Jetzt antworten' gedrückt: Beantworte die letzte Frage oder, wenn keine klare Frage da ist, das, was die Lehrkraft gerade wissen will." : "automatische Erkennung"}`;
   const ctx = kontext ? `\n\nStundenkontext (bisheriger Zwischenstand):\n${kontext}` : "";
   const alt = bisherige?.length ? `\n\nSchon beantwortete Fragen dieser Stunde (nicht noch einmal beantworten, außer die Lehrkraft fragt sie erneut):\n- ${bisherige.join("\n- ")}` : "";
-  const eigene = frage ? `\n\nVom Schüler eingetippte Frage (hat Vorrang): ${frage}` : "";
+  const eigene = frage ? (erkannt ? `\n\nVom Frage-Wächter erkannte Frage der Lehrkraft (beantworten, frage_erkannt = true): ${frage}` : `\n\nVom Schüler eingetippte Frage (hat Vorrang): ${frage}`) : "";
   return `${kopf}${ctx}${alt}\n\nTranskript der letzten Minuten (das Neueste steht unten):\n<transkript>\n${transkriptText(transkript)}\n</transkript>${eigene}`;
 }
 
@@ -233,9 +267,11 @@ export async function antwort(anbieter, eingabe) {
     effort: eingabe.modus === "manuell" ? "high" : "medium",
     websuche: Boolean(eingabe.websuche),
   });
-  if (!daten.frage_erkannt) {
+  const erzwungen = eingabe.modus === "manuell" || Boolean(eingabe.frage);
+  if (!daten.frage_erkannt && !(erzwungen && daten.antwort)) {
     return { frage_erkannt: false, frage: "", antwort: "", kurz: "", erklaerung: "", bild: null, nutzung };
   }
+  if (!daten.frage_erkannt) daten.frage_erkannt = true;
   const bild = daten.bild && daten.bild.typ !== "keins" ? daten.bild : null;
   return { ...daten, bild, nutzung };
 }

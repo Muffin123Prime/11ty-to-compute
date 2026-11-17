@@ -53,6 +53,13 @@ await page.evaluate(() => window.unterricht.zwischenstand());
 await page.locator(".zwischenstand").getByText("Attrappen-Stunde", { exact: false }).or(page.locator(".zwischenstand").getByText("Beispielstunde")).first().waitFor({ timeout: 10000 });
 assert.match(await page.locator(".spalte-links").textContent(), /Seite 42/);
 
+// Frage-Wächter: Satz ohne Fragewort-Muster, der Wächter (Attrappe) findet trotzdem eine Frage
+await page.evaluate(() => window.unterricht.einspeisen("so und jetzt überlegt mal alle kurz was ist eigentlich ein dipol hm"));
+await page.evaluate(() => window.unterricht.waechter());
+await page.waitForFunction(() => /Antwort da|schon beantwortet|keine Frage/.test(document.querySelector(".waechter")?.textContent || ""), null, { timeout: 10000 });
+const waechterText = await page.locator(".waechter").textContent();
+assert.match(waechterText, /Antwort da|schon beantwortet/);
+
 // Eingetippte Frage
 await page.getByPlaceholder(/Frage eintippen/).fill("Was ist ein Dipol?");
 await page.getByRole("button", { name: "Fragen", exact: true }).click();

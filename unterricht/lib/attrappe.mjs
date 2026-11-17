@@ -32,14 +32,15 @@ function standardAntwort(felder, params) {
     const manuell = /Modus: Der Schüler/.test(user);
     const eingetippt = user.match(/eingetippte Frage \(hat Vorrang\): (.+)$/m)?.[1];
     const letzte = user.split("\n").filter((z) => z.trim() && !z.startsWith("<")).at(-1) || "";
-    const fragend = eingetippt || manuell || /\?|wie sieht|was ist|warum|wer kann|erklär|^who|^what|^why|^how|who can|qui peut|quién/i.test(letzte);
+    const erkannt = user.match(/erkannte Frage der Lehrkraft \(beantworten, frage_erkannt = true\): (.+)$/m)?.[1];
+    const fragend = eingetippt || erkannt || manuell || /\?|wie sieht|was ist|warum|wer kann|erklär|^who|^what|^why|^how|who can|qui peut|quién/i.test(letzte);
     if (!fragend) {
       return { frage_erkannt: false, frage: "", antwort: "", kurz: "", erklaerung: "", bild: { typ: "keins", wert: "", beschreibung: "" } };
     }
     const wasser = /h2o|wasser/i.test(eingetippt || user);
     return {
       frage_erkannt: true,
-      frage: eingetippt || "Wie sieht ein Wassermolekül aus?",
+      frage: eingetippt || erkannt || "Wie sieht ein Wassermolekül aus?",
       antwort: wasser
         ? "Ein Wassermolekül besteht aus einem Sauerstoffatom, an dem zwei Wasserstoffatome hängen. Die beiden Bindungen stehen in einem Winkel von etwa 104 Grad, deshalb ist das Molekül gewinkelt und nicht gerade."
         : "Das ist eine Attrappen-Antwort: Hier stünde, was du laut sagen könntest.",
@@ -60,6 +61,11 @@ function standardAntwort(felder, params) {
       hausaufgaben: ["Seite 42, Aufgabe 3"],
       begriffe: [{ begriff: "Dipol", erklaerung: "Ein Molekül mit einer positiven und einer negativen Seite." }],
     };
+  }
+  if (felder.includes("art")) {
+    const letzte = user.split("\n").filter((z) => z.trim() && !z.startsWith("<")).at(-1) || "";
+    const fragend = /\?|wie sieht|was ist|warum|wer kann|erklär|nennt|rechnet|^who|^what|^why|who can/i.test(letzte);
+    return fragend ? { frage_erkannt: true, frage: "Wie sieht ein Wassermolekül aus?", art: "frage" } : { frage_erkannt: false, frage: "", art: "keine" };
   }
   if (felder.includes("uebersetzungen")) {
     const ids = [...user.matchAll(/<segment id="([^"]+)">([^<]*)<\/segment>/g)];

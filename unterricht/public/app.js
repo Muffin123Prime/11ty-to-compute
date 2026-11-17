@@ -181,6 +181,7 @@
     /\b(nenn(t|e)? (mir|uns)|erklär(t|e)?( mir| uns)?|beschreib(t|e)?( mir| uns)?|definier(t|e)?|zähl(t|e)? (mal )?auf|fass(t|e)? (mal )?zusammen|rechne(t)? (mal )?(aus|nach)|zeichne(t)?|überleg(t)? (mal|euch))\b/i,
     /\b(wie heißt|wie nennt man|wie viel|wieviel|wie groß|wie lange|wie schnell|wie schwer|wie funktioniert|wie lautet|wie rechnet man|wie kommt man|wie entsteht|wie wird|wie kann man|wie würde|wie berechnet|wofür steht|wofür braucht|woraus besteht|welche rolle)\b/i,
     /\b(stimmt das|richtig oder falsch|ja oder nein|oder nicht)\s*$/i,
+    /\b(könnt ihr|kannst du|kann mir|könnte mir|wer von euch|sag mal|sagt mal|was meint ihr|was denkt ihr|was glaubt ihr|wisst ihr|habt ihr (eine )?idee|wie würdet ihr|was würdet ihr|fällt (euch|dir)|überlegt (mal|euch)|denkt (mal )?nach|schaut (mal|euch)|guckt (mal|euch)|wer traut sich|wer möchte|wer will|wer hat|wer erklärt|wer beschreibt|wer rechnet|wer liest)\b/i,
     // Englisch
     /^(who|what|where|when|why|how|which|whose|can anyone|can anybody|can someone|does anyone|does anybody|is there anyone|do you know|tell me|explain|describe|give me|name)\b/i,
     /\b(who can tell|who knows|what is|what are|what does|what do you|what did|what would|how do|how does|how many|how much|how would|why do|why does|why did|why is|anyone know|any ideas|what about|can you tell|tell me)\b/i,
@@ -213,6 +214,10 @@
     zwischenstandLaeuft: false,
     zwischenstandTimer: null,
     zwischenstandSegmente: 0,
+    waechterTimer: null,
+    waechterLaeuft: false,
+    waechterStand: 0, // Anzahl Segmente beim letzten Prüfen
+    waechterText: "", // Statuszeile
     uebersetzTimer: null,
     uebersetzLaeuft: false,
     recLaeuft: false,
@@ -386,12 +391,75 @@
     return teil.slice(-hoechstens);
   }
 
+  // Zwei Fragen gelten als gleich, wenn sich ihre Wörter stark überschneiden.
+  const woerter = (t) => new Set(String(t).toLowerCase().replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length > 2));
+  function aehnlich(a, b) {
+    const A = woerter(a);
+    const B = woerter(b);
+    if (!A.size || !B.size) return false;
+    let gleich = 0;
+    for (const w of A) if (B.has(w)) gleich++;
+    return gleich / Math.min(A.size, B.size) >= 0.6;
+  }
+  function schonGestellt(frage) {
+    const kuerzlich = live.stunde.fragen.filter((f) => f.status !== "fehler" && liveSekunden() - f.t < 600);
+    return kuerzlich.some((f) => aehnlich(f.frage, frage));
+  }
+
+  // Der Frage-Wächter: prüft alle paar Sekunden den neuen Text mit dem kleinen
+  // Modell, unabhängig von den Wortmustern. Erkennt er eine Frage, kommt die
+  // Antwort, ohne dass jemand drückt.
+  const WAECHTER_ALLE_MS = 9000;
+  function waechterStarten() {
+    clearInterval(live.waechterTimer);
+    live.waechterTimer = setInterval(waechterPruefen, WAECHTER_ALLE_MS);
+  }
+  async function waechterPruefen() {
+    const st = live.stunde;
+    if (!st || !einst.auto || live.waechterLaeuft) return;
+    const neue = st.transkript.length - live.waechterStand;
+    if (neue < 1) return;
+    live.waechterLaeuft = true;
+    live.waechterStand = st.transkript.length;
+    setzeWaechterText("prüft …");
+    try {
+      const d = await api("/api/frage", {
+        fach: st.fach,
+        sprache: st.sprache || "de",
+        transkript: letzteSegmente(75, 4, 30),
+        bisherige: st.fragen.filter((f) => f.status !== "fehler").slice(0, 8).map((f) => f.frage),
+      });
+      if (live.stunde !== st) return;
+      if (d.frage_erkannt && d.frage) {
+        if (schonGestellt(d.frage)) setzeWaechterText(`${zeit(liveSekunden())} schon beantwortet`);
+        else {
+          setzeWaechterText(`${zeit(liveSekunden())} ${d.art === "aufgabe" ? "Aufgabe" : "Frage"} erkannt`);
+          live.letzteAnfrageMs = Date.now();
+          live.letzteFrageText = d.frage;
+          await frageStellen({ modus: "auto", frage: d.frage, erkannt: true });
+        }
+      } else {
+        setzeWaechterText(`${zeit(liveSekunden())} keine Frage`);
+      }
+    } catch (e) {
+      setzeWaechterText(`Prüfung fehlgeschlagen: ${e.message}`);
+    } finally {
+      live.waechterLaeuft = false;
+    }
+  }
+  function setzeWaechterText(t) {
+    live.waechterText = t;
+    const el_ = liveTeile && $(".waechter", liveTeile.band);
+    if (el_) el_.textContent = t;
+  }
+
   async function autoAntwort(text) {
     const jetzt = Date.now();
-    if (jetzt - live.letzteAnfrageMs < 8000) return; // nicht bei jedem Satz
-    if (text === live.letzteFrageText) return;
+    if (jetzt - live.letzteAnfrageMs < 6000) return; // nicht bei jedem Satz
+    if (text === live.letzteFrageText || schonGestellt(text)) return;
     live.letzteAnfrageMs = jetzt;
     live.letzteFrageText = text;
+    live.waechterStand = live.stunde.transkript.length; // der Wächter muss das nicht noch einmal prüfen
     await frageStellen({ modus: "auto", hinweisText: text });
   }
 
@@ -404,9 +472,9 @@
     return teile.filter(Boolean).join("\n");
   }
 
-  async function frageStellen({ modus, frage = "", hinweisText = "" }) {
+  async function frageStellen({ modus, frage = "", hinweisText = "", erkannt = false }) {
     if (!live.stunde) return;
-    const karte = { id: neueId(), t: Math.round(liveSekunden()), modus, frage: frage || hinweisText, antwort: "", kurz: "", erklaerung: "", bild: null, status: "wartet" };
+    const karte = { id: neueId(), t: Math.round(liveSekunden()), modus, frage: frage || hinweisText, antwort: "", kurz: "", erklaerung: "", bild: null, status: "wartet", erkannt };
     live.stunde.fragen.unshift(karte);
     live.laufend++;
     antwortenZeichnen();
@@ -415,6 +483,7 @@
         fach: live.stunde.fach,
         transkript: letzteSegmente(),
         frage,
+        erkannt,
         modus,
         kontext: kontextText(),
         sprache: live.stunde.sprache || "de",
@@ -424,14 +493,16 @@
       });
       if (!d.frage_erkannt) {
         if (modus === "auto") {
-          // Claude sagt: keine echte Frage. Karte wieder weg, kein Lärm.
+          // Das Modell sagt: keine echte Frage. Karte wieder weg, nur die Statuszeile sagt es.
           live.stunde.fragen = live.stunde.fragen.filter((f) => f.id !== karte.id);
+          setzeWaechterText(`${zeit(liveSekunden())} keine Frage`);
         } else {
           karte.status = "nichts";
           karte.antwort = "Ich habe gerade keine Frage der Lehrkraft gefunden. Tipp sie unten ein, dann beantworte ich sie.";
         }
       } else {
         Object.assign(karte, { status: "fertig", frage: d.frage || karte.frage, antwort: d.antwort, kurz: d.kurz || "", erklaerung: d.erklaerung || "", bild: d.bild || null, neu: true });
+        setzeWaechterText(`${zeit(liveSekunden())} Antwort da`);
         signal();
       }
     } catch (e) {
@@ -492,6 +563,9 @@
     live.zwischenstandSegmente = 0;
     clearInterval(live.zwischenstandTimer);
     live.zwischenstandTimer = setInterval(() => zwischenstandHolen(false), ZWISCHENSTAND_ALLE_MS);
+    live.waechterStand = 0;
+    live.waechterText = "";
+    waechterStarten();
     live.pausenMs = 0;
     live.pauseSeitMs = 0;
     live.zwischen = "";
@@ -559,6 +633,7 @@
     live.startMs = 0;
     clearInterval(live.timer);
     clearInterval(live.zwischenstandTimer);
+    clearInterval(live.waechterTimer);
     document.body.classList.remove("gedimmt");
     try {
       live.wakeLock?.release();
@@ -732,7 +807,7 @@
     const rechts = el("div", { class: "zwischenstand" });
     const eingabe = el("input", { class: "feld", placeholder: "Frage eintippen …", autocomplete: "off" });
     const leiste = el("div", { class: "leiste" },
-      el("button", { class: "knopf primaer", style: "min-height:52px;padding:0 22px;font-size:17px", onclick: () => frageStellen({ modus: "manuell" }) }, "Jetzt antworten"),
+      el("button", { class: "knopf", style: "min-height:50px;padding:0 20px", title: "Falls die Automatik etwas verpasst", onclick: () => frageStellen({ modus: "manuell" }) }, "Jetzt antworten"),
       el("form", { onsubmit: (e) => { e.preventDefault(); const v = eingabe.value.trim(); if (!v) return; eingabe.value = ""; frageStellen({ modus: "manuell", frage: v }); } },
         eingabe,
         el("button", { class: "knopf", type: "submit" }, "Fragen"),
@@ -743,8 +818,8 @@
       band,
       el("div", { class: "spalten" },
         el("section", { class: "spalte-links" }, el("h2", {}, "Fragen und Aufgaben"), links),
-        el("section", { class: "spalte-mitte" }, el("h2", {}, "Antworten"), antworten),
-        el("section", { class: "spalte-rechts" }, el("h2", {}, "Zusammenfassung bisher"), rechts),
+        el("section", { class: "spalte-mitte" }, el("h2", {}, "Antworten zum Vorlesen"), antworten),
+        el("section", { class: "spalte-rechts" }, el("h2", {}, "Stunde bisher"), rechts),
       ),
       leiste,
     );
@@ -777,7 +852,11 @@
       el("div", { class: "live-meta" },
         el("strong", {}, live.stunde.fach, live.stunde.sprache && live.stunde.sprache !== "de" && spracheName(live.stunde.sprache) !== live.stunde.fach ? ` · ${spracheName(live.stunde.sprache)}` : ""),
         el("span", {}, `${text} · `, el("span", { class: "zeit" }, zeit(liveSekunden()))),
-        el("div", { style: "margin-top:6px" }, el("button", { class: "knopf klein", onclick: () => { if (confirm("Stunde beenden und zusammenfassen?")) stundeBeenden(); } }, "Beenden")),
+        el("span", { class: `waechter${einst.auto ? "" : " aus"}` }, einst.auto ? live.waechterText || "Wächter an" : "Wächter aus"),
+        el("div", { class: "reihe", style: "gap:6px;margin-top:6px" },
+          el("button", { class: `knopf klein${einst.auto ? " primaer" : ""}`, onclick: () => { einst.auto = !einst.auto; speichereEinstellungen(); liveKopfZeichnen(); } }, einst.auto ? "Automatik an" : "Automatik aus"),
+          el("button", { class: "knopf klein", onclick: () => { if (confirm("Stunde beenden und zusammenfassen?")) stundeBeenden(); } }, "Beenden"),
+        ),
       ),
     );
     transkriptZeichnen();
@@ -791,7 +870,7 @@
     if (!box) return;
     const st = live.stunde;
     const tr = st.transkript;
-    const letzte = tr.slice(-3);
+    const letzte = tr.slice(-4);
     const fremd = st.sprache && st.sprache !== "de";
     const original = el("div", { class: fremd ? "original" : "" },
       tr.length === 0 && !live.zwischen ? el("span", { class: "leer" }, live.hoert ? (fremd ? `Ich höre zu (${spracheName(st.sprache)}) … Sobald jemand spricht, steht hier der Text und darunter die Übersetzung.` : "Ich höre zu … Sobald jemand spricht, steht der Text hier.") : SR ? "Pause. Auf den Punkt tippen, um weiter zuzuhören." : "Keine Spracherkennung in diesem Browser.") : null,
@@ -846,13 +925,13 @@
     if (bild.typ === "svg" && bild.svg) img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(bild.svg)}`;
     else if (bild.url) img.src = bild.url;
     else return null;
-    const fig = el("figure", { class: "bild", style: "margin:10px 0 0" }, img, el("figcaption", {}, [bild.beschreibung, bild.quelle ? ` (${bild.quelle})` : ""].join("")));
+    const fig = el("figure", { class: "bild" }, img, el("figcaption", {}, [bild.beschreibung, bild.quelle ? ` (${bild.quelle})` : ""].join("")));
     img.onerror = () => ersetze(fig, el("figcaption", {}, "Das Bild konnte nicht geladen werden."));
     return fig;
   }
 
   function antwortKarte(f, st) {
-    const klasse = `karte antwort-karte ${f.status === "wartet" ? "wartet" : f.status === "fertig" ? "" : "nichts"}${f.neu ? " neu" : ""}`;
+    const klasse = `karte antwort-karte ${f.status === "wartet" ? "wartet" : f.status === "fertig" ? "" : "nichts"}${f.neu ? " neu" : ""}${f.bild ? " mit-bild" : ""}`;
     if (f.neu) setTimeout(() => { f.neu = false; }, 4000);
     const entfernen = () => {
       st.fragen = st.fragen.filter((x) => x.id !== f.id);
@@ -861,29 +940,36 @@
         antwortenZeichnen();
       } else db.speichere(st).then(() => zeigeStunde(st.id));
     };
-    return el("div", { class: klasse, dataset: { frage: f.id } },
-      el("div", { class: "frage" },
-        f.status === "wartet" ? el("span", {}, el("span", { class: "lade" }), " Ich überlege … ") : null,
-        f.frage ? f.frage : f.modus === "manuell" ? "Was will die Lehrkraft gerade wissen?" : "",
-      ),
+    const kopf = el("div", { class: "kopfzeile" },
+      el("span", { class: "tag" }, zeit(f.t)),
+      f.erkannt || f.modus === "auto" ? el("span", { class: "tag" }, "automatisch") : el("span", { class: "tag" }, "auf Knopfdruck"),
+      f.neu ? el("span", { class: "tag neu-tag" }, "neu") : null,
+    );
+    const frage = el("div", { class: "frage" },
+      f.status === "wartet" ? el("span", { class: "lade" }) : null,
+      f.frage ? f.frage : f.modus === "manuell" ? "Was will die Lehrkraft gerade wissen?" : "",
+      f.status === "wartet" ? el("span", { class: "muted" }, " … ich überlege") : null,
+    );
+    const text = el("div", { class: "text" },
+      kopf,
+      frage,
       f.status === "fehler" ? el("p", { class: "fehler" }, f.antwort) : f.antwort ? el("p", { class: "antwort" }, f.antwort) : null,
       f.kurz && f.status === "fertig" ? el("p", { class: "kurz" }, el("span", { class: "muted" }, "Kurz: "), f.kurz) : null,
-      f.erklaerung ? el("p", { class: "erklaerung" }, f.erklaerung) : null,
-      bildElement(f.bild),
+      f.erklaerung ? el("details", { class: "erklaerung" }, el("summary", {}, "Hintergrund für Rückfragen"), el("p", {}, f.erklaerung)) : null,
       el("div", { class: "fuss" },
-        el("span", { class: "tag" }, zeit(f.t)),
         f.antwort && f.status === "fertig" ? el("button", { class: "knopf leise klein", onclick: () => navigator.clipboard?.writeText(f.antwort).then(() => meldung("Kopiert.")) }, "Kopieren") : null,
-        f.status === "fehler" ? el("button", { class: "knopf klein", onclick: () => { entfernen(); frageStellen({ modus: f.modus, frage: f.modus === "manuell" && f.frage ? f.frage : "" }); } }, "Noch mal") : null,
+        f.status === "fehler" ? el("button", { class: "knopf klein", onclick: () => { entfernen(); frageStellen({ modus: f.modus, frage: f.frage || "", erkannt: Boolean(f.erkannt) }); } }, "Noch mal") : null,
         el("button", { class: "knopf leise klein", onclick: entfernen }, "Weg"),
       ),
     );
+    return el("div", { class: klasse, dataset: { frage: f.id } }, text, bildElement(f.bild));
   }
 
   function antwortenZeichnen() {
     if (!liveTeile || !live.stunde || !document.contains(liveTeile.antworten)) return;
     const fragen = live.stunde.fragen;
     ersetze(liveTeile.antworten, 
-      fragen.length ? fragen.map((f) => antwortKarte(f, live.stunde)) : el("p", { class: "muted klein" }, "Wenn die Lehrkraft etwas fragt, steht hier der Vorschlag mit Bild. Oder unten „Jetzt antworten“ drücken."),
+      fragen.length ? fragen.map((f) => antwortKarte(f, live.stunde)) : el("div", { class: "leer-karte" }, el("div", { class: "lade" }), el("p", {}, "Die Automatik hört mit. Sobald die Lehrkraft eine Frage stellt, steht hier die Antwort zum Vorlesen, mit Bild, wenn es eins braucht."), el("p", { class: "muted klein" }, "Unten „Jetzt antworten“, falls sie etwas verpasst.")),
     );
     fragenSpalteZeichnen();
   }
@@ -1143,6 +1229,7 @@
     einspeisen: (text) => { segmentHinzu(text); transkriptZeichnen(); },
     zustand: () => ({ hoert: live.hoert, pausiert: live.pausiert, stunde: live.stunde }),
     zwischenstand: () => zwischenstandHolen(true),
+    waechter: () => waechterPruefen(),
     uebersetzen,
     exportText,
     istFrage,
