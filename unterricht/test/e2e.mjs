@@ -53,6 +53,17 @@ await page.evaluate(() => window.unterricht.zwischenstand());
 await page.locator(".zwischenstand").getByText("Attrappen-Stunde", { exact: false }).or(page.locator(".zwischenstand").getByText("Beispielstunde")).first().waitFor({ timeout: 10000 });
 assert.match(await page.locator(".spalte-links").textContent(), /Seite 42/);
 
+// Vorläufiger Erkennungs-Text (noch nicht final) löst nach kurzer Ruhe die Antwort aus
+await page.waitForTimeout(5200); // Sperre zwischen zwei automatischen Anfragen
+await page.evaluate(() => window.unterricht.zwischen("wer weiß warum der himmel blau ist"));
+await page.waitForFunction(() => document.querySelectorAll(".antwort-karte .antwort").length >= 2, null, { timeout: 10000 });
+assert.match(await page.locator(".live-text").textContent(), /himmel blau/);
+// das endgültige Segment ersetzt das vorläufige, ohne neue Karte
+await page.evaluate(() => window.unterricht.einspeisen("wer weiß warum der himmel blau ist"));
+await page.waitForTimeout(800);
+assert.equal(await page.evaluate(() => window.unterricht.zustand().stunde.transkript.filter((s) => s.vorlaeufig).length), 0);
+assert.equal(await page.locator(".antwort-karte").count(), 2);
+
 // Frage-Wächter: Satz ohne Fragewort-Muster, der Wächter (Attrappe) findet trotzdem eine Frage
 await page.evaluate(() => window.unterricht.einspeisen("so und jetzt überlegt mal alle kurz was ist eigentlich ein dipol hm"));
 await page.evaluate(() => window.unterricht.waechter());

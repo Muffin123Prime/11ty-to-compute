@@ -121,7 +121,7 @@ export async function apiAnfrage(request, env, optionen = {}) {
       const transkript = transkriptPruefen(body.transkript);
       const frage = typeof body.frage === "string" ? body.frage.trim().slice(0, 1000) : "";
       if (!transkript.length && !frage) return json({ fehler: "Kein Transkript und keine Frage." }, 400, cors);
-      const ergebnis = await antwort(client, {
+      const eingabe = {
         fach: String(body.fach || "").slice(0, 80),
         transkript,
         frage,
@@ -132,7 +132,27 @@ export async function apiAnfrage(request, env, optionen = {}) {
         bisherige: Array.isArray(body.bisherige) ? body.bisherige.slice(-8).map((f) => String(f).slice(0, 200)) : [],
         websuche: body.websuche === true && anbieter.name === "anthropic",
         profil,
-      });
+      };
+      if (body.stream === true) {
+        // Server-Sent Events: "delta" mit jedem Textstück, am Ende "fertig" mit dem Ergebnis.
+        const enc = new TextEncoder();
+        const stream = new ReadableStream({
+          async start(ctrl) {
+            const senden = (o) => ctrl.enqueue(enc.encode(`data: ${JSON.stringify(o)}\n\n`));
+            try {
+              const ergebnis = await antwort(client, eingabe, (delta) => senden({ typ: "delta", delta }));
+              const bild = await bildAufloesen(ergebnis.bild, optionen.fetchFn);
+              senden({ typ: "fertig", ...ergebnis, bild });
+            } catch (e) {
+              const bekannt = anbieter.fehlerText?.(e);
+              senden({ typ: "fehler", fehler: bekannt?.text || e?.message || "Unbekannter Fehler." });
+            }
+            ctrl.close();
+          },
+        });
+        return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", ...cors } });
+      }
+      const ergebnis = await antwort(client, eingabe);
       const bild = await bildAufloesen(ergebnis.bild, optionen.fetchFn);
       return json({ ...ergebnis, bild }, 200, cors);
     }

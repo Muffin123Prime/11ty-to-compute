@@ -11,29 +11,26 @@ export const STANDARD_MODELL = "claude-opus-5-5";
 export const ANTWORT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["frage_erkannt", "frage", "antwort", "kurz", "erklaerung", "bild"],
+  // Reihenfolge ist Absicht: Die Antwort kommt zuerst, damit sie beim Streamen sofort erscheint.
+  required: ["frage_erkannt", "antwort", "kurz", "frage", "bild", "erklaerung"],
   properties: {
     frage_erkannt: {
       type: "boolean",
       description:
-        "true, wenn die Lehrkraft im Transkript zuletzt eine Frage oder Aufgabe an die Klasse gestellt hat (oder der Schüler selbst eine Frage eingetippt hat).",
-    },
-    frage: {
-      type: "string",
-      description: "Die Frage, so wie sie verstanden wurde, in einem Satz. Leer, wenn keine Frage erkannt.",
+        "true, wenn die Lehrkraft im Transkript zuletzt eine Frage oder Aufgabe an die Klasse gestellt hat (oder eine Frage vorgegeben ist).",
     },
     antwort: {
       type: "string",
       description:
-        "Die Antwort zum Vorlesen: gesprochenes Deutsch, so wie ein guter Schüler dieser Klassenstufe sie im Unterricht sagen würde. Ein bis drei Sätze (bei Erklär- und Rechenaufgaben bis vier). Leer, wenn keine Frage erkannt.",
+        "Die Antwort zum Vorlesen: gesprochenes Deutsch, so wie ein guter Schüler dieser Klassenstufe sie im Unterricht sagen würde. Ein bis drei Sätze. Leer, wenn keine Frage erkannt.",
     },
     kurz: {
       type: "string",
-      description: "Dieselbe Antwort in einem einzigen kurzen Satz, für den Fall, dass der Schüler schnell dran ist. Leer, wenn keine Frage erkannt.",
+      description: "Dieselbe Antwort in einem einzigen kurzen Satz. Leer, wenn keine Frage erkannt.",
     },
-    erklaerung: {
+    frage: {
       type: "string",
-      description: "Optional ein bis drei Sätze Hintergrund, damit der Schüler Rückfragen beantworten kann. Sonst leer.",
+      description: "Die Frage, so wie sie verstanden wurde, in einem Satz. Leer, wenn keine Frage erkannt.",
     },
     bild: {
       type: "object",
@@ -44,11 +41,15 @@ export const ANTWORT_SCHEMA = {
           type: "string",
           enum: ["keins", "molekuel", "wikipedia", "svg"],
           description:
-            "molekuel: ein chemischer Stoff, wert = englischer Name (z.B. water, glucose, sodium chloride). wikipedia: ein Artikel der deutschen Wikipedia, dessen Hauptbild passt, wert = Artikeltitel. svg: selbst gezeichnete Skizze (Strukturformel, Diagramm, Schema), wert = vollständiger SVG-Code mit viewBox, ohne Skripte, höchstens 6000 Zeichen. keins: kein Bild nötig.",
+            "Nur wenn die Frage nach dem Aussehen, Aufbau oder einer Darstellung fragt. molekuel: chemischer Stoff, wert = englischer Name (water, glucose). wikipedia: Artikel der deutschen Wikipedia mit passendem Hauptbild, wert = Artikeltitel. svg: nur wenn beides nicht passt, kleine Skizze als SVG (viewBox 0 0 400 300, höchstens 900 Zeichen, keine Skripte). Sonst keins.",
         },
         wert: { type: "string" },
         beschreibung: { type: "string", description: "Bildunterschrift in einem Satz. Leer bei typ keins." },
       },
+    },
+    erklaerung: {
+      type: "string",
+      description: "Höchstens ein Satz Hintergrund für eine Rückfrage der Lehrkraft. Sonst leer.",
     },
   },
 };
@@ -98,11 +99,10 @@ export const FRAGE_SCHEMA = {
 };
 
 export function frageSystemPrompt() {
-  return `Du bist der Frage-Wächter einer Unterrichts-App. Du bekommst die letzten Sätze aus einer automatischen Mitschrift des Unterrichts (Hörfehler, keine Satzzeichen, abgeschnittene Sätze, manchmal Mitschüler). Deine einzige Aufgabe: Erkennen, ob die Lehrkraft im neuesten Teil (unten) gerade eine Frage oder Aufgabe an die Klasse gerichtet hat, auf die sich ein Schüler melden könnte.
-
-Zählt als Frage oder Aufgabe: "Wer kann mir sagen …", "Wie sieht … aus", "Was ist …", "Warum …", "Nennt mir …", "Rechnet mal …", "Beschreibt …", "Was meint ihr …", "Weiß jemand …", "Wie würdet ihr …", "Überlegt mal, woran …", auch ohne Fragewort, wenn klar eine Antwort erwartet wird. Auch Fragen, die über zwei Zeilen gehen oder mitten im Satz von der Erkennung zerschnitten wurden.
-Zählt nicht: rhetorische Fragen, die die Lehrkraft sofort selbst beantwortet; Organisatorisches ("Habt ihr alle das Buch?", "Wer fehlt?", "Seid ihr fertig?"); Rückfragen an einen einzelnen Schüler, der gerade dran ist; Fragen, die in der Liste der schon beantworteten stehen; reine Erklärungen.
-Im Zweifel, wenn es nach einer echten Frage an die Klasse klingt: frage_erkannt = true. Formuliere "frage" sauber aus, mit Hörfehlern korrigiert, so wie die Lehrkraft sie gemeint hat. Antworte ausschließlich im vorgegebenen JSON-Format.`;
+  return `Du bist der Frage-Wächter einer Unterrichts-App. Du bekommst die letzten Sätze einer automatischen Mitschrift (Hörfehler, keine Satzzeichen, zerschnittene Sätze). Entscheide, ob die Lehrkraft im neuesten Teil (unten) gerade eine Frage oder Aufgabe an die Klasse gerichtet hat, auf die sich ein Schüler melden könnte.
+Ja: "Wer kann mir sagen …", "Wie sieht … aus", "Was ist …", "Warum …", "Nennt mir …", "Rechnet mal …", "Was meint ihr …", "Überlegt mal …", auch mit Namensaufruf, auch ohne Fragewort, wenn klar eine Antwort erwartet wird.
+Nein: rhetorische Fragen, die sofort selbst beantwortet werden; Organisatorisches ("Habt ihr das Buch?", "Seid ihr fertig?"); Rückfragen an einen Schüler, der schon antwortet; Fragen aus der Liste "schon beantwortet"; reine Erklärungen.
+Im Zweifel ja. "frage" sauber ausformuliert, Hörfehler korrigiert. Nur JSON.`;
 }
 
 export async function frageErkennen(anbieter, eingabe) {
@@ -114,7 +114,7 @@ export async function frageErkennen(anbieter, eingabe) {
     schema: FRAGE_SCHEMA,
     effort: "low",
     schnell: true,
-    maxTokens: 300,
+    maxTokens: 200,
   });
   if (!daten.frage_erkannt || !daten.frage) return { frage_erkannt: false, frage: "", art: "keine", nutzung };
   return { frage_erkannt: true, frage: daten.frage, art: daten.art === "aufgabe" ? "aufgabe" : "frage", nutzung };
@@ -192,8 +192,8 @@ Deine Aufgabe:
    - Fremdsprachenunterricht: Stellt die Lehrkraft die Frage auf Englisch (oder Französisch, Spanisch), antworte in dieser Sprache, auf dem Niveau der Klasse.
    - Meinungsfragen: eine klare Position mit einem Grund, in Ich-Form.
    - Wenn das Transkript die Frage nur halb hergibt, beantworte die wahrscheinlichste Lesart und formuliere in "frage", wie du sie verstanden hast.
-3. "erklaerung": ein bis drei Sätze Hintergrund, damit der Schüler Rückfragen der Lehrkraft beantworten kann (warum das so ist, worauf es hinausläuft, was eine typische Nachfrage wäre). Sonst leer.
-4. Fragt die Lehrkraft, wie etwas aussieht, dargestellt, gezeichnet oder aufgebaut ist (Molekül, Strukturformel, Zelle, Organ, Schaltkreis, Diagramm, Karte, geometrische Figur, Funktionsgraph), liefere ein Bild: Für chemische Stoffe "molekuel" mit dem englischen Stoffnamen. Für Dinge mit gutem Wikipedia-Hauptbild "wikipedia" mit dem deutschen Artikeltitel. Wenn eine einfache eigene Skizze besser passt (Lewis-Formel, Kräftediagramm, Winkel, Reaktionsgleichung, Aufbau, Graph), zeichne sie als SVG: schlicht, schwarze Linien auf weißem Grund, gut lesbare Beschriftungen auf Deutsch, viewBox 0 0 400 300, keine Skripte, kein externes Laden.
+3. "erklaerung": höchstens ein Satz Hintergrund für eine mögliche Rückfrage. Sonst leer. Fasse dich insgesamt kurz, der Schüler wartet.
+4. Fragt die Lehrkraft, wie etwas aussieht, dargestellt, gezeichnet oder aufgebaut ist (Molekül, Strukturformel, Zelle, Organ, Schaltkreis, Diagramm, Karte, geometrische Figur, Funktionsgraph), liefere ein Bild: Für chemische Stoffe "molekuel" mit dem englischen Stoffnamen. Für Dinge mit gutem Wikipedia-Hauptbild "wikipedia" mit dem deutschen Artikeltitel. Nur wenn beides nicht passt, eine ganz kleine eigene Skizze als SVG (viewBox 0 0 400 300, schwarze Linien auf Weiß, höchstens 900 Zeichen, keine Skripte).
 5. Wenn keine Frage da ist: frage_erkannt = false und alle anderen Felder leer bzw. typ "keins". Erfinde keine Frage.
 6. Steht dir die Web-Suche zur Verfügung, nutze sie nur, wenn du dir bei einer Zahl, einem Datum, einem Namen oder einem aktuellen Ereignis nicht sicher bist. Für Schulstoff, den du sicher weißt, antworte direkt: Der Schüler wartet, jede Suche kostet Sekunden.
 
@@ -259,18 +259,20 @@ async function strukturiert(anbieter, params) {
  * @param client Anthropic-Client
  * @param eingabe { fach, transkript: [{t, text}], frage?, modus: "auto"|"manuell", profil?, modell? }
  */
-export async function antwort(anbieter, eingabe) {
-  let { daten, nutzung } = await strukturiert(anbieter, {
+export async function antwort(anbieter, eingabe, onDelta) {
+  const rufen = (params) => (onDelta && anbieter.strukturiertStream ? anbieter.strukturiertStream({ ...params, onDelta }) : strukturiert(anbieter, params));
+  let { daten, nutzung } = await rufen({
     system: antwortSystemPrompt(eingabe.profil),
     user: antwortUserPrompt(eingabe),
     schema: ANTWORT_SCHEMA,
     effort: eingabe.modus === "manuell" ? "high" : "medium",
+    maxTokens: 700,
     websuche: Boolean(eingabe.websuche),
   });
   // "Jetzt antworten" ohne erkennbare Frage: zweiter Anlauf mit klarem Auftrag,
   // damit der Schüler auf jeden Fall etwas zum Sagen hat.
   if (eingabe.modus === "manuell" && !eingabe.frage && !daten.frage_erkannt && eingabe.transkript?.length) {
-    const zweiter = await strukturiert(anbieter, {
+    const zweiter = await rufen({
       system: antwortSystemPrompt(eingabe.profil),
       user: antwortUserPrompt({
         ...eingabe,
@@ -279,6 +281,7 @@ export async function antwort(anbieter, eingabe) {
       }),
       schema: ANTWORT_SCHEMA,
       effort: "medium",
+      maxTokens: 700,
     });
     daten = zweiter.daten;
     nutzung = { ...zweiter.nutzung, eingabe: (nutzung.eingabe || 0) + (zweiter.nutzung.eingabe || 0), ausgabe: (nutzung.ausgabe || 0) + (zweiter.nutzung.ausgabe || 0) };

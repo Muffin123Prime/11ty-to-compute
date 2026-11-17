@@ -29,8 +29,9 @@ test("cloudflare: ruft Workers AI mit json_schema auf und parst die Antwort", as
   assert.equal(d.frage_erkannt, true);
   assert.equal(d.bild.typ, "molekuel");
   assert.equal(d.nutzung.anbieter, "cloudflare");
-  assert.equal(aufrufe[0].modell, "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+  assert.equal(aufrufe[0].modell, "@cf/openai/gpt-oss-120b");
   assert.equal(aufrufe[0].params.response_format.type, "json_schema");
+  assert.equal(aufrufe[0].params.reasoning_effort, "low");
   assert.match(aufrufe[0].params.messages[1].content, /JSON-Schema/);
   // Übersetzung nimmt das schnelle Modell
   ai.run = async (modell) => { aufrufe.push({ modell }); return { response: '{"uebersetzungen":[{"id":"a","text":"Hallo"}]}' }; };
@@ -97,4 +98,39 @@ test("status nennt den Anbieter", async () => {
   assert.equal(d.anbieter, "cloudflare");
   assert.equal(d.websuche, false);
   assert.match(d.anbieterName, /kostenlos/);
+});
+
+test("cloudflare: Streaming liefert Deltas und am Ende das Ergebnis als SSE", async () => {
+  const stuecke = ['{"frage_erkannt":true,"antwort":"Gewin', 'kelt.","kurz":"Kurz.","frage":"F?","bild":{"typ":"keins","wert":"","beschreibung":""},"erklaerung":""}'];
+  const ai = {
+    run: async (modell, params) => {
+      assert.equal(params.stream, true);
+      const enc = new TextEncoder();
+      return new ReadableStream({
+        start(c) {
+          for (const t of stuecke) c.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: t } }] })}\n\n`));
+          c.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 50, completion_tokens: 9 } })}\n\ndata: [DONE]\n\n`));
+          c.close();
+        },
+      });
+    },
+  };
+  const r = await apiAnfrage(post("/api/antwort", { frage: "F?", stream: true }), { AI: ai });
+  assert.match(r.headers.get("content-type"), /text\/event-stream/);
+  const text = await r.text();
+  const events = text.split("\n\n").filter(Boolean).map((z) => JSON.parse(z.replace(/^data: /, "")));
+  assert.deepEqual(events.slice(0, 2).map((e) => e.typ), ["delta", "delta"]);
+  const fertig = events.at(-1);
+  assert.equal(fertig.typ, "fertig");
+  assert.equal(fertig.antwort, "Gewinkelt.");
+  assert.equal(fertig.nutzung.eingabe, 50);
+});
+
+test("stream ohne Stream-Anbieter: ein einziges fertig-Ereignis", async () => {
+  const { attrappenClient } = await import("./attrappe.mjs");
+  const r = await apiAnfrage(post("/api/antwort", { frage: "Was ist H2O?", stream: true }), { ANTHROPIC_API_KEY: "x" }, { client: attrappenClient() });
+  const events = (await r.text()).split("\n\n").filter(Boolean).map((z) => JSON.parse(z.replace(/^data: /, "")));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].typ, "fertig");
+  assert.equal(events[0].frage_erkannt, true);
 });

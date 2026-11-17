@@ -15,7 +15,7 @@ import Anthropic from "@anthropic-ai/sdk";
 
 export const STANDARD = {
   anthropic: { modell: "claude-opus-5-5", schnell: "claude-opus-5-5" },
-  cloudflare: { modell: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", schnell: "@cf/meta/llama-3.1-8b-instruct-fast" },
+  cloudflare: { modell: "@cf/openai/gpt-oss-120b", schnell: "@cf/meta/llama-3.1-8b-instruct-fast" },
   groq: { modell: "llama-3.3-70b-versatile", schnell: "llama-3.1-8b-instant" },
   gemini: { modell: "gemini-2.5-flash", schnell: "gemini-2.5-flash-lite" },
 };
@@ -118,32 +118,91 @@ export function anthropicAnbieter(client, modelle = {}) {
 }
 
 // ------------------------------------------------------- Cloudflare Workers AI
+function cfParams(modell, { system, user, schema, maxTokens }) {
+  const params = {
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user + schemaHinweis(schema) },
+    ],
+    response_format: { type: "json_schema", json_schema: schemaOhneExtras(schema) },
+    max_tokens: Math.min(maxTokens || 2000, 4096),
+    temperature: 0.3,
+  };
+  // gpt-oss denkt vor der Antwort; auf "low" bleibt das kurz.
+  if (/gpt-oss/.test(modell)) params.reasoning_effort = "low";
+  return params;
+}
+function cfFehler(e) {
+  const text = String(e?.message || e);
+  if (/quota|neuron|limit|exceed|429/i.test(text)) return new Error("Das kostenlose Tageskontingent von Workers AI ist aufgebraucht (ab Mitternacht UTC geht es weiter).");
+  return new Error(`Workers AI: ${text}`);
+}
+
+// Liest einen SSE-Strom von Workers AI (OpenAI-Chat-Stückchen) und ruft onDelta für jeden Textteil.
+export async function sseLesen(stream, onDelta) {
+  const reader = stream.getReader();
+  const dec = new TextDecoder();
+  let rest = "";
+  let text = "";
+  let nutzung = {};
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    rest += dec.decode(value, { stream: true });
+    const zeilen = rest.split("\n");
+    rest = zeilen.pop();
+    for (const z of zeilen) {
+      const t = z.trim();
+      if (!t.startsWith("data:")) continue;
+      const p = t.slice(5).trim();
+      if (p === "[DONE]") continue;
+      let d;
+      try {
+        d = JSON.parse(p);
+      } catch {
+        continue;
+      }
+      if (d.usage) nutzung = d.usage;
+      const delta = d.choices?.[0]?.delta?.content ?? d.response ?? "";
+      if (delta) {
+        text += delta;
+        if (onDelta) onDelta(delta, text);
+      }
+    }
+  }
+  return { text, nutzung };
+}
+
 export function cloudflareAnbieter(ai, modelle = {}) {
   const m = { ...STANDARD.cloudflare, ...modelle };
   return {
     name: "cloudflare",
     modell: m.modell,
-    async strukturiert({ system, user, schema, maxTokens, schnell }) {
-      const modell = schnell ? m.schnell : m.modell;
+    async strukturiert(p) {
+      const modell = p.schnell ? m.schnell : m.modell;
       let antwort;
       try {
-        antwort = await ai.run(modell, {
-          messages: [
-            { role: "system", content: system },
-            { role: "user", content: user + schemaHinweis(schema) },
-          ],
-          response_format: { type: "json_schema", json_schema: schemaOhneExtras(schema) },
-          max_tokens: Math.min(maxTokens || 2000, 4096),
-          temperature: 0.3,
-        });
+        antwort = await ai.run(modell, cfParams(modell, p));
       } catch (e) {
-        const text = String(e?.message || e);
-        if (/quota|neuron|limit|exceed|429/i.test(text)) throw new Error("Das kostenlose Tageskontingent von Workers AI ist aufgebraucht (ab Mitternacht UTC geht es weiter).");
-        throw new Error(`Workers AI: ${text}`);
+        throw cfFehler(e);
       }
-      const roh = antwort?.response ?? antwort;
+      const roh = antwort?.response ?? antwort?.choices?.[0]?.message?.content ?? antwort;
       const daten = jsonAusText(roh);
-      return { daten, nutzung: { anbieter: "cloudflare", modell, eingabe: antwort?.usage?.prompt_tokens ?? 0, ausgabe: antwort?.usage?.completion_tokens ?? 0 } };
+      const u = antwort?.usage || {};
+      return { daten, nutzung: { anbieter: "cloudflare", modell, eingabe: u.prompt_tokens ?? 0, ausgabe: u.completion_tokens ?? 0 } };
+    },
+    // Wie strukturiert, aber der Text kommt Stück für Stück über onDelta(delta, bisher).
+    async strukturiertStream(p) {
+      const modell = p.schnell ? m.schnell : m.modell;
+      let stream;
+      try {
+        stream = await ai.run(modell, { ...cfParams(modell, p), stream: true });
+      } catch (e) {
+        throw cfFehler(e);
+      }
+      const { text, nutzung } = await sseLesen(stream, p.onDelta);
+      const daten = jsonAusText(text);
+      return { daten, nutzung: { anbieter: "cloudflare", modell, eingabe: nutzung.prompt_tokens ?? 0, ausgabe: nutzung.completion_tokens ?? 0 } };
     },
     fehlerText: () => null,
   };

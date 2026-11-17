@@ -216,6 +216,10 @@
     zwischenstandSegmente: 0,
     waechterTimer: null,
     waechterLaeuft: false,
+    waechterNochmal: false,
+    waechterZuletztMs: 0,
+    vorlaeufig: null, // Segment aus dem noch unfertigen Erkennungs-Text
+    stabilTimer: null,
     waechterStand: 0, // Anzahl Segmente beim letzten Prüfen
     waechterText: "", // Statuszeile
     uebersetzTimer: null,
@@ -247,6 +251,7 @@
         else zwischen += (zwischen ? " " : "") + text;
       }
       live.zwischen = zwischen;
+      vorlaeufigAktualisieren(zwischen);
       transkriptZeichnen();
     };
     rec.onerror = (e) => {
@@ -335,26 +340,70 @@
     if (live.stunde) db.speichere(live.stunde).catch(() => {});
   });
 
+  // Safari und Chrome liefern den endgültigen Text oft erst nach einer langen
+  // Pause. Damit Übersetzung und Frage-Wächter nicht warten müssen, wird der
+  // noch unfertige Text als vorläufiges Segment mitgeführt und laufend ersetzt.
+  function vorlaeufigAktualisieren(zwischen) {
+    const st = live.stunde;
+    if (!st) return;
+    const text = zwischen.trim();
+    if (!text) return;
+    if (!live.vorlaeufig || !st.transkript.includes(live.vorlaeufig)) {
+      live.vorlaeufig = { t: Math.max(0, Math.round(liveSekunden())), text, vorlaeufig: true };
+      st.transkript.push(live.vorlaeufig);
+    } else if (live.vorlaeufig.text !== text) {
+      live.vorlaeufig.text = text;
+      delete live.vorlaeufig.de; // Übersetzung passt nicht mehr
+    }
+    // Nach 1,2 s ohne Änderung gilt der Text als stabil: dann übersetzen und auf Fragen prüfen.
+    clearTimeout(live.stabilTimer);
+    live.stabilTimer = setTimeout(() => {
+      if (!live.vorlaeufig || live.stunde !== st) return;
+      uebersetzungAnstossen(300);
+      fragePruefen(live.vorlaeufig.text, true);
+    }, 1200);
+  }
+
   function segmentHinzu(text) {
     if (!live.stunde) return;
     const t = Math.max(0, Math.round(liveSekunden()));
-    live.stunde.transkript.push({ t, text });
+    clearTimeout(live.stabilTimer);
+    const v = live.vorlaeufig;
+    live.vorlaeufig = null;
+    if (v && live.stunde.transkript.includes(v)) {
+      // Das vorläufige Segment wird zum endgültigen; Übersetzung bleibt, wenn der Text gleich blieb.
+      if (v.text !== text) delete v.de;
+      v.text = text;
+      v.t = Math.min(v.t, t);
+      delete v.vorlaeufig;
+    } else {
+      live.stunde.transkript.push({ t, text });
+    }
     speichernBald();
     uebersetzungAnstossen();
-    if (!einst.auto) return;
-    // Fragen ziehen sich oft über zwei Erkennungs-Stücke ("wer kann mir sagen" / "wie das molekül aussieht").
-    const vor = live.stunde.transkript.at(-2);
-    const paar = vor && t - vor.t <= 8 ? `${vor.text} ${text}` : text;
-    if (istFrage(text) || istFrage(paar)) autoAntwort(paar);
+    fragePruefen(text, false);
+  }
+
+  // Prüft neuen Text auf eine Frage: erst die schnellen Wortmuster, sonst der Wächter.
+  function fragePruefen(text, vorlaeufig) {
+    if (!einst.auto || !live.stunde) return;
+    const tr = live.stunde.transkript;
+    const letzter = tr.at(-1);
+    const vor = tr.at(-2);
+    const paar = vor && letzter && letzter.t - vor.t <= 8 ? `${vor.text} ${text}` : text;
+    // Erst der neue Text allein, sonst zusammen mit dem Stück davor (zerschnittene Frage).
+    const hinweis = istFrage(text) ? text : istFrage(paar) ? paar : null;
+    if (hinweis) autoAntwort(hinweis);
+    else waechterAnstossen(vorlaeufig);
   }
 
   // ---------- Live-Übersetzung ----------------------------------------------
   // Fremdsprachige Stunden: neue Stücke werden gesammelt und nach kurzer Pause
   // gebündelt übersetzt, damit die Übersetzung ein, zwei Sekunden hinterherläuft.
-  function uebersetzungAnstossen() {
+  function uebersetzungAnstossen(wartezeit = 700) {
     if (!live.stunde || live.stunde.sprache === "de") return;
     clearTimeout(live.uebersetzTimer);
-    live.uebersetzTimer = setTimeout(uebersetzen, 3000);
+    live.uebersetzTimer = setTimeout(uebersetzen, wartezeit);
   }
   async function uebersetzen() {
     const st = live.stunde;
@@ -365,9 +414,14 @@
     offen.forEach((s) => (s.de = null)); // null = unterwegs
     transkriptZeichnen();
     try {
-      const d = await api("/api/uebersetzung", { von: st.sprache, fach: st.fach, segmente: offen.map((s) => ({ id: String(s.t) + ":" + s.text.length, text: s.text })) });
+      const texte = offen.map((s) => s.text);
+      const d = await api("/api/uebersetzung", { von: st.sprache, fach: st.fach, segmente: offen.map((s, i) => ({ id: `s${i}`, text: s.text })) });
       const nachId = new Map(d.uebersetzungen.map((u) => [u.id, u.text]));
-      offen.forEach((s) => (s.de = nachId.get(String(s.t) + ":" + s.text.length) || ""));
+      offen.forEach((s, i) => {
+        // Hat sich der vorläufige Text inzwischen geändert, gilt die Übersetzung nicht mehr.
+        if (s.text !== texte[i]) delete s.de;
+        else s.de = nachId.get(`s${i}`) ?? d.uebersetzungen[i]?.text ?? "";
+      });
       live.uebersetzFehler = "";
       speichernBald();
     } catch (e) {
@@ -378,7 +432,7 @@
       transkriptZeichnen();
       if (live.stunde === st && st.transkript.some((s) => s.de === undefined)) {
         clearTimeout(live.uebersetzTimer);
-        live.uebersetzTimer = setTimeout(uebersetzen, live.uebersetzFehler ? 8000 : 1500);
+        live.uebersetzTimer = setTimeout(uebersetzen, live.uebersetzFehler ? 8000 : 500);
       }
     }
   }
@@ -437,24 +491,43 @@
   // Der Frage-Wächter: prüft alle paar Sekunden den neuen Text mit dem kleinen
   // Modell, unabhängig von den Wortmustern. Erkennt er eine Frage, kommt die
   // Antwort, ohne dass jemand drückt.
-  const WAECHTER_ALLE_MS = 9000;
+  const WAECHTER_MIN_ABSTAND_MS = 4000;
   function waechterStarten() {
     clearInterval(live.waechterTimer);
-    live.waechterTimer = setInterval(waechterPruefen, WAECHTER_ALLE_MS);
+    live.waechterTimer = setInterval(() => waechterAnstossen(false), 15000); // Sicherheitsnetz
+  }
+  // Wird bei jedem neuen (auch vorläufigen) Text gerufen; läuft höchstens alle vier Sekunden.
+  function waechterAnstossen() {
+    if (!live.stunde || !einst.auto) return;
+    if (live.waechterLaeuft) {
+      live.waechterNochmal = true;
+      return;
+    }
+    const wartezeit = WAECHTER_MIN_ABSTAND_MS - (Date.now() - live.waechterZuletztMs);
+    clearTimeout(live.waechterWarten);
+    if (wartezeit > 0) {
+      live.waechterWarten = setTimeout(waechterPruefen, wartezeit);
+      return;
+    }
+    waechterPruefen();
   }
   async function waechterPruefen() {
     const st = live.stunde;
     if (!st || !einst.auto || live.waechterLaeuft) return;
     const neue = st.transkript.length - live.waechterStand;
-    if (neue < 1) return;
+    const letzter = st.transkript.at(-1);
+    if (neue < 1 && !(letzter?.vorlaeufig && letzter.text !== live.waechterLetzterText)) return;
     live.waechterLaeuft = true;
+    live.waechterNochmal = false;
+    live.waechterZuletztMs = Date.now();
     live.waechterStand = st.transkript.length;
+    live.waechterLetzterText = letzter?.text || "";
     setzeWaechterText("prüft …");
     try {
       const d = await api("/api/frage", {
         fach: st.fach,
         sprache: st.sprache || "de",
-        transkript: letzteSegmente(75, 4, 30),
+        transkript: letzteSegmente(45, 3, 14),
         bisherige: st.fragen.filter((f) => f.status !== "fehler").slice(0, 8).map((f) => f.frage),
       });
       if (live.stunde !== st) return;
@@ -464,7 +537,7 @@
           setzeWaechterText(`${zeit(liveSekunden())} ${d.art === "aufgabe" ? "Aufgabe" : "Frage"} erkannt`);
           live.letzteAnfrageMs = Date.now();
           live.letzteFrageText = d.frage;
-          await frageStellen({ modus: "auto", frage: d.frage, erkannt: true });
+          frageStellen({ modus: "auto", frage: d.frage, erkannt: true });
         }
       } else {
         setzeWaechterText(`${zeit(liveSekunden())} keine Frage`);
@@ -473,6 +546,7 @@
       setzeWaechterText(`Prüfung fehlgeschlagen: ${e.message}`);
     } finally {
       live.waechterLaeuft = false;
+      if (live.waechterNochmal) waechterAnstossen();
     }
   }
   function setzeWaechterText(t) {
@@ -483,8 +557,8 @@
 
   async function autoAntwort(text) {
     const jetzt = Date.now();
-    if (jetzt - live.letzteAnfrageMs < 6000) return; // nicht bei jedem Satz
-    if (text === live.letzteFrageText || schonGestellt(text)) return;
+    if (jetzt - live.letzteAnfrageMs < 5000) return; // nicht bei jedem Satz
+    if (text === live.letzteFrageText || aehnlich(text, live.letzteFrageText) || schonGestellt(text)) return;
     live.letzteAnfrageMs = jetzt;
     live.letzteFrageText = text;
     live.waechterStand = live.stunde.transkript.length; // der Wächter muss das nicht noch einmal prüfen
@@ -500,29 +574,95 @@
     return teile.filter(Boolean).join("\n");
   }
 
+  // Holt aus dem noch unvollständigen JSON den bisherigen Antworttext.
+  function teilAntwort(text) {
+    const m = text.match(/"antwort"\s*:\s*"((?:[^"\\]|\\.)*)/);
+    if (!m) return "";
+    try {
+      return JSON.parse(`"${m[1]}"`);
+    } catch {
+      return m[1].replace(/\\n/g, " ").replace(/\\"/g, '"').replace(/\\$/, "");
+    }
+  }
+
   async function frageStellen({ modus, frage = "", hinweisText = "", erkannt = false }) {
     if (!live.stunde) return;
+    const st = live.stunde;
     const karte = { id: neueId(), t: Math.round(liveSekunden()), modus, frage: frage || hinweisText, antwort: "", kurz: "", erklaerung: "", bild: null, status: "wartet", erkannt };
-    live.stunde.fragen.unshift(karte);
+    st.fragen.unshift(karte);
     live.laufend++;
     antwortenZeichnen();
+    const body = {
+      fach: st.fach,
+      transkript: letzteSegmente(),
+      frage,
+      erkannt,
+      modus,
+      kontext: kontextText(),
+      sprache: st.sprache || "de",
+      bisherige: st.fragen.filter((f) => f.status === "fertig" && f.id !== karte.id).slice(0, 8).map((f) => f.frage),
+      websuche: Boolean(einst.websuche),
+      profil: profil(),
+      stream: true,
+    };
     try {
-      const d = await api("/api/antwort", {
-        fach: live.stunde.fach,
-        transkript: letzteSegmente(),
-        frage,
-        erkannt,
-        modus,
-        kontext: kontextText(),
-        sprache: live.stunde.sprache || "de",
-        bisherige: live.stunde.fragen.filter((f) => f.status === "fertig" && f.id !== karte.id).slice(0, 8).map((f) => f.frage),
-        websuche: Boolean(einst.websuche),
-        profil: profil(),
-      });
+      const kopf = { "content-type": "application/json" };
+      if (einst.appKey) kopf["x-app-key"] = einst.appKey;
+      let r;
+      try {
+        r = await fetch(serverUrl("/api/antwort"), { method: "POST", headers: kopf, body: JSON.stringify(body) });
+      } catch {
+        throw new Error("Server nicht erreichbar. Stimmt die Adresse in den Einstellungen? Hast du Internet?");
+      }
+      if (!r.ok) {
+        let f;
+        try {
+          f = (await r.json()).fehler;
+        } catch {
+          /* kein JSON */
+        }
+        throw new Error(f || `Fehler ${r.status}`);
+      }
+      let d = null;
+      if (/text\/event-stream/.test(r.headers.get("content-type") || "")) {
+        const reader = r.body.getReader();
+        const dec = new TextDecoder();
+        let rest = "";
+        let bisher = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          rest += dec.decode(value, { stream: true });
+          const teile = rest.split("\n\n");
+          rest = teile.pop();
+          for (const teil of teile) {
+            const zeile = teil.split("\n").find((z) => z.startsWith("data:"));
+            if (!zeile) continue;
+            let ev;
+            try {
+              ev = JSON.parse(zeile.slice(5));
+            } catch {
+              continue;
+            }
+            if (ev.typ === "delta") {
+              bisher += ev.delta;
+              const text = teilAntwort(bisher);
+              if (text && text !== karte.antwort) {
+                karte.antwort = text;
+                karte.status = "schreibt";
+                antwortTextAktualisieren(karte);
+              }
+            } else if (ev.typ === "fertig") d = ev;
+            else if (ev.typ === "fehler") throw new Error(ev.fehler);
+          }
+        }
+        if (!d) throw new Error("Die Verbindung ist abgebrochen.");
+      } else {
+        d = await r.json();
+      }
       if (!d.frage_erkannt) {
         if (modus === "auto") {
-          // Das Modell sagt: keine echte Frage. Karte wieder weg, nur die Statuszeile sagt es.
-          live.stunde.fragen = live.stunde.fragen.filter((f) => f.id !== karte.id);
+          st.fragen = st.fragen.filter((f) => f.id !== karte.id);
           setzeWaechterText(`${zeit(liveSekunden())} keine Frage`);
         } else {
           karte.status = "nichts";
@@ -541,6 +681,19 @@
       speichernBald();
       antwortenZeichnen();
     }
+  }
+
+  // Beim Streamen nur den Antworttext der einen Karte nachführen, nicht alles neu zeichnen.
+  function antwortTextAktualisieren(karte) {
+    const k = liveTeile && $(`[data-frage="${karte.id}"]`, liveTeile.antworten);
+    if (!k) return antwortenZeichnen();
+    let p = $(".antwort", k);
+    if (!p) {
+      p = el("p", { class: "antwort" });
+      $(".frage", k)?.after(p);
+      $(".lade", k)?.remove();
+    }
+    p.textContent = karte.antwort + " ▍";
   }
 
   // ---------- Zwischenstand (laufende Zusammenfassung) -------------------------
@@ -593,6 +746,8 @@
     live.zwischenstandTimer = setInterval(() => zwischenstandHolen(false), ZWISCHENSTAND_ALLE_MS);
     live.waechterStand = 0;
     live.waechterText = "";
+    live.waechterZuletztMs = 0;
+    live.vorlaeufig = null;
     waechterStarten();
     live.pausenMs = 0;
     live.pauseSeitMs = 0;
@@ -656,6 +811,11 @@
     live.rec = null;
     clearInterval(live.wachhund);
     clearTimeout(live.uebersetzTimer);
+    clearTimeout(live.stabilTimer);
+    clearTimeout(live.waechterWarten);
+    // Ein noch vorläufiges Segment wird zum echten.
+    st.transkript.forEach((s) => delete s.vorlaeufig);
+    live.vorlaeufig = null;
     st.dauer = Math.round(liveSekunden());
     live.stunde = null;
     live.startMs = 0;
@@ -905,8 +1065,7 @@
     const fremd = st.sprache && st.sprache !== "de";
     const original = el("div", { class: fremd ? "original" : "" },
       tr.length === 0 && !live.zwischen ? el("span", { class: "leer" }, live.hoert ? (fremd ? `Ich höre zu (${spracheName(st.sprache)}) … Sobald jemand spricht, steht hier der Text und darunter die Übersetzung.` : "Ich höre zu … Sobald jemand spricht, steht der Text hier.") : SR ? "Pause. Auf den Punkt tippen, um weiter zuzuhören." : "Keine Spracherkennung in diesem Browser.") : null,
-      letzte.map((s, i) => el("span", { class: i === letzte.length - 1 && !live.zwischen ? "neu" : "alt" }, `${s.text} `)),
-      live.zwischen ? el("span", { class: "zwischen" }, live.zwischen) : null,
+      letzte.map((s, i) => el("span", { class: s.vorlaeufig ? "zwischen" : i === letzte.length - 1 ? "neu" : "alt" }, `${s.text} `)),
     );
     const uebersetzung = fremd && tr.length
       ? el("div", { class: "uebersetzung" },
@@ -963,7 +1122,7 @@
   }
 
   function antwortKarte(f, st) {
-    const klasse = `karte antwort-karte ${f.status === "wartet" ? "wartet" : f.status === "fertig" ? "" : "nichts"}${f.neu ? " neu" : ""}${f.bild ? " mit-bild" : ""}`;
+    const klasse = `karte antwort-karte ${f.status === "wartet" || f.status === "schreibt" ? "wartet" : f.status === "fertig" ? "" : "nichts"}${f.neu ? " neu" : ""}${f.bild ? " mit-bild" : ""}`;
     if (f.neu) setTimeout(() => { f.neu = false; }, 4000);
     const entfernen = () => {
       st.fragen = st.fragen.filter((x) => x.id !== f.id);
@@ -981,11 +1140,12 @@
       f.status === "wartet" ? el("span", { class: "lade" }) : null,
       f.frage ? f.frage : f.modus === "manuell" ? "Was will die Lehrkraft gerade wissen?" : "",
       f.status === "wartet" ? el("span", { class: "muted" }, " … ich überlege") : null,
+      f.status === "schreibt" ? el("span", { class: "muted" }, " … schreibt") : null,
     );
     const text = el("div", { class: "text" },
       kopf,
       frage,
-      f.status === "fehler" ? el("p", { class: "fehler" }, f.antwort) : f.antwort ? el("p", { class: "antwort" }, f.antwort) : null,
+      f.status === "fehler" ? el("p", { class: "fehler" }, f.antwort) : f.antwort ? el("p", { class: "antwort" }, f.status === "schreibt" ? `${f.antwort} ▍` : f.antwort) : null,
       f.kurz && f.status === "fertig" ? el("p", { class: "kurz" }, el("span", { class: "muted" }, "Kurz: "), f.kurz) : null,
       f.erklaerung ? el("details", { class: "erklaerung" }, el("summary", {}, "Hintergrund für Rückfragen"), el("p", {}, f.erklaerung)) : null,
       el("div", { class: "fuss" },
@@ -1259,6 +1419,7 @@
   // Für Tests und zum Nachtragen von Hand: window.unterricht.einspeisen("…")
   window.unterricht = {
     einspeisen: (text) => { segmentHinzu(text); transkriptZeichnen(); },
+    zwischen: (text) => { live.zwischen = text; vorlaeufigAktualisieren(text); transkriptZeichnen(); },
     zustand: () => ({ hoert: live.hoert, pausiert: live.pausiert, stunde: live.stunde }),
     zwischenstand: () => zwischenstandHolen(true),
     waechter: () => waechterPruefen(),
