@@ -138,6 +138,15 @@ export async function apiAnfrage(request, env, optionen = {}) {
     if (pfad === "/api/zusammenfassung") {
       const transkript = transkriptPruefen(body.transkript);
       if (transkript.length < 3) return json({ fehler: "Das Transkript ist zu kurz für eine Zusammenfassung." }, 400, cors);
+      const ohneDoppelte = (liste, schluessel = (x) => x) => {
+        const gesehen = new Set();
+        return (Array.isArray(liste) ? liste : []).filter((x) => {
+          const k = String(schluessel(x)).trim().toLowerCase();
+          if (!k || gesehen.has(k)) return false;
+          gesehen.add(k);
+          return true;
+        });
+      };
       const ergebnis = await zusammenfassung(client, {
         fach: String(body.fach || "").slice(0, 80),
         datum: String(body.datum || "").slice(0, 40),
@@ -146,6 +155,10 @@ export async function apiAnfrage(request, env, optionen = {}) {
         transkript,
         profil,
       });
+      ergebnis.kernpunkte = ohneDoppelte(ergebnis.kernpunkte);
+      ergebnis.hausaufgaben = ohneDoppelte(ergebnis.hausaufgaben);
+      ergebnis.fragen = ohneDoppelte(ergebnis.fragen, (f) => f?.frage);
+      ergebnis.begriffe = ohneDoppelte(ergebnis.begriffe, (b) => b?.begriff);
       return json(ergebnis, 200, cors);
     }
 
