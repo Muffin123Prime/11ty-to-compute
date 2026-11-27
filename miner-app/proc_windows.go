@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -53,3 +54,25 @@ func hideWindow(cmd *exec.Cmd) {
 func stopProcess(p *os.Process) {
 	_ = p.Kill()
 }
+
+var awakeCh = make(chan bool, 4)
+
+func init() {
+	// Windows merkt sich die Einstellung pro Thread. Deshalb läuft sie auf
+	// einem eigenen, fest gebundenen Thread, der bis zum Ende der App lebt.
+	go func() {
+		runtime.LockOSThread()
+		proc := syscall.NewLazyDLL("kernel32.dll").NewProc("SetThreadExecutionState")
+		const esContinuous, esSystemRequired = 0x80000000, 0x00000001
+		for on := range awakeCh {
+			flags := uintptr(esContinuous)
+			if on {
+				flags |= esSystemRequired
+			}
+			_, _, _ = proc.Call(flags)
+		}
+	}()
+}
+
+// setKeepAwake verhindert, dass Windows von selbst in den Standby geht.
+func setKeepAwake(on bool) { awakeCh <- on }

@@ -38,18 +38,20 @@ type Config struct {
 	Mode           string `json:"mode"` // max | balanced | quiet
 	PauseOnActive  bool   `json:"pauseOnActive"`
 	PauseOnBattery bool   `json:"pauseOnBattery"`
-	AutoMine       bool   `json:"autoMine"` // beim App-Start sofort minen
-	Remote         bool   `json:"remote"`   // Stand an die Handy-Seite melden
+	AutoMine       bool   `json:"autoMine"`  // beim App-Start sofort minen
+	Remote         bool   `json:"remote"`    // Stand an die Handy-Seite melden
+	KeepAwake      bool   `json:"keepAwake"` // Standby verhindern, solange die App läuft
 	RelayKey       string `json:"relayKey,omitempty"`
 }
 
 func defaultConfig() Config {
 	return Config{
-		Pool:   "pool.supportxmr.com:443",
-		TLS:    true,
-		Worker: "mein-pc",
-		Mode:   "max",
-		Remote: true,
+		Pool:      "pool.supportxmr.com:443",
+		TLS:       true,
+		Worker:    "mein-pc",
+		Mode:      "max",
+		Remote:    true,
+		KeepAwake: true,
 	}
 }
 
@@ -266,6 +268,7 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	a.cfg = in.Config
 	err := a.saveConfig()
 	a.mu.Unlock()
+	setKeepAwake(in.Config.KeepAwake)
 	if err != nil {
 		writeErr(w, 500, fmt.Errorf("Einstellungen konnten nicht gespeichert werden: %v", err))
 		return
@@ -408,6 +411,7 @@ func main() {
 	}
 	app.loadConfig()
 	app.ensureRelayKey()
+	setKeepAwake(app.cfg.KeepAwake)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -446,6 +450,7 @@ func main() {
 	case <-sig:
 	}
 	app.miner.StopAndWait()
+	setKeepAwake(false)
 	app.tracker.mu.Lock()
 	app.tracker.save()
 	app.tracker.mu.Unlock()

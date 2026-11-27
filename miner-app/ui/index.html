@@ -226,6 +226,7 @@
     </div>
     <label class="check"><input type="checkbox" id="autoMine"> <span>Beim Öffnen der App sofort mit dem Mining beginnen</span></label>
     <label class="check"><input type="checkbox" id="autostart"> <span>App automatisch starten, wenn ich mich am PC anmelde</span></label>
+    <label class="check"><input type="checkbox" id="keepAwake"> <span>PC wach halten: kein Standby, solange die App läuft</span></label>
     <label class="check"><input type="checkbox" id="remote"> <span>Stand an die Handy-Seite melden</span></label>
     <label class="check"><input type="checkbox" id="pauseOnActive"> <span>Nur minen, wenn ich den PC gerade nicht benutze</span></label>
     <label class="check"><input type="checkbox" id="pauseOnBattery"> <span>Im Akkubetrieb pausieren</span></label>
@@ -302,7 +303,7 @@ function fillForm(s) {
   $("wallet").value = c.wallet || "";
   $("worker").value = c.worker || "";
   setMode(c.mode);
-  for (const k of ["pauseOnActive", "pauseOnBattery", "autoMine", "remote"]) $(k).checked = !!c[k];
+  for (const k of ["pauseOnActive", "pauseOnBattery", "autoMine", "remote", "keepAwake"]) $(k).checked = !!c[k];
   $("autostart").checked = s.autostart;
   const preset = [...$("poolSel").options].find(o => o.value === c.pool + "|" + (c.tls ? 1 : 0));
   $("poolSel").value = preset ? preset.value : "custom";
@@ -317,7 +318,7 @@ function readForm() {
   return {
     wallet: $("wallet").value.trim(), pool: pool.trim(), tls, worker: $("worker").value.trim(), mode,
     pauseOnActive: $("pauseOnActive").checked, pauseOnBattery: $("pauseOnBattery").checked,
-    autoMine: $("autoMine").checked, remote: $("remote").checked, autostart: $("autostart").checked,
+    autoMine: $("autoMine").checked, remote: $("remote").checked, keepAwake: $("keepAwake").checked, autostart: $("autostart").checked,
   };
 }
 
