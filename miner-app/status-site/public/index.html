@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#000000">
+<title>KryptoMiner</title>
+<style>
+  :root { --bg: #000; --fg: #fff; --dim: #8c8c8c; --line: #262626; --soft: #0d0d0d; }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 560px; margin: 0 auto; padding: 22px 16px calc(36px + env(safe-area-inset-bottom)); }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 28px; }
+  .brand { font-size: 13px; letter-spacing: 0.22em; text-transform: uppercase; font-weight: 600; }
+  .age { font-size: 13px; color: var(--dim); text-align: right; }
+  .state { display: flex; align-items: center; gap: 12px; font-size: 15px; letter-spacing: 0.14em; text-transform: uppercase; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--fg); flex: none; }
+  .dot.on { background: var(--fg); animation: beat 2s infinite; }
+  .dot.half { background: var(--dim); border-color: var(--dim); }
+  @keyframes beat { 50% { box-shadow: 0 0 0 7px rgba(255, 255, 255, 0.12); } }
+  @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } }
+  .big { font-size: clamp(56px, 19vw, 96px); font-weight: 200; letter-spacing: -0.045em; line-height: 1; margin: 14px 0 4px; font-variant-numeric: tabular-nums; }
+  .big small { font-size: 0.24em; font-weight: 400; letter-spacing: 0.04em; color: var(--dim); margin-left: 8px; }
+  .sub { color: var(--dim); font-size: 14px; min-height: 20px; }
+  .chart { margin: 26px 0 6px; }
+  .chart svg { display: block; width: 100%; height: 72px; }
+  .chart .cap { display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); margin-top: 6px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); margin-top: 22px; }
+  .cell { padding: 16px 0 16px; border-bottom: 1px solid var(--line); min-width: 0; }
+  .cell:nth-child(odd) { padding-right: 12px; }
+  .cell:nth-child(even) { padding-left: 16px; border-left: 1px solid var(--line); }
+  .cell.wide { grid-column: 1 / -1; padding-left: 0; border-left: 0; }
+  .k { font-size: 11.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); }
+  .v { font-size: 22px; font-weight: 300; letter-spacing: -0.01em; margin-top: 4px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .n { font-size: 13px; color: var(--dim); margin-top: 2px; }
+  .foot { color: var(--dim); font-size: 12.5px; margin-top: 22px; }
+  .msg { margin-top: 80px; text-align: center; color: var(--dim); }
+  .msg b { display: block; color: var(--fg); font-size: 20px; font-weight: 400; margin-bottom: 8px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="brand">KryptoMiner</div>
+    <div class="age" id="age"></div>
+  </header>
+
+  <div id="view" hidden>
+    <div class="state"><span class="dot" id="dot"></span><span id="stateText"></span></div>
+    <div class="big"><span id="rate">–</span><small id="unit">H/s</small></div>
+    <div class="sub" id="sub"></div>
+
+    <div class="chart" id="chart" hidden>
+      <svg id="spark" viewBox="0 0 300 72" preserveAspectRatio="none" role="img" aria-label="Verlauf der Hashrate"></svg>
+      <div class="cap"><span id="chartFrom"></span><span>Verlauf der Hashrate</span><span>jetzt</span></div>
+    </div>
+
+    <div class="grid">
+      <div class="cell"><div class="k">Arbeitet seit</div><div class="v" id="since">–</div><div class="n" id="sinceAt"></div></div>
+      <div class="cell"><div class="k">Insgesamt gearbeitet</div><div class="v" id="total">–</div><div class="n">seit dem ersten Start</div></div>
+      <div class="cell"><div class="k">Guthaben im Pool</div><div class="v" id="due">–</div><div class="n" id="dueEur"></div></div>
+      <div class="cell"><div class="k">Ausgezahlt</div><div class="v" id="paid">–</div><div class="n" id="paidEur"></div></div>
+      <div class="cell"><div class="k">Shares</div><div class="v" id="shares">–</div><div class="n">vom Pool angenommen</div></div>
+      <div class="cell"><div class="k">Bestwert</div><div class="v" id="best">–</div><div class="n">höchste Hashrate</div></div>
+      <div class="cell wide"><div class="k">Bisher verdient</div><div class="v" id="earned">–</div><div class="n" id="earnedEur"></div></div>
+    </div>
+    <div class="foot" id="foot"></div>
+  </div>
+
+  <div class="msg" id="msg"><b>Lädt …</b></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const id = location.hash.slice(1);
+const num = v => (typeof v === "number" && isFinite(v) ? v : null);
+const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : "");
+
+function rateParts(v) {
+  if (v == null) return ["–", "H/s"];
+  if (v >= 1e6) return [(v / 1e6).toFixed(2).replace(".", ","), "MH/s"];
+  if (v >= 1e4) return [(v / 1e3).toFixed(1).replace(".", ","), "kH/s"];
+  if (v >= 1e3) return [(v / 1e3).toFixed(2).replace(".", ","), "kH/s"];
+  return [v.toFixed(0), "H/s"];
+}
+function dur(s) {
+  if (s == null) return "–";
+  s = Math.max(0, Math.floor(s));
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  if (d) return `${d} T ${h} Std`;
+  if (h) return `${h} Std ${m} Min`;
+  if (m) return `${m} Min`;
+  return `${s} Sek`;
+}
+const xmr = v => v.toFixed(6).replace(".", ",") + " XMR";
+const eur = v => "≈ " + v.toLocaleString("de-DE", { style: "currency", currency: "EUR", minimumFractionDigits: 2, maximumFractionDigits: v < 1 ? 4 : 2 });
+const clock = ts => new Date(ts * 1000).toLocaleString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+function spark(hist) {
+  const pts = (Array.isArray(hist) ? hist : []).filter(p => Array.isArray(p) && num(p[0]) != null && num(p[1]) != null).slice(-288);
+  $("chart").hidden = pts.length < 3;
+  if (pts.length < 3) return;
+  const max = Math.max(...pts.map(p => p[1]), 1), W = 300, H = 72;
+  const xy = pts.map((p, i) => [(i / (pts.length - 1)) * W, H - 3 - (p[1] / max) * (H - 8)]);
+  const line = xy.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+  $("spark").innerHTML =
+    `<path d="${line} L${W} ${H} L0 ${H} Z" fill="#fff" fill-opacity="0.07"/>` +
+    `<path d="${line}" fill="none" stroke="#fff" stroke-width="1.5" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
+  $("chartFrom").textContent = "vor " + dur(Date.now() / 1000 - pts[0][0]);
+}
+
+function show(data) {
+  const s = data.state || {}, st = s.stats || null;
+  const age = Math.max(0, (data.now - data.receivedAt) / 1000);
+  const stale = age > 150;
+  let live = !stale && s.phase === "running";
+  const dot = $("dot"); dot.className = "dot";
+  let text = "Aus", sub = "Der Miner läuft gerade nicht.";
+  if (stale || s.phase === "offline") { text = "Offline"; sub = "Der PC ist aus oder die App ist beendet."; }
+  else if (s.phase === "installing") { text = "Startet"; sub = "Der Miner wird vorbereitet."; dot.classList.add("half"); }
+  else if (s.phase === "error") { text = "Fehler"; sub = "Am PC ist ein Fehler aufgetreten – schau in die App."; }
+  else if (live && st && st.paused) { text = "Pausiert"; sub = "Der PC wird gerade benutzt oder läuft im Akkubetrieb."; dot.classList.add("half"); live = false; }
+  else if (live && st && st.connected) { text = "Arbeitet"; sub = "Verbunden mit " + str(st.pool, 80); dot.classList.add("on"); }
+  else if (live) { text = "Verbindet"; sub = "Verbindung zum Pool wird aufgebaut."; dot.classList.add("half"); }
+  $("stateText").textContent = text; $("sub").textContent = sub;
+
+  const h = st && Array.isArray(st.hashrate) ? st.hashrate.map(num) : [];
+  const [r, u] = rateParts(live ? (h[0] ?? h[1] ?? h[2] ?? null) : (stale || s.phase !== "running" ? 0 : null));
+  $("rate").textContent = r; $("unit").textContent = u;
+
+  const started = num(s.startedAt);
+  if (live && started) { $("since").textContent = dur(data.now / 1000 - started); $("sinceAt").textContent = "gestartet " + clock(started); }
+  else { $("since").textContent = "–"; $("sinceAt").textContent = "läuft gerade nicht"; }
+  $("total").textContent = dur(num(s.totalSeconds));
+  $("shares").textContent = st && num(st.sharesGood) != null ? st.sharesGood.toLocaleString("de-DE") : "–";
+  const best = rateParts(st ? num(st.highest) : null); $("best").textContent = best[0] === "–" ? "–" : best[0] + " " + best[1];
+
+  const b = s.balance, price = num(s.eur);
+  const due = b ? num(b.due) : null, paid = b ? num(b.paid) : null;
+  const put = (el, v) => { $(el).textContent = v == null ? "–" : xmr(v); $(el + "Eur").textContent = v != null && price ? eur(v * price) : (v == null && el === "due" ? "noch keine Daten vom Pool" : ""); };
+  put("due", due); put("paid", paid); put("earned", due != null ? due + (paid || 0) : null);
+
+  spark(s.history);
+  const cpu = st ? str(st.cpu, 80) : "";
+  $("foot").textContent = [str(s.worker, 40), cpu, st && num(st.threads) ? st.threads + " Threads" : ""].filter(Boolean).join(" · ");
+  $("age").textContent = "Stand: vor " + dur(age);
+  $("view").hidden = false; $("msg").hidden = true;
+}
+
+function message(title, text) {
+  $("view").hidden = true; $("msg").hidden = false; $("age").textContent = "";
+  $("msg").innerHTML = ""; const b = document.createElement("b"); b.textContent = title;
+  $("msg").append(b, document.createTextNode(text));
+}
+
+async function load() {
+  if (!/^[0-9a-f]{32}$/.test(id)) return message("Kein gültiger Link", "Scanne den QR-Code in der KryptoMiner-App auf deinem PC.");
+  try {
+    const res = await fetch("/api/status?id=" + id, { cache: "no-store" });
+    if (res.status === 404) return message("Noch keine Daten", "Starte die KryptoMiner-App auf deinem PC. Der Stand erscheint hier nach etwa einer Minute.");
+    if (!res.ok) throw new Error();
+    show(await res.json());
+  } catch (e) {
+    if ($("view").hidden) message("Keine Verbindung", "Der Stand konnte nicht geladen werden. Neuer Versuch in Kürze.");
+    else $("age").textContent = "Keine Verbindung";
+  }
+}
+load();
+setInterval(load, 15000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+</script>
+</body>
+</html>

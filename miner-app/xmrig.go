@@ -50,6 +50,7 @@ type Miner struct {
 	apiToken  string
 	logs      []string
 	version   string
+	msr       string // "" | ok | failed
 }
 
 func (m *Miner) binPath() string {
@@ -140,7 +141,17 @@ func (m *Miner) run(cfg Config) error {
 		"--http-host", "127.0.0.1",
 		"--http-port", fmt.Sprint(port),
 		"--http-access-token", token,
-		"--cpu-max-threads-hint", fmt.Sprint(cfg.Threads),
+	}
+	switch cfg.Mode {
+	case "quiet":
+		args = append(args, "--cpu-max-threads-hint", "50", "--cpu-priority", "1")
+	case "balanced":
+		args = append(args, "--cpu-max-threads-hint", "75")
+	default: // max: alle sinnvollen Threads, Vorrang vor anderen Programmen
+		args = append(args, "--cpu-max-threads-hint", "100", "--cpu-priority", "3")
+		if runtime.GOOS == "linux" {
+			args = append(args, "--randomx-1gb-pages")
+		}
 	}
 	if cfg.TLS {
 		args = append(args, "--tls")
@@ -169,6 +180,7 @@ func (m *Miner) run(cfg Config) error {
 	m.startedAt = time.Now()
 	m.apiPort = port
 	m.apiToken = token
+	m.msr = ""
 	stopNow := m.stopping
 	m.mu.Unlock()
 	if stopNow {
@@ -183,7 +195,15 @@ func (m *Miner) run(cfg Config) error {
 			if line == "" {
 				continue
 			}
+			low := strings.ToLower(line)
 			m.mu.Lock()
+			if strings.Contains(low, "msr") {
+				if strings.Contains(low, "failed") {
+					m.msr = "failed"
+				} else if strings.Contains(low, "success") {
+					m.msr = "ok"
+				}
+			}
 			m.appendLog(line)
 			m.mu.Unlock()
 		}
@@ -254,6 +274,7 @@ type MinerStats struct {
 	Threads    int         `json:"threads"`
 	Version    string      `json:"version"`
 	Algo       string      `json:"algo"`
+	HugePages  *int        `json:"hugePages"` // Anteil in Prozent, falls bekannt
 }
 
 // Stats fragt die lokale Schnittstelle des laufenden Miners ab.
@@ -276,10 +297,11 @@ func (m *Miner) Stats() *MinerStats {
 		return nil
 	}
 	var raw struct {
-		Version  string `json:"version"`
-		Paused   bool   `json:"paused"`
-		Algo     string `json:"algo"`
-		Hashrate struct {
+		Version   string          `json:"version"`
+		Paused    bool            `json:"paused"`
+		Algo      string          `json:"algo"`
+		HugePages json.RawMessage `json:"hugepages"`
+		Hashrate  struct {
 			Total   []*float64 `json:"total"`
 			Highest *float64   `json:"highest"`
 		} `json:"hashrate"`
@@ -310,6 +332,11 @@ func (m *Miner) Stats() *MinerStats {
 		Threads:    raw.CPU.Threads,
 		Version:    raw.Version,
 		Algo:       raw.Algo,
+	}
+	var hp []int
+	if json.Unmarshal(raw.HugePages, &hp) == nil && len(hp) == 2 && hp[1] > 0 {
+		pct := hp[0] * 100 / hp[1]
+		s.HugePages = &pct
 	}
 	for i := 0; i < 3 && i < len(raw.Hashrate.Total); i++ {
 		s.Hashrate[i] = raw.Hashrate.Total[i]

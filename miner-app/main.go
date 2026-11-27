@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/skip2/go-qrcode"
 )
 
 //go:embed ui/index.html
@@ -33,19 +35,21 @@ type Config struct {
 	Pool           string `json:"pool"`
 	TLS            bool   `json:"tls"`
 	Worker         string `json:"worker"`
-	Threads        int    `json:"threads"` // CPU-Auslastung in Prozent
+	Mode           string `json:"mode"` // max | balanced | quiet
 	PauseOnActive  bool   `json:"pauseOnActive"`
 	PauseOnBattery bool   `json:"pauseOnBattery"`
 	AutoMine       bool   `json:"autoMine"` // beim App-Start sofort minen
+	Remote         bool   `json:"remote"`   // Stand an die Handy-Seite melden
+	RelayKey       string `json:"relayKey,omitempty"`
 }
 
 func defaultConfig() Config {
 	return Config{
-		Pool:           "pool.supportxmr.com:443",
-		TLS:            true,
-		Worker:         "mein-pc",
-		Threads:        75,
-		PauseOnBattery: true,
+		Pool:   "pool.supportxmr.com:443",
+		TLS:    true,
+		Worker: "mein-pc",
+		Mode:   "max",
+		Remote: true,
 	}
 }
 
@@ -68,11 +72,8 @@ func (c *Config) validate() error {
 	if !reWorker.MatchString(c.Worker) {
 		return errors.New("Der Gerätename darf nur Buchstaben, Ziffern, - und _ enthalten (max. 32 Zeichen).")
 	}
-	if c.Threads < 10 {
-		c.Threads = 10
-	}
-	if c.Threads > 100 {
-		c.Threads = 100
+	if c.Mode != "balanced" && c.Mode != "quiet" {
+		c.Mode = "max"
 	}
 	return nil
 }
@@ -83,7 +84,9 @@ type App struct {
 	cfgPath string
 	miner   *Miner
 	balance *Balance
+	tracker *Tracker
 	quit    chan struct{}
+	mineArg bool // nach Neustart mit Administratorrechten weiter minen
 }
 
 func (a *App) loadConfig() {
@@ -93,6 +96,17 @@ func (a *App) loadConfig() {
 		return
 	}
 	_ = json.Unmarshal(data, &a.cfg)
+	if a.cfg.Mode == "" {
+		a.cfg.Mode = "max"
+	}
+}
+
+// ensureRelayKey legt beim ersten Start den Schlüssel für die Handy-Seite an.
+func (a *App) ensureRelayKey() {
+	if a.cfg.RelayKey == "" {
+		a.cfg.RelayKey = newRelayKey()
+		_ = a.saveConfig()
+	}
 }
 
 func (a *App) saveConfig() error {
@@ -193,21 +207,35 @@ func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	cfg := a.cfg
 	a.mu.Unlock()
+	link := remoteLink(cfg)
+	cfg.RelayKey = ""
+	total, hist, eur, pushOK, pushErr := a.tracker.snapshot()
 
 	m := a.miner
 	m.mu.Lock()
 	state := map[string]any{
-		"phase":     m.phase,
-		"progress":  m.progress,
-		"error":     m.errMsg,
-		"logs":      append([]string(nil), m.logs...),
-		"config":    cfg,
-		"autostart": autostartEnabled(),
-		"dataDir":   m.dir,
-		"os":        runtime.GOOS,
+		"msr":          m.msr,
+		"admin":        isAdmin(),
+		"totalSeconds": total,
+		"history":      hist,
+		"remoteLink":   link,
+		"remoteError":  pushErr,
+		"remoteOK":     !pushOK.IsZero() && time.Since(pushOK) < 2*time.Minute,
+		"phase":        m.phase,
+		"progress":     m.progress,
+		"error":        m.errMsg,
+		"logs":         append([]string(nil), m.logs...),
+		"config":       cfg,
+		"autostart":    autostartEnabled(),
+		"dataDir":      m.dir,
+		"os":           runtime.GOOS,
 	}
 	if m.phase == "running" {
 		state["uptime"] = int(time.Since(m.startedAt).Seconds())
+		state["startedAt"] = m.startedAt.Unix()
+	}
+	if eur > 0 {
+		state["eur"] = eur
 	}
 	m.mu.Unlock()
 
@@ -234,6 +262,7 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
+	in.Config.RelayKey = a.cfg.RelayKey
 	a.cfg = in.Config
 	err := a.saveConfig()
 	a.mu.Unlock()
@@ -264,16 +293,56 @@ func (a *App) handleStart(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleStop(w http.ResponseWriter, r *http.Request) {
 	a.miner.Stop()
+	go func() {
+		time.Sleep(2 * time.Second)
+		a.tracker.push(a, false)
+	}()
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
-func (a *App) handleQuit(w http.ResponseWriter, r *http.Request) {
+// handleElevate startet die App mit Administratorrechten neu (nur Windows).
+func (a *App) handleElevate(w http.ResponseWriter, r *http.Request) {
+	m := a.miner
+	m.mu.Lock()
+	mining := m.phase == "running" || m.phase == "installing"
+	m.mu.Unlock()
+	if err := relaunchElevated(mining); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
+	a.shutdown()
+}
+
+func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	link := remoteLink(a.cfg)
+	a.mu.Unlock()
+	if link == "" {
+		http.NotFound(w, r)
+		return
+	}
+	png, err := qrcode.Encode(link, qrcode.Medium, 512)
+	if err != nil {
+		http.Error(w, "QR-Code konnte nicht erzeugt werden", 500)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(png)
+}
+
+func (a *App) shutdown() {
 	select {
 	case <-a.quit:
 	default:
 		close(a.quit)
 	}
+}
+
+func (a *App) handleQuit(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]bool{"ok": true})
+	a.shutdown()
 }
 
 func post(h http.HandlerFunc) http.HandlerFunc {
@@ -302,10 +371,16 @@ func openBrowser(url string) {
 
 func main() {
 	background := flag.Bool("background", false, "ohne Browserfenster starten (für den Autostart)")
+	takeover := flag.Bool("takeover", false, "eine laufende Instanz ablösen (intern)")
+	mine := flag.Bool("mine", false, "sofort mit dem Mining beginnen (intern)")
 	flag.Parse()
 	url := "http://" + listenAddr + "/"
 
 	ln, err := net.Listen("tcp", listenAddr)
+	for i := 0; err != nil && *takeover && i < 120; i++ {
+		time.Sleep(250 * time.Millisecond)
+		ln, err = net.Listen("tcp", listenAddr)
+	}
 	if err != nil {
 		// Die App läuft schon – nur die Oberfläche öffnen.
 		if !*background {
@@ -328,9 +403,11 @@ func main() {
 		cfgPath: filepath.Join(dir, "config.json"),
 		miner:   &Miner{dir: dir, phase: "stopped"},
 		balance: &Balance{},
+		tracker: loadTracker(dir),
 		quit:    make(chan struct{}),
 	}
 	app.loadConfig()
+	app.ensureRelayKey()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -347,14 +424,18 @@ func main() {
 	mux.HandleFunc("/api/start", post(app.handleStart))
 	mux.HandleFunc("/api/stop", post(app.handleStop))
 	mux.HandleFunc("/api/quit", post(app.handleQuit))
+	mux.HandleFunc("/api/elevate", post(app.handleElevate))
+	mux.HandleFunc("/api/qr.png", app.handleQR)
 
 	go func() { _ = http.Serve(ln, guard(mux)) }()
 
 	cfg := app.cfg
-	if cfg.AutoMine && cfg.validate() == nil {
+	if (cfg.AutoMine || *mine) && cfg.validate() == nil {
 		_ = app.miner.Start(cfg)
 	}
-	if !*background {
+	go app.tracker.loop(app)
+	go app.tracker.push(app, false)
+	if !*background && !*takeover {
 		openBrowser(url)
 	}
 
@@ -365,4 +446,8 @@ func main() {
 	case <-sig:
 	}
 	app.miner.StopAndWait()
+	app.tracker.mu.Lock()
+	app.tracker.save()
+	app.tracker.mu.Unlock()
+	app.tracker.push(app, true)
 }

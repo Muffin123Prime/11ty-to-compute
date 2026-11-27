@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"time"
@@ -16,4 +17,10 @@ func stopProcess(p *os.Process) {
 		time.Sleep(5 * time.Second)
 		_ = p.Kill()
 	}()
+}
+
+func isAdmin() bool { return os.Geteuid() == 0 }
+
+func relaunchElevated(mine bool) error {
+	return errors.New("Starte die App auf diesem System selbst mit Administratorrechten (sudo).")
 }
