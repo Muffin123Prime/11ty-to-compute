@@ -8,9 +8,14 @@ App starten, einmal die Wallet-Adresse eintragen, auf „Mining starten“ klick
 - Lädt beim ersten Start den Open-Source-Miner [XMRig](https://github.com/xmrig/xmrig)
   von dessen offizieller GitHub-Seite und prüft die Prüfsumme des Downloads.
 - Startet und stoppt den Miner im Hintergrund.
-- Zeigt Hashrate, angenommene Shares, Laufzeit und (bei SupportXMR) dein Pool-Guthaben.
-- Einstellungen: CPU-Auslastung, Pause bei PC-Benutzung oder im Akkubetrieb,
-  Mining beim App-Start, App-Start bei der Anmeldung.
+- Zeigt Hashrate, Verlauf, Laufzeit, angenommene Shares und (bei SupportXMR)
+  Guthaben und Auszahlungen, auch grob in Euro.
+- Drei Leistungsstufen; „Maximal“ nutzt die gesamte Rechenleistung. Unter Windows
+  kann sich die App mit Administratorrechten neu starten, damit XMRig Huge Pages
+  und das MSR-Feintuning nutzen kann.
+- Handy-Seite: Die App meldet ihren Stand alle 30 Sekunden an eine kleine
+  Website (`status-site/`). Der QR-Code in der App führt dorthin; die Seite ist
+  von überall erreichbar. Die Wallet-Adresse wird nie übertragen.
 
 Die Oberfläche öffnet sich im Browser unter `http://127.0.0.1:47821/` und ist nur
 von deinem eigenen PC aus erreichbar.
@@ -40,7 +45,18 @@ beendet das Mining nicht.
 Benötigt [Go](https://go.dev/dl/) ab Version 1.22, sonst nichts:
 
 ```sh
-./build.sh
+RELAY_URL=https://kryptominer-status.netlify.app ./build.sh
 ```
+
+`RELAY_URL` ist die Adresse der Handy-Seite. Ohne sie wird die App ohne
+Handy-Ansicht gebaut.
+
+## Handy-Seite (`status-site/`)
+
+Eine statische Seite mit zwei Netlify-Funktionen und Netlify Blobs als Speicher:
+`POST /api/push` nimmt den Stand der App entgegen, `GET /api/status?id=…` liefert
+ihn an die Seite. Die App weist sich mit einem geheimen Schlüssel aus; die Kennung
+im Link ist dessen Prüfsumme, sodass der Link nur lesen, aber nicht schreiben kann.
+In Netlify als Basisverzeichnis `miner-app/status-site` einstellen.
 
 Die fertigen Programme liegen danach in `dist/`.
