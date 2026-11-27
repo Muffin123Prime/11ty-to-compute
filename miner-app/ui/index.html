@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KryptoMiner</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #181d24; --line: #2a323d; --text: #e8ecf1; --muted: #93a0b0;
+    --accent: #ff7a1a; --accent-ink: #1a0d02; --ok: #3ecf8e; --bad: #ff6b6b; --field: #10141a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f4f5f7; --panel: #ffffff; --line: #dde1e7; --text: #171b21; --muted: #5d6877;
+      --accent: #e8650a; --accent-ink: #ffffff; --ok: #12915a; --bad: #c93434; --field: #f8f9fb;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 13px; margin: 0 0 14px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  button {
+    font: inherit; font-weight: 600; border-radius: 9px; border: 1px solid var(--line);
+    background: transparent; color: var(--text); padding: 9px 16px; cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  button.big { font-size: 17px; padding: 14px 34px; min-width: 190px; }
+  button.quiet { color: var(--muted); font-weight: 500; padding: 6px 12px; }
+
+  .hero { display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+  .status { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 600; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 22%, transparent); }
+  .dot.busy { background: var(--accent); animation: pulse 1.1s infinite; }
+  .dot.bad { background: var(--bad); }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  .sub { color: var(--muted); font-size: 14px; margin-top: 4px; }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 12px; width: 260px; max-width: 100%; }
+  .bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width 0.3s; }
+  .error { margin-top: 14px; padding: 12px 14px; border-radius: 9px; border: 1px solid var(--bad); color: var(--bad); font-size: 14px; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .stat { border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .stat b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .stat span { color: var(--muted); font-size: 13px; }
+
+  label { display: block; font-weight: 600; margin-bottom: 6px; }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 5px; }
+  input[type=text], select {
+    width: 100%; font: inherit; color: var(--text); background: var(--field);
+    border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px;
+  }
+  input[type=text]:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #wallet { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  .field { margin-bottom: 18px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 620px) { .row { grid-template-columns: 1fr; } }
+  .check { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 10px; font-weight: 400; }
+  .check input { margin-top: 4px; accent-color: var(--accent); }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .actions { display: flex; align-items: center; gap: 14px; margin-top: 8px; flex-wrap: wrap; }
+  #saveMsg { font-size: 14px; }
+  #saveMsg.ok { color: var(--ok); } #saveMsg.bad { color: var(--bad); }
+
+  pre {
+    margin: 0; background: var(--field); border: 1px solid var(--line); border-radius: 9px; padding: 12px;
+    font: 12px/1.55 ui-monospace, Consolas, monospace; height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  details summary { cursor: pointer; font-weight: 600; }
+  details ul { margin: 12px 0 0; padding-left: 20px; color: var(--muted); }
+  details li { margin-bottom: 8px; }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: var(--field); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>KryptoMiner</h1>
+    <button class="quiet" id="quitBtn" title="Mining stoppen und die App schließen">App beenden</button>
+  </header>
+
+  <section class="panel">
+    <div class="hero">
+      <div>
+        <div class="status"><span class="dot" id="dot"></span><span id="statusText">Lädt …</span></div>
+        <div class="sub" id="statusSub"></div>
+        <div class="bar" id="bar" hidden><i id="barFill"></i></div>
+      </div>
+      <button class="primary big" id="toggleBtn" disabled>Mining starten</button>
+    </div>
+    <div class="error" id="errorBox" hidden></div>
+  </section>
+
+  <section class="panel">
+    <h2>Live-Werte</h2>
+    <div class="stats">
+      <div class="stat"><b id="sRate">–</b><span>Hashrate (aktuell)</span></div>
+      <div class="stat"><b id="sAvg">–</b><span>Hashrate (15 Min.)</span></div>
+      <div class="stat"><b id="sShares">–</b><span>Angenommene Shares</span></div>
+      <div class="stat"><b id="sUptime">–</b><span>Laufzeit</span></div>
+      <div class="stat" id="balBox" hidden><b id="sDue">–</b><span>Guthaben im Pool (XMR)</span></div>
+      <div class="stat" id="paidBox" hidden><b id="sPaid">–</b><span>Bereits ausgezahlt (XMR)</span></div>
+    </div>
+    <div class="sub" id="cpuLine"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Einstellungen</h2>
+    <div class="field">
+      <label for="wallet">Deine Monero-Adresse (Wallet)</label>
+      <input type="text" id="wallet" spellcheck="false" autocomplete="off" placeholder="4… oder 8… (95 Zeichen)">
+      <div class="hint">Dorthin zahlt der Pool deine Erträge aus. Noch keine Adresse? Erstelle eine mit der offiziellen Wallet von <a href="https://www.getmonero.org/downloads/" target="_blank" rel="noopener">getmonero.org</a>.</div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="poolSel">Mining-Pool</label>
+        <select id="poolSel">
+          <option value="pool.supportxmr.com:443|1">SupportXMR (empfohlen)</option>
+          <option value="custom">Eigener Pool …</option>
+        </select>
+        <div id="customPool" hidden style="margin-top:10px">
+          <input type="text" id="pool" spellcheck="false" placeholder="adresse:port">
+          <label class="check" style="margin-top:10px"><input type="checkbox" id="tls"> <span>Verschlüsselte Verbindung (TLS)</span></label>
+        </div>
+      </div>
+      <div class="field">
+        <label for="worker">Name dieses Geräts</label>
+        <input type="text" id="worker" spellcheck="false" maxlength="32">
+        <div class="hint">Erscheint in der Pool-Übersicht.</div>
+      </div>
+    </div>
+    <div class="field">
+      <label for="threads">Prozessor-Auslastung: <span id="threadsVal">75</span> %</label>
+      <input type="range" id="threads" min="10" max="100" step="5" value="75">
+      <div class="hint">Mehr bringt mehr Ertrag, aber auch mehr Stromverbrauch, Wärme und Lüfterlärm.</div>
+    </div>
+    <label class="check"><input type="checkbox" id="pauseOnActive"> <span>Nur minen, wenn ich den PC gerade nicht benutze (pausiert bei Maus- und Tastatureingaben)</span></label>
+    <label class="check"><input type="checkbox" id="pauseOnBattery"> <span>Im Akkubetrieb pausieren</span></label>
+    <label class="check"><input type="checkbox" id="autoMine"> <span>Beim Öffnen der App sofort mit dem Mining beginnen</span></label>
+    <label class="check"><input type="checkbox" id="autostart"> <span>App automatisch starten, wenn ich mich am PC anmelde</span></label>
+    <div class="actions">
+      <button class="primary" id="saveBtn">Speichern</button>
+      <span id="saveMsg" role="status"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Protokoll</h2>
+    <pre id="log" aria-live="off"></pre>
+  </section>
+
+  <section class="panel">
+    <details>
+      <summary>Hinweise und Hilfe</summary>
+      <ul>
+        <li><b>Virenschutz:</b> Windows Defender und andere Virenscanner stufen Mining-Programme grundsätzlich als „potenziell unerwünscht“ ein und löschen sie oft. Wenn der Start fehlschlägt, füge in deinem Virenschutz eine Ausnahme für diesen Ordner hinzu: <code id="dataDir"></code></li>
+        <li><b>Ertrag:</b> Ein normaler PC verdient mit Monero meist nur wenige Cent pro Tag. Rechne die Stromkosten dagegen, bevor du ihn dauerhaft laufen lässt.</li>
+        <li><b>Auszahlung:</b> SupportXMR zahlt automatisch aus, sobald dein Guthaben die Mindestgrenze des Pools erreicht hat. Bei kleiner Hashrate kann das Monate dauern.</li>
+        <li><b>Wärme:</b> Mining lastet den Prozessor dauerhaft aus. Bei Laptops lieber eine niedrige Auslastung wählen und auf gute Belüftung achten.</li>
+        <li><b>Technik:</b> Gerechnet wird mit dem Open-Source-Programm XMRig. Es behält standardmäßig 1 % der Rechenzeit als Spende für seine Entwickler ein.</li>
+      </ul>
+    </details>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let phase = "", formLoaded = false, busy = false;
+
+function fmtRate(v) {
+  if (v == null) return "–";
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + " MH/s";
+  if (v >= 1e3) return (v / 1e3).toFixed(2) + " kH/s";
+  return v.toFixed(0) + " H/s";
+}
+function fmtTime(s) {
+  if (s == null) return "–";
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  return h ? `${h} h ${m} min` : m ? `${m} min ${sec} s` : `${sec} s`;
+}
+function fmtXmr(v) { return v.toFixed(6).replace(".", ","); }
+
+async function api(path, body) {
+  const res = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+  return data;
+}
+
+function fillForm(s) {
+  const c = s.config;
+  $("wallet").value = c.wallet || "";
+  $("worker").value = c.worker || "";
+  $("threads").value = c.threads; $("threadsVal").textContent = c.threads;
+  $("pauseOnActive").checked = c.pauseOnActive;
+  $("pauseOnBattery").checked = c.pauseOnBattery;
+  $("autoMine").checked = c.autoMine;
+  $("autostart").checked = s.autostart;
+  const preset = [...$("poolSel").options].find(o => o.value === c.pool + "|" + (c.tls ? 1 : 0));
+  $("poolSel").value = preset ? preset.value : "custom";
+  $("pool").value = c.pool; $("tls").checked = c.tls;
+  $("customPool").hidden = !!preset;
+  $("dataDir").textContent = s.dataDir;
+}
+
+function readForm() {
+  let pool = $("pool").value, tls = $("tls").checked;
+  if ($("poolSel").value !== "custom") {
+    const [p, t] = $("poolSel").value.split("|"); pool = p; tls = t === "1";
+  }
+  return {
+    wallet: $("wallet").value.trim(), pool: pool.trim(), tls, worker: $("worker").value.trim(),
+    threads: +$("threads").value, pauseOnActive: $("pauseOnActive").checked,
+    pauseOnBattery: $("pauseOnBattery").checked, autoMine: $("autoMine").checked,
+    autostart: $("autostart").checked,
+  };
+}
+
+function render(s) {
+  phase = s.phase;
+  if (!formLoaded) { fillForm(s); formLoaded = true; }
+  const st = s.stats, dot = $("dot");
+  dot.className = "dot";
+  let text = "Gestoppt", sub = s.config.wallet ? "Bereit zum Minen." : "Trage unten zuerst deine Monero-Adresse ein.";
+  if (phase === "installing") {
+    dot.classList.add("busy"); text = "Wird vorbereitet …";
+    sub = s.progress > 0 && s.progress < 100 ? `Miner wird heruntergeladen (${s.progress} %)` : "Einen Moment …";
+  } else if (phase === "running") {
+    if (st && st.paused) { dot.classList.add("busy"); text = "Pausiert"; sub = "Der Miner wartet (PC in Benutzung oder Akkubetrieb)."; }
+    else if (st && st.connected) { dot.classList.add("on"); text = "Mining läuft"; sub = "Verbunden mit " + st.pool; }
+    else { dot.classList.add("busy"); text = "Verbinde mit dem Pool …"; sub = "Die ersten Werte erscheinen nach etwa einer Minute."; }
+  } else if (phase === "error") { dot.classList.add("bad"); text = "Fehler"; sub = ""; }
+  $("statusText").textContent = text; $("statusSub").textContent = sub;
+  $("bar").hidden = phase !== "installing";
+  $("barFill").style.width = (s.progress || 0) + "%";
+  $("errorBox").hidden = !s.error; $("errorBox").textContent = s.error || "";
+
+  const active = phase === "running" || phase === "installing";
+  const btn = $("toggleBtn");
+  btn.textContent = active ? "Mining stoppen" : "Mining starten";
+  btn.classList.toggle("primary", !active);
+  btn.disabled = busy;
+
+  const h = st ? st.hashrate : [null, null, null];
+  $("sRate").textContent = st ? fmtRate(h[0] ?? h[1]) : "–";
+  $("sAvg").textContent = st ? fmtRate(h[2] ?? h[1]) : "–";
+  $("sShares").textContent = st ? st.sharesGood.toLocaleString("de-DE") : "–";
+  $("sUptime").textContent = phase === "running" ? fmtTime(s.uptime) : "–";
+  $("cpuLine").textContent = st && st.cpu ? `${st.cpu} · ${st.threads} Threads · XMRig ${st.version}` : "";
+  $("balBox").hidden = $("paidBox").hidden = !s.balance;
+  if (s.balance) { $("sDue").textContent = fmtXmr(s.balance.due); $("sPaid").textContent = fmtXmr(s.balance.paid); }
+
+  const log = $("log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+  const txt = (s.logs || []).join("\n");
+  if (log.textContent !== txt) { log.textContent = txt; if (atEnd) log.scrollTop = log.scrollHeight; }
+}
+
+async function refresh() {
+  try { render(await api("/api/state")); }
+  catch (e) {
+    $("dot").className = "dot bad";
+    $("statusText").textContent = "App nicht erreichbar";
+    $("statusSub").textContent = "Starte KryptoMiner neu und lade diese Seite.";
+    $("toggleBtn").disabled = true;
+  }
+}
+
+function setMsg(text, cls) { const m = $("saveMsg"); m.textContent = text; m.className = cls || ""; }
+
+async function save() {
+  try { await api("/api/config", readForm()); setMsg("Gespeichert.", "ok"); return true; }
+  catch (e) { setMsg(e.message, "bad"); return false; }
+}
+
+$("saveBtn").onclick = async () => {
+  if (await save() && phase === "running") setMsg("Gespeichert. Gilt ab dem nächsten Start des Minings.", "ok");
+};
+$("toggleBtn").onclick = async () => {
+  busy = true; $("toggleBtn").disabled = true;
+  try {
+    if (phase === "running" || phase === "installing") await api("/api/stop", {});
+    else if (await save()) await api("/api/start", {});
+    else $("wallet").focus();
+  } catch (e) { setMsg(e.message, "bad"); }
+  busy = false; refresh();
+};
+$("quitBtn").onclick = async () => {
+  if (!confirm("Mining stoppen und KryptoMiner beenden?")) return;
+  try { await api("/api/quit", {}); } catch (e) {}
+  clearInterval(timer);
+  document.querySelector("main").innerHTML = "<h1>KryptoMiner wurde beendet.</h1><p>Du kannst dieses Fenster schließen.</p>";
+};
+$("threads").oninput = e => $("threadsVal").textContent = e.target.value;
+$("poolSel").onchange = e => $("customPool").hidden = e.target.value !== "custom";
+
+refresh();
+const timer = setInterval(refresh, 2000);
+</script>
+</body>
+</html>
